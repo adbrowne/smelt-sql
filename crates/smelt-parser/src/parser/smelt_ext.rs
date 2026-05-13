@@ -335,6 +335,7 @@ impl<'a> Parser<'a> {
             "ref",
             "source",
             "metric",
+            "record",
         ];
         for legacy in LEGACY {
             if seg.eq_ignore_ascii_case(legacy) {

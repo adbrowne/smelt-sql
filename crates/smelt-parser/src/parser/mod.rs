@@ -249,26 +249,16 @@ impl<'a> Parser<'a> {
     // ===== Map method name allowlist =====
 
     /// Returns true when `name` is a recognised Map<K,V> API method name.
-    /// This keeps `schema.func()` producing `FUNCTION_CALL` while routing
-    /// known map methods through the `MAP_METHOD_CALL` node kind. The
-    /// spec's closed API is `{entries, keys, values, get, has}`; the other
-    /// names are routed too so type inference emits `MapApiUnknown` rather
-    /// than silently degrading to a `FUNCTION_CALL`.
+    /// The spec defines a **closed** five-method API: `{entries, keys,
+    /// values, get, has}`. Only these names are routed through the
+    /// `MAP_METHOD_CALL` node kind; any other dotted-method call falls
+    /// through to `FUNCTION_CALL`, which avoids misclassifying
+    /// `db.remove(x)` (where `db` is a non-Map identifier) as a Map API
+    /// call. Type inference dispatches `MAP_METHOD_CALL` against the
+    /// receiver type and reports `MapApiUnknown` only when the receiver
+    /// is actually a `Map<K, V>`.
     pub(super) fn is_map_method_name(name: &str) -> bool {
-        matches!(
-            name,
-            "entries"
-                | "get"
-                | "has"
-                | "keys"
-                | "values"
-                | "contains_key"
-                | "insert"
-                | "remove"
-                | "len"
-                | "is_empty"
-                | "merge"
-        )
+        matches!(name, "entries" | "get" | "has" | "keys" | "values")
     }
 
     // Domain-specific parsing methods live in submodules:
