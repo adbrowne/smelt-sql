@@ -96,7 +96,7 @@ This plan drives the implementation, examples, user docs, and skill update for t
 | 2     | done     | 2981610 | 2026-05-13 |
 | 3     | done     | 99e8a1a | 2026-05-13 |
 | 4     | done     | 08ff414 | 2026-05-13 |
-| 5     | done     | —      | 2026-05-13 |
+| 5     | done     | e117911 | 2026-05-13 |
 | 6     | pending  | —      | —    |
 | 7     | pending  | —      | —    |
 
