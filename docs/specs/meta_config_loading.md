@@ -209,6 +209,7 @@ A `smelt.record SourceEntry = {…}` declaration is visible from every loader ca
 - **Loaders not yet implemented.** No code exists yet; the surface above is intended, not landed. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 - **Recursive schemas.** Whether mutually-recursive `smelt.record` declarations should be admissible at loader-call schema positions is deferred. The acyclic-DAG record-declaration rule applies; loader-schemas inherit the same restriction.
 - **Per-target overlay merge of `Map<K, V>` is per-key replace, not per-key deep-merge.** A future spec edit may add per-key deep-merge if real configs demand it; today's rule is "overlay key replaces base value at that key", matching the `List<S>` replacement rule's spirit (the overlay is a value substitution, not a structural blend).
+- **Loader-call type synthesis is callable but not yet consumed by upstream inference.** `infer_loader_call_smelt_type` synthesises `SmeltType::Record` / `SmeltType::List(Record)` / `SmeltType::Map(Text, Record)` correctly for a `smelt.config.load_yaml`/`_json` call site. However, the production inference dispatch (`infer_smelt_path_call_type` in `crates/smelt-db/src/type_inference.rs`) returns `Option<TypedColumn>` (a `DataType`-based wrapper) and cannot structurally carry meta-language types. The first production consumer — LSP hover on a loader call — wires `infer_loader_call_smelt_type` directly; HOF dispatch over loader-call source lists is wired in a later iteration. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References
 

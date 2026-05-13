@@ -5514,6 +5514,632 @@ pub fn check_config_var_call_diagnostics(
     diags
 }
 
+// ============================================================================
+// Loader call dispatch (Phase E1 Phase 5)
+// ============================================================================
+
+/// Known scalar type names that are forbidden as loader schemas.
+///
+/// These are valid as field types inside a record body, but NOT as the schema
+/// argument to `smelt.config.load_yaml` / `load_json` — the loader requires a
+/// record, `List<record>`, or `Map<Text, record>` at the top level.
+const KNOWN_SCALAR_TYPE_NAMES: &[&str] = &[
+    "Text",
+    "Integer",
+    "Float",
+    "Double",
+    "Boolean",
+    "Date",
+    "Timestamp",
+    "Decimal",
+    "Blob",
+    "Varchar",
+    "BigInt",
+    "SmallInt",
+    "TinyInt",
+    "UInt",
+    "UBigInt",
+];
+
+/// Reflection-witness type names that are forbidden as loader schemas.
+///
+/// These are meta-language types that refer to compiler objects (columns,
+/// models, sources), not to data shapes. Using them as a loader schema is
+/// always wrong: the loader needs a record, `List<record>`, or `Map<Text, record>`.
+const REFLECTION_WITNESS_TYPE_NAMES: &[&str] = &["ColumnRef", "ModelRef", "SourceRef"];
+
+/// The outcome of a loader path argument check.
+#[derive(Debug, Clone)]
+pub enum LoaderPathOutcome {
+    /// Path is not a string literal — emit `ConfigLoaderPathNotLiteral`.
+    NotLiteral { arg_range: crate::Range },
+    /// Path contains `\` — emit `ConfigLoaderPathBackslash`.
+    Backslash {
+        path: String,
+        call_range: crate::Range,
+    },
+    /// Path is absolute, escapes the workspace, or has a scheme prefix —
+    /// emit `ConfigLoaderPathEscapesWorkspace`.
+    EscapesWorkspace {
+        path: String,
+        call_range: crate::Range,
+    },
+    /// Path is valid but the file was not found — emit `ConfigLoaderFileNotFound`.
+    FileNotFound {
+        path: String,
+        arg_range: crate::Range,
+    },
+    /// Path is valid and the file exists.
+    Valid { path: String },
+}
+
+/// Check a single loader path literal for well-formedness.
+///
+/// `path_value` is the unquoted path string.
+/// `path_range` is the range of the string-literal token (for path-check diagnostics).
+/// `call_range` is the range of the whole call expression (for escape/backslash diagnostics).
+/// `file_exists` is a callback that returns `true` when the workspace contains
+/// the given workspace-relative path.
+///
+/// Pure — no Salsa dependency, no I/O.
+pub fn check_loader_path(
+    path_value: &str,
+    path_range: crate::Range,
+    call_range: crate::Range,
+    file_exists: &dyn Fn(&str) -> bool,
+) -> LoaderPathOutcome {
+    // 1. Backslash check.
+    if path_value.contains('\\') {
+        return LoaderPathOutcome::Backslash {
+            path: path_value.to_string(),
+            call_range,
+        };
+    }
+
+    // 2. Escape check: absolute, ..-escape, scheme prefix.
+    if path_value.starts_with('/')
+        || path_value.starts_with("../")
+        || path_value == ".."
+        || has_scheme_prefix(path_value)
+    {
+        return LoaderPathOutcome::EscapesWorkspace {
+            path: path_value.to_string(),
+            call_range,
+        };
+    }
+    // Component-level `..` check (e.g. `a/../../etc/passwd`).
+    for component in path_value.split('/') {
+        if component == ".." {
+            return LoaderPathOutcome::EscapesWorkspace {
+                path: path_value.to_string(),
+                call_range,
+            };
+        }
+    }
+
+    // 3. File-not-found check.
+    if !file_exists(path_value) {
+        return LoaderPathOutcome::FileNotFound {
+            path: path_value.to_string(),
+            arg_range: path_range,
+        };
+    }
+
+    LoaderPathOutcome::Valid {
+        path: path_value.to_string(),
+    }
+}
+
+fn has_scheme_prefix(path: &str) -> bool {
+    // Check for http://, https://, s3://, file://
+    for scheme in &["http://", "https://", "s3://", "file://"] {
+        if path.starts_with(scheme) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Determine if the text of a schema argument is an admissible loader schema.
+///
+/// Returns `true` when the schema text looks like an inline record (`{...}`),
+/// a `List<...>`, a `Map<Text, ...>`, or an identifier that is NOT a known
+/// scalar type name (i.e. could be a named `smelt.record` declaration).
+///
+/// Returns `false` for bare scalar names (`Integer`, `Text`, `Float`, etc.)
+/// or `Lambda<...>` style types.
+///
+/// Pure — no Salsa dependency.
+pub fn schema_arg_text_is_admissible(schema_text: &str, registry: &RecordRegistry) -> bool {
+    let trimmed = schema_text.trim();
+    // Inline record: starts with `{`
+    if trimmed.starts_with('{') {
+        return true;
+    }
+    // List or Map with angle brackets
+    if trimmed.starts_with("List<") || trimmed.starts_with("Map<") {
+        return true;
+    }
+    // Lambda (forbidden)
+    if trimmed.starts_with("Lambda<") {
+        return false;
+    }
+    // Bare identifier: check if it's a known scalar, a reflection witness, or a declared record.
+    // Known scalars → forbidden.
+    if KNOWN_SCALAR_TYPE_NAMES.contains(&trimmed) {
+        return false;
+    }
+    // Reflection witnesses (`ColumnRef`, `ModelRef`, `SourceRef`) → forbidden.
+    // These are meta-language types that name compiler objects, not data shapes.
+    if REFLECTION_WITNESS_TYPE_NAMES.contains(&trimmed) {
+        return false;
+    }
+    // Unknown identifier: if it's in the registry → admissible (named record).
+    // If not in the registry → we can't tell at this point, so tentatively
+    // allow it (the upstream type-checker emits UnknownType separately).
+    if registry.lookup(trimmed).is_some() {
+        return true;
+    }
+    // Not in registry and not a known scalar or reflection witness — could be a
+    // future/unknown name. Treat as unknown-admissible to avoid false positives.
+    // The LSP separately emits UnknownType diagnostics.
+    true
+}
+
+/// Parse a schema argument text (as it appears in source code) into a [`SmeltType`].
+///
+/// Handles:
+/// - Inline record type: `{field: Type, ...}` → `SmeltType::Record { name: None, fields }`
+/// - Named record reference: `Cohort` → `SmeltType::Record { name: Some("Cohort"), fields: registry_fields }`
+/// - `List<S>`: recursively resolves `S`.
+/// - `Map<Text, S>`: recursively resolves `S`.
+/// - Forbidden schemas (scalars, reflection witnesses, Lambda): `SmeltType::Unknown`.
+///
+/// `ctx` is used for named record lookup. Pure — no Salsa dependency, no I/O.
+fn parse_schema_arg_to_smelt_type(schema_text: &str, ctx: &TypeContext) -> SmeltType {
+    let trimmed = schema_text.trim();
+
+    // Inline record `{ f: T, ... }`
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        let body = &trimmed[1..trimmed.len() - 1];
+        let mut fields = std::collections::BTreeMap::new();
+        for part in body.split(',') {
+            let part = part.trim();
+            if let Some((name, ty_text)) = part.split_once(':') {
+                let name = name.trim().to_string();
+                let ty = parse_field_type_text(ty_text.trim());
+                fields.insert(name, ty);
+            }
+        }
+        return SmeltType::Record { fields, name: None };
+    }
+
+    // List<S>
+    if let Some(inner) = trimmed
+        .strip_prefix("List<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        let inner_ty = parse_schema_arg_to_smelt_type(inner, ctx);
+        return SmeltType::List(Box::new(inner_ty));
+    }
+
+    // Map<Text, S>
+    if let Some(inner) = trimmed
+        .strip_prefix("Map<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        if let Some((k_str, v_str)) = split_map_type_args(inner) {
+            let k_ty = parse_field_type_text(k_str.trim());
+            let v_ty = parse_schema_arg_to_smelt_type(v_str.trim(), ctx);
+            return SmeltType::Map {
+                key: Box::new(k_ty),
+                value: Box::new(v_ty),
+            };
+        }
+    }
+
+    // Bare identifier: check for known scalars and reflection witnesses first.
+    if KNOWN_SCALAR_TYPE_NAMES.contains(&trimmed)
+        || REFLECTION_WITNESS_TYPE_NAMES.contains(&trimmed)
+    {
+        return SmeltType::Unknown;
+    }
+    // Lambda → Unknown
+    if trimmed.starts_with("Lambda<") {
+        return SmeltType::Unknown;
+    }
+
+    // Named record reference: try to look up in the registry.
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        if let Some(decl) = ctx.lookup_record_decl(trimmed) {
+            let fields: std::collections::BTreeMap<String, SmeltType> = decl
+                .fields
+                .iter()
+                .map(|(n, ty, _)| (n.clone(), ty.clone()))
+                .collect();
+            return SmeltType::Record {
+                fields,
+                name: Some(trimmed.to_string()),
+            };
+        }
+        // Not in registry — synthesise a shell Record with the name (unknown fields).
+        return SmeltType::Record {
+            fields: std::collections::BTreeMap::new(),
+            name: Some(trimmed.to_string()),
+        };
+    }
+
+    SmeltType::Unknown
+}
+
+/// Parse a field type text (scalar or simple type name) into a [`SmeltType`].
+///
+/// This is the leaf-level parser used by `parse_schema_arg_to_smelt_type` for
+/// field types inside inline records and Map value types. It does NOT resolve
+/// named records — field types must be concrete scalar types at this level.
+fn parse_field_type_text(type_text: &str) -> SmeltType {
+    use smelt_types::TypeConstraint;
+    use DataType as DT;
+    match type_text.trim() {
+        "Text" | "Varchar" => SmeltType::Expr(TypeConstraint::Concrete(DT::Text)),
+        "Integer" | "Int" | "BigInt" => SmeltType::Expr(TypeConstraint::Concrete(DT::Integer)),
+        "Float" | "Double" => SmeltType::Expr(TypeConstraint::Concrete(DT::Float)),
+        "Boolean" | "Bool" => SmeltType::Expr(TypeConstraint::Concrete(DT::Boolean)),
+        "Date" => SmeltType::Expr(TypeConstraint::Concrete(DT::Date)),
+        "Timestamp" => SmeltType::Expr(TypeConstraint::Concrete(DT::Timestamp {
+            with_timezone: false,
+        })),
+        _ => SmeltType::Unknown,
+    }
+}
+
+/// Split `K, V` from the inner string of a `Map<K, V>` at the first top-level comma.
+fn split_map_type_args(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return Some((&s[..i], &s[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Infer the [`SmeltType`] synthesised by a `smelt.config.load_yaml` or
+/// `smelt.config.load_json` call expression.
+///
+/// Returns `Some(schema_type)` on the happy path (path is a literal, schema is
+/// admissible). Returns `None` when the call is not a `load_yaml`/`load_json`
+/// call, the path argument is missing, or the schema argument is missing.
+///
+/// This function is the pure type-synthesis layer; it does not emit diagnostics.
+/// The diagnostic layer (`check_loader_call_diagnostics`) handles error emission.
+///
+/// Per spec §"Loader value materialisation" rule 1: the call's synthesised type
+/// is the declared schema's type. `TypedColumn` (the return of `infer_expression_type`)
+/// only carries a `DataType` projection (`DataType::Unknown` for meta-types), so
+/// this function returns the full `SmeltType` directly.
+///
+/// Pure — no Salsa dependency, no I/O.
+pub fn infer_loader_call_smelt_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option<SmeltType> {
+    let segs = call.segments();
+    if segs.len() != 2 || segs[0].to_lowercase() != "config" {
+        return None;
+    }
+    let loader_name = segs[1].to_lowercase();
+    if loader_name != "load_yaml" && loader_name != "load_json" {
+        // load_toml is reserved → Unknown
+        return None;
+    }
+
+    // Second positional argument: the schema.
+    let positional_args: Vec<_> = call
+        .arg_list()
+        .map(|args| args.positional_args().into_iter().collect())
+        .unwrap_or_default();
+
+    let schema_expr = positional_args.get(1)?;
+    let schema_text = schema_expr.syntax().text().to_string();
+    let smelt_ty = parse_schema_arg_to_smelt_type(&schema_text, ctx);
+    if matches!(smelt_ty, SmeltType::Unknown) {
+        return None;
+    }
+    Some(smelt_ty)
+}
+
+/// Walk all `SMELT_PATH_CALL` descendants of `root` for
+/// `smelt.config.load_yaml`, `smelt.config.load_json`, and
+/// `smelt.config.load_toml` calls.
+///
+/// For each call:
+/// - `load_toml`: emit `ConfigLoaderTomlNotYetSupported` at the call expression.
+/// - `load_yaml` / `load_json`:
+///   - Check path argument (literal, escape, backslash, existence).
+///   - Check schema argument (admissibility).
+///   - Synthesise return type (the schema's type).
+///
+/// `file_exists` is a pure callback that returns `true` when a workspace-
+/// relative path exists. In the Salsa layer, this is backed by
+/// `loader_file_exists`; in tests, it is a closure over a static set.
+///
+/// `registry` supplies the workspace `RecordRegistry` for named-schema lookup.
+///
+/// `text` is the raw source file text (used for span → range conversion; pass
+/// `""` in tests where range accuracy is not needed).
+///
+/// Pure — no Salsa dependency.
+pub fn check_loader_call_diagnostics(
+    root: &smelt_parser::syntax_kind::SyntaxNode,
+    file_exists: &dyn Fn(&str) -> bool,
+    registry: &RecordRegistry,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+
+    let mut diags = Vec::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    for node in root.descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let call = match SmeltPathCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let segs = call.segments();
+        // We handle: config.load_yaml, config.load_json, config.load_toml
+        if segs.len() != 2 || segs[0].to_lowercase() != "config" {
+            continue;
+        }
+        let loader_name = segs[1].to_lowercase();
+        if loader_name != "load_yaml" && loader_name != "load_json" && loader_name != "load_toml" {
+            continue;
+        }
+
+        let call_range = to_range(node.text_range());
+
+        // ─── load_toml: reserved ─────────────────────────────────────────
+        if loader_name == "load_toml" {
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: crate::meta_loader_diagnostic_message(
+                    crate::DiagnosticCode::ConfigLoaderTomlNotYetSupported,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                range: call_range,
+                code: Some(crate::DiagnosticCode::ConfigLoaderTomlNotYetSupported),
+                data: None,
+            });
+            continue;
+        }
+
+        // ─── load_yaml / load_json ────────────────────────────────────────
+
+        // Collect positional arguments.
+        let positional_args: Vec<_> = call
+            .arg_list()
+            .map(|args| args.positional_args().into_iter().collect())
+            .unwrap_or_default();
+
+        // ── Argument 1: path ─────────────────────────────────────────────
+        let path_arg = positional_args.first();
+        match path_arg {
+            None => {
+                // No path argument: emit PathNotLiteral at the call.
+                diags.push(crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: crate::meta_loader_diagnostic_message(
+                        crate::DiagnosticCode::ConfigLoaderPathNotLiteral,
+                        Some("(missing)"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                    range: call_range,
+                    code: Some(crate::DiagnosticCode::ConfigLoaderPathNotLiteral),
+                    data: None,
+                });
+                continue;
+            }
+            Some(arg_expr) => {
+                // Is the path argument a string literal?
+                if !crate::config_vars::is_string_literal_expr(arg_expr) {
+                    let arg_range = to_range(arg_expr.syntax().text_range());
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_loader_diagnostic_message(
+                            crate::DiagnosticCode::ConfigLoaderPathNotLiteral,
+                            Some(&arg_expr.syntax().text().to_string()),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: arg_range,
+                        code: Some(crate::DiagnosticCode::ConfigLoaderPathNotLiteral),
+                        data: None,
+                    });
+                    continue;
+                }
+
+                // Extract the string value.
+                let path_value = match crate::config_vars::extract_string_literal_value(arg_expr) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let arg_range = to_range(arg_expr.syntax().text_range());
+
+                // Check path well-formedness.
+                match check_loader_path(&path_value, arg_range, call_range, file_exists) {
+                    LoaderPathOutcome::Backslash { path, .. } => {
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_loader_diagnostic_message(
+                                crate::DiagnosticCode::ConfigLoaderPathBackslash,
+                                None,
+                                Some(&path),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ),
+                            range: arg_range,
+                            code: Some(crate::DiagnosticCode::ConfigLoaderPathBackslash),
+                            data: None,
+                        });
+                        continue;
+                    }
+                    LoaderPathOutcome::EscapesWorkspace { path, .. } => {
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_loader_diagnostic_message(
+                                crate::DiagnosticCode::ConfigLoaderPathEscapesWorkspace,
+                                None,
+                                Some(&path),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ),
+                            range: arg_range,
+                            code: Some(crate::DiagnosticCode::ConfigLoaderPathEscapesWorkspace),
+                            data: None,
+                        });
+                        continue;
+                    }
+                    LoaderPathOutcome::FileNotFound { path, arg_range } => {
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_loader_diagnostic_message(
+                                crate::DiagnosticCode::ConfigLoaderFileNotFound,
+                                None,
+                                Some(&path),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ),
+                            range: arg_range,
+                            code: Some(crate::DiagnosticCode::ConfigLoaderFileNotFound),
+                            data: None,
+                        });
+                        continue;
+                    }
+                    LoaderPathOutcome::NotLiteral { .. } => {
+                        // Already handled above — this arm is unreachable since we
+                        // checked is_string_literal_expr first.
+                        continue;
+                    }
+                    LoaderPathOutcome::Valid { .. } => {
+                        // Path is valid. Continue to schema check.
+                    }
+                }
+
+                // ── Argument 2: schema ────────────────────────────────────
+                let schema_arg = positional_args.get(1);
+                if let Some(schema_expr) = schema_arg {
+                    let schema_range = to_range(schema_expr.syntax().text_range());
+                    let schema_text = schema_expr.syntax().text().to_string();
+                    if !schema_arg_text_is_admissible(&schema_text, registry) {
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_loader_diagnostic_message(
+                                crate::DiagnosticCode::ConfigLoaderSchemaForbidden,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(&schema_text),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ),
+                            range: schema_range,
+                            code: Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden),
+                            data: None,
+                        });
+                    }
+                }
+                // Schema is admissible (or absent) — no further diagnostics at
+                // this level. The Salsa orchestration layer emits validation
+                // diagnostics from `loader_resolved_value` after parsing the file.
+            }
+        }
+    }
+
+    diags
+}
+
 /// Walk all `SMELT_PATH_CALL` descendants of `select_stmt` whose path is
 /// `columns_of`. For each such call emit:
 ///
@@ -12218,5 +12844,327 @@ mod tests {
             is_subtype_of(&cohort_ty, &narrow_ty),
             "Cohort must be assignable to {{name: Text}} via record width subtyping"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase E1 Phase 5: Loader call dispatch tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Helper: parse SQL text and return the syntax root.
+    fn parse_loader_sql(src: &str) -> smelt_parser::syntax_kind::SyntaxNode {
+        smelt_parser::parse(src).syntax()
+    }
+
+    /// Helper: a file_exists callback that always returns `false` (no files exist).
+    fn no_files(_: &str) -> bool {
+        false
+    }
+
+    /// Helper: a file_exists callback that always returns `true` (all files exist).
+    fn all_files_exist(_: &str) -> bool {
+        true
+    }
+
+    /// Helper: empty RecordRegistry.
+    fn empty_registry() -> smelt_types::signatures::RecordRegistry {
+        smelt_types::signatures::RecordRegistry::empty()
+    }
+
+    // ─── load_yaml_path_must_be_literal_emits_diagnostic ─────────────────
+
+    #[test]
+    fn load_yaml_path_must_be_literal_emits_diagnostic() {
+        // `some_var` is not a string literal — should emit ConfigLoaderPathNotLiteral.
+        let src = "SELECT smelt.config.load_yaml(some_var, {f: Text}) FROM t";
+        let root = parse_loader_sql(src);
+        let diags = check_loader_call_diagnostics(&root, &no_files, &empty_registry(), "");
+        let not_literal: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderPathNotLiteral))
+            .collect();
+        assert_eq!(
+            not_literal.len(),
+            1,
+            "non-literal path must emit exactly 1 ConfigLoaderPathNotLiteral; got: {:?}",
+            diags
+        );
+    }
+
+    // ─── load_yaml_path_escapes_workspace_emits_diagnostic ───────────────
+
+    #[test]
+    fn load_yaml_path_escapes_workspace_emits_diagnostic() {
+        let bad_paths = &[
+            "'/etc/passwd'",
+            "'../escape.yaml'",
+            "'http://x.com/c.yaml'",
+            "'s3://bucket/c.yaml'",
+        ];
+        for path_literal in bad_paths {
+            let src = format!(
+                "SELECT smelt.config.load_yaml({}, {{f: Text}}) FROM t",
+                path_literal
+            );
+            let root = parse_loader_sql(&src);
+            let diags =
+                check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+            let escapes: Vec<_> = diags
+                .iter()
+                .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderPathEscapesWorkspace))
+                .collect();
+            assert_eq!(
+                escapes.len(),
+                1,
+                "path {} must emit exactly 1 ConfigLoaderPathEscapesWorkspace; got: {:?}",
+                path_literal,
+                diags
+            );
+        }
+    }
+
+    // ─── load_yaml_path_backslash_emits_diagnostic ───────────────────────
+
+    #[test]
+    fn load_yaml_path_backslash_emits_diagnostic() {
+        // Note: in SQL, backslash in a string literal must be doubled or escaped.
+        // We test the check_loader_path pure function directly.
+        let zero_range = crate::Range {
+            start: smelt_parser::ast::Position { line: 0, column: 0 },
+            end: smelt_parser::ast::Position { line: 0, column: 0 },
+        };
+        let outcome = check_loader_path(
+            "configs\\cohorts.yaml",
+            zero_range,
+            zero_range,
+            &all_files_exist,
+        );
+        assert!(
+            matches!(outcome, LoaderPathOutcome::Backslash { .. }),
+            "backslash in path must produce Backslash outcome; got: {:?}",
+            outcome
+        );
+    }
+
+    // ─── load_yaml_file_not_found_emits_diagnostic ───────────────────────
+
+    #[test]
+    fn load_yaml_file_not_found_emits_diagnostic() {
+        let src = "SELECT smelt.config.load_yaml('nope.yaml', {f: Text}) FROM t";
+        let root = parse_loader_sql(src);
+        // file_exists always returns false.
+        let diags = check_loader_call_diagnostics(&root, &no_files, &empty_registry(), "");
+        let not_found: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderFileNotFound))
+            .collect();
+        assert_eq!(
+            not_found.len(),
+            1,
+            "missing file must emit exactly 1 ConfigLoaderFileNotFound; got: {:?}",
+            diags
+        );
+        assert!(
+            not_found[0].message.contains("nope.yaml"),
+            "ConfigLoaderFileNotFound message must name the file; got: {}",
+            not_found[0].message
+        );
+    }
+
+    // ─── load_yaml_schema_forbidden_emits_diagnostic ─────────────────────
+
+    #[test]
+    fn load_yaml_schema_forbidden_emits_diagnostic() {
+        // `Integer` is a bare scalar — forbidden as a loader schema.
+        let src = "SELECT smelt.config.load_yaml('c.yaml', Integer) FROM t";
+        let root = parse_loader_sql(src);
+        let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+        let forbidden: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
+            .collect();
+        assert_eq!(
+            forbidden.len(),
+            1,
+            "bare scalar schema `Integer` must emit exactly 1 ConfigLoaderSchemaForbidden; got: {:?}",
+            diags
+        );
+
+        // `Text` is a bare scalar — also forbidden.
+        let src2 = "SELECT smelt.config.load_yaml('c.yaml', Text) FROM t";
+        let root2 = parse_loader_sql(src2);
+        let diags2 = check_loader_call_diagnostics(&root2, &all_files_exist, &empty_registry(), "");
+        let forbidden2: Vec<_> = diags2
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
+            .collect();
+        assert_eq!(
+            forbidden2.len(),
+            1,
+            "bare scalar schema `Text` must emit exactly 1 ConfigLoaderSchemaForbidden; got: {:?}",
+            diags2
+        );
+
+        // `Lambda<Text>` is a reflection witness — forbidden as a loader schema.
+        let src3 = "SELECT smelt.config.load_yaml('c.yaml', Lambda<Text>) FROM t";
+        let root3 = parse_loader_sql(src3);
+        let diags3 = check_loader_call_diagnostics(&root3, &all_files_exist, &empty_registry(), "");
+        let forbidden3: Vec<_> = diags3
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
+            .collect();
+        assert_eq!(
+            forbidden3.len(),
+            1,
+            "reflection witness `Lambda<Text>` must emit exactly 1 ConfigLoaderSchemaForbidden; got: {:?}",
+            diags3
+        );
+
+        // `ColumnRef` is a reflection witness — forbidden as a loader schema.
+        let src4 = "SELECT smelt.config.load_yaml('c.yaml', ColumnRef) FROM t";
+        let root4 = parse_loader_sql(src4);
+        let diags4 = check_loader_call_diagnostics(&root4, &all_files_exist, &empty_registry(), "");
+        let forbidden4: Vec<_> = diags4
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
+            .collect();
+        assert_eq!(
+            forbidden4.len(),
+            1,
+            "reflection witness `ColumnRef` must emit exactly 1 ConfigLoaderSchemaForbidden; got: {:?}",
+            diags4
+        );
+    }
+
+    // ─── load_toml_emits_reserved_diagnostic ─────────────────────────────
+
+    #[test]
+    fn load_toml_emits_reserved_diagnostic() {
+        let src = "SELECT smelt.config.load_toml('c.toml', {f: Text}) FROM t";
+        let root = parse_loader_sql(src);
+        let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+        let reserved: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderTomlNotYetSupported))
+            .collect();
+        assert_eq!(
+            reserved.len(),
+            1,
+            "load_toml must emit exactly 1 ConfigLoaderTomlNotYetSupported; got: {:?}",
+            diags
+        );
+        // The call's synthesised type is Unknown (recoverable) — we check that
+        // no other loader-specific diagnostic is emitted.
+        let other: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code != Some(crate::DiagnosticCode::ConfigLoaderTomlNotYetSupported))
+            .collect();
+        assert!(
+            other.is_empty(),
+            "load_toml must emit ONLY ConfigLoaderTomlNotYetSupported; also got: {:?}",
+            other
+        );
+    }
+
+    // ─── load_yaml_synthesises_schema_type_on_happy_path ─────────────────
+
+    #[test]
+    fn load_yaml_synthesises_schema_type_on_happy_path() {
+        // A valid path (file exists) + inline schema → no diagnostics.
+        let src = "SELECT smelt.config.load_yaml('cohorts.yaml', {name: Text, threshold: Integer}) FROM t";
+        let root = parse_loader_sql(src);
+        let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+        // On the happy path, the pure function emits zero diagnostics.
+        // (The actual validation diagnostics — from parsing the file — are
+        //  emitted by the Salsa `loader_resolved_value` orchestration layer,
+        //  not by this pure function.)
+        assert!(
+            diags.is_empty(),
+            "happy-path loader call must emit zero diagnostics from the dispatch function; got: {:?}",
+            diags
+        );
+
+        // The synthesised SmeltType of `smelt.config.load_yaml('cohorts.yaml', Cohort)` must
+        // be the schema's declared type (spec §"Loader value materialisation" rule 1).
+        // `TypedColumn` carries only DataType (no SmeltType), so we use the dedicated
+        // `infer_loader_call_smelt_type` function which returns `SmeltType` directly.
+        let ctx = make_cohort_ctx();
+
+        // Named record schema: `Cohort` → Record{Cohort}.
+        let src_named = "SELECT smelt.config.load_yaml('cohorts.yaml', Cohort) FROM t";
+        let expr_named = parse_first_expr(src_named);
+        let call_named = expr_named
+            .as_smelt_path_call()
+            .expect("must be a SmeltPathCall");
+        let smelt_ty_named = infer_loader_call_smelt_type(&call_named, &ctx)
+            .expect("load_yaml with named Cohort schema must return a SmeltType");
+        match &smelt_ty_named {
+            SmeltType::Record { name, .. } => {
+                assert_eq!(
+                    name.as_deref(),
+                    Some("Cohort"),
+                    "load_yaml with named schema must synthesise Record{{Cohort}}; got name {:?}",
+                    name
+                );
+            }
+            other => panic!(
+                "load_yaml with named schema must synthesise SmeltType::Record; got: {:?}",
+                other
+            ),
+        }
+
+        // Inline schema: `{name: Text, threshold: Integer}` → anonymous Record.
+        let src_inline = "SELECT smelt.config.load_yaml('cohorts.yaml', {name: Text, threshold: Integer}) FROM t";
+        let expr_inline = parse_first_expr(src_inline);
+        let call_inline = expr_inline
+            .as_smelt_path_call()
+            .expect("must be a SmeltPathCall");
+        let ctx_empty = TypeContext::new();
+        let smelt_ty_inline = infer_loader_call_smelt_type(&call_inline, &ctx_empty)
+            .expect("load_yaml with inline schema must return a SmeltType");
+        match &smelt_ty_inline {
+            SmeltType::Record { fields, name } => {
+                assert!(
+                    name.is_none(),
+                    "inline schema must produce an anonymous Record; got name {:?}",
+                    name
+                );
+                assert!(
+                    fields.contains_key("name"),
+                    "inline Record must contain 'name' field; got fields: {:?}",
+                    fields.keys().collect::<Vec<_>>()
+                );
+                assert!(
+                    fields.contains_key("threshold"),
+                    "inline Record must contain 'threshold' field; got fields: {:?}",
+                    fields.keys().collect::<Vec<_>>()
+                );
+            }
+            other => panic!(
+                "load_yaml with inline schema must synthesise SmeltType::Record; got: {:?}",
+                other
+            ),
+        }
+
+        // List<schema>: `List<Cohort>` → List<Record{Cohort}>.
+        let src_list = "SELECT smelt.config.load_yaml('cohorts.yaml', List<Cohort>) FROM t";
+        let expr_list = parse_first_expr(src_list);
+        let call_list = expr_list
+            .as_smelt_path_call()
+            .expect("must be a SmeltPathCall");
+        let smelt_ty_list = infer_loader_call_smelt_type(&call_list, &ctx)
+            .expect("load_yaml with List<Cohort> schema must return a SmeltType");
+        match &smelt_ty_list {
+            SmeltType::List(inner) => {
+                assert!(
+                    matches!(inner.as_ref(), SmeltType::Record { .. }),
+                    "load_yaml with List<Cohort> schema must synthesise List<Record>; got inner: {:?}",
+                    inner
+                );
+            }
+            other => panic!(
+                "load_yaml with List<Cohort> schema must synthesise SmeltType::List; got: {:?}",
+                other
+            ),
+        }
     }
 }

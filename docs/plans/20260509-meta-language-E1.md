@@ -96,7 +96,7 @@ This plan drives the implementation, examples, user docs, and skill update for t
 | 2     | done     | 2981610 | 2026-05-13 |
 | 3     | done     | 99e8a1a | 2026-05-13 |
 | 4     | done     | 08ff414 | 2026-05-13 |
-| 5     | pending  | —      | —    |
+| 5     | done     | —      | 2026-05-13 |
 | 6     | pending  | —      | —    |
 | 7     | pending  | —      | —    |
 
@@ -599,6 +599,8 @@ This plan drives the implementation, examples, user docs, and skill update for t
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- Phase 5: `infer_smelt_path_call_type` does not dispatch to `infer_loader_call_smelt_type` for `smelt.config.load_yaml`/`load_json` calls. Reason: `infer_smelt_path_call_type` returns `Option<TypedColumn>` (`DataType`-based) and cannot carry `SmeltType::Record`/`List`/`Map`. The helper `infer_loader_call_smelt_type` is the canonical meta-language inference function for loader calls; production callers (LSP hover on a loader call site, HOF dispatch over loader-typed source lists) wire it directly in Phase 6 (LSP) and Phase E2 (HOF / `ModelDef` propagation). Tests in `crates/smelt-db/src/type_inference.rs::tests::load_yaml_synthesises_schema_type_on_happy_path` verify the helper's correctness for all three schema shapes.
 
 ## Verification
 

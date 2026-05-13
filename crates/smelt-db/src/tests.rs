@@ -4951,3 +4951,293 @@ fn diagnostic_codes_loader_set_complete() {
         "ConfigLoaderNullCoercion message must match spec; got: {msg}"
     );
 }
+
+// ============================================================================
+// Phase E1 Phase 5 — Salsa loader input invalidation + record declarations
+// ============================================================================
+
+/// Verify that `loader_file_parsed` is re-evaluated when the `LoaderFileInput`
+/// text changes (Salsa cache invalidation).
+///
+/// When the same path is registered a second time with different text, the
+/// result of `loader_file_parsed` must reflect the new content.
+#[test]
+fn loader_file_text_is_salsa_input() {
+    let mut db = Database::default();
+
+    // Register a loader file with initial YAML text.
+    let path: Arc<str> = Arc::from("data/config.yaml");
+    let text_v1: Arc<str> = Arc::from("name: Alice\nage: 30\n");
+    let input_v1 = db.set_loader_file(path.clone(), text_v1, true);
+
+    // First parse: should succeed and return the v1 text.
+    let result_v1 = loader_file_parsed(&db, input_v1);
+    assert!(
+        result_v1.is_ok(),
+        "v1 parse must succeed; got: {:?}",
+        result_v1.as_ref().as_ref().err()
+    );
+
+    // Update the same path with new text.
+    let text_v2: Arc<str> = Arc::from("name: Bob\nage: 42\n");
+    let input_v2 = db.set_loader_file(path.clone(), text_v2.clone(), true);
+
+    // The returned input handle must be the same Salsa entity (update-in-place).
+    assert!(
+        input_v1 == input_v2,
+        "set_loader_file must return the same input handle on update"
+    );
+
+    // Second parse: Salsa re-evaluates and the text is now v2.
+    let result_v2 = loader_file_parsed(&db, input_v2);
+    assert!(result_v2.is_ok(), "v2 parse must succeed");
+
+    // Confirm the root now reflects the updated text (root mapping contains "Bob").
+    let parsed = result_v2.as_ref().as_ref().unwrap();
+    match &parsed.root {
+        crate::loader::ParsedNode::Mapping { entries, .. } => {
+            let name_entry = entries.iter().find(|(k, _, _)| k == "name");
+            let name_node = name_entry.map(|(_, _, v)| v);
+            match name_node {
+                Some(crate::loader::ParsedNode::String { value, .. }) => {
+                    assert_eq!(
+                        value, "Bob",
+                        "after update, root.name must be 'Bob'; got '{}'",
+                        value
+                    );
+                }
+                other => panic!(
+                    "expected String node for 'name' after update; got {:?}",
+                    other
+                ),
+            }
+        }
+        other => panic!("expected Mapping at root after update; got {:?}", other),
+    }
+}
+
+/// Verify that `loader_resolved_value` is invalidated when the `LoaderFileInput`
+/// text changes (Salsa cache invalidation for content-validation).
+///
+/// When the loader file is updated via `set_loader_file`, the
+/// `loader_resolved_value` result must reflect the new content.
+#[test]
+fn loader_resolved_value_invalidated_on_file_change() {
+    let mut db = Database::default();
+
+    // Register a loader file with v1 YAML text ({name: us_west}).
+    let loader_path: Arc<str> = Arc::from("cohorts.yaml");
+    let text_v1: Arc<str> = Arc::from("{name: us_west, threshold: 100}");
+    let input_v1 = db.set_loader_file(loader_path.clone(), text_v1, true);
+
+    // Build a LoaderCallSiteId for a hypothetical `smelt.config.load_yaml` call.
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: loader_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // First resolution: should parse the v1 text.
+    let resolved_v1 = loader_resolved_value(&db, input_v1, call_site.clone());
+    assert!(
+        resolved_v1.parsed.is_some(),
+        "v1 resolution must produce a parsed result"
+    );
+    assert!(
+        resolved_v1.diagnostics.is_empty(),
+        "v1 resolution must have no diagnostics for a valid file; got: {:?}",
+        resolved_v1.diagnostics
+    );
+
+    // Verify the v1 value has the expected content.
+    match &resolved_v1.parsed {
+        Some(p) => match &p.root {
+            crate::loader::ParsedNode::Mapping { entries, .. } => {
+                let name_entry = entries.iter().find(|(k, _, _)| k == "name");
+                match name_entry.map(|(_, _, v)| v) {
+                    Some(crate::loader::ParsedNode::String { value, .. }) => {
+                        assert_eq!(
+                            value, "us_west",
+                            "v1 name must be 'us_west'; got '{}'",
+                            value
+                        );
+                    }
+                    other => panic!("expected String for 'name' in v1; got {:?}", other),
+                }
+            }
+            other => panic!("expected Mapping in v1; got {:?}", other),
+        },
+        None => panic!("v1 parsed must be Some"),
+    }
+
+    // Update the loader file to v2 ({name: us_east, threshold: 200}).
+    let text_v2: Arc<str> = Arc::from("{name: us_east, threshold: 200}");
+    let input_v2 = db.set_loader_file(loader_path.clone(), text_v2, true);
+
+    // The input handle must be the same Salsa entity (update-in-place).
+    assert!(
+        input_v1 == input_v2,
+        "set_loader_file must return the same input handle on update"
+    );
+
+    // Second resolution: Salsa must invalidate and re-evaluate because the
+    // loader file text changed.
+    let resolved_v2 = loader_resolved_value(&db, input_v2, call_site);
+    assert!(
+        resolved_v2.parsed.is_some(),
+        "v2 resolution must produce a parsed result"
+    );
+    assert!(
+        resolved_v2.diagnostics.is_empty(),
+        "v2 resolution must have no diagnostics; got: {:?}",
+        resolved_v2.diagnostics
+    );
+
+    // The v2 value must reflect the updated file content.
+    match &resolved_v2.parsed {
+        Some(p) => match &p.root {
+            crate::loader::ParsedNode::Mapping { entries, .. } => {
+                let name_entry = entries.iter().find(|(k, _, _)| k == "name");
+                match name_entry.map(|(_, _, v)| v) {
+                    Some(crate::loader::ParsedNode::String { value, .. }) => {
+                        assert_eq!(
+                            value, "us_east",
+                            "v2 name must be 'us_east' after update; got '{}'",
+                            value
+                        );
+                    }
+                    other => panic!("expected String for 'name' in v2; got {:?}", other),
+                }
+            }
+            other => panic!("expected Mapping in v2; got {:?}", other),
+        },
+        None => panic!("v2 parsed must be Some"),
+    }
+}
+
+/// Verify that the production diagnostic orchestrator (`file_diagnostics`) wires
+/// through `loader_resolved_value` end-to-end.
+///
+/// Registers a workspace with a `.sql` file containing a
+/// `smelt.config.load_yaml('cohorts.yaml', {name: Text})` call, registers a
+/// `LoaderFileInput` for `cohorts.yaml` with valid content `{name: us_west}`,
+/// and asserts that `file_diagnostics` produces NO
+/// `ConfigLoaderRequiredFieldMissing` diagnostic.
+///
+/// Then mutates the loader file to `{wrong_field: x}` via `set_loader_file`,
+/// runs `file_diagnostics` again, and asserts that a
+/// `ConfigLoaderRequiredFieldMissing` diagnostic is now present.
+///
+/// This proves the production orchestrator wires through `workspace.loader_files`
+/// rather than the no-op closure.
+#[test]
+fn file_diagnostics_end_to_end_loader_content_validation() {
+    use std::path::PathBuf;
+
+    let mut db = Database::default();
+    let project_root = PathBuf::from("/tmp/smelt_test_loader_e2e");
+
+    // Register a project and a sql file containing a load_yaml call.
+    let project = db.set_project_input(project_root.clone(), String::new());
+    let sql_content = "SELECT smelt.config.load_yaml('cohorts.yaml', {name: Text}) AS cfg";
+    let sql_path = project_root.join("models/cohorts.sql");
+    let sql_file = db.set_source_file(
+        sql_path.clone(),
+        sql_content.to_string(),
+        project_root.clone(),
+    );
+
+    // Register the workspace (loader_files starts empty).
+    db.set_workspace(vec![sql_file], vec![project]);
+
+    // Register a loader file with valid content — 'name' field is present.
+    let loader_path: Arc<str> = Arc::from("cohorts.yaml");
+    let text_v1: Arc<str> = Arc::from("{name: us_west}");
+    db.set_loader_file(loader_path.clone(), text_v1, true);
+
+    let workspace = db.workspace();
+
+    // Phase 1: file_diagnostics must NOT have a ConfigLoaderRequiredFieldMissing.
+    let diags_v1 = file_diagnostics(&db, workspace, sql_file);
+    let missing_v1: Vec<_> = diags_v1
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ConfigLoaderRequiredFieldMissing))
+        .collect();
+    assert!(
+        missing_v1.is_empty(),
+        "file_diagnostics must not report ConfigLoaderRequiredFieldMissing \
+         when the loader file satisfies the schema; got: {:?}",
+        missing_v1
+    );
+
+    // Phase 2: mutate the loader file to have a wrong field — 'name' is now absent.
+    let text_v2: Arc<str> = Arc::from("{wrong_field: x}");
+    db.set_loader_file(loader_path.clone(), text_v2, true);
+
+    // file_diagnostics must now report ConfigLoaderRequiredFieldMissing.
+    let diags_v2 = file_diagnostics(&db, workspace, sql_file);
+    let missing_v2: Vec<_> = diags_v2
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ConfigLoaderRequiredFieldMissing))
+        .collect();
+    assert!(
+        !missing_v2.is_empty(),
+        "file_diagnostics must report ConfigLoaderRequiredFieldMissing \
+         after the loader file no longer satisfies the schema; got diags: {:?}",
+        diags_v2
+    );
+}
+
+/// Verify that `smelt_record_declarations` collects declarations from all
+/// files in the workspace and returns them in file order.
+///
+/// Two files each contribute one `smelt.record` declaration; the query must
+/// return exactly two entries with the correct names.
+#[test]
+fn smelt_record_declarations_query_collects_workspace_decls() {
+    let mut db = TestDb::default();
+
+    // File 1: declares smelt.record SourceEntry.
+    db.set_file_text(
+        PathBuf::from("models/sources.sql"),
+        Arc::new(
+            "smelt.record SourceEntry = { name: Text, age: Integer }\n\
+             SELECT 1"
+                .to_string(),
+        ),
+    );
+
+    // File 2: declares smelt.record MetricConfig.
+    db.set_file_text(
+        PathBuf::from("models/metrics.sql"),
+        Arc::new(
+            "smelt.record MetricConfig = { metric_name: Text, threshold: Float }\n\
+             SELECT 1"
+                .to_string(),
+        ),
+    );
+
+    let workspace = db.sync_workspace();
+    let decls = smelt_record_declarations(&db.db, workspace);
+
+    assert_eq!(
+        decls.len(),
+        2,
+        "workspace with two smelt.record declarations must produce exactly 2 entries; got {}: {:?}",
+        decls.len(),
+        decls.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+
+    let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"SourceEntry"),
+        "decls must include SourceEntry; got {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"MetricConfig"),
+        "decls must include MetricConfig; got {:?}",
+        names
+    );
+}

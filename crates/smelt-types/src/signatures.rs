@@ -693,7 +693,7 @@ pub struct DiagnosticSentinel {
 ///
 /// Pure — no Salsa dependency. Produced by the Phase 2 parser and consumed by
 /// `build_record_registry`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SmeltRecordDeclaration {
     /// The declared record name (e.g. `"SourceEntry"`).
     pub name: String,
