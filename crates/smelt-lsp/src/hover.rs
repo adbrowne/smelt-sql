@@ -3,12 +3,18 @@
 //! All `hover_text_for_*` builders, expansion-frame rendering, and related
 //! pure formatting helpers. These functions are stateless: they take an AST
 //! node (+ optional context) and return a `String`/`Option<PathBuf>`.
+//!
+//! Some of the `pub fn`s below are reachable only from the unit-test module
+//! (`#[cfg(test)] mod tests;`) — they were exercised in-place when this file
+//! was part of `lib.rs`. They are kept `pub` because they form a stable
+//! formatter surface that the `Backend::hover`/`goto_definition` impls grow
+//! into call sites for over time.
+#![allow(dead_code)]
 
 use tower_lsp::lsp_types::*;
 
 use smelt_db::{Diagnostic as DbDiagnostic, DiagnosticData as DbData};
-use smelt_parser::ast::File as AstFile;
-use smelt_types::{format_smelt_type_hover, TypedColumn};
+use smelt_types::format_smelt_type_hover;
 
 /// Render a database diagnostic into the LSP message body + per-frame
 /// `related_information` list.

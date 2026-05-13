@@ -125,7 +125,7 @@ pub fn determine_completion_context(text: &str, offset: usize) -> CompletionCont
 }
 
 /// Check if cursor is in a FROM/JOIN table reference position
-fn is_in_from_position(upper_text: &str) -> bool {
+pub(crate) fn is_in_from_position(upper_text: &str) -> bool {
     // Find the last occurrence of FROM or JOIN keywords
     let from_pos = upper_text.rfind("FROM");
     let join_pos = upper_text.rfind("JOIN");
@@ -398,4 +398,3 @@ fn add_path_ref_alias(
         _ => {}
     }
 }
-

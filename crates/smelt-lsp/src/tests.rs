@@ -1,4 +1,6 @@
 use super::*;
+use std::path::PathBuf;
+use tower_lsp::lsp_types::{Position, Range};
 
 #[test]
 fn test_from_clause_context_after_from_keyword() {
@@ -80,8 +82,8 @@ fn test_not_from_position_complete_table_ref() {
 // =====================================================================
 
 use smelt_db::{
-    Diagnostic as DbDiagnosticT, DiagnosticCode, DiagnosticData,
-    DiagnosticSeverity as DbSeverityT, Range as DbRange,
+    Diagnostic as DbDiagnosticT, DiagnosticCode, DiagnosticData, DiagnosticSeverity as DbSeverityT,
+    Range as DbRange,
 };
 use smelt_parser::ast::Position as DbPosition;
 use smelt_types::FrameInfo;
@@ -580,9 +582,7 @@ fn hover_smelt_config_var_unresolved() {
         "hover for unresolved config.var must still contain `Text`, got: {text}"
     );
     assert!(
-        text.contains("not declared")
-            || text.contains("not found")
-            || text.contains("undefined"),
+        text.contains("not declared") || text.contains("not found") || text.contains("undefined"),
         "hover for unresolved config.var must indicate the variable is missing, got: {text}"
     );
 }
@@ -1627,8 +1627,7 @@ fn hover_on_model_ref_field_projection_shows_field_type() {
     );
     let tags_text = text_tags.unwrap();
     assert!(
-        tags_text.contains("List")
-            && (tags_text.contains("Text") || tags_text.contains("TEXT")),
+        tags_text.contains("List") && (tags_text.contains("Text") || tags_text.contains("TEXT")),
         "hover for `m.tags` must mention List and Text type, got: {tags_text}"
     );
 
@@ -1658,8 +1657,7 @@ fn hover_on_model_ref_field_projection_shows_field_type() {
         "hover_text_for_source_ref_field('path') must return Some, got None"
     );
     let src_tags = hover_text_for_source_ref_field("tags");
-    let src_tags_text =
-        src_tags.expect("hover_text_for_source_ref_field('tags') must return Some");
+    let src_tags_text = src_tags.expect("hover_text_for_source_ref_field('tags') must return Some");
     assert!(
         src_tags_text.contains("List"),
         "hover_text_for_source_ref_field('tags') must mention List, got: {src_tags_text}"

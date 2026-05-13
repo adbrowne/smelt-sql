@@ -4,7 +4,7 @@
 //! to its definition location(s). Used by `Backend::goto_definition` and
 //! hover handlers.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use smelt_db::{Database, Workspace};
 use smelt_parser::ast::File as AstFile;

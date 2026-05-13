@@ -1,7 +1,7 @@
 //! The LSP backend: `Backend` struct and `LanguageServer` trait impl.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -15,9 +15,8 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
-    check_type_diagnostics, file_diagnostics, functions_in_file,
-    yaml_edits::find_source_column_yaml_rename, Database, Diagnostic as DbDiagnostic,
-    DiagnosticAcc, DiagnosticCode as DbCode, DiagnosticData as DbData,
+    functions_in_file, yaml_edits::find_source_column_yaml_rename, Database,
+    Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
     DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile, Workspace,
 };
 use smelt_parser::ast::File as AstFile;
@@ -34,15 +33,14 @@ use crate::completion::{
 };
 use crate::db_helpers::{
     all_file_paths, diagnostics_for, file_project_root, file_text, lookup_file, lookup_project,
-    project_sources_yaml, resolve_ref_path, workspace_files,
+    project_sources_yaml,
 };
 use crate::hover::{
-    column_ref_field_completions, columns_of_arg_completions_for_sql,
-    find_smelt_fn_call_at_cursor, find_var_line_in_smelt_yml, hover_text_for_column_ref_field,
-    hover_text_for_columns_of_call, hover_text_for_hof_meta_language,
-    hover_text_for_list_literal_dual, hover_text_for_list_spread, hover_text_for_model_ref_field,
-    hover_text_for_models_all, hover_text_for_models_with_tag_call, hover_text_for_pipe_expr,
-    hover_text_for_source_ref_field, hover_text_for_sources_all,
+    column_ref_field_completions, columns_of_arg_completions_for_sql, find_smelt_fn_call_at_cursor,
+    find_var_line_in_smelt_yml, hover_text_for_column_ref_field, hover_text_for_columns_of_call,
+    hover_text_for_hof_meta_language, hover_text_for_list_literal_dual, hover_text_for_list_spread,
+    hover_text_for_model_ref_field, hover_text_for_models_all, hover_text_for_models_with_tag_call,
+    hover_text_for_pipe_expr, hover_text_for_source_ref_field, hover_text_for_sources_all,
     hover_text_for_sources_with_tag_call, is_column_ref_param_before_dot,
     is_model_ref_param_before_dot, is_source_ref_param_before_dot, lambda_param_binder_range,
     lambda_params_for_completion, model_ref_field_completions, passing_body_aggregate_labels,
@@ -616,7 +614,7 @@ impl Backend {
 
             let scan_result = tokio::task::spawn_blocking(move || {
                 let mut cache_guard = cache_for_blocking.blocking_lock();
-                python_scan::execute_single_python_file(
+                crate::python_scan::execute_single_python_file(
                     &py_path_for_blocking,
                     &project_root_for_blocking,
                     &mut cache_guard,
@@ -931,7 +929,7 @@ impl LanguageServer for Backend {
                         let context_json = build_python_context(&all_files, &config);
                         let mut cache = self.python_cache.lock().await;
                         *cache = PythonModelCache::load(&project_root);
-                        let scan_result = python_scan::discover_python_models(
+                        let scan_result = crate::python_scan::discover_python_models(
                             &models_path,
                             &project_root,
                             &mut cache,
