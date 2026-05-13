@@ -40,6 +40,34 @@ jq -c "$filter | select(.event == \"tool\")" "$LOG" \
   | jq -s 'sort_by(-(.resp_bytes // 0)) | .[:10] | .[] | "\(.resp_bytes) bytes  \(.tool)  \(.cmd // "" | tostring | .[0:80])"' -r
 
 echo
+echo "=== Edit responses exceeding threshold (EDIT_SIZE_KB=${EDIT_SIZE_KB:-50}) ==="
+# Edit returns the full post-edit file. On large files this dominates cache-read
+# cost because the response lingers in transcript and is re-read every turn.
+# Aggregate by file to surface "this file is the hot spot — split it or delegate
+# its edits to a subagent so the big response stays out of the orchestrator's
+# context window".
+threshold_bytes=$(( ${EDIT_SIZE_KB:-50} * 1024 ))
+jq -c "$filter | select(.event == \"tool\" and .tool == \"Edit\" and (.resp_bytes // 0) >= $threshold_bytes)" "$LOG" \
+  | jq -s '
+      if length == 0 then "<no Edit responses over threshold>"
+      else
+        . as $entries
+        | ($entries
+           | group_by(.cmd)
+           | map({
+               file: (.[0].cmd // "?"),
+               count: length,
+               max_kb: ((map(.resp_bytes) | max) / 1024 | floor),
+               total_mb: ((map(.resp_bytes) | add) / 1024 / 1024 * 100 | floor / 100)
+             })
+           | sort_by(-.total_mb)
+           | (.[] | "\(.count)x  max=\(.max_kb)KB  total=\(.total_mb)MB  \(.file)")),
+          "",
+          "SUMMARY: \($entries | length) Edit calls over threshold; \(($entries | map(.resp_bytes) | add) / 1024 / 1024 * 100 | floor / 100) MB total returned"
+      end
+    ' -r
+
+echo
 echo "=== Tool-call counts by tool ==="
 jq -c "$filter | select(.event == \"tool\") | .tool" "$LOG" \
   | sort | uniq -c | sort -rn
