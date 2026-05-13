@@ -4426,3 +4426,528 @@ fn model_ref_columns_routes_through_columns_of_query() {
     assert_eq!(columns_via_ref[0].name, "order_id");
     assert_eq!(columns_via_ref[1].name, "amount");
 }
+
+// ============================================================================
+// Phase E1 TDD tests — DiagnosticCode completeness
+// ============================================================================
+
+/// Test 11: `diagnostic_codes_record_set_complete`
+///
+/// Every record diagnostic code exists in `DiagnosticCode` and renders the
+/// spec message format from `meta_language.md` §"Record diagnostic codes".
+#[test]
+fn diagnostic_codes_record_set_complete() {
+    // SmeltRecordRedefinition
+    let code = DiagnosticCode::SmeltRecordRedefinition;
+    assert!(matches!(code, DiagnosticCode::SmeltRecordRedefinition));
+    let msg = meta_record_diagnostic_message(
+        code,
+        Some("Foo"),
+        None,
+        Some("models/foo.sql"),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("Foo") && msg.contains("models/foo.sql") && msg.contains("workspace-wide"),
+        "SmeltRecordRedefinition message must match spec; got: {msg}"
+    );
+
+    // RecordFieldUnknown
+    let code = DiagnosticCode::RecordFieldUnknown;
+    assert!(matches!(code, DiagnosticCode::RecordFieldUnknown));
+    let msg = meta_record_diagnostic_message(
+        code,
+        Some("Entry"),
+        Some("bar"),
+        None,
+        None,
+        None,
+        Some("name, type"),
+    );
+    assert!(
+        msg.contains("Entry") && msg.contains("bar") && msg.contains("name, type"),
+        "RecordFieldUnknown message must match spec; got: {msg}"
+    );
+
+    // RecordFieldMissing
+    let code = DiagnosticCode::RecordFieldMissing;
+    assert!(matches!(code, DiagnosticCode::RecordFieldMissing));
+    let msg =
+        meta_record_diagnostic_message(code, Some("Entry"), Some("name"), None, None, None, None);
+    assert!(
+        msg.contains("Entry") && msg.contains("name") && msg.contains("missing"),
+        "RecordFieldMissing message must match spec; got: {msg}"
+    );
+
+    // RecordFieldDuplicate
+    let code = DiagnosticCode::RecordFieldDuplicate;
+    assert!(matches!(code, DiagnosticCode::RecordFieldDuplicate));
+    let msg = meta_record_diagnostic_message(code, None, Some("name"), None, None, None, None);
+    assert!(
+        msg.contains("name") && msg.contains("already appears"),
+        "RecordFieldDuplicate message must match spec; got: {msg}"
+    );
+
+    // RecordFieldTypeMismatch
+    let code = DiagnosticCode::RecordFieldTypeMismatch;
+    assert!(matches!(code, DiagnosticCode::RecordFieldTypeMismatch));
+    let msg = meta_record_diagnostic_message(
+        code,
+        None,
+        Some("amount"),
+        None,
+        Some("Integer"),
+        Some("Text"),
+        None,
+    );
+    assert!(
+        msg.contains("amount") && msg.contains("Integer") && msg.contains("Text"),
+        "RecordFieldTypeMismatch message must match spec; got: {msg}"
+    );
+
+    // RecordLiteralUnknownTarget
+    let code = DiagnosticCode::RecordLiteralUnknownTarget;
+    assert!(matches!(code, DiagnosticCode::RecordLiteralUnknownTarget));
+    let msg = meta_record_diagnostic_message(code, None, None, None, None, None, None);
+    assert!(
+        msg.contains("cannot infer record type"),
+        "RecordLiteralUnknownTarget message must match spec; got: {msg}"
+    );
+
+    // RecordFieldNotProjectable
+    let code = DiagnosticCode::RecordFieldNotProjectable;
+    assert!(matches!(code, DiagnosticCode::RecordFieldNotProjectable));
+    let msg =
+        meta_record_diagnostic_message(code, Some("Integer"), Some("foo"), None, None, None, None);
+    assert!(
+        msg.contains("Integer") && msg.contains("foo") && msg.contains("no fields"),
+        "RecordFieldNotProjectable message must match spec; got: {msg}"
+    );
+
+    // RecordFieldTypeForbidden
+    let code = DiagnosticCode::RecordFieldTypeForbidden;
+    assert!(matches!(code, DiagnosticCode::RecordFieldTypeForbidden));
+    let msg = meta_record_diagnostic_message(code, Some("ModelRef"), None, None, None, None, None);
+    assert!(
+        msg.contains("ModelRef") && msg.contains("not user-writable"),
+        "RecordFieldTypeForbidden message must match spec; got: {msg}"
+    );
+
+    // RecordCyclicDeclaration
+    let code = DiagnosticCode::RecordCyclicDeclaration;
+    assert!(matches!(code, DiagnosticCode::RecordCyclicDeclaration));
+    let msg = meta_record_diagnostic_message(code, Some("Node"), None, None, None, None, None);
+    assert!(
+        msg.contains("Node") && msg.contains("cycle"),
+        "RecordCyclicDeclaration message must match spec; got: {msg}"
+    );
+
+    // RecordInDataWorld
+    let code = DiagnosticCode::RecordInDataWorld;
+    assert!(matches!(code, DiagnosticCode::RecordInDataWorld));
+    let msg = meta_record_diagnostic_message(code, None, None, None, None, None, None);
+    assert!(
+        msg.contains("Data-World") || msg.contains("data-world") || msg.contains("SQL"),
+        "RecordInDataWorld message must reference Data-World position; got: {msg}"
+    );
+}
+
+/// Test 12: `diagnostic_codes_map_set_complete`
+///
+/// Every map diagnostic code exists in `DiagnosticCode` and renders per spec.
+#[test]
+fn diagnostic_codes_map_set_complete() {
+    // MapKeyTypeNotText
+    let code = DiagnosticCode::MapKeyTypeNotText;
+    assert!(matches!(code, DiagnosticCode::MapKeyTypeNotText));
+    let msg =
+        meta_map_diagnostic_message(code, None, None, None, None, Some("Integer"), None, None);
+    assert!(
+        msg.contains("Integer") && msg.contains("Text"),
+        "MapKeyTypeNotText message must match spec; got: {msg}"
+    );
+
+    // MapApiUnknown
+    let code = DiagnosticCode::MapApiUnknown;
+    assert!(matches!(code, DiagnosticCode::MapApiUnknown));
+    let msg = meta_map_diagnostic_message(code, None, Some("merge"), None, None, None, None, None);
+    assert!(
+        msg.contains("merge") && msg.contains("entries"),
+        "MapApiUnknown message must match spec; got: {msg}"
+    );
+
+    // MapApiArityMismatch
+    let code = DiagnosticCode::MapApiArityMismatch;
+    assert!(matches!(code, DiagnosticCode::MapApiArityMismatch));
+    let msg =
+        meta_map_diagnostic_message(code, Some("get"), None, None, Some("0"), None, None, None);
+    assert!(
+        msg.contains("get") && msg.contains("0"),
+        "MapApiArityMismatch message must match spec; got: {msg}"
+    );
+
+    // MapApiNamedArgument
+    let code = DiagnosticCode::MapApiNamedArgument;
+    assert!(matches!(code, DiagnosticCode::MapApiNamedArgument));
+    let msg = meta_map_diagnostic_message(code, Some("get"), None, None, None, None, None, None);
+    assert!(
+        msg.contains("get") && msg.contains("named"),
+        "MapApiNamedArgument message must match spec; got: {msg}"
+    );
+
+    // MapApiUnexpectedArgument
+    let code = DiagnosticCode::MapApiUnexpectedArgument;
+    assert!(matches!(code, DiagnosticCode::MapApiUnexpectedArgument));
+    let msg = meta_map_diagnostic_message(code, Some("keys"), None, None, None, None, None, None);
+    assert!(
+        msg.contains("keys") && msg.contains("no arguments"),
+        "MapApiUnexpectedArgument message must match spec; got: {msg}"
+    );
+
+    // MapGetMissingKey
+    let code = DiagnosticCode::MapGetMissingKey;
+    assert!(matches!(code, DiagnosticCode::MapGetMissingKey));
+    let msg = meta_map_diagnostic_message(code, None, None, Some("prod"), None, None, None, None);
+    assert!(
+        msg.contains("prod") && msg.contains("binding"),
+        "MapGetMissingKey message must match spec; got: {msg}"
+    );
+
+    // MapApiArgTypeMismatch
+    let code = DiagnosticCode::MapApiArgTypeMismatch;
+    assert!(matches!(code, DiagnosticCode::MapApiArgTypeMismatch));
+    let msg = meta_map_diagnostic_message(
+        code,
+        Some("get"),
+        None,
+        None,
+        None,
+        None,
+        Some("Text"),
+        Some("Integer"),
+    );
+    assert!(
+        msg.contains("get") && msg.contains("Text") && msg.contains("Integer"),
+        "MapApiArgTypeMismatch message must match spec; got: {msg}"
+    );
+}
+
+/// Test 13: `diagnostic_codes_loader_set_complete`
+///
+/// Every loader diagnostic code exists in `DiagnosticCode` and renders
+/// per `meta_config_loading.md` §"Validation diagnostics".
+#[test]
+fn diagnostic_codes_loader_set_complete() {
+    // ConfigLoaderPathNotLiteral
+    let code = DiagnosticCode::ConfigLoaderPathNotLiteral;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderPathNotLiteral));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        Some("path_var"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("path_var") && msg.contains("literal"),
+        "ConfigLoaderPathNotLiteral message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderPathEscapesWorkspace
+    let code = DiagnosticCode::ConfigLoaderPathEscapesWorkspace;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderPathEscapesWorkspace
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("/etc/passwd"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("/etc/passwd") && msg.contains("workspace-relative"),
+        "ConfigLoaderPathEscapesWorkspace message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderPathBackslash
+    let code = DiagnosticCode::ConfigLoaderPathBackslash;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderPathBackslash));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("config\\data.yaml"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("config\\data.yaml"),
+        "ConfigLoaderPathBackslash message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderFileNotFound
+    let code = DiagnosticCode::ConfigLoaderFileNotFound;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderFileNotFound));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("config/missing.yaml"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("config/missing.yaml") && msg.contains("not found"),
+        "ConfigLoaderFileNotFound message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderSchemaForbidden
+    let code = DiagnosticCode::ConfigLoaderSchemaForbidden;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderSchemaForbidden));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("Integer"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("Integer") && msg.contains("record type"),
+        "ConfigLoaderSchemaForbidden message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderTomlNotYetSupported
+    let code = DiagnosticCode::ConfigLoaderTomlNotYetSupported;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderTomlNotYetSupported
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    );
+    assert!(
+        msg.contains("load_toml") && msg.contains("reserved"),
+        "ConfigLoaderTomlNotYetSupported message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderParseError
+    let code = DiagnosticCode::ConfigLoaderParseError;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderParseError));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("config.yaml"),
+        Some("YAML"),
+        Some("unexpected token"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("YAML") && msg.contains("config.yaml") && msg.contains("unexpected token"),
+        "ConfigLoaderParseError message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderRequiredFieldMissing
+    let code = DiagnosticCode::ConfigLoaderRequiredFieldMissing;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderRequiredFieldMissing
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("name"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("name") && msg.contains("required") && msg.contains("missing"),
+        "ConfigLoaderRequiredFieldMissing message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderUnknownField
+    let code = DiagnosticCode::ConfigLoaderUnknownField;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderUnknownField));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("extra"),
+        Some("name, value"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("extra") && msg.contains("name, value"),
+        "ConfigLoaderUnknownField message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderTypeMismatch
+    let code = DiagnosticCode::ConfigLoaderTypeMismatch;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderTypeMismatch));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("count"),
+        None,
+        Some("Integer"),
+        Some("String"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("count") && msg.contains("Integer") && msg.contains("String"),
+        "ConfigLoaderTypeMismatch message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderRootShapeMismatch
+    let code = DiagnosticCode::ConfigLoaderRootShapeMismatch;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderRootShapeMismatch
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("List<Entry>"),
+        None,
+        Some("sequence"),
+        Some("mapping"),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("List<Entry>") && msg.contains("sequence") && msg.contains("mapping"),
+        "ConfigLoaderRootShapeMismatch message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderDuplicateMapKey
+    let code = DiagnosticCode::ConfigLoaderDuplicateMapKey;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderDuplicateMapKey));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("prod"),
+        Some("line 5"),
+        Some("line 2"),
+    );
+    assert!(
+        msg.contains("prod") && msg.contains("line 5") && msg.contains("line 2"),
+        "ConfigLoaderDuplicateMapKey message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderNullCoercion
+    let code = DiagnosticCode::ConfigLoaderNullCoercion;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderNullCoercion));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("line 3"),
+        None,
+    );
+    assert!(
+        msg.contains("line 3") && msg.contains("empty string"),
+        "ConfigLoaderNullCoercion message must match spec; got: {msg}"
+    );
+}

@@ -613,6 +613,117 @@ pub enum DiagnosticCode {
     /// Anchored at the field-name token span.
     /// Introduced in Phase 1 of the meta-language plan (Phase D).
     SourceRefFieldUnknown,
+
+    // ── Phase E1 (meta-language) record diagnostic codes ─────────────────────
+    /// A second `smelt.record` declaration in the workspace shares an existing
+    /// record's name. First-declaration-wins. Anchored at the second
+    /// declaration's name token.
+    /// Message: "record `{name}` is already declared in {path}; record names must be unique workspace-wide"
+    SmeltRecordRedefinition,
+    /// Field projection or literal field name outside the target's declared
+    /// field set. Anchored at the offending field-name token.
+    /// Message: "record `{type}` has no field `{name}`; expected one of: {fields}"
+    RecordFieldUnknown,
+    /// A record literal omits a field required by the target type.
+    /// Anchored at the literal's closing brace.
+    /// Message: "record literal for `{type}` is missing required field `{name}`"
+    RecordFieldMissing,
+    /// A record literal names the same field twice.
+    /// Anchored at the second occurrence's name token.
+    /// Message: "field `{name}` already appears in this record literal"
+    RecordFieldDuplicate,
+    /// A literal field value's type is not assignable to the declared field type.
+    /// Anchored at the offending value expression.
+    /// Message: "record field `{name}` expects {expected}; found {actual}"
+    RecordFieldTypeMismatch,
+    /// A record literal appears in a position with no inferable target type.
+    /// Anchored at the literal's opening brace.
+    /// Message: "cannot infer record type from context; annotate the target type"
+    RecordLiteralUnknownTarget,
+    /// Mid-chain field projection through a non-record-typed value.
+    /// Anchored at the offending projection token.
+    /// Message: "value of type {type} has no fields; projection `{field}` is not valid"
+    RecordFieldNotProjectable,
+    /// A `smelt.record` field type references a meta-only witness
+    /// (`ColumnRef`, `ModelRef`, `SourceRef`) or `Lambda`.
+    /// Anchored at the field's type expression.
+    /// Message: "record field types may not reference {type}; reflection witnesses are not user-writable"
+    RecordFieldTypeForbidden,
+    /// A record declaration references its own name directly or transitively,
+    /// forming a cycle. v1 records must form a DAG.
+    /// Anchored at the cycle's introducing field-type expression.
+    /// Message: "record `{name}` forms a cycle; recursive record declarations are not supported in v1"
+    RecordCyclicDeclaration,
+    /// A record-typed value is referenced in a Data-World (SQL) position
+    /// outside a splice context. Records are pure meta-world values.
+    /// Anchored at the binding reference.
+    /// Message: "record-typed value may not appear in a Data-World (SQL) position; use field projection to produce a spliced value"
+    RecordInDataWorld,
+
+    // ── Phase E1 (meta-language) map diagnostic codes ─────────────────────────
+    /// A `Map<K, V>` type expression with `K` other than `Text`.
+    /// Message: "Map key type must be Text in v1; found {type}"
+    MapKeyTypeNotText,
+    /// Method-call on a `Map<K, V>` value with a name outside the closed Map API.
+    /// Message: "Map has no method `{name}`; expected one of: entries, keys, values, get, has"
+    MapApiUnknown,
+    /// `m.get` or `m.has` called with other than one positional argument.
+    /// Message: "Map.{method} expects one positional argument; found {n}"
+    MapApiArityMismatch,
+    /// A Map API method called with a named argument.
+    /// Message: "Map.{method} does not support named arguments"
+    MapApiNamedArgument,
+    /// `m.entries`, `m.keys`, or `m.values` called with any argument.
+    /// Message: "Map.{method} takes no arguments"
+    MapApiUnexpectedArgument,
+    /// `m.get(k)` with statically-known `k` absent from `m`.
+    /// Message: "Map has no binding for key `{key}`"
+    MapGetMissingKey,
+    /// `m.get(k)` or `m.has(k)` with `k`'s type not assignable to `K`.
+    /// Message: "Map.{method} expects key of type {expected}; found {actual}"
+    MapApiArgTypeMismatch,
+
+    // ── Phase E1 (meta-language) loader diagnostic codes ─────────────────────
+    /// Loader `path` argument is not a string literal.
+    /// Message: "loader path must be a string literal; found {expr}"
+    ConfigLoaderPathNotLiteral,
+    /// Path is absolute, contains `..` escape, or has a scheme prefix.
+    /// Message: "loader path must be a workspace-relative path; found {path}"
+    ConfigLoaderPathEscapesWorkspace,
+    /// Path contains `\`.
+    /// Message: "loader paths use `/` as the path separator; found `\` in {path}"
+    ConfigLoaderPathBackslash,
+    /// Resolved file does not exist in the workspace.
+    /// Message: "loader file `{path}` not found in workspace"
+    ConfigLoaderFileNotFound,
+    /// Schema argument is not an admissible shape.
+    /// Message: "loader schema must be a record type, `List<record>`, or `Map<Text, record>`; found {actual}"
+    ConfigLoaderSchemaForbidden,
+    /// `smelt.config.load_toml` is called.
+    /// Message: "smelt.config.load_toml is reserved; only YAML and JSON loaders are supported in v1"
+    ConfigLoaderTomlNotYetSupported,
+    /// The file is not valid YAML / JSON.
+    /// Message: "failed to parse {format} file `{path}`: {parser_error}"
+    ConfigLoaderParseError,
+    /// A loaded value omits a field required by the schema.
+    /// Message: "field `{name}` required by schema is missing"
+    ConfigLoaderRequiredFieldMissing,
+    /// A loaded value contains a field not in the schema.
+    /// Message: "field `{name}` is not declared in the schema; expected one of: {fields}"
+    ConfigLoaderUnknownField,
+    /// A loaded value's type does not match the schema's declared type.
+    /// Message: "field `{name}` expects {expected}; got {actual}"
+    ConfigLoaderTypeMismatch,
+    /// The file's top-level shape does not match the schema's expected root shape.
+    /// Message: "schema `{type}` expects {expected_shape}; file's top level is {actual_shape}"
+    ConfigLoaderRootShapeMismatch,
+    /// A `Map<Text, S>`-shaped file contains the same key twice.
+    /// Message: "duplicate map key `{key}` at {row}; earlier appearance at {first_row}"
+    ConfigLoaderDuplicateMapKey,
+    /// A YAML `null` scalar coerces to an empty `Text` value at a schema field declared `Text`.
+    /// Severity: Warning.
+    /// Message: "null value at {row} coerced to empty string; declare a default in the source file"
+    ConfigLoaderNullCoercion,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -881,6 +992,238 @@ pub fn meta_reflection_diagnostic_message_with_table_expr(
         }
         _ => panic!(
             "meta_reflection_diagnostic_message called with non-Phase-C/D code: {:?}",
+            code
+        ),
+    }
+}
+
+/// Render the diagnostic message for Phase E1 (meta-language) record diagnostic codes.
+///
+/// Parameters vary by code — see each variant's doc comment for the placeholders.
+/// All `Option<&str>` parameters default to `"?"` when `None`.
+///
+/// Returns the exact message string specified in `meta_language.md`
+/// §"Record diagnostic codes".
+#[allow(clippy::too_many_arguments)]
+pub fn meta_record_diagnostic_message(
+    code: DiagnosticCode,
+    type_name: Option<&str>,
+    field_name: Option<&str>,
+    path: Option<&str>,
+    expected: Option<&str>,
+    actual: Option<&str>,
+    fields: Option<&str>,
+) -> String {
+    let ty = type_name.unwrap_or("?");
+    let name = field_name.unwrap_or("?");
+    match code {
+        DiagnosticCode::SmeltRecordRedefinition => {
+            let p = path.unwrap_or("?");
+            format!(
+                "record `{ty}` is already declared in {p}; record names must be unique workspace-wide"
+            )
+        }
+        DiagnosticCode::RecordFieldUnknown => {
+            let fs = fields.unwrap_or("?");
+            format!("record `{ty}` has no field `{name}`; expected one of: {fs}")
+        }
+        DiagnosticCode::RecordFieldMissing => {
+            format!("record literal for `{ty}` is missing required field `{name}`")
+        }
+        DiagnosticCode::RecordFieldDuplicate => {
+            format!("field `{name}` already appears in this record literal")
+        }
+        DiagnosticCode::RecordFieldTypeMismatch => {
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!("record field `{name}` expects {exp}; found {act}")
+        }
+        DiagnosticCode::RecordLiteralUnknownTarget => {
+            "cannot infer record type from context; annotate the target type".to_string()
+        }
+        DiagnosticCode::RecordFieldNotProjectable => {
+            format!("value of type {ty} has no fields; projection `{name}` is not valid")
+        }
+        DiagnosticCode::RecordFieldTypeForbidden => {
+            format!(
+                "record field types may not reference {ty}; reflection witnesses are not user-writable"
+            )
+        }
+        DiagnosticCode::RecordCyclicDeclaration => {
+            format!(
+                "record `{ty}` forms a cycle; recursive record declarations are not supported in v1"
+            )
+        }
+        DiagnosticCode::RecordInDataWorld => {
+            "record-typed value may not appear in a Data-World (SQL) position; use field projection to produce a spliced value".to_string()
+        }
+        _ => panic!(
+            "meta_record_diagnostic_message called with non-record code: {:?}",
+            code
+        ),
+    }
+}
+
+/// Render the diagnostic message for Phase E1 (meta-language) map diagnostic codes.
+///
+/// Parameters vary by code:
+/// - `method`: the Map API method name (for arity/named-arg/unexpected-arg codes).
+/// - `name`: the unknown method name (for `MapApiUnknown`).
+/// - `key`: the missing key (for `MapGetMissingKey`).
+/// - `n`: the actual argument count as a string (for `MapApiArityMismatch`).
+/// - `expected`: expected key type (for `MapApiArgTypeMismatch`).
+/// - `actual`: actual type/found value (various).
+///
+/// Returns the exact message string specified in `meta_language.md`
+/// §"Map diagnostic codes".
+#[allow(clippy::too_many_arguments)]
+pub fn meta_map_diagnostic_message(
+    code: DiagnosticCode,
+    method: Option<&str>,
+    name: Option<&str>,
+    key: Option<&str>,
+    n: Option<&str>,
+    type_name: Option<&str>,
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> String {
+    let m = method.unwrap_or("?");
+    match code {
+        DiagnosticCode::MapKeyTypeNotText => {
+            let ty = type_name.unwrap_or("?");
+            format!("Map key type must be Text in v1; found {ty}")
+        }
+        DiagnosticCode::MapApiUnknown => {
+            let n = name.unwrap_or("?");
+            format!("Map has no method `{n}`; expected one of: entries, keys, values, get, has")
+        }
+        DiagnosticCode::MapApiArityMismatch => {
+            let count = n.unwrap_or("?");
+            format!("Map.{m} expects one positional argument; found {count}")
+        }
+        DiagnosticCode::MapApiNamedArgument => {
+            format!("Map.{m} does not support named arguments")
+        }
+        DiagnosticCode::MapApiUnexpectedArgument => {
+            format!("Map.{m} takes no arguments")
+        }
+        DiagnosticCode::MapGetMissingKey => {
+            let k = key.unwrap_or("?");
+            format!("Map has no binding for key `{k}`")
+        }
+        DiagnosticCode::MapApiArgTypeMismatch => {
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!("Map.{m} expects key of type {exp}; found {act}")
+        }
+        _ => panic!(
+            "meta_map_diagnostic_message called with non-map code: {:?}",
+            code
+        ),
+    }
+}
+
+/// Render the diagnostic message for Phase E1 (meta-language) loader diagnostic codes.
+///
+/// Parameters vary by code:
+/// - `expr`: the expression text (for `ConfigLoaderPathNotLiteral`).
+/// - `path`: the path text (for path-related codes).
+/// - `format`: the file format name (for `ConfigLoaderParseError`).
+/// - `parser_error`: the parser error string (for `ConfigLoaderParseError`).
+/// - `name`: field name (for field-related codes).
+/// - `fields`: comma-separated list of valid fields (for `ConfigLoaderUnknownField`).
+/// - `expected_type`, `actual_type`: type strings (for `ConfigLoaderTypeMismatch`,
+///   `ConfigLoaderRootShapeMismatch`).
+/// - `expected_shape`, `actual_shape`: shape strings (for `ConfigLoaderRootShapeMismatch`).
+/// - `key`: the duplicate key (for `ConfigLoaderDuplicateMapKey`).
+/// - `row`, `first_row`: row references (for `ConfigLoaderDuplicateMapKey`,
+///   `ConfigLoaderNullCoercion`).
+///
+/// Returns the exact message string specified in `meta_config_loading.md`
+/// §"Validation diagnostics".
+#[allow(clippy::too_many_arguments)]
+pub fn meta_loader_diagnostic_message(
+    code: DiagnosticCode,
+    expr: Option<&str>,
+    path: Option<&str>,
+    format: Option<&str>,
+    parser_error: Option<&str>,
+    name: Option<&str>,
+    fields: Option<&str>,
+    expected_type: Option<&str>,
+    actual_type: Option<&str>,
+    expected_shape: Option<&str>,
+    actual_shape: Option<&str>,
+    key: Option<&str>,
+    row: Option<&str>,
+    first_row: Option<&str>,
+) -> String {
+    match code {
+        DiagnosticCode::ConfigLoaderPathNotLiteral => {
+            let e = expr.unwrap_or("?");
+            format!("loader path must be a string literal; found {e}")
+        }
+        DiagnosticCode::ConfigLoaderPathEscapesWorkspace => {
+            let p = path.unwrap_or("?");
+            format!("loader path must be a workspace-relative path; found {p}")
+        }
+        DiagnosticCode::ConfigLoaderPathBackslash => {
+            let p = path.unwrap_or("?");
+            format!(r"loader paths use `/` as the path separator; found `\` in {p}")
+        }
+        DiagnosticCode::ConfigLoaderFileNotFound => {
+            let p = path.unwrap_or("?");
+            format!("loader file `{p}` not found in workspace")
+        }
+        DiagnosticCode::ConfigLoaderSchemaForbidden => {
+            let act = actual_type.unwrap_or("?");
+            format!("loader schema must be a record type, `List<record>`, or `Map<Text, record>`; found {act}")
+        }
+        DiagnosticCode::ConfigLoaderTomlNotYetSupported => {
+            "smelt.config.load_toml is reserved; only YAML and JSON loaders are supported in v1"
+                .to_string()
+        }
+        DiagnosticCode::ConfigLoaderParseError => {
+            let fmt = format.unwrap_or("?");
+            let p = path.unwrap_or("?");
+            let err = parser_error.unwrap_or("?");
+            format!("failed to parse {fmt} file `{p}`: {err}")
+        }
+        DiagnosticCode::ConfigLoaderRequiredFieldMissing => {
+            let n = name.unwrap_or("?");
+            format!("field `{n}` required by schema is missing")
+        }
+        DiagnosticCode::ConfigLoaderUnknownField => {
+            let n = name.unwrap_or("?");
+            let fs = fields.unwrap_or("?");
+            format!("field `{n}` is not declared in the schema; expected one of: {fs}")
+        }
+        DiagnosticCode::ConfigLoaderTypeMismatch => {
+            let n = name.unwrap_or("?");
+            let exp = expected_type.unwrap_or("?");
+            let act = actual_type.unwrap_or("?");
+            format!("field `{n}` expects {exp}; got {act}")
+        }
+        DiagnosticCode::ConfigLoaderRootShapeMismatch => {
+            let ty = expected_type.unwrap_or("?");
+            let exp = expected_shape.unwrap_or("?");
+            let act = actual_shape.unwrap_or("?");
+            format!("schema `{ty}` expects {exp}; file's top level is {act}")
+        }
+        DiagnosticCode::ConfigLoaderDuplicateMapKey => {
+            let k = key.unwrap_or("?");
+            let r = row.unwrap_or("?");
+            let fr = first_row.unwrap_or("?");
+            format!("duplicate map key `{k}` at {r}; earlier appearance at {fr}")
+        }
+        DiagnosticCode::ConfigLoaderNullCoercion => {
+            let r = row.unwrap_or("?");
+            format!(
+                "null value at {r} coerced to empty string; declare a default in the source file"
+            )
+        }
+        _ => panic!(
+            "meta_loader_diagnostic_message called with non-loader code: {:?}",
             code
         ),
     }
