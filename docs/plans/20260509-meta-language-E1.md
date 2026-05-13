@@ -93,7 +93,7 @@ This plan drives the implementation, examples, user docs, and skill update for t
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 9ca6416 | 2026-05-13 |
-| 2     | done     | —      | 2026-05-13 |
+| 2     | done     | 2981610 | 2026-05-13 |
 | 3     | pending  | —      | —    |
 | 4     | pending  | —      | —    |
 | 5     | pending  | —      | —    |
