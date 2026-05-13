@@ -6909,6 +6909,409 @@ pub fn registry_code_to_diagnostic_code(
     }
 }
 
+// ============================================================================
+// Map<K,V> API dispatch — type inference (Phase E1 Phase 4)
+// ============================================================================
+
+/// A single argument to a Map API method call, as seen by the pure type
+/// inference layer.
+///
+/// Callers (Salsa wrappers and unit tests) pre-process the AST arguments into
+/// this data-only representation so that `infer_map_method_call` remains purely
+/// functional with no AST / Salsa dependency.
+#[derive(Debug, Clone)]
+pub enum MapCallArg {
+    /// A positional argument.
+    Positional {
+        /// The synthesised type of the argument expression.
+        ty: SmeltType,
+        /// `Some(s)` when the argument is a string literal with value `s`.
+        /// Used to enable statically-known-key resolution at `m.get(k)` /
+        /// `m.has(k)`. `None` means the key is not statically known at
+        /// type-check time (evaluation deferred to expansion time).
+        literal_value: Option<String>,
+    },
+    /// A named argument (`param => value`). Named arguments are never
+    /// permitted on any Map API method; the caller surfaces one `MapCallArg::Named`
+    /// per named argument so the function can emit `MapApiNamedArgument` for each.
+    Named {
+        /// The parameter name as written in the source.
+        param_name: String,
+        /// The synthesised type of the value expression.
+        ty: SmeltType,
+    },
+}
+
+/// Discriminates whether a Map API method call was resolved at type-check
+/// time (statically) or deferred to expansion time.
+///
+/// This is carried in `MapMethodCallResult::static_resolution` so tests (and
+/// future phases) can assert that the static-resolution path was taken rather
+/// than the generic formula fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaticResolution {
+    /// Static-key lookup (`get`) found the key present in the bound contents.
+    /// The value type returned is the *per-entry* type from `contents`, which
+    /// may be narrower than the declared `V`.
+    Present,
+    /// Static-key lookup (`get`) found the key absent from the bound contents.
+    /// A `MapGetMissingKey` diagnostic is emitted; `inferred` is `Unknown`.
+    Absent,
+    /// Static-key presence check (`has`) resolved to a known Boolean value.
+    /// `true` → key is in `contents`; `false` → key is absent.
+    Bool(bool),
+    /// The call was not resolved statically (non-literal key or unbound contents).
+    Deferred,
+}
+
+/// Result of type-checking a Map API method call (Phase E1 Phase 4).
+#[derive(Debug)]
+pub struct MapMethodCallResult {
+    /// The synthesised return type.
+    ///
+    /// On happy path: the formula from `MAP_API_METHODS[method].return_type_formula(K, V)`.
+    /// On any error: `SmeltType::Unknown` (drop-on-error semantics).
+    pub inferred: SmeltType,
+    /// Diagnostics emitted (0 on happy path).
+    pub sentinels: Vec<RecordLiteralSentinel>,
+    /// Whether static-key resolution was performed.
+    ///
+    /// `Deferred` for all zero-arg methods and for keyed methods when the key
+    /// is not a literal or when `map_contents` is `None`.
+    pub static_resolution: StaticResolution,
+}
+
+/// Type-check a `Map<K,V>` method call and synthesise its return type.
+///
+/// # Arguments
+///
+/// * `receiver_type` — the `SmeltType` of the receiver expression. Must be
+///   `SmeltType::Map { key, value }` (invariant) or any other type (the latter
+///   is a caller error; this function only handles Map receivers — non-Map
+///   receivers are routed by the surrounding dispatch in `infer_expression_type`
+///   to `infer_record_field_projection` or similar).
+/// * `method_name` — the name token of the method as written in the source.
+/// * `args` — pre-processed argument list. Named args are represented as
+///   `MapCallArg::Named`; positional args as `MapCallArg::Positional`.
+/// * `map_contents` — `Some(contents)` when the Map's key-value bindings are
+///   fully resolved at type-check time (e.g. from a loader). `None` when the
+///   Map's contents are not statically known (defers key resolution to expansion
+///   time). Only consulted for `m.get(k)` and `m.has(k)` when `k` is a string
+///   literal.
+/// * `call_span` — the text range of the entire call expression, used to anchor
+///   diagnostics.
+///
+/// # Purity
+///
+/// Pure — no Salsa dependency. Anchors diagnostics at `call_span`.
+pub fn infer_map_method_call(
+    receiver_type: &SmeltType,
+    method_name: &str,
+    args: &[MapCallArg],
+    map_contents: Option<&std::collections::BTreeMap<String, SmeltType>>,
+    call_span: TextRange,
+) -> MapMethodCallResult {
+    use smelt_types::signatures::{is_subtype_of, lookup_map_api_method, Arity, MapApiMethodKind};
+
+    let mut sentinels: Vec<RecordLiteralSentinel> = Vec::new();
+
+    // Extract key/value types from receiver. `receiver_type` must be Map<K,V>.
+    let (key_ty, value_ty) = match receiver_type {
+        SmeltType::Map { key, value } => (key.as_ref(), value.as_ref()),
+        _ => {
+            // Caller routing error — should not happen in correct dispatch.
+            // Treat as unknown method to avoid panicking.
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::MapApiUnknown,
+                span: call_span,
+                message: crate::meta_map_diagnostic_message(
+                    crate::DiagnosticCode::MapApiUnknown,
+                    None,
+                    Some(method_name),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+            return MapMethodCallResult {
+                inferred: SmeltType::Unknown,
+                sentinels,
+                static_resolution: StaticResolution::Deferred,
+            };
+        }
+    };
+
+    // Check for named arguments — never permitted on any Map API method.
+    // Emit one MapApiNamedArgument per named arg (positional args are processed
+    // separately). Named args short-circuit further checks.
+    let has_named = args.iter().any(|a| matches!(a, MapCallArg::Named { .. }));
+    if has_named {
+        for a in args {
+            if let MapCallArg::Named { .. } = a {
+                sentinels.push(RecordLiteralSentinel {
+                    code: crate::DiagnosticCode::MapApiNamedArgument,
+                    span: call_span,
+                    message: crate::meta_map_diagnostic_message(
+                        crate::DiagnosticCode::MapApiNamedArgument,
+                        Some(method_name),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                });
+            }
+        }
+        return MapMethodCallResult {
+            inferred: SmeltType::Unknown,
+            sentinels,
+            static_resolution: StaticResolution::Deferred,
+        };
+    }
+
+    // Collect positional args (no named args at this point).
+    let pos_args: Vec<&MapCallArg> = args
+        .iter()
+        .filter(|a| matches!(a, MapCallArg::Positional { .. }))
+        .collect();
+
+    // Look up the method in the closed registry.
+    let Some(method) = lookup_map_api_method(method_name) else {
+        // Unknown method — emit MapApiUnknown anchored at call_span.
+        sentinels.push(RecordLiteralSentinel {
+            code: crate::DiagnosticCode::MapApiUnknown,
+            span: call_span,
+            message: crate::meta_map_diagnostic_message(
+                crate::DiagnosticCode::MapApiUnknown,
+                None,
+                Some(method_name),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        });
+        return MapMethodCallResult {
+            inferred: SmeltType::Unknown,
+            sentinels,
+            static_resolution: StaticResolution::Deferred,
+        };
+    };
+
+    // Arity check.
+    let Arity::Exact(expected_arity) = method.arity;
+    let actual_arity = pos_args.len();
+
+    if actual_arity != expected_arity {
+        // Arity mismatch: for zero-arity methods (entries/keys/values), any
+        // positional argument emits MapApiUnexpectedArgument; for one-arity
+        // methods (get/has) with wrong count, emit MapApiArityMismatch.
+        if expected_arity == 0 {
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::MapApiUnexpectedArgument,
+                span: call_span,
+                message: crate::meta_map_diagnostic_message(
+                    crate::DiagnosticCode::MapApiUnexpectedArgument,
+                    Some(method_name),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+        } else {
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::MapApiArityMismatch,
+                span: call_span,
+                message: crate::meta_map_diagnostic_message(
+                    crate::DiagnosticCode::MapApiArityMismatch,
+                    Some(method_name),
+                    None,
+                    None,
+                    Some(&actual_arity.to_string()),
+                    None,
+                    None,
+                    None,
+                ),
+            });
+        }
+        return MapMethodCallResult {
+            inferred: SmeltType::Unknown,
+            sentinels,
+            static_resolution: StaticResolution::Deferred,
+        };
+    }
+
+    // For keyed-lookup (`get`) and keyed-presence (`has`) methods: validate the
+    // key argument type and perform static-key resolution when possible.
+    // The dispatch is driven by `method.kind` — no string-literal comparisons.
+    if matches!(
+        method.kind,
+        MapApiMethodKind::KeyedGet | MapApiMethodKind::KeyedHas
+    ) {
+        // Exactly one positional arg (arity already validated above).
+        let arg = pos_args[0];
+        let MapCallArg::Positional {
+            ty: arg_ty,
+            literal_value,
+        } = arg
+        else {
+            unreachable!("named args are handled above")
+        };
+
+        // Key type check: arg must be assignable to K.
+        if !is_subtype_of(arg_ty, key_ty) {
+            let expected_str = format!("{key_ty}");
+            let actual_str = format!("{arg_ty}");
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::MapApiArgTypeMismatch,
+                span: call_span,
+                message: crate::meta_map_diagnostic_message(
+                    crate::DiagnosticCode::MapApiArgTypeMismatch,
+                    Some(method_name),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&expected_str),
+                    Some(&actual_str),
+                ),
+            });
+            return MapMethodCallResult {
+                inferred: SmeltType::Unknown,
+                sentinels,
+                static_resolution: StaticResolution::Deferred,
+            };
+        }
+
+        // Static-key resolution: only when both contents are bound AND the arg is a string literal.
+        if let (Some(contents), Some(key_str)) = (map_contents, literal_value.as_deref()) {
+            if matches!(method.kind, MapApiMethodKind::KeyedGet) {
+                // Statically-known key: look it up in the bound contents.
+                if contents.contains_key(key_str) {
+                    // Present → synthesise the per-entry type from `contents`
+                    // (may be narrower than the declared `V`).
+                    let resolved_ty = contents
+                        .get(key_str)
+                        .cloned()
+                        .unwrap_or_else(|| value_ty.clone());
+                    return MapMethodCallResult {
+                        inferred: resolved_ty,
+                        sentinels,
+                        static_resolution: StaticResolution::Present,
+                    };
+                } else {
+                    // Absent → MapGetMissingKey + Unknown.
+                    sentinels.push(RecordLiteralSentinel {
+                        code: crate::DiagnosticCode::MapGetMissingKey,
+                        span: call_span,
+                        message: crate::meta_map_diagnostic_message(
+                            crate::DiagnosticCode::MapGetMissingKey,
+                            None,
+                            None,
+                            Some(key_str),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    });
+                    return MapMethodCallResult {
+                        inferred: SmeltType::Unknown,
+                        sentinels,
+                        static_resolution: StaticResolution::Absent,
+                    };
+                }
+            }
+            // `has` with static key: resolve to Bool(true/false) with no diagnostic.
+            let key_present = contents.contains_key(key_str);
+            let boolean_ty = (method.return_type_formula)(key_ty, value_ty);
+            return MapMethodCallResult {
+                inferred: boolean_ty,
+                sentinels,
+                static_resolution: StaticResolution::Bool(key_present),
+            };
+        }
+        // Non-static key: fall through to the formula computation below.
+    }
+
+    // Happy path: compute return type from the method's formula.
+    let return_ty = (method.return_type_formula)(key_ty, value_ty);
+    MapMethodCallResult {
+        inferred: return_ty,
+        sentinels,
+        static_resolution: StaticResolution::Deferred,
+    }
+}
+
+/// Validate a `Map<K, V>` type expression: check that `K` is `Text` (v1 constraint).
+///
+/// Returns `(sentinels, recovered_type)`.
+///
+/// * `sentinels` — empty on success; one `MapKeyTypeNotText` sentinel anchored at
+///   `key_span` when `K` is not `SmeltType::Expr(Concrete(Text))`.
+/// * `recovered_type` — the canonical type to use for the rest of the enclosing
+///   declaration body:
+///   - When `K = Text` (valid): the original `map_type` unchanged.
+///   - When `K ≠ Text` (invalid): `Map<Text, V>` using the user-supplied `V`,
+///     recovering the original `V` to avoid avalanche errors downstream.
+///   - When `map_type` is not a `Map` at all: `map_type` unchanged (nothing to validate).
+///
+/// Per spec rule 1: callers must use the returned `recovered_type` rather than the
+/// original `map_type` when `K ≠ Text` — this avoids cascading "expected Text, got X"
+/// diagnostics for every key-expression inside the declaration.
+///
+/// Pure — no Salsa dependency.
+pub fn validate_map_type_expression(
+    map_type: &SmeltType,
+    key_span: TextRange,
+) -> (Vec<RecordLiteralSentinel>, SmeltType) {
+    let mut sentinels = Vec::new();
+
+    let (key_ty, value_ty) = match map_type {
+        SmeltType::Map { key, value } => (key.as_ref(), value.as_ref()),
+        _ => return (sentinels, map_type.clone()), // Not a Map — nothing to validate.
+    };
+
+    let is_text = matches!(
+        key_ty,
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+    );
+
+    if !is_text {
+        let type_display = format!("{key_ty}");
+        sentinels.push(RecordLiteralSentinel {
+            code: crate::DiagnosticCode::MapKeyTypeNotText,
+            span: key_span,
+            message: crate::meta_map_diagnostic_message(
+                crate::DiagnosticCode::MapKeyTypeNotText,
+                None,
+                None,
+                None,
+                None,
+                Some(&type_display),
+                None,
+                None,
+            ),
+        });
+        // Recover as Map<Text, V> to avoid avalanche errors.
+        let recovered = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(value_ty.clone()),
+        };
+        return (sentinels, recovered);
+    }
+
+    (sentinels, map_type.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11164,6 +11567,656 @@ mod tests {
         assert!(
             is_subtype_of(&inline, &named),
             "inline {{name: Text, threshold: Integer}} must be assignable to Record{{Cohort}}"
+        );
+    }
+
+    // =========================================================================
+    // Phase E1 Phase 4 TDD tests — Map<K,V> API dispatch + invariance +
+    // statically-known-key resolution
+    // =========================================================================
+
+    /// Helper: build `Map<Text, Integer>`.
+    fn map_text_integer_ty() -> SmeltType {
+        SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+        }
+    }
+
+    /// Helper: build `Map<Text, Number>`.
+    fn map_text_number_ty() -> SmeltType {
+        use smelt_types::signatures::TypeConstraint;
+        SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Numeric)),
+        }
+    }
+
+    /// Helper: build a `MapCallArg` that is a positional Text literal.
+    fn text_literal_arg(s: &str) -> MapCallArg {
+        MapCallArg::Positional {
+            ty: SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+            literal_value: Some(s.to_string()),
+        }
+    }
+
+    /// Helper: build a `MapCallArg` that is a positional Integer literal (non-text key).
+    fn integer_literal_arg() -> MapCallArg {
+        MapCallArg::Positional {
+            ty: SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+            literal_value: None,
+        }
+    }
+
+    /// Helper: build a `MapCallArg` that is a positional non-literal Text (variable).
+    fn text_variable_arg() -> MapCallArg {
+        MapCallArg::Positional {
+            ty: SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+            literal_value: None,
+        }
+    }
+
+    /// Helper: a named argument.
+    fn named_arg() -> MapCallArg {
+        MapCallArg::Named {
+            param_name: "key".to_string(),
+            ty: SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        }
+    }
+
+    /// Helper: build a synthetic `Map<Text, Numeric>` receiver.
+    ///
+    /// The declared `V` is `Numeric` (widened). The per-entry contents
+    /// (`bounded_map_contents`) store `Integer` (narrower). This split is
+    /// intentional: if the static-resolution path is taken, `get('a')` returns
+    /// `Integer` (per-entry type). If the generic-V fallback were taken instead,
+    /// it would return `Numeric`. Tests that assert `Integer` therefore prove the
+    /// static path was exercised.
+    fn bounded_map_receiver() -> SmeltType {
+        SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Numeric)),
+        }
+    }
+
+    /// Helper: build the bound contents `{'a': Integer, 'b': Integer}`.
+    ///
+    /// Each entry stores `Integer` — narrower than the declared `V = Numeric` in
+    /// `bounded_map_receiver()`. Used alongside `bounded_map_receiver()` to
+    /// distinguish the static-resolution path from the generic-formula fallback.
+    fn bounded_map_contents() -> std::collections::BTreeMap<String, SmeltType> {
+        let mut contents = std::collections::BTreeMap::new();
+        contents.insert(
+            "a".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        contents.insert(
+            "b".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        contents
+    }
+
+    // Phase E1 Phase 4 test 1
+    #[test]
+    fn map_api_entries_synthesises_list_of_record() {
+        let receiver = map_text_integer_ty();
+        let result = infer_map_method_call(
+            &receiver,
+            "entries",
+            &[],
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            result.sentinels.is_empty(),
+            "m.entries() must emit no diagnostics, got: {:?}",
+            result.sentinels
+        );
+        // Expected: List<Record<{key: Text, value: Integer}>>
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "key".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "value".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let expected = SmeltType::List(Box::new(SmeltType::Record { fields, name: None }));
+        assert_eq!(
+            result.inferred, expected,
+            "m.entries() must synthesise List<Record<{{key: Text, value: Integer}}>>, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // Phase E1 Phase 4 test 2
+    #[test]
+    fn map_api_keys_and_values_synthesise_lists() {
+        let receiver = map_text_integer_ty();
+
+        // m.keys() → List<Text>
+        let keys_result = infer_map_method_call(
+            &receiver,
+            "keys",
+            &[],
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            keys_result.sentinels.is_empty(),
+            "m.keys() must emit no diagnostics, got: {:?}",
+            keys_result.sentinels
+        );
+        let expected_keys = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Text,
+        ))));
+        assert_eq!(
+            keys_result.inferred, expected_keys,
+            "m.keys() must synthesise List<Text>, got: {:?}",
+            keys_result.inferred
+        );
+
+        // m.values() → List<Integer>
+        let values_result = infer_map_method_call(
+            &receiver,
+            "values",
+            &[],
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            values_result.sentinels.is_empty(),
+            "m.values() must emit no diagnostics, got: {:?}",
+            values_result.sentinels
+        );
+        let expected_values = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Integer,
+        ))));
+        assert_eq!(
+            values_result.inferred, expected_values,
+            "m.values() must synthesise List<Integer>, got: {:?}",
+            values_result.inferred
+        );
+    }
+
+    // Phase E1 Phase 4 test 3
+    #[test]
+    fn map_api_get_synthesises_value_type_on_non_static_key() {
+        let receiver = map_text_integer_ty();
+        // Non-literal k: Text — evaluation deferred.
+        let args = [text_variable_arg()];
+        let result = infer_map_method_call(
+            &receiver,
+            "get",
+            &args,
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            result.sentinels.is_empty(),
+            "m.get(k) with non-literal key must emit no diagnostics, got: {:?}",
+            result.sentinels
+        );
+        let expected = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+        assert_eq!(
+            result.inferred, expected,
+            "m.get(k) with non-literal key must synthesise Integer (value type), got: {:?}",
+            result.inferred
+        );
+        assert_eq!(
+            result.static_resolution,
+            StaticResolution::Deferred,
+            "m.get(k) with non-literal key must report Deferred resolution, got: {:?}",
+            result.static_resolution
+        );
+    }
+
+    // Phase E1 Phase 4 test 4
+    #[test]
+    fn map_api_get_statically_known_present_key_synthesises_value_and_resolves() {
+        // Use bounded_map_receiver() which declares V = Numeric (widened), while
+        // bounded_map_contents() stores Integer (narrower) for each entry.
+        // If the static-resolution path is taken, get('a') returns Integer (per-entry type).
+        // If the generic-V fallback is taken instead, it would return Numeric.
+        // Asserting Integer proves the static path was exercised.
+        let receiver = bounded_map_receiver();
+        let contents = bounded_map_contents();
+        // m.get('a') — key 'a' is present in the bound contents.
+        let args = [text_literal_arg("a")];
+        let result = infer_map_method_call(
+            &receiver,
+            "get",
+            &args,
+            Some(&contents),
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            result.sentinels.is_empty(),
+            "m.get('a') on bound map must emit no diagnostics, got: {:?}",
+            result.sentinels
+        );
+        // Must return Integer (the per-entry type from contents), NOT Numeric (the declared V).
+        let expected = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+        assert_eq!(
+            result.inferred, expected,
+            "m.get('a') must synthesise Integer (per-entry type), not Numeric (declared V), got: {:?}",
+            result.inferred
+        );
+        assert_eq!(
+            result.static_resolution,
+            StaticResolution::Present,
+            "m.get('a') on bound map must report Present resolution, got: {:?}",
+            result.static_resolution
+        );
+    }
+
+    // Phase E1 Phase 4 test 5
+    #[test]
+    fn map_api_get_statically_known_missing_key_emits_diagnostic() {
+        let receiver = map_text_integer_ty();
+        let contents = bounded_map_contents();
+        // m.get('c') — key 'c' is absent from the bound contents.
+        let args = [text_literal_arg("c")];
+        let result = infer_map_method_call(
+            &receiver,
+            "get",
+            &args,
+            Some(&contents),
+            TextRange::new(0.into(), 0.into()),
+        );
+        let missing: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapGetMissingKey)
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "m.get('c') on bound map must emit exactly 1 MapGetMissingKey, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(result.inferred, SmeltType::Unknown),
+            "m.get('c') missing key must synthesise Unknown, got: {:?}",
+            result.inferred
+        );
+        assert_eq!(
+            result.static_resolution,
+            StaticResolution::Absent,
+            "m.get('c') missing key must report Absent resolution, got: {:?}",
+            result.static_resolution
+        );
+    }
+
+    // Phase E1 Phase 4 test 6
+    #[test]
+    fn map_api_has_statically_known_returns_boolean_literal() {
+        let receiver = map_text_integer_ty();
+        let contents = bounded_map_contents();
+
+        // m.has('a') — present → Boolean + StaticResolution::Bool(true), no diagnostic.
+        let args_present = [text_literal_arg("a")];
+        let result_present = infer_map_method_call(
+            &receiver,
+            "has",
+            &args_present,
+            Some(&contents),
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            result_present.sentinels.is_empty(),
+            "m.has('a') must emit no diagnostics, got: {:?}",
+            result_present.sentinels
+        );
+        assert!(
+            matches!(
+                result_present.inferred,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+            ),
+            "m.has('a') must synthesise Boolean, got: {:?}",
+            result_present.inferred
+        );
+        assert_eq!(
+            result_present.static_resolution,
+            StaticResolution::Bool(true),
+            "m.has('a') on bound map (key present) must report Bool(true), got: {:?}",
+            result_present.static_resolution
+        );
+
+        // m.has('c') — absent → Boolean + StaticResolution::Bool(false), no diagnostic.
+        let args_absent = [text_literal_arg("c")];
+        let result_absent = infer_map_method_call(
+            &receiver,
+            "has",
+            &args_absent,
+            Some(&contents),
+            TextRange::new(0.into(), 0.into()),
+        );
+        assert!(
+            result_absent.sentinels.is_empty(),
+            "m.has('c') must emit no diagnostics, got: {:?}",
+            result_absent.sentinels
+        );
+        assert!(
+            matches!(
+                result_absent.inferred,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+            ),
+            "m.has('c') must synthesise Boolean, got: {:?}",
+            result_absent.inferred
+        );
+        assert_eq!(
+            result_absent.static_resolution,
+            StaticResolution::Bool(false),
+            "m.has('c') on bound map (key absent) must report Bool(false), got: {:?}",
+            result_absent.static_resolution
+        );
+    }
+
+    // Phase E1 Phase 4 test 7
+    #[test]
+    fn map_api_unknown_method_emits_diagnostic() {
+        let receiver = map_text_integer_ty();
+        let result = infer_map_method_call(
+            &receiver,
+            "bogus",
+            &[],
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        let unknown: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiUnknown)
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "m.bogus() must emit exactly 1 MapApiUnknown, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(result.inferred, SmeltType::Unknown),
+            "m.bogus() must synthesise Unknown, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // Phase E1 Phase 4 test 8
+    #[test]
+    fn map_api_arity_mismatch_on_get_emits_diagnostic() {
+        let receiver = map_text_integer_ty();
+        let zero = TextRange::new(0.into(), 0.into());
+
+        // m.get() — zero args → ArityMismatch
+        let result_zero = infer_map_method_call(&receiver, "get", &[], None, zero);
+        let mismatch_zero: Vec<_> = result_zero
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiArityMismatch)
+            .collect();
+        assert_eq!(
+            mismatch_zero.len(),
+            1,
+            "m.get() with 0 args must emit exactly 1 MapApiArityMismatch, got: {:?}",
+            result_zero.sentinels
+        );
+
+        // m.get('a', 'b') — two args → ArityMismatch
+        let args_two = [text_literal_arg("a"), text_literal_arg("b")];
+        let result_two = infer_map_method_call(&receiver, "get", &args_two, None, zero);
+        let mismatch_two: Vec<_> = result_two
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiArityMismatch)
+            .collect();
+        assert_eq!(
+            mismatch_two.len(),
+            1,
+            "m.get('a', 'b') must emit exactly 1 MapApiArityMismatch, got: {:?}",
+            result_two.sentinels
+        );
+    }
+
+    // Phase E1 Phase 4 test 9
+    #[test]
+    fn map_api_named_argument_emits_diagnostic() {
+        let receiver = map_text_integer_ty();
+        let args = [named_arg()];
+        let result = infer_map_method_call(
+            &receiver,
+            "get",
+            &args,
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        let named: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiNamedArgument)
+            .collect();
+        assert_eq!(
+            named.len(),
+            1,
+            "m.get(key => 'a') must emit exactly 1 MapApiNamedArgument, got: {:?}",
+            result.sentinels
+        );
+    }
+
+    // Phase E1 Phase 4 test 10
+    #[test]
+    fn map_api_unexpected_argument_on_entries_emits_diagnostic() {
+        let receiver = map_text_integer_ty();
+        let zero = TextRange::new(0.into(), 0.into());
+
+        // m.entries('x') — unexpected argument
+        let args = [text_literal_arg("x")];
+        let result_entries = infer_map_method_call(&receiver, "entries", &args, None, zero);
+        let unexpected_entries: Vec<_> = result_entries
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiUnexpectedArgument)
+            .collect();
+        assert_eq!(
+            unexpected_entries.len(),
+            1,
+            "m.entries('x') must emit exactly 1 MapApiUnexpectedArgument, got: {:?}",
+            result_entries.sentinels
+        );
+
+        // m.keys('x') — unexpected argument
+        let result_keys = infer_map_method_call(&receiver, "keys", &args, None, zero);
+        let unexpected_keys: Vec<_> = result_keys
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiUnexpectedArgument)
+            .collect();
+        assert_eq!(
+            unexpected_keys.len(),
+            1,
+            "m.keys('x') must emit exactly 1 MapApiUnexpectedArgument, got: {:?}",
+            result_keys.sentinels
+        );
+
+        // m.values('x') — unexpected argument
+        let result_values = infer_map_method_call(&receiver, "values", &args, None, zero);
+        let unexpected_values: Vec<_> = result_values
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiUnexpectedArgument)
+            .collect();
+        assert_eq!(
+            unexpected_values.len(),
+            1,
+            "m.values('x') must emit exactly 1 MapApiUnexpectedArgument, got: {:?}",
+            result_values.sentinels
+        );
+    }
+
+    // Phase E1 Phase 4 test 11
+    #[test]
+    fn map_api_arg_type_mismatch_emits_diagnostic() {
+        let receiver = map_text_integer_ty();
+        // m.get(42) — argument type Integer is not assignable to key type Text
+        let args = [integer_literal_arg()];
+        let result = infer_map_method_call(
+            &receiver,
+            "get",
+            &args,
+            None,
+            TextRange::new(0.into(), 0.into()),
+        );
+        let mismatch: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapApiArgTypeMismatch)
+            .collect();
+        assert_eq!(
+            mismatch.len(),
+            1,
+            "m.get(42) must emit exactly 1 MapApiArgTypeMismatch, got: {:?}",
+            result.sentinels
+        );
+    }
+
+    // Phase E1 Phase 4 test 12
+    #[test]
+    fn map_key_type_not_text_emits_diagnostic() {
+        // Map<Integer, Text> — K is Integer, not Text → MapKeyTypeNotText
+        let map_integer_key = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        };
+        let zero = TextRange::new(0.into(), 0.into());
+        let (sentinels, _recovered) = validate_map_type_expression(&map_integer_key, zero);
+        let not_text: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::MapKeyTypeNotText)
+            .collect();
+        assert_eq!(
+            not_text.len(),
+            1,
+            "Map<Integer, Text> must emit exactly 1 MapKeyTypeNotText, got: {:?}",
+            sentinels
+        );
+    }
+
+    // Phase E1 Phase 4 test 12b
+    #[test]
+    fn map_key_type_not_text_recovers_as_map_text_v_for_avalanche_protection() {
+        // Map<Integer, Text> — K is Integer (invalid).
+        // The recovered type must be Map<Text, Text> (K replaced with Text, V preserved).
+        let map_integer_key = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        };
+        let zero = TextRange::new(0.into(), 0.into());
+        let (sentinels, recovered) = validate_map_type_expression(&map_integer_key, zero);
+
+        // Diagnostic must still be present.
+        assert_eq!(
+            sentinels
+                .iter()
+                .filter(|s| s.code == crate::DiagnosticCode::MapKeyTypeNotText)
+                .count(),
+            1,
+            "recovered path must still emit MapKeyTypeNotText"
+        );
+
+        // Recovered type must be Map<Text, Text> (V = Text preserved from original).
+        let expected_recovered = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        };
+        assert_eq!(
+            recovered, expected_recovered,
+            "recovered type must be Map<Text, V> (V = Text), not {:?}",
+            recovered
+        );
+
+        // Verify valid Map<Text, Integer> passes through unchanged.
+        let map_text_int = map_text_integer_ty();
+        let (ok_sentinels, ok_recovered) = validate_map_type_expression(&map_text_int, zero);
+        assert!(
+            ok_sentinels.is_empty(),
+            "Map<Text, Integer> must emit no diagnostics"
+        );
+        assert_eq!(
+            ok_recovered, map_text_int,
+            "valid map must be returned unchanged"
+        );
+    }
+
+    // Phase E1 Phase 4 test 13
+    #[test]
+    fn map_invariance_in_value_axis_rejects_assignment() {
+        use smelt_types::signatures::is_subtype_of;
+        // Map<Text, Integer> is NOT assignable to Map<Text, Number> (invariant in V)
+        let m_int = map_text_integer_ty();
+        let m_num = map_text_number_ty();
+        assert!(
+            !is_subtype_of(&m_int, &m_num),
+            "Map<Text, Integer> must NOT be assignable to Map<Text, Number> (invariance in V)"
+        );
+        assert!(
+            !is_subtype_of(&m_num, &m_int),
+            "Map<Text, Number> must NOT be assignable to Map<Text, Integer> (invariance in V)"
+        );
+    }
+
+    // Phase E1 Phase 4 test 14
+    #[test]
+    fn map_invariance_does_not_block_record_value_projection() {
+        use smelt_types::signatures::{is_subtype_of, TypeConstraint};
+
+        // Map<Text, Cohort> — build a Cohort-typed Map
+        let mut cohort_fields = std::collections::BTreeMap::new();
+        cohort_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        cohort_fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let cohort_ty = SmeltType::Record {
+            fields: cohort_fields,
+            name: Some("Cohort".to_string()),
+        };
+
+        // Wide record target: { name: Text } (narrower record type)
+        let mut narrow_fields = std::collections::BTreeMap::new();
+        narrow_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        let narrow_ty = SmeltType::Record {
+            fields: narrow_fields,
+            name: None,
+        };
+
+        // Map-level: Map<Text, Cohort> is NOT assignable to Map<Text, {name: Text}>
+        // (invariance at the Map level).
+        let map_cohort = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(cohort_ty.clone()),
+        };
+        let map_narrow = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(narrow_ty.clone()),
+        };
+        assert!(
+            !is_subtype_of(&map_cohort, &map_narrow),
+            "Map<Text, Cohort> must NOT be assignable to Map<Text, {{name: Text}}> (Map invariance)"
+        );
+
+        // But width subtyping over the projected value IS admitted:
+        // Cohort <: {name: Text} (Cohort has more fields, so it satisfies the narrower record).
+        assert!(
+            is_subtype_of(&cohort_ty, &narrow_ty),
+            "Cohort must be assignable to {{name: Text}} via record width subtyping"
         );
     }
 }

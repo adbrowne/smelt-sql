@@ -510,6 +510,29 @@ pub enum Arity {
     Exact(usize),
 }
 
+/// Discriminates the dispatch behaviour of a Map API method.
+///
+/// Adding a new method to the registry requires choosing a `kind`, which
+/// determines whether key-type validation and static-key resolution are
+/// performed at the call site. This makes the registry the sole source of
+/// truth: changing a method's kind changes its dispatch behaviour without
+/// touching call-site code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapApiMethodKind {
+    /// Zero-argument iteration method (`entries`, `keys`, `values`).
+    /// No key argument — no key-type check, no static-key resolution.
+    ZeroArg,
+    /// One-argument lookup that resolves to the value type (`get`).
+    /// Validates the key-argument type; resolves statically to the per-entry
+    /// type when the key is a string literal and the map contents are known.
+    KeyedGet,
+    /// One-argument presence check that resolves to `Boolean` (`has`).
+    /// Validates the key-argument type; resolves statically to `Bool(true)`
+    /// or `Bool(false)` when the key is a string literal and map contents
+    /// are known.
+    KeyedHas,
+}
+
 /// A single entry in the closed Map API method registry.
 ///
 /// The five entries are: `entries`, `keys`, `values`, `get`, `has`.
@@ -519,6 +542,8 @@ pub struct MapApiMethod {
     pub name: &'static str,
     /// Required positional argument count.
     pub arity: Arity,
+    /// Dispatch kind — controls key-arg validation and static-resolution behaviour.
+    pub kind: MapApiMethodKind,
     /// Whether named arguments are accepted (always `false` in v1).
     pub named_args_allowed: bool,
     /// Return type formula. Takes the receiver's `K` and `V` types and
@@ -531,8 +556,8 @@ impl std::fmt::Debug for MapApiMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "MapApiMethod {{ name: {:?}, arity: {:?} }}",
-            self.name, self.arity
+            "MapApiMethod {{ name: {:?}, arity: {:?}, kind: {:?} }}",
+            self.name, self.arity, self.kind
         )
     }
 }
@@ -576,30 +601,35 @@ pub static MAP_API_METHODS: &[MapApiMethod] = &[
     MapApiMethod {
         name: "entries",
         arity: Arity::Exact(0),
+        kind: MapApiMethodKind::ZeroArg,
         named_args_allowed: false,
         return_type_formula: map_entries_return,
     },
     MapApiMethod {
         name: "keys",
         arity: Arity::Exact(0),
+        kind: MapApiMethodKind::ZeroArg,
         named_args_allowed: false,
         return_type_formula: map_keys_return,
     },
     MapApiMethod {
         name: "values",
         arity: Arity::Exact(0),
+        kind: MapApiMethodKind::ZeroArg,
         named_args_allowed: false,
         return_type_formula: map_values_return,
     },
     MapApiMethod {
         name: "get",
         arity: Arity::Exact(1),
+        kind: MapApiMethodKind::KeyedGet,
         named_args_allowed: false,
         return_type_formula: map_get_return,
     },
     MapApiMethod {
         name: "has",
         arity: Arity::Exact(1),
+        kind: MapApiMethodKind::KeyedHas,
         named_args_allowed: false,
         return_type_formula: map_has_return,
     },
