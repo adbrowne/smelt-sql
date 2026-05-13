@@ -3,22 +3,16 @@
 //! `check_unsupported_constructs` accumulator helpers invoked by
 //! `check_file_diagnostics`).
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use salsa::Accumulator;
 use smelt_parser::{self, File as AstFile};
 use smelt_types::{parse_type, DataType};
 
-use crate::queries::functions::file_signature_inputs;
 use crate::queries::parse::{model_path_refs, model_refs, model_sources, parse_file, parse_model};
 use crate::queries::schema::{
     model_input_constraints, model_schema, resolved_model_schema, type_context, typed_model_schema,
 };
 use crate::type_inference;
-use crate::{
-    resolve_ref, DiagnosticAcc, Position, Range, RefKind, SourceFile, Workspace,
-};
+use crate::{resolve_ref, DiagnosticAcc, Position, Range, SourceFile, Workspace};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
 // ============================================================================

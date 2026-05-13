@@ -11,20 +11,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rowan::TextRange;
-use smelt_parser::{self, File as AstFile, TableRef};
-use smelt_types::{parse_type, DataType, TypedColumn};
+use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
+use smelt_types::{DataType, TypedColumn};
 
-use crate::queries::functions::{file_signature_inputs, function_signature, resolve_function};
+use crate::function_body_check::{self, infer_tableexpr_return_schema};
+use crate::queries::functions::{file_signature_inputs, resolve_function};
 use crate::queries::parse::parse_file;
 use crate::queries::project::{project_seeds, project_sources, sources_config};
-use crate::schema::{
-    self, Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
-    ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
-};
-use crate::type_inference::{self, TypeContext};
-use crate::{resolve_ref, SourceFile, Workspace};
+use crate::schema::{self, Column, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema};
+use crate::type_inference::{self, infer_cte_columns, infer_select_column_types, TypeContext};
+use crate::{find_project, resolve_ref, SourceFile, Workspace};
 
-use smelt_core::SourceInfo;
+use smelt_core::{SourceInfo, SourcesConfig};
 
 // ============================================================================
 // Schema queries
@@ -1272,4 +1270,3 @@ pub fn model_function_type(
         has_wildcard_output,
     })
 }
-

@@ -9,8 +9,7 @@ use smelt_parser::{self, File as AstFile};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
 
 use crate::queries::parse::parse_file;
-use crate::{Range, SourceFile, Workspace};
-
+use crate::{SourceFile, Workspace};
 
 // ============================================================================
 // Function signature index (Phase 3, smelt-functions Step 1)

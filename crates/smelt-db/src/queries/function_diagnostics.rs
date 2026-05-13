@@ -8,27 +8,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rowan::TextRange;
-use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
-use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
-use smelt_types::{parse_type, DataType};
+use smelt_parser::{self, ast::SmeltPathRef, File as AstFile};
+use smelt_types::signatures::FunctionSig;
+use smelt_types::{DataType, TypedColumn};
 
-use crate::diagnostics_types::{
-    meta_hof_diagnostic_message, meta_list_diagnostic_message, meta_loader_diagnostic_message,
-    meta_map_diagnostic_message, meta_record_diagnostic_message, meta_reflection_diagnostic_message,
-    meta_reflection_diagnostic_message_with_table_expr,
-};
-use crate::queries::functions::{
-    file_signature_inputs, function_signature, functions_in_file,
-};
+use crate::queries::functions::file_signature_inputs;
 use crate::queries::parse::parse_file;
-use crate::queries::project::project_paths;
-use crate::{
-    backends, function_body_check, provenance_validator, resolve_function, resolved_model_schema,
-    sources_config, type_context, Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity,
-    Model, Position, Range, RefKind, SourceFile, TypeContext, TypedColumn, Workspace,
+use crate::queries::project::{project_paths, sources_config};
+use crate::queries::schema::{
+    resolved_model_schema, type_context, RefSchemaProvider, SalsaRefSchemaProvider,
 };
-
+use crate::{
+    backends, find_project, function_body_check, function_call_cycle_fn_ids, resolve_function,
+    resolve_ref_path, type_inference, Diagnostic, DiagnosticCode, DiagnosticSeverity, Position,
+    Range, RefKind, SourceFile, TypeContext, Workspace,
+};
 
 /// Workspace-wide duplicate-function-name diagnostics. Each returned tuple is
 /// `(path, diagnostic)` where `path` is the offending file and `diagnostic`

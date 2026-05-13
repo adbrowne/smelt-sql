@@ -6,13 +6,12 @@
 
 use std::sync::Arc;
 
-use smelt_parser::{self, File as AstFile};
+use smelt_parser;
 
-use crate::loader;
 use crate::queries::parse::parse_file;
+use crate::type_inference;
 use crate::{
-    Diagnostic, DiagnosticCode, DiagnosticSeverity, LoaderFileInput, Position, Range,
-    SourceFile, Workspace,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, LoaderFileInput, SourceFile, Workspace,
 };
 
 // ============================================================================

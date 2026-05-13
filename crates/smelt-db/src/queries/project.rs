@@ -9,16 +9,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use smelt_parser::{self, File as AstFile};
+use smelt_types::parse_type;
 
+use crate::config_vars;
 use crate::queries::parse::parse_model;
-use crate::{
-    Model, ProjectInput, SourceFile, Workspace,
-};
+use crate::{Model, ProjectInput, SourceFile, Workspace};
 
 pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
-use smelt_core::{SeedInfo, SourceInfo, SourcesConfig, SourceTableDef};
+use smelt_core::{SeedInfo, SourceInfo, SourcesConfig};
 
 /// YAML parse error with location information
 #[derive(Debug, Clone, PartialEq, Eq)]
