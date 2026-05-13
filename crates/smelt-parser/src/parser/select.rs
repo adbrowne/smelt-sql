@@ -1,0 +1,907 @@
+//! `SELECT` statement grammar.
+//!
+//! Covers the full SELECT statement including:
+//! - `SELECT` list (DISTINCT/ALL, items, wildcards)
+//! - `FROM` / `JOIN` / `LATERAL` / `PIVOT` / `UNPIVOT` / `TABLESAMPLE`
+//! - `WHERE`, `GROUP BY`, `HAVING`, `QUALIFY`
+//! - `ORDER BY`, `LIMIT` / `OFFSET` / `FETCH FIRST`
+//! - `WITH` clause / CTEs (including RECURSIVE and column lists)
+//! - `UNION` / `INTERSECT` / `EXCEPT` (set-op tails on a select stmt)
+
+use crate::SyntaxKind::*;
+
+impl<'a> super::Parser<'a> {
+    pub(super) fn parse_select_stmt(&mut self) {
+        self.start_node(SELECT_STMT);
+
+        if self.too_deep() {
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
+
+        // WITH clause MUST come first (before SELECT)
+        self.skip_trivia();
+        if self.at(WITH_KW) {
+            self.parse_with_clause();
+        }
+
+        // SELECT
+        self.expect(SELECT_KW);
+
+        // DISTINCT / ALL (after SELECT, before select list)
+        self.skip_trivia();
+        if self.at(DISTINCT_KW) {
+            self.advance(); // DISTINCT
+            self.skip_trivia();
+            // Check for DISTINCT ON (PostgreSQL)
+            if self.at(ON_KW) {
+                self.start_node(DISTINCT_ON_CLAUSE);
+                self.advance(); // ON
+                self.skip_trivia();
+                if self.expect(LPAREN) {
+                    // Parse expression list
+                    loop {
+                        self.skip_trivia();
+                        self.parse_expression();
+                        self.skip_trivia();
+                        if self.at(COMMA) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(RPAREN);
+                }
+                self.finish_node(); // DISTINCT_ON_CLAUSE
+            }
+        } else if self.at(ALL_KW) {
+            self.advance();
+        }
+
+        // Select list
+        self.parse_select_list();
+
+        // FROM clause (optional - SELECT without FROM is valid)
+        self.skip_trivia();
+        if self.at(FROM_KW) {
+            self.parse_from_clause();
+        }
+
+        // WHERE clause
+        self.skip_trivia();
+        if self.at(WHERE_KW) {
+            self.parse_where_clause();
+        }
+
+        // GROUP BY clause
+        self.skip_trivia();
+        if self.at(GROUP_KW) {
+            self.parse_group_by_clause();
+        }
+
+        // HAVING clause (must come after GROUP BY)
+        self.skip_trivia();
+        if self.at(HAVING_KW) {
+            self.parse_having_clause();
+        }
+
+        // QUALIFY clause (after HAVING, before ORDER BY)
+        self.skip_trivia();
+        if self.at(QUALIFY_KW) {
+            self.parse_qualify_clause();
+        }
+
+        // ORDER BY clause
+        self.skip_trivia();
+        if self.at(ORDER_KW) {
+            self.parse_order_by_clause();
+        }
+
+        // LIMIT clause
+        self.skip_trivia();
+        let has_limit = self.at(LIMIT_KW);
+        if has_limit {
+            self.parse_limit_clause();
+        }
+
+        // OFFSET without LIMIT (for FETCH FIRST pattern)
+        self.skip_trivia();
+        if self.at(OFFSET_KW) && !has_limit {
+            self.start_node(LIMIT_CLAUSE);
+            self.advance(); // OFFSET
+            self.skip_trivia();
+            if self.at(NUMBER) {
+                self.advance();
+            } else {
+                self.error("Expected number after OFFSET".to_string());
+            }
+            self.finish_node();
+        }
+
+        // FETCH FIRST/NEXT N ROW(S) ONLY
+        self.skip_trivia();
+        if self.at_contextual_keyword("FETCH") {
+            self.parse_fetch_clause();
+        }
+
+        // Set operations: UNION / INTERSECT / EXCEPT
+        self.skip_trivia();
+        if self.at_any(&[UNION_KW, INTERSECT_KW, EXCEPT_KW]) {
+            self.advance(); // consume UNION/INTERSECT/EXCEPT
+            self.skip_trivia();
+            // Optional ALL
+            if self.at(ALL_KW) {
+                self.advance();
+            }
+            self.skip_trivia();
+            // Parse next SELECT
+            if self.at(SELECT_KW) || self.at(WITH_KW) {
+                self.parse_select_stmt();
+            } else {
+                self.error("Expected SELECT after set operation".to_string());
+            }
+        }
+
+        self.depth -= 1;
+        self.finish_node();
+    }
+
+    pub(super) fn parse_select_list(&mut self) {
+        self.start_node(SELECT_LIST);
+        self.skip_trivia();
+
+        // Parse comma-separated select items (including * and table.*)
+        loop {
+            if self.at(DOT_DOT_DOT) {
+                // List spread in SELECT list: `...metric_exprs`
+                self.parse_list_spread();
+            } else if self.at(STAR) {
+                // Handle SELECT * as a special select item
+                self.start_node(SELECT_ITEM);
+                self.advance();
+                self.finish_node();
+            } else if self.at(IDENT)
+                && self.peek_nth_non_trivia(1) == Some(DOT)
+                && self.peek_nth_non_trivia(2) == Some(STAR)
+            {
+                // `table.*` qualified star. Emit as a SELECT_ITEM carrying
+                // IDENT DOT STAR tokens directly — downstream consumers
+                // treat `SELECT_ITEM` with a trailing STAR as a star-item.
+                // The peek check skipped trivia, so we must do the same
+                // between advances or the comment between `.` and `*`
+                // would leave STAR outside the SELECT_ITEM.
+                self.start_node(SELECT_ITEM);
+                self.advance(); // IDENT
+                self.skip_trivia();
+                self.advance(); // DOT
+                self.skip_trivia();
+                self.advance(); // STAR
+                self.finish_node();
+            } else {
+                self.parse_select_item();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                // Allow trailing comma - break if next token ends the SELECT list
+                if self.at_any(&[
+                    FROM_KW,
+                    WHERE_KW,
+                    GROUP_KW,
+                    HAVING_KW,
+                    QUALIFY_KW,
+                    ORDER_KW,
+                    LIMIT_KW,
+                    OFFSET_KW,
+                    EOF,
+                    INNER_KW,
+                    LEFT_KW,
+                    RIGHT_KW,
+                    FULL_KW,
+                    CROSS_KW,
+                    JOIN_KW,
+                    UNION_KW,
+                    INTERSECT_KW,
+                    EXCEPT_KW,
+                ]) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_select_item(&mut self) {
+        self.start_node(SELECT_ITEM);
+        self.skip_trivia();
+
+        // Parse expression
+        self.parse_expression();
+
+        // Optional AS alias
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance();
+            self.skip_trivia();
+            if self.at(IDENT) {
+                self.advance();
+            }
+        } else if self.at(IDENT) {
+            // Implicit alias (no AS keyword)
+            self.advance();
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_from_clause(&mut self) {
+        self.start_node(FROM_CLAUSE);
+
+        self.expect(FROM_KW);
+
+        // Parse first table reference (required)
+        self.parse_table_ref();
+
+        // Parse zero or more JOIN clauses
+        loop {
+            self.skip_trivia();
+            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW]) {
+                self.parse_join_clause();
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_table_ref(&mut self) {
+        self.start_node(TABLE_REF);
+        self.skip_trivia();
+
+        // Check for LATERAL keyword (PostgreSQL)
+        if self.at(LATERAL_KW) {
+            self.advance(); // LATERAL
+            self.skip_trivia();
+        }
+
+        // Phase 5b: reject legacy smelt.fn.* in FROM position.
+        if self.at(IDENT) && self.at_smelt_fn_trigger() {
+            self.error("smelt.fn.* is removed; use smelt.functions.<name> instead".to_string());
+            // Fall through — the generic IDENT path below handles error recovery.
+        }
+
+        // Phase 4: reject legacy smelt.ref() and smelt.source() call forms.
+        // Emit an error pointing the user to the unified smelt.<path> form,
+        // then parse the call as a generic FUNCTION_CALL for error recovery.
+        if self.at(IDENT) && self.at_smelt_legacy_ref_or_source_trigger() {
+            self.error(
+                "smelt.ref() and smelt.source() are removed; \
+                 use smelt.models.<name> or smelt.sources.<schema>.<table> instead"
+                    .to_string(),
+            );
+            // Fall through — the generic IDENT path below will still consume
+            // and produce a FUNCTION_CALL node so the rest of the parse continues.
+        }
+
+        // smelt.<path> migration, Phase 1: unified value/call form. The
+        // trigger excludes the legacy second-segments (`fn`, `define`,
+        // `extern`, `as_struct`, `ref`, `source`, `metric`) so the existing
+        // grammar paths above and the FUNCTION_CALL path below stay intact.
+        if self.at(IDENT) && self.at_smelt_path_trigger() {
+            self.parse_smelt_path_form();
+            self.skip_trivia();
+            if self.at(AS_KW) {
+                self.advance();
+                self.skip_trivia();
+                self.expect(IDENT);
+            } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
+                self.advance();
+            }
+            self.finish_node(); // TABLE_REF
+            return;
+        }
+
+        if self.at(LPAREN) {
+            // Could be a subquery
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // consume LPAREN
+            self.skip_trivia();
+
+            // Check if it's a subquery (starts with SELECT or WITH) or VALUES
+            if self.at(SELECT_KW) || self.at(WITH_KW) {
+                self.start_node_at(checkpoint, SUBQUERY);
+                self.parse_select_stmt();
+                self.skip_trivia();
+                self.expect(RPAREN);
+                self.finish_node(); // Close SUBQUERY
+            } else if self.at(VALUES_KW) {
+                self.start_node_at(checkpoint, SUBQUERY);
+                self.parse_values_clause();
+                self.skip_trivia();
+                self.expect(RPAREN);
+                self.finish_node();
+            } else {
+                // Not a subquery, error
+                self.error("Expected SELECT in subquery".to_string());
+                self.expect(RPAREN);
+            }
+        } else if self.at(IDENT) {
+            // Use builder checkpoint for proper lookahead
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // Consume IDENT
+            self.skip_trivia();
+
+            if self.at(LPAREN) {
+                // It's a simple function call - wrap in FUNCTION_CALL node using checkpoint
+                self.start_node_at(checkpoint, FUNCTION_CALL);
+                self.parse_arg_list();
+                self.finish_node(); // Close FUNCTION_CALL
+            } else if self.at(DOT) {
+                // Could be schema.table or namespace.func()
+                self.advance(); // Consume DOT
+                self.skip_trivia();
+                self.expect(IDENT); // Consume second IDENT
+                self.skip_trivia();
+
+                if self.at(LPAREN) {
+                    // Namespaced function call: smelt.ref()
+                    self.start_node_at(checkpoint, FUNCTION_CALL);
+                    self.parse_arg_list();
+                    self.finish_node(); // Close FUNCTION_CALL
+                }
+                // else: just a qualified table name (schema.table), already consumed
+            }
+            // else: simple identifier, already consumed
+        } else {
+            self.error("Expected table reference".to_string());
+        }
+
+        // Optional TABLESAMPLE clause (PostgreSQL)
+        self.skip_trivia();
+        if self.at(TABLESAMPLE_KW) {
+            self.start_node(TABLESAMPLE_CLAUSE);
+            self.advance(); // TABLESAMPLE
+            self.skip_trivia();
+
+            // Sampling method: BERNOULLI or SYSTEM
+            if self.at(BERNOULLI_KW) || self.at(SYSTEM_KW) {
+                self.advance();
+                self.skip_trivia();
+            }
+
+            // Percentage in parentheses
+            if self.expect(LPAREN) {
+                self.skip_trivia();
+                self.parse_expression(); // Sample percentage
+                self.skip_trivia();
+                self.expect(RPAREN);
+            }
+
+            // Optional REPEATABLE (seed)
+            self.skip_trivia();
+            if self.at(REPEATABLE_KW) {
+                self.advance(); // REPEATABLE
+                self.skip_trivia();
+                if self.expect(LPAREN) {
+                    self.skip_trivia();
+                    self.parse_expression(); // Seed value
+                    self.skip_trivia();
+                    self.expect(RPAREN);
+                }
+            }
+
+            self.finish_node(); // TABLESAMPLE_CLAUSE
+        }
+
+        // Optional PIVOT/UNPIVOT clause
+        self.skip_trivia();
+        if self.at(PIVOT_KW) {
+            self.parse_pivot_clause();
+        } else if self.at(UNPIVOT_KW) {
+            self.parse_unpivot_clause();
+        }
+
+        // Optional AS alias (explicit with AS keyword or implicit)
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance();
+            self.skip_trivia();
+            self.expect(IDENT);
+        } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
+            // Implicit alias (no AS keyword)
+            // Only consume if it's not a keyword that would end the table ref
+            self.advance();
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_pivot_clause(&mut self) {
+        self.start_node(PIVOT_CLAUSE);
+        self.expect(PIVOT_KW);
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        // Parse aggregate expression(s): SUM(amount), COUNT(*)
+        self.skip_trivia();
+        self.parse_expression();
+
+        // FOR column
+        self.skip_trivia();
+        // FOR is not a keyword in our lexer, so it's parsed as IDENT
+        if self.at(IDENT) {
+            // Check if text is "FOR"
+            let token = self.tokens[self.pos];
+            let text = &self.input[self.offset..self.offset + token.len];
+            if text.eq_ignore_ascii_case("FOR") {
+                self.advance(); // FOR
+                self.skip_trivia();
+                self.parse_expression(); // column name
+            }
+        }
+
+        // IN (values...)
+        self.skip_trivia();
+        if self.at(IN_KW) {
+            self.parse_pivot_in_list();
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    pub(super) fn parse_unpivot_clause(&mut self) {
+        self.start_node(UNPIVOT_CLAUSE);
+        self.expect(UNPIVOT_KW);
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        // Value column name
+        self.skip_trivia();
+        self.parse_expression();
+
+        // FOR name column
+        self.skip_trivia();
+        if self.at(IDENT) {
+            let token = self.tokens[self.pos];
+            let text = &self.input[self.offset..self.offset + token.len];
+            if text.eq_ignore_ascii_case("FOR") {
+                self.advance(); // FOR
+                self.skip_trivia();
+                self.parse_expression(); // name column
+            }
+        }
+
+        // IN (columns...)
+        self.skip_trivia();
+        if self.at(IN_KW) {
+            self.parse_pivot_in_list();
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    pub(super) fn parse_pivot_in_list(&mut self) {
+        self.start_node(PIVOT_IN_LIST);
+        self.expect(IN_KW);
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        // Parse comma-separated values/columns
+        loop {
+            self.skip_trivia();
+            if self.at(RPAREN) {
+                break;
+            }
+            self.parse_expression();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    #[allow(clippy::if_same_then_else)]
+    pub(super) fn parse_join_clause(&mut self) {
+        self.start_node(JOIN_CLAUSE);
+
+        // Parse JOIN type modifiers (INNER, LEFT, RIGHT, FULL OUTER, CROSS)
+        // Note: The if-else blocks are intentionally similar for clarity
+        if self.at(INNER_KW) {
+            self.advance();
+            self.skip_trivia();
+        } else if self.at(LEFT_KW) {
+            self.advance();
+            self.skip_trivia();
+            if self.at(OUTER_KW) {
+                self.advance();
+                self.skip_trivia();
+            }
+        } else if self.at(RIGHT_KW) {
+            self.advance();
+            self.skip_trivia();
+            if self.at(OUTER_KW) {
+                self.advance();
+                self.skip_trivia();
+            }
+        } else if self.at(FULL_KW) {
+            self.advance();
+            self.skip_trivia();
+            if self.at(OUTER_KW) {
+                self.advance();
+                self.skip_trivia();
+            }
+        } else if self.at(CROSS_KW) {
+            self.advance();
+            self.skip_trivia();
+        }
+        // Note: Bare JOIN defaults to INNER JOIN
+
+        // Expect JOIN keyword
+        if !self.expect(JOIN_KW) {
+            // Error recovery: missing JOIN keyword
+            self.error("Expected JOIN keyword".to_string());
+            self.finish_node();
+            return;
+        }
+
+        // Parse table reference (may include LATERAL keyword)
+        self.skip_trivia();
+        if !self.at(IDENT) && !self.at(LATERAL_KW) && !self.at(LPAREN) {
+            // Error recovery: missing table reference
+            self.error("Expected table reference after JOIN".to_string());
+            self.finish_node();
+            return;
+        }
+        self.parse_table_ref();
+
+        // Parse join condition (ON or USING)
+        // CROSS JOIN doesn't require a condition
+        self.skip_trivia();
+        if self.at(ON_KW) || self.at(USING_KW) {
+            self.parse_join_condition();
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_join_condition(&mut self) {
+        self.start_node(JOIN_CONDITION);
+
+        if self.at(ON_KW) {
+            // ON expression
+            self.advance();
+            self.skip_trivia();
+
+            if !self.at_expression_start() {
+                self.error("Expected expression after ON".to_string());
+                self.finish_node();
+                return;
+            }
+            self.parse_expression();
+        } else if self.at(USING_KW) {
+            // USING (col1, col2, ...)
+            self.advance();
+            self.skip_trivia();
+
+            if !self.expect(LPAREN) {
+                self.error("Expected '(' after USING".to_string());
+                self.finish_node();
+                return;
+            }
+
+            // Parse comma-separated column list
+            loop {
+                self.skip_trivia();
+                if !self.at(IDENT) {
+                    self.error("Expected column name in USING clause".to_string());
+                    break;
+                }
+                self.advance();
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+
+            self.expect(RPAREN);
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_where_clause(&mut self) {
+        self.start_node(WHERE_CLAUSE);
+        self.expect(WHERE_KW);
+        self.parse_expression();
+        self.finish_node();
+    }
+
+    pub(super) fn parse_group_by_clause(&mut self) {
+        self.start_node(GROUP_BY_CLAUSE);
+        self.expect(GROUP_KW);
+        self.expect(BY_KW);
+
+        // Parse comma-separated column list
+        loop {
+            self.skip_trivia();
+            // List spread in GROUP BY: `GROUP BY ...keys`
+            if self.at(DOT_DOT_DOT) {
+                self.parse_list_spread();
+            } else {
+                self.parse_expression();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                // Allow trailing comma - break if next token ends GROUP BY
+                if self.at_any(&[
+                    HAVING_KW,
+                    QUALIFY_KW,
+                    ORDER_KW,
+                    LIMIT_KW,
+                    OFFSET_KW,
+                    EOF,
+                    UNION_KW,
+                    INTERSECT_KW,
+                    EXCEPT_KW,
+                ]) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_having_clause(&mut self) {
+        self.start_node(HAVING_CLAUSE);
+        self.expect(HAVING_KW);
+        self.parse_expression();
+        self.finish_node();
+    }
+
+    pub(super) fn parse_qualify_clause(&mut self) {
+        self.start_node(QUALIFY_CLAUSE);
+        self.expect(QUALIFY_KW);
+        self.parse_expression();
+        self.finish_node();
+    }
+
+    pub(super) fn parse_order_by_clause(&mut self) {
+        self.start_node(ORDER_BY_CLAUSE);
+        self.expect(ORDER_KW);
+        self.expect(BY_KW);
+
+        // Comma-separated order items
+        loop {
+            self.skip_trivia();
+            // List spread in ORDER BY: `ORDER BY ...sort_keys`
+            if self.at(DOT_DOT_DOT) {
+                self.parse_list_spread();
+            } else {
+                self.parse_order_by_item();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_order_by_item(&mut self) {
+        self.start_node(ORDER_BY_ITEM);
+
+        // Expression to order by
+        self.parse_expression();
+
+        // Optional ASC/DESC
+        self.skip_trivia();
+        if self.at(ASC_KW) || self.at(DESC_KW) {
+            self.advance();
+        }
+
+        // Optional NULLS FIRST/LAST
+        self.skip_trivia();
+        if self.at(NULLS_KW) {
+            self.advance();
+            self.skip_trivia();
+            if self.at(FIRST_KW) || self.at(LAST_KW) {
+                self.advance();
+            } else {
+                self.error("Expected FIRST or LAST after NULLS".to_string());
+            }
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_limit_clause(&mut self) {
+        self.start_node(LIMIT_CLAUSE);
+
+        self.expect(LIMIT_KW);
+        self.skip_trivia();
+
+        // LIMIT value (number or ALL)
+        if self.at(NUMBER) || self.at(ALL_KW) {
+            self.advance();
+        } else {
+            self.error("Expected number or ALL after LIMIT".to_string());
+        }
+
+        // Optional OFFSET
+        self.skip_trivia();
+        if self.at(OFFSET_KW) {
+            self.advance();
+            self.skip_trivia();
+            if self.at(NUMBER) {
+                self.advance();
+            } else {
+                self.error("Expected number after OFFSET".to_string());
+            }
+        }
+
+        self.finish_node();
+    }
+    pub(super) fn parse_with_clause(&mut self) {
+        self.start_node(WITH_CLAUSE);
+
+        self.expect(WITH_KW);
+
+        // Optional RECURSIVE
+        self.skip_trivia();
+        if self.at(RECURSIVE_KW) {
+            self.advance();
+        }
+
+        // Comma-separated CTEs
+        loop {
+            self.skip_trivia();
+            self.parse_cte();
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
+    pub(super) fn parse_cte(&mut self) {
+        self.start_node(CTE);
+
+        // CTE name
+        self.skip_trivia();
+        if !self.expect(IDENT) {
+            self.error("Expected CTE name".to_string());
+            self.finish_node();
+            return;
+        }
+
+        // Optional column list: name(col1, col2)
+        // For now, we'll parse it simply - if we see LPAREN followed by IDENT, it might be a column list
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            // Peek ahead to see if this looks like a column list
+            // Column list: (ident, ident, ...) followed by AS
+            // Query: (SELECT ...) - but this is after AS
+            // So if we see LPAREN and it's NOT preceded by AS, check if it's a column list
+
+            self.advance(); // consume LPAREN
+            self.skip_trivia();
+
+            // If we see IDENT (not SELECT/WITH), assume it's a column list
+            if self.at(IDENT) {
+                // Parse column list
+                loop {
+                    if !self.at(IDENT) {
+                        break;
+                    }
+                    self.advance();
+                    self.skip_trivia();
+
+                    if self.at(COMMA) {
+                        self.advance();
+                        self.skip_trivia();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(RPAREN);
+                self.skip_trivia();
+            } else if self.at(SELECT_KW) || self.at(WITH_KW) {
+                // This is actually the AS clause query, not a column list
+                // Parse the subquery
+                self.start_node(SUBQUERY);
+                self.parse_select_stmt();
+                self.finish_node();
+                self.expect(RPAREN);
+
+                // Done with CTE
+                self.finish_node();
+                return;
+            } else {
+                // Empty or unexpected
+                self.expect(RPAREN);
+                self.skip_trivia();
+            }
+        }
+
+        // AS (query)
+        if !self.expect(AS_KW) {
+            self.error("Expected AS in CTE".to_string());
+            self.finish_node();
+            return;
+        }
+
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.error("Expected ( after AS in CTE".to_string());
+            self.finish_node();
+            return;
+        }
+
+        self.skip_trivia();
+        if self.at(SELECT_KW) || self.at(WITH_KW) {
+            self.start_node(SUBQUERY);
+            self.parse_select_stmt();
+            self.finish_node();
+        } else if self.at(VALUES_KW) {
+            self.parse_values_clause();
+        } else if self.at_smelt_path_trigger() {
+            // smelt.<path> migration, Phase 1: a CTE body is a bare
+            // `smelt.<path>(args)` call. Phase 5b removes the smelt.fn.* arm
+            // here; use smelt.functions.* instead. The value form is also
+            // accepted here even
+            // though parameterless table-shaped paths are unusual — the
+            // resolver in Phase 2a decides the kind.
+            self.start_node(SUBQUERY);
+            self.parse_smelt_path_form();
+            self.finish_node();
+        } else {
+            self.error("Expected SELECT, WITH, or VALUES in CTE".to_string());
+        }
+
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+}

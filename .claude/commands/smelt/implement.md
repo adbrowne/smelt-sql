@@ -31,7 +31,7 @@ For each `pending` phase:
 
 #### 3a. Implementer subagent (red-green TDD)
 
-Spawn a fresh `general-purpose` subagent with a self-contained brief. The brief must include:
+Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise — this command's own `model: opus` is for orchestration, not delegation). The brief must include:
 
 - The phase's section verbatim (Goal, Pre-conditions, TDD tests, Implementation shape, Critical files, Docs touched, Commit message).
 - The spec sections the phase implements (paste them, don't link only — the subagent has no other context).
@@ -42,17 +42,19 @@ Spawn a fresh `general-purpose` subagent with a self-contained brief. The brief 
   - `cargo test`
   - `cargo test -p smelt-cli --test example_diagnostics`
 - The list of files the subagent is **allowed to touch** (Critical files + Docs touched). Out-of-scope edits should be reported, not made.
+- **Timeless-oracle rule for spec/docs-site edits (CLAUDE.md).** The phase context you are pasting uses phase vocabulary — that vocabulary belongs to the *plan only*. When the implementer edits `docs/specs/<slug>.md` or `docs-site/docs/...`, those edits must describe the feature as if it has always existed: no `### Phase A — ...` headings, no `(Phase B)` inline labels, no `[deferred to Phase E1]` callouts in body sections. Surface/Semantics/Design entries describe behaviour. Implementation gaps go in the spec's **Known Divergences** in behavioural terms (with a plan-file link), not as plan-phase status notes in body sections. Code-comment edits follow the same rule: describe the code, not which plan phase introduced it.
 
 Wait for the subagent to report. The expected report is: tests written, tests now green, all CI checks pass, commit ready (do **not** have the subagent commit — the main session commits in step 3d).
 
 #### 3b. Reviewer subagent (material findings only)
 
-Spawn a fresh `general-purpose` subagent as reviewer. Its brief:
+Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise) as reviewer. Its brief:
 
 - The phase's Review checklist verbatim.
 - The spec sections the phase implements (paste them).
 - The full diff produced by the implementer: `git diff` against the last phase's commit (or against the plan's commit for Phase 1).
 - An instruction to report **only material findings**: correctness against spec, architectural invariants violated, missing TDD coverage, scope creep beyond the phase's stated files. Style nits and naming preferences are out of scope.
+- An explicit Timeless-oracle check: scan diffs to `docs/specs/` and `docs-site/` for `Phase [A-Z0-9]`, `(Phase X)`, `[deferred to Phase ...]`, `Phase 0 scaffold`, or other plan-vocabulary leakage in body sections. Flag each as a material finding (the rule lives in `CLAUDE.md`). Phase numbers are tolerated in **Known Divergences** when paired with a plan-file link; everywhere else in the spec/docs-site body, they are drift.
 
 Wait for the reviewer to report.
 

@@ -94,6 +94,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 - Never skip hooks, never `--no-verify`, never force-push the tracking PR.
 - Don't widen scope: a phase may not reach into a later phase's scope.
 - Honor architectural invariants from `CLAUDE.md` (e.g., `type_inference.rs` purity).
+- **Timeless-oracle rule (CLAUDE.md).** Phase vocabulary lives in *this plan file only*. Edits to `docs/specs/<slug>.md` and `docs-site/docs/...` describe the feature as if it has always existed — no `### Phase A — …` headings, no `(Phase B)` inline labels, no `[deferred to Phase E1]` callouts in spec/user-doc body. If a phase ships an incomplete surface, the *spec* records the gap under **Known Divergences** in behavioural terms (not phase terms). The plan's Progress tracking table is where "what landed when" lives.
 
 ---
 
@@ -140,9 +141,9 @@ For each phase:
 - `crates/.../src/...rs` — {what changes}
 - ...
 
-**Docs touched (default, unless plan header is `Docs: code-only`).**
-- `docs/specs/{slug}.md` — {Surface or Constraints section update}
-- `docs-site/docs/...md` — {what user-facing change}
+**Docs touched (default, unless plan header is `Docs: code-only`).** *Write these as if the feature has always existed — no phase headings, no `(Phase X)` labels, no plan vocabulary. See Timeless-oracle rule.*
+- `docs/specs/{slug}.md` — {Surface/Semantics section update — describe behaviour, not "this phase adds"}
+- `docs-site/docs/...md` — {user-facing change, written as a feature description}
 
 **Review checklist** (material findings only):
 - [ ] TDD tests listed above exist and assert what's specified
@@ -150,6 +151,7 @@ For each phase:
 - [ ] Architectural invariants honored
 - [ ] No scope creep into later phases
 - [ ] User docs updated to match Surface
+- [ ] Spec + docs-site edits are timeless — no `Phase X` headings, no `(Phase X)` labels, no `[deferred to Phase Y]` callouts in body
 
 **Commit.** `{short type-prefixed message — used verbatim}`
 ```
@@ -196,3 +198,4 @@ Run /smelt:implement docs/plans/{file}.md to start execution.
 5. **Phases are atomic.** One commit per phase, never amend a prior phase.
 6. **Don't widen scope.** If a phase needs something from a later phase to pass tests, the phase boundaries are wrong — fix the plan, don't reach forward.
 7. **Plans should be ~30–50% shorter than pre-spec plans of the same scope.** If your plan is bloated with context, you're re-deriving the spec instead of citing it.
+8. **Phase vocabulary stays in the plan.** Spec and user-doc edits ride alongside each phase but must read as timeless feature descriptions. See the Timeless-oracle rule in `CLAUDE.md`. The plan file is allowed (and expected) to use phase vocabulary; the artifacts it touches are not.

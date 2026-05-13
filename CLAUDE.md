@@ -122,6 +122,37 @@ npm run package
 npm run watch
 ```
 
+## Token efficiency
+
+These rules apply to every subagent and every Bash invocation. The autonomous
+loop dispatches dozens of subagents per phase, so one large tool result repeated
+across phases is a real cost.
+
+- **Search with `rg` (ripgrep), not `grep -r` or `find`.** `rg` honors
+  `.gitignore` by default; `grep -r`/`find` traverse `docs-site/site/`,
+  `target/`, `node_modules/`, and other build artifacts. A single `grep -r`
+  over the workspace has previously returned 2+ MB of minified JS source maps
+  from `docs-site/site/assets/javascripts/*.min.js.map` — ~500K tokens dropped
+  into one tool result.
+- **Never search into build artifacts.** Specifically:
+  `docs-site/site/`, `target/`, `examples/*/target/`, `examples/*/.smelt/`,
+  `ui/dist/`, `ui/node_modules/`, `__pycache__/`. If you must use `grep`,
+  pass `--exclude-dir=site --exclude-dir=target --exclude-dir=node_modules`.
+- **`cargo test` output:** for verification gates use
+  `cargo test --quiet 2>&1 | tail -40`. The full pass listing of the workspace
+  is ~3,000 lines per run — only worth feeding back when investigating an
+  actual failure. Failures still surface; their context is in the tail.
+- **`cargo build` / `cargo check`:** silence routine warnings the same way:
+  `2>&1 | tail -50`. The first failure line is what matters.
+- **`git diff` to a reviewer:** prefer per-crate or per-file diffs over
+  whole-repo diffs when the change is bounded to one area.
+
+A usage log is written to `.claude/usage-log.jsonl` by the PostToolUse and
+SessionEnd hooks (see `.claude/settings.json`) and by `autonomy-loop.sh` for
+headless iterations. Summarize it with
+`bash .claude/scripts/usage-summary.sh` to see top tool-result outliers and
+per-iteration cost after an autonomous run.
+
 ## Architecture
 
 ### High-Level Design
@@ -325,6 +356,31 @@ A spec is the **canonical answer** to "how does this feature work?". It is norma
 - Edit the spec **before** writing the plan that changes the feature.
 - The spec diff is the change description for `/smelt:plan`.
 - `/smelt:validate <feature>` produces a drift report against the spec.
+
+### Timeless-oracle rule
+
+Specs (`docs/specs/`) and user docs (`docs-site/docs/`) describe the feature as if it has always existed. They never reference plan phases, milestones, or implementation history. A reader six months after the plan ships should not be able to tell which plan introduced a given paragraph.
+
+**Forbidden in spec body and user docs:**
+- Section headings tagged with a plan phase: `### Phase A — List<T>`, `#### Phase C goto-def`.
+- Inline labels referring to a phase: `Meta list (Phase A)`, "Phase B adds…", "ships in Phase E1".
+- Status callouts written in plan vocabulary: `*[deferred to Phase E1]*`, "Phase 0 scaffold".
+
+**Where it does belong:**
+- **Plans (`docs/plans/`)** — phases live here; this is the only place phase vocabulary is allowed.
+- **Spec → Known Divergences / Open Questions** — describe the gap in terms of *behavior* ("`column_origin` is not yet emitted by producers") and link the tracking plan. Phase numbers are tolerated here only when paired with a plan link.
+- **Spec → References → Plans (history)** — link plan files; do not describe their internal phase structure.
+
+**Examples — bad → good:**
+
+| Bad (in spec/user-doc body) | Good |
+|---|---|
+| `### Phase A — List<T>, list literals, spread` | `### Lists and spread` |
+| "Phase B adds iteration, transformation, and compile-time configuration:" | "The meta-language provides iteration, transformation, and compile-time configuration via:" |
+| "Inline-schema sugar … is a Phase E1 decision." | Move to **Open Questions**: "Whether `load_yaml(path, { name: Text })` is first-class surface or sugar for a named declaration is undecided. Tracked in `docs/plans/20260509-meta-language-overall.md`." |
+| "ships in Phase 51 of `docs/plans/20260422-smelt-functions.md`" inside §Surface | Move the *status* line to **Known Divergences**; the §Surface entry just describes the validation. |
+
+`/smelt:validate` flags `Phase [A-Z0-9]` matches in spec body sections and user docs as drift.
 
 ## Plans
 

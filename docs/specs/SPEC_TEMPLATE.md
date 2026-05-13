@@ -31,6 +31,8 @@ parsing scripts simple.
 > **What this is.** *(Required scope callout — keep this blockquote between the H1 and the first `## Surface` heading on every spec.)* A one-paragraph statement of what this spec covers and what it does not — naming the adjacent specs that own neighbouring concerns. Readers skim this first; if they're in the wrong file, the callout sends them to the right one. Example shape: "A normative spec for `<feature>`: <one-sentence summary of in-scope surface>. Out of scope: <bullet of adjacent concern> (see `<other_spec>.md`); <another adjacent concern> (see `<another_spec>.md`)."
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 

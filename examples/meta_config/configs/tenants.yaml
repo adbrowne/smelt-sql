@@ -1,0 +1,6 @@
+tenant_a:
+  plan: pro
+  threshold: 100
+tenant_b:
+  plan: free
+  threshold: 10

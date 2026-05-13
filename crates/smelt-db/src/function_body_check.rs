@@ -15,20 +15,25 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltPathCall, TableRef};
+use smelt_parser::ast::{
+    BinaryExpr, Cte, Expr, FunctionCall, Lambda, SelectStmt, SmeltPathCall, TableRef,
+};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
-    check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
-    SchemaMismatch, SchemaRequirement, Signature, SmeltType, StructRowTail, Tier, TypeConstraint,
-    UnificationError,
+    check_schema_requirement, column_ref_field, unify_call, ContextRef, ExprKind, FrameInfo,
+    FunctionSig, ModelOrigin, ParamSpec, SchemaMismatch, SchemaRequirement, Signature, SmeltType,
+    SourceOrigin, StructRowTail, Tier, TypeConstraint, UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
-    check_undeclared_columns, infer_cte_columns, infer_expression_kind, infer_expression_type,
-    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
+    check_column_ref_field_diagnostics, check_meta_text_lift_diagnostics,
+    check_model_ref_source_ref_field_diagnostics, check_undeclared_columns,
+    check_wide_reflection_diagnostics, infer_cte_columns, infer_expression_kind,
+    infer_expression_type, walk_expression_columns_with_visitor, walk_select_columns_with_visitor,
+    TypeContext,
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
@@ -136,6 +141,198 @@ pub fn walk_body_with_ctx(
     diagnostics
 }
 
+/// Phase B (meta-language): walk a HOF lambda body for type errors and stamp
+/// each resulting diagnostic with an **anonymous expansion frame** whose
+/// `fn_id = None` and `function = "<hof>"` (angle-bracketed form per spec).
+///
+/// This is the HOF equivalent of `check_function_body_with_expansion`: whereas
+/// `smelt.define` expansions produce named frames (`fn_id = Some(sig.name)`),
+/// HOF expansions produce anonymous frames because the HOF has no user-declared
+/// function body — it is a built-in operator.
+///
+/// The frame stack entry:
+/// - `function` = `"<hof>"` (e.g. `"<map>"`) — angle brackets distinguish
+///   synthesised HOF frames from user-named function frames (spec §FrameInfo).
+/// - `fn_id` = `None` (anonymous — no declaring file)
+/// - `call_site_range` = `call_range` (span of the outer HOF call expression)
+/// - `param`, `bound_type`, `decl_path`, `decl_range`, `element_index` = defaults
+///
+/// `nested` propagates the `smelt.functions.*` dispatch handler so that
+/// `smelt.define`-defined function calls inside a HOF lambda body still
+/// receive expansion-frame stamping (multi-frame chain support).
+///
+/// Pure function — no Salsa dependency.
+pub fn walk_hof_lambda_body_with_anonymous_frame(
+    lambda_body: &Expr,
+    lambda_ctx: &TypeContext,
+    text: &str,
+    hof_name: &str,
+    call_range: Option<Range>,
+    nested: Option<&NestedPathCallHandler<'_>>,
+) -> Vec<Diagnostic> {
+    let mut inner_diags = Vec::new();
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, nested);
+
+    // Stamp every inner diagnostic with an anonymous HOF expansion frame.
+    if inner_diags.is_empty() {
+        return inner_diags;
+    }
+
+    let frame = FrameInfo {
+        function: format!("<{}>", hof_name.to_lowercase()),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: None,
+        decl_range: None,
+        call_site_range: call_range,
+        fn_id: None, // anonymous — HOF has no declaring file
+        element_index: None,
+        column_origin: None,
+        model_origin: None,
+        source_origin: None,
+    };
+
+    inner_diags
+        .into_iter()
+        .map(|mut d| {
+            let frames = match d.data.take() {
+                Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+                    // Prepend the anonymous HOF frame (innermost-first ordering).
+                    existing.insert(0, frame.clone());
+                    existing
+                }
+                _ => vec![frame.clone()],
+            };
+            d.data = Some(DiagnosticData::ExpansionFrames(frames));
+            d
+        })
+        .collect()
+}
+
+/// Phase C (meta-language) variant of [`walk_hof_lambda_body_with_anonymous_frame`]
+/// that accepts an explicit `column_origin` to stamp onto the anonymous HOF frame.
+///
+/// When the HOF source list comes from `smelt.columns_of(t)`, callers can pass the
+/// column's source span (from the upstream `ModelSchema`) so the frame's
+/// `column_origin` field carries that span. When the source was not a
+/// `smelt.columns_of` call (or the span is not statically resolvable), pass `None`.
+///
+/// Pure function — no Salsa dependency.
+pub fn walk_hof_lambda_body_with_anonymous_frame_and_origin(
+    lambda_body: &Expr,
+    lambda_ctx: &TypeContext,
+    text: &str,
+    hof_name: &str,
+    call_range: Option<Range>,
+    nested: Option<&NestedPathCallHandler<'_>>,
+    column_origin: Option<TextRange>,
+) -> Vec<Diagnostic> {
+    let mut inner_diags = Vec::new();
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, nested);
+
+    // Stamp every inner diagnostic with an anonymous HOF expansion frame,
+    // including the Phase C `column_origin` extension.
+    if inner_diags.is_empty() {
+        return inner_diags;
+    }
+
+    let frame = FrameInfo {
+        function: format!("<{}>", hof_name.to_lowercase()),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: None,
+        decl_range: None,
+        call_site_range: call_range,
+        fn_id: None, // anonymous — HOF has no declaring file
+        element_index: None,
+        column_origin,
+        model_origin: None,
+        source_origin: None,
+    };
+
+    inner_diags
+        .into_iter()
+        .map(|mut d| {
+            let frames = match d.data.take() {
+                Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+                    // Prepend the anonymous HOF frame (innermost-first ordering).
+                    existing.insert(0, frame.clone());
+                    existing
+                }
+                _ => vec![frame.clone()],
+            };
+            d.data = Some(DiagnosticData::ExpansionFrames(frames));
+            d
+        })
+        .collect()
+}
+
+/// Phase D (meta-language) variant of
+/// [`walk_hof_lambda_body_with_anonymous_frame_and_origin`] for wide-reflection-
+/// sourced HOF lists (`smelt.models.*` / `smelt.sources.*`).
+///
+/// Stamps the anonymous HOF frame with `model_origin` or `source_origin`
+/// (the wide-reflection siblings of `column_origin`) so that diagnostics
+/// surfacing from inside a wide-reflection HOF lambda carry source-model /
+/// source-yaml provenance.
+///
+/// Exactly one of `model_origin` or `source_origin` should be `Some`; the
+/// other is `None`. Pass both as `None` to fall back to plain anonymous-frame
+/// behaviour (identical to [`walk_hof_lambda_body_with_anonymous_frame_and_origin`]
+/// with `column_origin = None`).
+///
+/// Pure function — no Salsa dependency.
+#[allow(clippy::too_many_arguments)]
+pub fn walk_hof_lambda_body_with_wide_reflection_frame(
+    lambda_body: &Expr,
+    lambda_ctx: &TypeContext,
+    text: &str,
+    hof_name: &str,
+    call_range: Option<Range>,
+    nested: Option<&NestedPathCallHandler<'_>>,
+    model_origin: Option<ModelOrigin>,
+    source_origin: Option<SourceOrigin>,
+) -> Vec<Diagnostic> {
+    let mut inner_diags = Vec::new();
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, nested);
+
+    // Stamp every inner diagnostic with an anonymous HOF expansion frame,
+    // including the Phase D wide-reflection origin extensions.
+    if inner_diags.is_empty() {
+        return inner_diags;
+    }
+
+    let frame = FrameInfo {
+        function: format!("<{}>", hof_name.to_lowercase()),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: None,
+        decl_range: None,
+        call_site_range: call_range,
+        fn_id: None, // anonymous — HOF has no declaring file
+        element_index: None,
+        column_origin: None,
+        model_origin,
+        source_origin,
+    };
+
+    inner_diags
+        .into_iter()
+        .map(|mut d| {
+            let frames = match d.data.take() {
+                Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+                    // Prepend the anonymous HOF frame (innermost-first ordering).
+                    existing.insert(0, frame.clone());
+                    existing
+                }
+                _ => vec![frame.clone()],
+            };
+            d.data = Some(DiagnosticData::ExpansionFrames(frames));
+            d
+        })
+        .collect()
+}
+
 fn check_function_body_inner(
     sig: &FunctionSig,
     body: &Expr,
@@ -194,7 +391,7 @@ fn emit_duplicate_param_diagnostics(params: &[ParamSpec], out: &mut Vec<Diagnost
 }
 
 /// Build a `TypeContext` seeded with the signature's parameter bindings.
-fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
+pub(crate) fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
     let mut ctx = TypeContext::new();
     for p in params {
         if p.name.is_empty() {
@@ -208,6 +405,31 @@ fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
         // lookup).
         if let Some(Ok(SmeltType::SelectItems { kind, .. })) = &p.type_ref {
             ctx.add_fragment_param_kind(&p.name, *kind);
+        }
+        // Carry-over (type-expert review): record the full SmeltType for
+        // List<T> (and any non-trivial meta-language type) parameters so that
+        // HOF inference can recover `SmeltType::List(...)` rather than
+        // collapsing to `DataType::Unknown`.  The scalar projection stored in
+        // `function_params` is insufficient for HOF first-argument inference.
+        //
+        // Phase C: also register `ColumnRef` params so that
+        // `is_meta_text_value` (called from `check_meta_text_lift_diagnostics`)
+        // can recognise `<param>.name` as a meta-Text lift and
+        // `check_function_select_body` can suppress the spurious
+        // `UnknownIdentifier` that `check_undeclared_columns` would otherwise
+        // emit for the qualified reference `<param>.name` before the lift check
+        // runs.
+        if let Some(Ok(smelt_ty)) = &p.type_ref {
+            if matches!(
+                smelt_ty,
+                SmeltType::List(_)
+                    | SmeltType::Unknown
+                    | SmeltType::ColumnRef
+                    | SmeltType::ModelRef
+                    | SmeltType::SourceRef
+            ) {
+                ctx.add_function_param_smelt_type(&p.name, smelt_ty.clone());
+            }
         }
     }
     ctx
@@ -241,6 +463,18 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
         // `Struct<{…}>` (Phase 35) params — runtime type unknown until Phase 36.
         Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown,
+        // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
+        // runtime DataType equivalent in Phase A.
+        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
+        // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid parameter sort.
+        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
+        // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
+        // `ModelRef` / `SourceRef` (Phase D meta-language) — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown,
+        // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
+        // Inference wiring lands in Phase 3/5.
+        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
@@ -727,6 +961,26 @@ pub fn check_smelt_path_call(
     let Some(name) = segments.last().cloned() else {
         return diagnostics;
     };
+
+    // Phase C: skip smelt.columns_of — it is a meta-builtin handled by
+    // `check_columns_of_diagnostics` and the `ColumnsOfUnresolvableSchema`
+    // wiring block in `check_file_diagnostics`. It does not go through the
+    // smelt-function call dispatcher and has no `FunctionSig` in the registry.
+    if segments.len() == 1 && name.to_lowercase() == "columns_of" {
+        return diagnostics;
+    }
+
+    // Phase D: skip smelt.models.* and smelt.sources.* wide-reflection accessors
+    // (`smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`,
+    // `smelt.sources.all`). These are meta-builtins handled by
+    // `check_wide_reflection_diagnostics` and the Phase D wiring block in
+    // `check_file_diagnostics`. They have no `FunctionSig` in the registry.
+    if let Some(first) = segments.first() {
+        let first_lower = first.to_lowercase();
+        if first_lower == "models" || first_lower == "sources" {
+            return diagnostics;
+        }
+    }
 
     // Build the display path for messages: "smelt.functions.foo"
     let display_path = format!("smelt.{}", segments.join("."));
@@ -1287,6 +1541,11 @@ pub fn check_smelt_path_call(
                 decl_path: decl_path.clone(),
                 decl_range,
                 call_site_range,
+                fn_id: Some(sig.name.clone()),
+                element_index: None,
+                column_origin: None,
+                model_origin: None,
+                source_origin: None,
             });
         } else {
             frames.push(FrameInfo {
@@ -1296,6 +1555,11 @@ pub fn check_smelt_path_call(
                 decl_path: decl_path.clone(),
                 decl_range,
                 call_site_range,
+                fn_id: Some(sig.name.clone()),
+                element_index: None,
+                column_origin: None,
+                model_origin: None,
+                source_origin: None,
             });
         }
         d.data = Some(DiagnosticData::ExpansionFrames(frames));
@@ -1508,7 +1772,7 @@ pub fn register_join_alias_schemas(
 ///   - nested `smelt.functions.*` path-form calls inside the SELECT-list
 ///     expressions dispatch through `nested_handler` so frames stack across
 ///     expansion depth (Phase 12 contract).
-fn check_function_select_body(
+pub(crate) fn check_function_select_body(
     _sig: &FunctionSig,
     select_stmt: &SelectStmt,
     text: &str,
@@ -1522,7 +1786,52 @@ fn check_function_select_body(
     //    SELECT references that does not resolve in `body_ctx` emits
     //    `UnknownIdentifier`. Select-list aliases are handled by
     //    `check_undeclared_columns` already.
+    //
+    //    Phase C (meta-Text-as-identifier lift): `check_undeclared_columns`
+    //    sees `<columnref-param>.<field>` (e.g. `c.name`) as an unresolved
+    //    qualified column reference — it looks up `c.name` in model / source /
+    //    CTE scopes, finds nothing, and would emit a spurious `UnknownIdentifier`
+    //    before the lift check gets a chance to reinterpret the expression.
+    //    To avoid the double-diagnostic, we suppress any
+    //    `check_undeclared_columns` entry whose `qualifier` is the name of a
+    //    `ColumnRef`-typed function parameter.  The lift check below then emits
+    //    its own diagnostic (anchored at the correct span) if the lifted
+    //    identifier does not resolve.
     for info in check_undeclared_columns(select_stmt, body_ctx) {
+        // Suppress spurious UnknownIdentifier for `<columnref-binding>.<field>`
+        // references regardless of whether `<field>` is a recognised ColumnRef
+        // field.  Two sub-cases:
+        //
+        //   - Recognised field (e.g. `c.name`): handled by the meta-Text lift
+        //     check in step 1b below.
+        //   - Unrecognised field (e.g. `c.foo`): handled by
+        //     `check_column_ref_field_diagnostics` in step 1c below, which
+        //     emits `ColumnRefFieldUnknown` at the field-name token span (the
+        //     correct spec-required anchor).
+        //
+        // Suppressing both avoids double-diagnostics: `check_undeclared_columns`
+        // anchors at the whole `c.foo` expression, while the Phase C checks
+        // anchor at the field token or emit the correct Phase C code.
+        if let Some(qualifier) = &info.qualifier {
+            use smelt_types::signatures::SmeltType;
+            let qualifier_smelt_ty = body_ctx.lookup_function_param_smelt_type(qualifier);
+            let qualifier_is_meta_record = qualifier_smelt_ty
+                .map(|ty| {
+                    matches!(
+                        ty,
+                        SmeltType::ColumnRef | SmeltType::ModelRef | SmeltType::SourceRef
+                    )
+                })
+                .unwrap_or(false);
+            if qualifier_is_meta_record {
+                // All `<meta-record-param>.<field>` references are handled by
+                // the lift check (step 1b) for recognised ColumnRef fields and by
+                // `check_column_ref_field_diagnostics` (step 1c) /
+                // `check_model_ref_source_ref_field_diagnostics` (step 1d) for
+                // unrecognised fields. Skip here to avoid double-diagnostics.
+                continue;
+            }
+        }
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!(
@@ -1533,6 +1842,59 @@ fn check_function_select_body(
             code: Some(DiagnosticCode::UnknownIdentifier),
             data: None,
         });
+    }
+
+    // 1b. Meta-Text-as-identifier lift recognition (§"Meta-Text-as-identifier
+    //     lift").  `check_meta_text_lift_diagnostics` detects expressions in
+    //     SELECT / ORDER BY / GROUP BY that are meta-Text values
+    //     (`<columnref-param>.name`) but does NOT emit scope diagnostics at
+    //     body-check time.  The field-name token ("name") is not the
+    //     per-element column name that the lift resolves to at expansion time;
+    //     validating it against in-scope columns would produce false positives.
+    //     Expansion-time validation is the correct location (spec §Semantics
+    //     rule 6).  This loop is retained as a forward-compatibility hook for
+    //     any future diagnostics the function may emit.
+    for info in check_meta_text_lift_diagnostics(select_stmt, body_ctx) {
+        diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "Unknown identifier `{}` — not a parameter or in any enclosing scope",
+                info.column_name
+            ),
+            range: to_range(info.range, text),
+            code: Some(DiagnosticCode::UnknownIdentifier),
+            data: None,
+        });
+    }
+
+    // 1c. Phase C ColumnRef field validation (Phase C §"ColumnRef field access").
+    //     For each `<columnref-param>.<field>` expression where `<field>` is NOT
+    //     in the closed field set `{name, type, is_numeric}`, emit
+    //     `ColumnRefFieldUnknown` anchored at the field-name token.
+    //
+    //     This is separate from step 1a (which now suppresses ALL ColumnRef-
+    //     qualified references to avoid double-diagnostics) and step 1b (which
+    //     handles the valid `c.name` lift). Only *unrecognised* fields reach
+    //     this check.
+    for diag in check_column_ref_field_diagnostics(select_stmt, body_ctx, text) {
+        diagnostics.push(diag);
+    }
+
+    // 1d. Phase D ModelRef / SourceRef field validation.
+    //     For each `<modelref-param>.<field>` / `<sourceref-param>.<field>`
+    //     expression where `<field>` is NOT in the closed four-field set
+    //     `{path, name, tags, columns}`, emit `ModelRefFieldUnknown` /
+    //     `SourceRefFieldUnknown` anchored at the field-name token.
+    //
+    //     Also fires `check_wide_reflection_diagnostics` so that
+    //     `smelt.models.with_tag(42)` inside a function body gets
+    //     `WithTagRequiresText`, and `smelt.models.bogus()` gets
+    //     `WideReflectionUnknownAccessor`.
+    for diag in check_model_ref_source_ref_field_diagnostics(select_stmt, body_ctx, text) {
+        diagnostics.push(diag);
+    }
+    for diag in check_wide_reflection_diagnostics(select_stmt, body_ctx, text) {
+        diagnostics.push(diag);
     }
 
     // 2. Dispatch nested `smelt.functions.*` path-form calls so frames stack
@@ -2483,6 +2845,447 @@ pub fn declared_return_hover_text(sig: &FunctionSig) -> Option<String> {
 // tests in `crates/smelt-db/tests/as_struct_tests.rs`) keep working.
 pub use smelt_planner::lowering::{as_struct_to_sql, backend_supports_struct_literal};
 
+/// Phase C (meta-language) HOF dispatcher: check a SELECT statement for
+/// `ColumnRefFieldUnknown` errors that arise when a HOF lambda body accesses
+/// an invalid field on a `ColumnRef`-typed binding.
+///
+/// A HOF call whose **first argument** is a `smelt.columns_of(…)` path call
+/// produces a `List<ColumnRef>` source list.  Each lambda bound from that list
+/// receives a `ColumnRef`-typed parameter.  When the lambda body accesses a
+/// field that is not in the closed field set `{name, type, is_numeric}`, this
+/// function emits `ColumnRefFieldUnknown` anchored at the field-name token.
+///
+/// Algorithm (per spec §ColumnRef field access):
+/// 1. Walk every `FUNCTION_CALL` descendant of `select_stmt`.
+/// 2. Identify `map`/`filter` calls whose first argument is
+///    `smelt.columns_of(…)` (detected by AST shape: a `SMELT_PATH_CALL` node
+///    whose single segment is `"columns_of"`).
+/// 3. Extract the single-parameter lambda from the second argument.
+/// 4. Build a scratch `TypeContext` with the lambda parameter registered as
+///    `SmeltType::ColumnRef` (via `add_function_param_smelt_type`) so that
+///    `check_column_ref_field_diagnostics_for_expr` can identify it.
+/// 5. Walk the lambda body expression, emitting `ColumnRefFieldUnknown` for
+///    every `<param>.<field>` access where `<field>` is not `name`, `type`,
+///    or `is_numeric`.
+///
+/// Pure function — no Salsa dependency.
+pub fn check_hof_column_ref_field_diagnostics(
+    select_stmt: &SelectStmt,
+    text: &str,
+) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::{DOT, FUNCTION_CALL, IDENT, SMELT_PATH_CALL};
+
+    let mut diags = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != FUNCTION_CALL {
+            continue;
+        }
+        let call = match FunctionCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Get the HOF name, handling keyword-lexed names like `filter`.
+        let call_name_lc: String = call
+            .name()
+            .unwrap_or_else(|| {
+                call.syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia())
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default()
+            })
+            .to_lowercase();
+
+        // Only map/filter (reduce doesn't take a lambda).
+        if call_name_lc != "map" && call_name_lc != "filter" {
+            continue;
+        }
+
+        let args = call.arguments();
+        if args.len() < 2 {
+            continue;
+        }
+
+        // First arg: must be a smelt.columns_of(…) path call.
+        let first_arg = &args[0];
+        let is_columns_of = first_arg.syntax().descendants().any(|n| {
+            if n.kind() != SMELT_PATH_CALL {
+                return false;
+            }
+            let path_call = match SmeltPathCall::cast(n) {
+                Some(p) => p,
+                None => return false,
+            };
+            let segs = path_call.segments();
+            segs.len() == 1 && segs[0].to_lowercase() == "columns_of"
+        }) || {
+            // Direct SMELT_PATH_CALL at the arg level.
+            if first_arg.syntax().kind() == SMELT_PATH_CALL {
+                if let Some(pc) = SmeltPathCall::cast(first_arg.syntax().clone()) {
+                    let segs = pc.segments();
+                    segs.len() == 1 && segs[0].to_lowercase() == "columns_of"
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if !is_columns_of {
+            continue;
+        }
+
+        // Second arg: extract lambda parameter name and body.
+        let second_arg = &args[1];
+        let lambda: Option<Lambda> = Lambda::cast(second_arg.syntax().clone())
+            .or_else(|| second_arg.syntax().children().find_map(Lambda::cast));
+        let lambda = match lambda {
+            Some(l) => l,
+            None => continue,
+        };
+
+        let param_name = match lambda.params().into_iter().next() {
+            Some(n) => n,
+            None => continue,
+        };
+        let lambda_body = match lambda.body() {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Build a scratch context with the lambda param registered as ColumnRef.
+        let mut lambda_ctx = TypeContext::new();
+        lambda_ctx.add_function_param_smelt_type(&param_name, SmeltType::ColumnRef);
+        // Also register as an Unknown-typed scalar so bare `param` resolves
+        // via `lookup_identifier` (prevents spurious UnknownIdentifier).
+        lambda_ctx.add_function_param(
+            &param_name,
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // Walk the lambda body expression for ColumnRef field errors.
+        let body_root = lambda_body.syntax();
+        // Dedup tracker: same (qualifier, field) may appear in nested EXPRESSION
+        // wrappers — emit only once per pair.
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        let to_range = |range: rowan::TextRange| -> Range {
+            smelt_parser::ast::text_range_to_range(text, range)
+        };
+
+        for body_node in body_root.descendants() {
+            let expr = match Expr::cast(body_node.clone()) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            // Look for qualified column refs: `qualifier.field`.
+            let col_ref = match smelt_parser::ast::ColumnRef::from_expr(&expr) {
+                Some(cr) => cr,
+                None => continue,
+            };
+
+            let qualifier = match col_ref.qualifier() {
+                Some(q) => q,
+                None => continue,
+            };
+
+            // Is the qualifier registered as ColumnRef?
+            let is_column_ref = lambda_ctx
+                .lookup_function_param_smelt_type(qualifier)
+                .map(|ty| matches!(ty, SmeltType::ColumnRef))
+                .unwrap_or(false);
+
+            if !is_column_ref {
+                continue;
+            }
+
+            let field_name = col_ref.name();
+
+            // Valid field — skip.
+            if column_ref_field(field_name).is_some() {
+                continue;
+            }
+
+            // Deduplicate.
+            let key = (qualifier.to_string(), field_name.to_string());
+            if !seen.insert(key) {
+                continue;
+            }
+
+            // Find the field-name token (the IDENT after the DOT) for precise anchoring.
+            let field_token_range = {
+                let mut after_dot = false;
+                let mut found: Option<rowan::TextRange> = None;
+                for token in body_node
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                {
+                    let kind = token.kind();
+                    if kind == DOT {
+                        after_dot = true;
+                    } else if kind == IDENT && after_dot {
+                        found = Some(token.text_range());
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| body_node.text_range())
+            };
+
+            diags.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: crate::meta_reflection_diagnostic_message(
+                    DiagnosticCode::ColumnRefFieldUnknown,
+                    None,
+                    Some(field_name),
+                ),
+                range: to_range(field_token_range),
+                code: Some(DiagnosticCode::ColumnRefFieldUnknown),
+                data: None,
+            });
+        }
+    }
+
+    diags
+}
+
+/// Phase D (meta-language) — HOF lambda body check for `ModelRef` / `SourceRef`
+/// field projections.
+///
+/// Mirrors `check_hof_column_ref_field_diagnostics` for the `ModelRef` /
+/// `SourceRef` record types.  For each `map` / `filter` HOF call whose first
+/// argument is a wide-reflection accessor call (`smelt.models.*` or
+/// `smelt.sources.*`), this function:
+///
+/// 1. Determines the element type of the list (`ModelRef` for `smelt.models.*`,
+///    `SourceRef` for `smelt.sources.*`).
+/// 2. Extracts the lambda parameter name.
+/// 3. Builds a scratch `TypeContext` with the parameter registered as the
+///    appropriate meta-record type.
+/// 4. Walks the lambda body for `<param>.<field>` accesses where `<field>` is
+///    not in the closed field set `{path, name, tags, columns}` and emits
+///    `ModelRefFieldUnknown` / `SourceRefFieldUnknown` anchored at the
+///    field-name token.
+///
+/// Pure function — no Salsa dependency.
+pub fn check_hof_model_ref_source_ref_field_diagnostics(
+    select_stmt: &SelectStmt,
+    text: &str,
+) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::{DOT, FUNCTION_CALL, IDENT, SMELT_PATH_CALL};
+    use smelt_types::signatures::{model_ref_field, source_ref_field, SmeltType};
+
+    let mut diags = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != FUNCTION_CALL {
+            continue;
+        }
+        let call = match FunctionCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Only map/filter HOFs.
+        let call_name_lc: String = call
+            .name()
+            .unwrap_or_else(|| {
+                call.syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia())
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default()
+            })
+            .to_lowercase();
+        if call_name_lc != "map" && call_name_lc != "filter" {
+            continue;
+        }
+
+        let args = call.arguments();
+        if args.len() < 2 {
+            continue;
+        }
+
+        // First arg: must be a wide-reflection smelt path call
+        // (`smelt.models.*` or `smelt.sources.*`).
+        let first_arg = &args[0];
+        let wide_reflection_ns: Option<SmeltType> = first_arg
+            .syntax()
+            .descendants()
+            .find_map(|n| {
+                if n.kind() != SMELT_PATH_CALL {
+                    return None;
+                }
+                let path_call = SmeltPathCall::cast(n)?;
+                let segs = path_call.segments();
+                if segs.len() != 2 {
+                    return None;
+                }
+                match segs[0].to_lowercase().as_str() {
+                    "models" => Some(SmeltType::ModelRef),
+                    "sources" => Some(SmeltType::SourceRef),
+                    _ => None,
+                }
+            })
+            .or_else(|| {
+                if first_arg.syntax().kind() != SMELT_PATH_CALL {
+                    return None;
+                }
+                let pc = SmeltPathCall::cast(first_arg.syntax().clone())?;
+                let segs = pc.segments();
+                if segs.len() != 2 {
+                    return None;
+                }
+                match segs[0].to_lowercase().as_str() {
+                    "models" => Some(SmeltType::ModelRef),
+                    "sources" => Some(SmeltType::SourceRef),
+                    _ => None,
+                }
+            });
+
+        let elem_ty = match wide_reflection_ns {
+            Some(ty) => ty,
+            None => continue,
+        };
+
+        // Second arg: extract lambda parameter name and body.
+        let second_arg = &args[1];
+        let lambda: Option<Lambda> = Lambda::cast(second_arg.syntax().clone())
+            .or_else(|| second_arg.syntax().children().find_map(Lambda::cast));
+        let lambda = match lambda {
+            Some(l) => l,
+            None => continue,
+        };
+
+        let param_name = match lambda.params().into_iter().next() {
+            Some(n) => n,
+            None => continue,
+        };
+        let lambda_body = match lambda.body() {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Build a scratch context with the lambda param registered as ModelRef or SourceRef.
+        let mut lambda_ctx = TypeContext::new();
+        lambda_ctx.add_function_param_smelt_type(&param_name, elem_ty.clone());
+        // Also register as Unknown-typed scalar so bare `param` resolves
+        // via `lookup_identifier` (prevents spurious UnknownIdentifier).
+        use smelt_types::TypedColumn;
+        lambda_ctx.add_function_param(
+            &param_name,
+            TypedColumn {
+                data_type: smelt_types::DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        let is_model_ref = matches!(elem_ty, SmeltType::ModelRef);
+
+        // Walk the lambda body for field errors.
+        let body_root = lambda_body.syntax();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        let to_range = |range: rowan::TextRange| -> Range {
+            smelt_parser::ast::text_range_to_range(text, range)
+        };
+
+        for body_node in body_root.descendants() {
+            let expr = match smelt_parser::ast::Expr::cast(body_node.clone()) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            let col_ref = match smelt_parser::ast::ColumnRef::from_expr(&expr) {
+                Some(cr) => cr,
+                None => continue,
+            };
+
+            let qualifier = match col_ref.qualifier() {
+                Some(q) => q,
+                None => continue,
+            };
+
+            // Is the qualifier registered as ModelRef/SourceRef?
+            let registered_ty = lambda_ctx
+                .lookup_function_param_smelt_type(qualifier)
+                .cloned();
+            let matches_elem = match &registered_ty {
+                Some(SmeltType::ModelRef) => is_model_ref,
+                Some(SmeltType::SourceRef) => !is_model_ref,
+                _ => false,
+            };
+            if !matches_elem {
+                continue;
+            }
+
+            let field_name = col_ref.name();
+
+            // Valid field — skip.
+            let field_known = if is_model_ref {
+                model_ref_field(field_name).is_some()
+            } else {
+                source_ref_field(field_name).is_some()
+            };
+            if field_known {
+                continue;
+            }
+
+            // Deduplicate.
+            let key = (qualifier.to_string(), field_name.to_string());
+            if !seen.insert(key) {
+                continue;
+            }
+
+            // Find the field-name token (the IDENT after the DOT).
+            let field_token_range = {
+                let mut after_dot = false;
+                let mut found: Option<rowan::TextRange> = None;
+                for token in body_node
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                {
+                    let kind = token.kind();
+                    if kind == DOT {
+                        after_dot = true;
+                    } else if kind == IDENT && after_dot {
+                        found = Some(token.text_range());
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| body_node.text_range())
+            };
+
+            let code = if is_model_ref {
+                DiagnosticCode::ModelRefFieldUnknown
+            } else {
+                DiagnosticCode::SourceRefFieldUnknown
+            };
+            diags.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: crate::meta_reflection_diagnostic_message(code, None, Some(field_name)),
+                range: to_range(field_token_range),
+                code: Some(code),
+                data: None,
+            });
+        }
+    }
+
+    diags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2554,5 +3357,678 @@ mod tests {
         );
         let diags = check_function_body(&sig, &body, &text);
         assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+    }
+
+    // === Phase B (meta-language Phase 3) TDD tests: HOF expansion frames ===
+
+    /// A type error inside a HOF lambda body carries an `ExpansionFrames` payload
+    /// whose innermost frame has `function = "<map>"`, `fn_id = None`, and
+    /// `call_site_range` set to the span of the `map(...)` call.
+    ///
+    /// This exercises the anonymous-frame stamping: HOF calls push a frame with
+    /// `fn_id = None` (anonymous) and angle-bracketed name (`"<map>"`) before
+    /// walking the lambda body diagnostics.
+    #[test]
+    fn hof_lambda_body_diagnostic_carries_anonymous_frame() {
+        use crate::type_inference::{check_hof_position_diagnostics, TypeContext};
+
+        // Parse a SELECT containing a map HOF whose lambda body has a type error:
+        // `fn c => c + 'hello'` — `c` is SmallInt (from [1,2,3]), `'hello'` is Text.
+        let sql = "SELECT map([1, 2, 3], fn c => c + 'hello') FROM t";
+        let parse = smelt_parser::parse(sql);
+        let ast = smelt_parser::ast::File::cast(parse.syntax()).expect("file");
+        let select = ast.select_stmt().expect("one SELECT");
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, sql);
+
+        // There must be at least one diagnostic stamped with an anonymous HOF frame.
+        // The function field must use the angle-bracketed form `"<map>"` per spec §FrameInfo.
+        let frame_diag = diags.iter().find(|d| {
+            matches!(
+                &d.data,
+                Some(crate::DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.fn_id.is_none() && f.function == "<map>")
+            )
+        });
+        assert!(
+            frame_diag.is_some(),
+            "HOF lambda body diagnostic must carry an anonymous <map> frame (angle-bracketed); got: {diags:?}"
+        );
+    }
+
+    /// `walk_hof_lambda_body_with_anonymous_frame` with `nested = Some(handler)`
+    /// propagates the handler into `walk_body` so SMELT_PATH_CALL nodes inside
+    /// the lambda body still receive frame stamping.
+    ///
+    /// Also verifies the `<map>` bracket form: even when `nested` is wired,
+    /// the anonymous HOF frame carries `function = "<map>"`.
+    #[test]
+    fn hof_lambda_body_with_nested_wired_propagates_and_brackets_hof_name() {
+        use crate::type_inference::TypeContext;
+
+        // Parse a smelt.define whose body has an unknown identifier `bad_expr`.
+        // `walk_body` will emit `UnknownIdentifier`; the anonymous HOF frame wraps it.
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        // Lambda context has no bindings — `bad_expr` is unknown.
+        let lambda_ctx = TypeContext::new();
+
+        // A nested handler that simply returns no diagnostics (no SMELT_PATH_CALL
+        // nodes exist in this body anyway — we verify `nested` is wired without
+        // panicking, and that the HOF frame is still stamped correctly).
+        let nested_fn: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = walk_hof_lambda_body_with_anonymous_frame(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            Some(nested_fn),
+        );
+
+        // The unknown identifier should produce an UnknownIdentifier diagnostic
+        // wrapped with a `<map>` anonymous HOF frame (angle-bracketed form).
+        let frame_diag = diags.iter().find(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.fn_id.is_none() && f.function == "<map>")
+            )
+        });
+        assert!(
+            frame_diag.is_some(),
+            "walk_hof_lambda_body_with_anonymous_frame with nested=Some must stamp \
+             a <map> anonymous frame (angle-bracketed); got: {diags:?}"
+        );
+    }
+
+    // ─── Phase C Phase 2: pipeline integration tests ──────────────────────────
+    //
+    // These tests verify that `check_function_select_body` (called from the real
+    // diagnostic pipeline) correctly handles `<columnref-param>.<field>` references:
+    //   - No spurious `UnknownIdentifier` emitted by `check_undeclared_columns`.
+    //   - Lift diagnostics from `check_meta_text_lift_diagnostics` are wired in.
+    //
+    // We call `check_function_select_body` directly (it is private but we are in
+    // the same module) rather than going through the full Salsa pipeline, which
+    // would require a real database and file system.
+    //
+    // `check_function_select_body` accepts `_sig: &FunctionSig` but does NOT
+    // inspect it internally (the leading underscore is intentional); we parse a
+    // minimal smelt.define and use the extracted sig purely to satisfy the type.
+
+    /// Parse a minimal `smelt.define` to obtain a `FunctionSig` for passing to
+    /// `check_function_select_body`.  The sig is not inspected by the function.
+    fn minimal_sig() -> FunctionSig {
+        let text = "smelt.define test_fn(x: Expr<Integer>) AS (x)\n";
+        let clean = smelt_parser::strip_frontmatter(text).to_string();
+        let p = smelt_parser::parse(&clean);
+        let ast = AstFile::cast(p.syntax()).expect("FILE");
+        extract_function_signatures(&ast, &clean)
+            .into_iter()
+            .next()
+            .expect("one define")
+    }
+
+    /// Build a `TypeContext` seeded with:
+    ///   - `c: ColumnRef` (function parameter via `add_function_param_smelt_type`)
+    ///   - `c` also as an `Unknown`-typed `function_param` so bare `c` resolves
+    ///   - model columns `t.name (Text)` and `t.amount (Double)`
+    ///   - alias `t → t`
+    fn make_pipeline_ctx() -> TypeContext {
+        use smelt_types::signatures::SmeltType;
+        let mut ctx = TypeContext::new();
+        // Register the ColumnRef smelt-type so is_meta_text_value fires and
+        // the suppression check in check_function_select_body triggers.
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        // Also register `c` as an Unknown-typed function param so bare `c`
+        // resolves via lookup_identifier (prevents a spurious UnknownIdentifier
+        // for the bare qualifier itself).
+        ctx.add_function_param(
+            "c",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx.add_model_column(
+            "t",
+            "name",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Text,
+                nullable: true,
+            },
+        );
+        ctx.add_model_column(
+            "t",
+            "amount",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Double,
+                nullable: true,
+            },
+        );
+        ctx.add_alias("t", "t");
+        ctx
+    }
+
+    /// Parse a SELECT statement from a bare SQL string (no smelt.define wrapper).
+    fn parse_select_for_pipeline(sql: &str) -> smelt_parser::ast::SelectStmt {
+        let parse = smelt_parser::parse(sql);
+        let ast = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
+        ast.select_stmt().expect("one SELECT")
+    }
+
+    /// `check_function_select_body` with `c: ColumnRef` and body
+    /// `SELECT c.name FROM t` where `name` is in scope must emit ZERO diagnostics —
+    /// no spurious `UnknownIdentifier` from `check_undeclared_columns` and no
+    /// lift error from `check_meta_text_lift_diagnostics`.
+    #[test]
+    fn pipeline_column_ref_name_in_scope_produces_no_diagnostics() {
+        let sig = minimal_sig();
+        let ctx = make_pipeline_ctx();
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_for_pipeline(sql);
+
+        let no_op_nested: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
+
+        assert!(
+            diags.is_empty(),
+            "SELECT c.name FROM t with c: ColumnRef and 'name' in scope must produce \
+             ZERO diagnostics from the pipeline — no spurious UnknownIdentifier and no \
+             lift error; got: {diags:?}"
+        );
+    }
+
+    /// `check_function_select_body` with `c: ColumnRef` and body
+    /// `SELECT c.foo FROM t` where `foo` is NOT a recognised ColumnRef field must
+    /// emit EXACTLY ONE `ColumnRefFieldUnknown` (Phase C spec).
+    ///
+    /// The suppression gate fires for ALL ColumnRef-qualified references
+    /// (`qualifier_is_column_ref` is sufficient) to avoid double-diagnostics.
+    /// `check_column_ref_field_diagnostics` (step 1c) then emits `ColumnRefFieldUnknown`
+    /// anchored at the field-name token, which is the Phase C spec-required behaviour.
+    #[test]
+    fn pipeline_column_ref_non_text_field_emits_column_ref_field_unknown() {
+        let sig = minimal_sig();
+        let ctx = make_pipeline_ctx();
+        let sql = "SELECT c.foo FROM t";
+        let select = parse_select_for_pipeline(sql);
+
+        let no_op_nested: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
+
+        // `c.foo` — `foo` is not a recognised ColumnRef field (`column_ref_field("foo")` = None).
+        // Phase C: the suppression gate fires for ALL ColumnRef-qualified refs, and
+        // `check_column_ref_field_diagnostics` emits `ColumnRefFieldUnknown` for the unknown field.
+        // This is one and only one diagnostic — no double-diagnostic from check_undeclared_columns.
+        assert_eq!(
+            diags.len(),
+            1,
+            "SELECT c.foo FROM t must produce exactly one ColumnRefFieldUnknown — \
+             foo is not a recognised ColumnRef field; got: {diags:?}"
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(DiagnosticCode::ColumnRefFieldUnknown),
+            "diagnostic must be ColumnRefFieldUnknown; got: {:?}",
+            diags[0].code
+        );
+    }
+
+    /// `check_function_select_body` with `c: ColumnRef` and body
+    /// `SELECT c.name FROM t` where no column literally named `"name"` exists in
+    /// the body context must emit ZERO diagnostics.
+    ///
+    /// Body-check-time scope validation for lifted identifiers is suppressed:
+    /// `check_meta_text_lift_diagnostics` returns the field-name token `"name"`,
+    /// not the per-element column name that `c.name` resolves to at expansion time.
+    /// Validating that token against in-scope columns produces false positives in
+    /// the common case where no column happens to be literally named `"name"`.
+    /// Expansion-time validation (after the per-element column name is known)
+    /// is the correct location per spec §Semantics rule 6.
+    #[test]
+    fn pipeline_column_ref_name_not_in_scope_emits_no_diagnostics() {
+        use smelt_types::signatures::SmeltType;
+
+        let sig = minimal_sig();
+
+        // Build a context where `c` is ColumnRef but the model has NO `name` column.
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx.add_function_param(
+            "c",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Unknown,
+                nullable: true,
+            },
+        );
+        // Only `amount` — no `name`.
+        ctx.add_model_column(
+            "t",
+            "amount",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Double,
+                nullable: true,
+            },
+        );
+        ctx.add_alias("t", "t");
+
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_for_pipeline(sql);
+
+        let no_op_nested: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
+
+        // Zero diagnostics: body-check-time lift-scope validation is suppressed.
+        // `check_undeclared_columns` is suppressed for the ColumnRef qualifier `c`
+        // (step 1a), and `check_meta_text_lift_diagnostics` (step 1b) returns
+        // no diagnostics because expansion-time column names are not yet known.
+        assert!(
+            diags.is_empty(),
+            "SELECT c.name FROM t with 'name' NOT literally in scope must produce ZERO \
+             diagnostics — body-check-time lift-scope validation is suppressed; got: {diags:?}"
+        );
+    }
+
+    // ─── Phase C Phase 3 TDD tests ────────────────────────────────────────────
+
+    /// `walk_hof_lambda_body_with_anonymous_frame` with a concrete
+    /// `column_origin` stamps that origin onto the resulting frame.
+    ///
+    /// When the HOF source list comes from `smelt.columns_of(t)`, the
+    /// per-element frame's `column_origin` must be set to the column's source
+    /// span from the upstream schema. This test exercises the frame-stamping
+    /// path by calling a variant that accepts an explicit `column_origin`.
+    ///
+    /// DEFERRED (Phase 5): The full integration path — where `smelt.columns_of(orders)`
+    /// feeds a HOF source list and each per-element expansion frame carries
+    /// `column_origin = Some(span_of_column_in_source_schema)` flowing from the
+    /// `ModelSchema`'s column declaration spans — is deferred to Phase 5 (HOF
+    /// expansion wiring). The current test calls
+    /// `walk_hof_lambda_body_with_anonymous_frame_and_origin` directly with a
+    /// hand-constructed span, which verifies the frame-stamping mechanism in
+    /// isolation but does NOT exercise the `columns_of` source-list path. A full
+    /// integration test requires the HOF expansion dispatcher to call
+    /// `columns_of_for_table_expr`, iterate the resulting `ColumnRefValue`s, and
+    /// pass each `ColumnRefValue::source_span` as the `column_origin` argument —
+    /// that dispatcher wiring does not yet exist. Re-enable and rewrite once
+    /// Phase 5 HOF expansion is complete.
+    #[test]
+    #[ignore = "deferred to Phase 5: HOF expansion wiring for smelt.columns_of source lists not yet integrated"]
+    fn columns_of_hof_lambda_carries_column_origin_frame() {
+        use crate::type_inference::TypeContext;
+        use rowan::TextRange;
+        use rowan::TextSize;
+
+        // Set up a body expression that will produce an error (unknown identifier).
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        // Simulate a concrete column origin span (e.g. column "id" declared at offset 7–9).
+        let origin = TextRange::new(TextSize::from(7u32), TextSize::from(9u32));
+
+        let diags = walk_hof_lambda_body_with_anonymous_frame_and_origin(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            Some(origin),
+        );
+
+        // The frame must carry the column_origin we passed in.
+        let frame_diag = diags.iter().find(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.column_origin == Some(origin))
+            )
+        });
+        assert!(
+            frame_diag.is_some(),
+            "HOF frame must carry the column_origin span; got: {diags:?}"
+        );
+    }
+
+    /// `check_columns_of_unresolvable_schema` emits `ColumnsOfUnresolvableSchema`
+    /// anchored at the call site and the surrounding splice drops (empty diagnostics
+    /// from the HOF handler).
+    ///
+    /// The drop-on-error policy matches `MetaSpreadInForbiddenPosition`: the
+    /// diagnostic is emitted and no further cascading errors surface from inside
+    /// the lambda body.
+    ///
+    /// DEFERRED (Phase 5): The spec's drop-on-error invariant requires the HOF
+    /// expansion dispatcher to: (a) call `columns_of_for_table_expr` which returns
+    /// `Err(())` for an unresolvable model, (b) emit exactly one
+    /// `ColumnsOfUnresolvableSchema` diagnostic anchored at the `smelt.columns_of`
+    /// call-site span, and (c) suppress all cascading diagnostics from the lambda
+    /// body for that HOF call.  That HOF expansion dispatcher wiring does not yet
+    /// exist (Phase 5 scope).  The current test only exercises the message-function
+    /// and the diagnostic code round-trip, not the pipeline invariant.  Re-enable
+    /// and rewrite to set up a full workspace with a function containing
+    /// `map(smelt.columns_of(t), fn c => SOME_BODY)` where `t` resolves to an
+    /// `Unknown` schema, run `file_diagnostics`, and assert exactly one
+    /// `ColumnsOfUnresolvableSchema` diagnostic with no cascading diagnostics from
+    /// inside the lambda body.
+    #[test]
+    #[ignore = "deferred to Phase 5: ColumnsOfUnresolvableSchema drop-on-error HOF wiring not yet integrated"]
+    fn columns_of_unresolvable_schema_drops_with_diagnostic() {
+        // Build a diagnostic directly via the Phase C message function.
+        let msg = crate::meta_reflection_diagnostic_message_with_table_expr(
+            crate::DiagnosticCode::ColumnsOfUnresolvableSchema,
+            None,
+            None,
+            Some("smelt.models.nonexistent"),
+        );
+        assert_eq!(
+            msg,
+            "cannot resolve column list for smelt.models.nonexistent; upstream schema is unknown",
+            "ColumnsOfUnresolvableSchema message must match spec"
+        );
+
+        // Simulate constructing a drop diagnostic — the message is produced and
+        // the surrounding splice would emit nothing else.
+        let drop_diag = crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: msg.clone(),
+            range: crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            },
+            code: Some(crate::DiagnosticCode::ColumnsOfUnresolvableSchema),
+            data: None,
+        };
+        // Verify the diagnostic round-trips correctly.
+        assert_eq!(
+            drop_diag.code,
+            Some(crate::DiagnosticCode::ColumnsOfUnresolvableSchema)
+        );
+        assert!(drop_diag.message.contains("nonexistent"));
+    }
+
+    /// `column_origin_passed_through_to_first_frame` verifies that the
+    /// `column_origin` argument supplied to
+    /// `walk_hof_lambda_body_with_anonymous_frame_and_origin` is carried verbatim
+    /// onto the resulting anonymous frame (single-element check).
+    ///
+    /// End-to-end ordering across multiple `ColumnRef` source elements is verified
+    /// by `columns_of_expansion_preserves_source_ordering_pure` in `tests.rs`,
+    /// which exercises `columns_to_column_ref_values` directly. Multi-element
+    /// dispatcher integration is deferred (see plan's "Deferred during
+    /// implementation" §"Phase 3 — production HOF expansion dispatcher
+    /// integration").
+    #[test]
+    fn column_origin_passed_through_to_first_frame() {
+        use crate::type_inference::TypeContext;
+        use rowan::{TextRange, TextSize};
+
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        // First column origin (column "id" at offset 0–2).
+        let first_origin = TextRange::new(TextSize::from(0u32), TextSize::from(2u32));
+
+        // Walk the lambda body with the first column's origin.
+        let diags = walk_hof_lambda_body_with_anonymous_frame_and_origin(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            Some(first_origin),
+        );
+
+        // The frame must have column_origin = Some(first_origin).
+        let has_first_origin = diags.iter().any(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.column_origin == Some(first_origin))
+            )
+        });
+        assert!(
+            has_first_origin,
+            "frame for first column must carry first_origin; got: {diags:?}"
+        );
+    }
+
+    /// `columns_of_for_table_expr` with two different models at call-site produces
+    /// different concrete column lists, proving per-call-site schema-resolution works.
+    ///
+    /// This verifies the call-site materialisation behaviour: when a function
+    /// `f(t: TableExpr)` is called with `orders` vs `products`, the resolved
+    /// `ColumnRefValue` lists differ.  The test exercises the Salsa query
+    /// `columns_of_for_table_expr` directly (the machinery that wires expansion-time
+    /// call-site arguments to concrete schemas), without requiring the full HOF
+    /// expansion pipeline which is deferred to Phase 5.
+    #[test]
+    fn columns_of_in_table_expr_parameter_uses_call_site_schema() {
+        use crate::test_harness::TestDb;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let mut db = TestDb::default();
+
+        // Model `orders` with columns: id, amount.
+        let orders_path = PathBuf::from("models/orders.sql");
+        db.set_file_text(
+            orders_path.clone(),
+            Arc::new("SELECT 1 AS id, 9.99 AS amount FROM source.raw_orders".to_string()),
+        );
+
+        // Model `products` with columns: sku, price.
+        let products_path = PathBuf::from("models/products.sql");
+        db.set_file_text(
+            products_path.clone(),
+            Arc::new("SELECT 'A1' AS sku, 4.99 AS price FROM source.raw_products".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![orders_path.clone(), products_path.clone()]));
+        db.set_file_project_root(orders_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(products_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+        let ws = db.sync_workspace();
+
+        // Call-site: f(orders) → columns [id, amount].
+        let orders_cols = crate::columns_of_for_table_expr(&db.db, ws, "orders".to_string())
+            .expect("columns_of_for_table_expr must resolve orders");
+        assert_eq!(
+            orders_cols.len(),
+            2,
+            "orders has 2 columns; got: {:?}",
+            orders_cols
+        );
+        assert_eq!(orders_cols[0].name, "id");
+        assert_eq!(orders_cols[1].name, "amount");
+
+        // Call-site: f(products) → columns [sku, price].
+        let products_cols = crate::columns_of_for_table_expr(&db.db, ws, "products".to_string())
+            .expect("columns_of_for_table_expr must resolve products");
+        assert_eq!(
+            products_cols.len(),
+            2,
+            "products has 2 columns; got: {:?}",
+            products_cols
+        );
+        assert_eq!(products_cols[0].name, "sku");
+        assert_eq!(products_cols[1].name, "price");
+
+        // The two call sites with different `t` arguments produce different column lists.
+        let orders_names: Vec<&str> = orders_cols.iter().map(|c| c.name.as_str()).collect();
+        let products_names: Vec<&str> = products_cols.iter().map(|c| c.name.as_str()).collect();
+        assert_ne!(
+            orders_names, products_names,
+            "orders and products must produce different column lists; \
+             per-call-site schema-resolution must not conflate models"
+        );
+    }
+
+    // === Phase D (meta-language) tests — wide-reflection HOF frame extensions ===
+
+    /// A HOF lambda body that errors when its source list comes from
+    /// `smelt.models.*` carries a Phase D anonymous frame whose
+    /// `model_origin` field is `Some(...)`.
+    ///
+    /// This test calls `walk_hof_lambda_body_with_wide_reflection_frame` directly
+    /// with a hand-constructed `ModelOrigin`, verifying the frame-stamping
+    /// mechanism in isolation.
+    #[test]
+    fn wide_reflection_hof_lambda_carries_model_origin_frame() {
+        use smelt_types::signatures::ModelOrigin;
+
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        let origin = ModelOrigin {
+            path: "models/cohort_model.sql".to_string(),
+            frontmatter_span: None,
+        };
+
+        let diags = walk_hof_lambda_body_with_wide_reflection_frame(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            Some(origin.clone()),
+            None, // source_origin
+        );
+
+        // The frame must have model_origin = Some(origin) and source_origin = None.
+        let has_model_origin = diags.iter().any(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.model_origin.as_ref() == Some(&origin)
+                        && f.source_origin.is_none()
+                        && f.fn_id.is_none()) // anonymous frame
+            )
+        });
+        assert!(
+            has_model_origin,
+            "HOF frame must carry model_origin; got: {diags:?}"
+        );
+    }
+
+    /// A HOF lambda body that errors when its source list comes from
+    /// `smelt.sources.*` carries a Phase D anonymous frame whose
+    /// `source_origin` field is `Some(...)`.
+    #[test]
+    fn wide_reflection_hof_lambda_carries_source_origin_frame() {
+        use smelt_types::signatures::SourceOrigin;
+
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        let origin = SourceOrigin {
+            path: "models/raw/events.yml".to_string(),
+            declaration_span: None,
+        };
+
+        let diags = walk_hof_lambda_body_with_wide_reflection_frame(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            None, // model_origin
+            Some(origin.clone()),
+        );
+
+        // The frame must have source_origin = Some(origin) and model_origin = None.
+        let has_source_origin = diags.iter().any(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.source_origin.as_ref() == Some(&origin)
+                        && f.model_origin.is_none()
+                        && f.fn_id.is_none()) // anonymous frame
+            )
+        });
+        assert!(
+            has_source_origin,
+            "HOF frame must carry source_origin; got: {diags:?}"
+        );
+    }
+
+    /// `smelt.models.with_tag(t)` materialises ModelRef values in
+    /// workspace-relative path-sorted order. This test uses the Salsa query
+    /// layer to verify that `models_with_tag` returns results in the same order
+    /// the spec mandates ("byte-lexicographic on the workspace-relative path
+    /// with `/` separators").
+    #[test]
+    fn wide_reflection_expansion_preserves_path_order() {
+        use crate::test_harness::TestDb;
+        use std::sync::Arc;
+
+        let mut db = TestDb::default();
+        let root = std::path::PathBuf::from(".");
+
+        // Three models with `cohort` tag — registered in reverse order to verify
+        // that the query produces path-sorted output regardless of insertion order.
+        let paths = [
+            (
+                "models/z_last.sql",
+                "---\ntags: [cohort]\n---\nSELECT 1 AS id FROM s.t",
+            ),
+            (
+                "models/a_first.sql",
+                "---\ntags: [cohort]\n---\nSELECT 2 AS id FROM s.t",
+            ),
+            (
+                "models/m_middle.sql",
+                "---\ntags: [cohort]\n---\nSELECT 3 AS id FROM s.t",
+            ),
+        ];
+
+        for (path_str, text) in &paths {
+            let p = std::path::PathBuf::from(path_str);
+            db.set_file_text(p.clone(), Arc::new(text.to_string()));
+            db.set_file_project_root(p.clone(), root.clone());
+        }
+        db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![root.clone()]));
+        let ws = db.sync_workspace();
+
+        let result = crate::models_with_tag(&db.db, ws, "cohort".to_string());
+
+        assert_eq!(result.len(), 3);
+        // Path-sorted order: a_first < m_middle < z_last.
+        assert!(
+            result[0].path.contains("a_first"),
+            "first must be a_first; got {}",
+            result[0].path
+        );
+        assert!(
+            result[1].path.contains("m_middle"),
+            "second must be m_middle; got {}",
+            result[1].path
+        );
+        assert!(
+            result[2].path.contains("z_last"),
+            "third must be z_last; got {}",
+            result[2].path
+        );
     }
 }

@@ -3506,3 +3506,1933 @@ fn test_three_way_cycle_recovery() {
     let _diags_b = db.file_diagnostics(b_path);
     let _diags_c = db.file_diagnostics(c_path);
 }
+
+// === Phase A (meta-language) TDD tests: DiagnosticCode variants ===
+
+/// `MetaListEmptyTypeUnknown` exists in the `DiagnosticCode` enum and
+/// renders the spec message format: "cannot infer element type for empty
+/// list literal".
+#[test]
+fn diagnostic_code_meta_list_empty_type_unknown() {
+    let code = DiagnosticCode::MetaListEmptyTypeUnknown;
+    // Pattern-match to confirm the variant is reachable.
+    assert!(matches!(code, DiagnosticCode::MetaListEmptyTypeUnknown));
+    // Render the canonical message via the spec message helper.
+    let msg = meta_list_diagnostic_message(code, None, None, None);
+    assert_eq!(
+        msg, "cannot infer element type for empty list literal",
+        "MetaListEmptyTypeUnknown message must match spec"
+    );
+}
+
+/// `MetaListHeterogeneous` exists in the `DiagnosticCode` enum and
+/// renders the spec message format: "list elements have incompatible
+/// types: {T0}, {Tk}".
+#[test]
+fn diagnostic_code_meta_list_heterogeneous() {
+    let code = DiagnosticCode::MetaListHeterogeneous;
+    assert!(matches!(code, DiagnosticCode::MetaListHeterogeneous));
+    let msg = meta_list_diagnostic_message(code, Some("Expr<Integer>"), Some("Expr<Text>"), None);
+    assert_eq!(
+        msg, "list elements have incompatible types: Expr<Integer>, Expr<Text>",
+        "MetaListHeterogeneous message must match spec"
+    );
+}
+
+/// `MetaSpreadInForbiddenPosition` exists in the `DiagnosticCode` enum and
+/// renders the spec message format: "spread is not allowed in {position name}".
+#[test]
+fn diagnostic_code_meta_spread_in_forbidden_position() {
+    let code = DiagnosticCode::MetaSpreadInForbiddenPosition;
+    assert!(matches!(
+        code,
+        DiagnosticCode::MetaSpreadInForbiddenPosition
+    ));
+    let msg = meta_list_diagnostic_message(code, None, None, Some("WHERE clause"));
+    assert_eq!(
+        msg, "spread is not allowed in WHERE clause",
+        "MetaSpreadInForbiddenPosition message must match spec"
+    );
+}
+
+/// `MetaSpreadOnNonList` exists in the `DiagnosticCode` enum and renders
+/// the spec message format: "spread expects List<T>; found {actual type}".
+#[test]
+fn diagnostic_code_meta_spread_on_non_list() {
+    let code = DiagnosticCode::MetaSpreadOnNonList;
+    assert!(matches!(code, DiagnosticCode::MetaSpreadOnNonList));
+    let msg = meta_list_diagnostic_message(code, None, Some("Expr<Integer>"), None);
+    assert_eq!(
+        msg, "spread expects List<T>; found Expr<Integer>",
+        "MetaSpreadOnNonList message must match spec"
+    );
+}
+
+// === Phase A Phase 3 — production-path (Salsa) tests ===
+//
+// These tests call `db.file_diagnostics()` (the Salsa query path) to verify
+// that the pure meta-language check functions are properly wired into the
+// production diagnostics pipeline.
+//
+// A test MUST go red before the wiring is added, green after. Comments
+// indicate which state each test entered.
+
+/// Production path: `SELECT ...[1, 'x'] FROM t` — heterogeneous inline spread —
+/// must produce exactly one `MetaListHeterogeneous` diagnostic via `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_spread_heterogeneous_list_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT ...[1, 'x'] FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaListHeterogeneous))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT ...[1, 'x'] FROM t must produce exactly 1 MetaListHeterogeneous; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT id, ...[], created_at FROM t` — empty-list spread —
+/// must produce zero meta-language diagnostics via `file_diagnostics`.
+///
+/// Was RED (would fail to call the pure function) before wiring.
+/// After wiring: GREEN — empty spread is valid, no meta diagnostics.
+#[test]
+fn production_path_spread_empty_list_no_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT id, ...[], created_at FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::MetaListHeterogeneous)
+                    | Some(DiagnosticCode::MetaListEmptyTypeUnknown)
+                    | Some(DiagnosticCode::MetaSpreadInForbiddenPosition)
+                    | Some(DiagnosticCode::MetaSpreadOnNonList)
+            )
+        })
+        .collect();
+    assert!(
+        meta_diags.is_empty(),
+        "SELECT id, ...[], created_at FROM t must produce zero meta-language diagnostics; \
+         got: {:?}",
+        meta_diags
+    );
+}
+
+/// Production path: `SELECT id, ...[a, b], created_at FROM t` — valid spread of
+/// homogeneous list — must produce zero meta-language diagnostics via
+/// `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_spread_valid_no_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT id, ...[a, b], created_at FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::MetaListHeterogeneous)
+                    | Some(DiagnosticCode::MetaListEmptyTypeUnknown)
+                    | Some(DiagnosticCode::MetaSpreadInForbiddenPosition)
+                    | Some(DiagnosticCode::MetaSpreadOnNonList)
+            )
+        })
+        .collect();
+    assert!(
+        meta_diags.is_empty(),
+        "SELECT id, ...[a, b], created_at FROM t must produce zero meta-language diagnostics; \
+         got: {:?}",
+        meta_diags
+    );
+}
+
+/// Production path: `SELECT * FROM t WHERE x = 1 AND ...preds` — spread in WHERE —
+/// must produce exactly one `MetaSpreadInForbiddenPosition` diagnostic via
+/// `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_spread_in_where_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT * FROM t WHERE x = 1 AND ...preds");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaSpreadInForbiddenPosition))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT * FROM t WHERE x = 1 AND ...preds must produce exactly 1 \
+         MetaSpreadInForbiddenPosition; got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT [1, 'hello'] FROM t` — heterogeneous list literal in a
+/// SELECT-list position (no spread) — must produce exactly one
+/// `MetaListHeterogeneous` diagnostic via `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_heterogeneous_literal_in_select_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT [1, 'hello'] FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaListHeterogeneous))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT [1, 'hello'] FROM t must produce exactly 1 MetaListHeterogeneous; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT [] FROM t` — empty list literal in unconstrained
+/// SELECT-list position — must produce exactly one `MetaListEmptyTypeUnknown`
+/// diagnostic via `file_diagnostics`.
+#[test]
+fn production_path_empty_list_literal_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT [] FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaListEmptyTypeUnknown))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT [] FROM t must produce exactly 1 MetaListEmptyTypeUnknown; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT ...1 FROM t` — spread of an integer literal (a
+/// non-list operand) — must produce exactly one `MetaSpreadOnNonList`
+/// diagnostic via `file_diagnostics`. Uses a literal rather than a column
+/// reference so the empty `TypeContext` resolves to a concrete non-list type
+/// (an `Unknown` column ref would silently skip the check).
+#[test]
+fn production_path_spread_on_non_list_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT ...1 FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaSpreadOnNonList))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT ...1 FROM t must produce exactly 1 MetaSpreadOnNonList; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+// ── Phase B (meta-language) diagnostic code existence + message tests ────────
+
+/// `LambdaInForbiddenPosition` exists in `DiagnosticCode` and renders the
+/// spec message format.
+#[test]
+fn diagnostic_code_lambda_in_forbidden_position() {
+    let code = DiagnosticCode::LambdaInForbiddenPosition;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(
+        msg,
+        "lambda is only valid as an argument to a higher-order function"
+    );
+}
+
+/// `LambdaArityNotSupported` exists and renders the spec message.
+#[test]
+fn diagnostic_code_lambda_arity_not_supported() {
+    let code = DiagnosticCode::LambdaArityNotSupported;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(
+        msg,
+        "multi-argument lambdas are not supported in v1; use a single parameter"
+    );
+}
+
+/// `LambdaResultTypeMismatch` exists and renders the spec message with substitutions.
+#[test]
+fn diagnostic_code_lambda_result_type_mismatch() {
+    let code = DiagnosticCode::LambdaResultTypeMismatch;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        Some("filter"),
+        None,
+        Some("Expr<Boolean>"),
+        Some("Expr<Integer>"),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        msg,
+        "filter requires lambda result Expr<Boolean>; found Expr<Integer>"
+    );
+}
+
+/// `HofExpectsLambda` exists and renders the spec message.
+#[test]
+fn diagnostic_code_hof_expects_lambda() {
+    let code = DiagnosticCode::HofExpectsLambda;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        Some("map"),
+        None,
+        None,
+        Some("Expr<Integer>"),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(msg, "map expects a lambda; found Expr<Integer>");
+}
+
+/// `HofExpectsReducer` exists and renders the spec message.
+#[test]
+fn diagnostic_code_hof_expects_reducer() {
+    let code = DiagnosticCode::HofExpectsReducer;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        Some("some_lambda"),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(msg, "reduce expects a reducer; found some_lambda");
+}
+
+/// `HofNameShadowed` exists and renders the spec message.
+#[test]
+fn diagnostic_code_hof_name_shadowed() {
+    let code = DiagnosticCode::HofNameShadowed;
+    let msg = meta_hof_diagnostic_message(code, None, Some("map"), None, None, None, None, None);
+    assert_eq!(msg, "map is a reserved higher-order function name");
+}
+
+/// `ReducerNameShadowed` exists and renders the spec message.
+#[test]
+fn diagnostic_code_reducer_name_shadowed() {
+    let code = DiagnosticCode::ReducerNameShadowed;
+    let msg =
+        meta_hof_diagnostic_message(code, None, Some("and_all"), None, None, None, None, None);
+    assert_eq!(msg, "and_all is a reserved reducer name");
+}
+
+/// `PipeRhsNotCall` exists and renders the spec message.
+#[test]
+fn diagnostic_code_pipe_rhs_not_call() {
+    let code = DiagnosticCode::PipeRhsNotCall;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(msg, "pipe right-hand side must be a function call");
+}
+
+/// `PipeInDataPosition` exists and renders the spec message.
+#[test]
+fn diagnostic_code_pipe_in_data_position() {
+    let code = DiagnosticCode::PipeInDataPosition;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(msg, "|> is meta-only; use SQL composition in this position");
+}
+
+/// `ReducerInputTypeMismatch` exists and renders the spec message.
+#[test]
+fn diagnostic_code_reducer_input_type_mismatch() {
+    let code = DiagnosticCode::ReducerInputTypeMismatch;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("and_all"),
+        Some("Expr<Boolean>"),
+        Some("Expr<Integer>"),
+    );
+    assert_eq!(
+        msg,
+        "reducer and_all expects List<Expr<Boolean>>; found List<Expr<Integer>>"
+    );
+}
+
+/// `ReducerEmptyNoIdentity` exists and renders the spec message.
+#[test]
+fn diagnostic_code_reducer_empty_no_identity() {
+    let code = DiagnosticCode::ReducerEmptyNoIdentity;
+    let msg =
+        meta_hof_diagnostic_message(code, None, None, None, None, Some("union_all"), None, None);
+    assert_eq!(msg, "reducer union_all has no identity for an empty list");
+}
+
+/// `ConfigVarNotFound` exists and renders the spec message.
+#[test]
+fn diagnostic_code_config_var_not_found() {
+    let code = DiagnosticCode::ConfigVarNotFound;
+    let msg = meta_hof_diagnostic_message(code, None, Some("my_var"), None, None, None, None, None);
+    assert_eq!(
+        msg,
+        "compile-time variable my_var not declared in smelt.yml vars"
+    );
+}
+
+/// `ConfigVarNameNotLiteral` exists and renders the spec message.
+#[test]
+fn diagnostic_code_config_var_name_not_literal() {
+    let code = DiagnosticCode::ConfigVarNameNotLiteral;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(msg, "smelt.config.var name must be a string literal");
+}
+
+/// `ConfigVarNullCoercion` exists and renders the spec message (Warning severity).
+#[test]
+fn diagnostic_code_config_var_null_coercion() {
+    let code = DiagnosticCode::ConfigVarNullCoercion;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        None,
+        Some("nullable_var"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        msg,
+        "null variable nullable_var coerced to empty string; declare a default in smelt.yml"
+    );
+}
+
+// ─── Phase C Phase 3 TDD tests ─────────────────────────────────────────────
+
+/// `ColumnsOfUnresolvableSchema` exists and renders the correct message.
+#[test]
+fn diagnostic_code_columns_of_unresolvable_schema_message() {
+    let code = DiagnosticCode::ColumnsOfUnresolvableSchema;
+    let msg = meta_reflection_diagnostic_message_with_table_expr(
+        code,
+        None,
+        None,
+        Some("smelt.models.orders"),
+    );
+    assert_eq!(
+        msg,
+        "cannot resolve column list for smelt.models.orders; upstream schema is unknown"
+    );
+}
+
+/// `columns_of_for_table_expr` resolves a model's schema and returns
+/// `ColumnRefValue`s in declaration order with correct name, data_type,
+/// and is_numeric values.
+///
+/// The fixture intentionally mixes numeric columns (`id: Integer`, `amount: Decimal`)
+/// with a non-numeric column (`name: Text`) to make the `is_numeric` assertions
+/// meaningful — a fixture with only numeric columns cannot detect a bug where
+/// `is_numeric` is always `true`.
+#[test]
+fn columns_of_salsa_query_resolves_smelt_path_schema() {
+    let mut db = TestDb::default();
+
+    // Create a model `orders` with three typed columns:
+    //   - id (Integer) — numeric
+    //   - amount (Decimal / 9.99) — numeric
+    //   - name (Text / string literal) — NOT numeric
+    let orders_path = PathBuf::from("models/orders.sql");
+    db.set_file_text(
+        orders_path.clone(),
+        Arc::new(
+            "SELECT 1 AS id, 9.99 AS amount, 'anon' AS name FROM source.raw_orders".to_string(),
+        ),
+    );
+    db.set_all_files(Arc::new(vec![orders_path.clone()]));
+    db.set_file_project_root(orders_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let ws = db.sync_workspace();
+    let result = columns_of_for_table_expr(&db.db, ws, "orders".to_string());
+
+    // Should resolve successfully.
+    let cols = result.expect("columns_of_for_table_expr must resolve orders");
+    assert_eq!(cols.len(), 3, "orders has 3 columns; got: {:?}", cols);
+
+    // Column order must be preserved (id, amount, name).
+    assert_eq!(cols[0].name, "id");
+    assert_eq!(cols[1].name, "amount");
+    assert_eq!(cols[2].name, "name");
+
+    // The source_span must be populated (non-None) for SQL-parsed columns.
+    assert!(
+        cols[0].source_span.is_some(),
+        "id column must have a source_span"
+    );
+    assert!(
+        cols[1].source_span.is_some(),
+        "amount column must have a source_span"
+    );
+    assert!(
+        cols[2].source_span.is_some(),
+        "name column must have a source_span"
+    );
+
+    // is_numeric must be derived from types.md Numeric constraint membership:
+    //   Integer and Decimal (9.99) → numeric; Text ('anon') → NOT numeric.
+    assert!(
+        cols[0].is_numeric,
+        "id (Integer) must have is_numeric == true; got col: {:?}",
+        cols[0]
+    );
+    assert!(
+        cols[1].is_numeric,
+        "amount (Decimal) must have is_numeric == true; got col: {:?}",
+        cols[1]
+    );
+    assert!(
+        !cols[2].is_numeric,
+        "name (Text) must have is_numeric == false; got col: {:?}",
+        cols[2]
+    );
+}
+
+/// `columns_of_for_table_expr` returns `Err(())` when the model name is not
+/// found in the workspace.
+#[test]
+fn columns_of_returns_err_for_nonexistent_model() {
+    let mut db = TestDb::default();
+    db.set_all_files(Arc::new(vec![]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let ws = db.sync_workspace();
+    let result = columns_of_for_table_expr(&db.db, ws, "nonexistent".to_string());
+
+    assert!(
+        result.is_err(),
+        "columns_of_for_table_expr must return Err for unknown model"
+    );
+}
+
+/// Salsa invalidation: modifying the upstream model's schema causes
+/// `columns_of_for_table_expr` to re-evaluate and return the new schema.
+///
+/// This verifies the Salsa cache invariant from the Phase C spec §"Salsa-cached
+/// pure function of workspace state".
+#[test]
+fn columns_of_invalidates_when_upstream_schema_changes() {
+    let mut db = TestDb::default();
+
+    let orders_path = PathBuf::from("models/orders.sql");
+    db.set_file_text(
+        orders_path.clone(),
+        Arc::new("SELECT 1 AS id FROM source.raw_orders".to_string()),
+    );
+    db.set_all_files(Arc::new(vec![orders_path.clone()]));
+    db.set_file_project_root(orders_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    // First evaluation: 1 column.
+    let ws = db.sync_workspace();
+    let cols_v1 =
+        columns_of_for_table_expr(&db.db, ws, "orders".to_string()).expect("v1 must resolve");
+    assert_eq!(
+        cols_v1.len(),
+        1,
+        "v1 must have 1 column; got: {:?}",
+        cols_v1
+    );
+
+    // Mutate the upstream schema by adding a column.
+    db.set_file_text(
+        orders_path.clone(),
+        Arc::new("SELECT 1 AS id, 'x' AS status FROM source.raw_orders".to_string()),
+    );
+
+    // Second evaluation after invalidation: 2 columns.
+    let ws2 = db.sync_workspace();
+    let cols_v2 =
+        columns_of_for_table_expr(&db.db, ws2, "orders".to_string()).expect("v2 must resolve");
+    assert_eq!(
+        cols_v2.len(),
+        2,
+        "v2 must have 2 columns after schema change; got: {:?}",
+        cols_v2
+    );
+    assert_eq!(cols_v2[1].name, "status");
+}
+
+/// `columns_to_column_ref_values` preserves declaration order.
+#[test]
+fn columns_of_expansion_preserves_source_ordering_pure() {
+    use crate::schema::{Column, ColumnSource};
+    use rowan::TextRange;
+
+    // Construct three columns in a deliberate order (z, a, m).
+    let make_col = |name: &str| -> Column {
+        Column {
+            name: name.to_string(),
+            alias: None,
+            source: ColumnSource::Unknown,
+            expression: String::new(),
+            range: TextRange::default(),
+            data_type: None,
+        }
+    };
+
+    let cols = vec![make_col("z"), make_col("a"), make_col("m")];
+    let result = columns_to_column_ref_values(&cols);
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].name, "z");
+    assert_eq!(result[1].name, "a");
+    assert_eq!(result[2].name, "m");
+}
+
+/// `ColumnsOfUnresolvableSchema` message renders with the `{t}` placeholder.
+#[test]
+fn columns_of_unresolvable_schema_message_with_placeholder() {
+    let msg = meta_reflection_diagnostic_message_with_table_expr(
+        DiagnosticCode::ColumnsOfUnresolvableSchema,
+        None,
+        None,
+        None, // no table_expr given — falls back to "t"
+    );
+    assert_eq!(
+        msg,
+        "cannot resolve column list for t; upstream schema is unknown"
+    );
+}
+
+// ============================================================================
+// Phase D — wide-reflection Salsa query tests
+// ============================================================================
+
+/// Helper: set up a multi-model workspace with frontmatter tags.
+///
+/// Returns (TestDb, Workspace). Models are named `a`, `b`, `c`, `d` under
+/// `models/a.sql`, etc. Models a/b/c are tagged `cohort`; model d is not.
+fn setup_cohort_workspace() -> (TestDb, Workspace) {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    let models: &[(&str, &str)] = &[
+        (
+            "models/a.sql",
+            "---\ntags: [cohort]\n---\nSELECT 1 AS id FROM source.raw",
+        ),
+        (
+            "models/b.sql",
+            "---\ntags: [cohort]\n---\nSELECT 2 AS id FROM source.raw",
+        ),
+        (
+            "models/c.sql",
+            "---\ntags: [cohort]\n---\nSELECT 3 AS id FROM source.raw",
+        ),
+        (
+            "models/d.sql",
+            "---\ntags: [other]\n---\nSELECT 4 AS id FROM source.raw",
+        ),
+    ];
+
+    for (path, text) in models {
+        let p = PathBuf::from(path);
+        db.set_file_text(p.clone(), Arc::new(text.to_string()));
+        db.set_file_project_root(p.clone(), root.clone());
+    }
+
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    let ws = db.sync_workspace();
+    (db, ws)
+}
+
+/// `models_with_tag(workspace, "cohort")` returns exactly the three
+/// `cohort`-tagged models in path-sorted order `[a, b, c]`.
+#[test]
+fn models_with_tag_returns_path_sorted_matches() {
+    let (db, ws) = setup_cohort_workspace();
+
+    let result = models_with_tag(&db.db, ws, "cohort".to_string());
+
+    assert_eq!(
+        result.len(),
+        3,
+        "expected 3 cohort-tagged models; got: {:?}",
+        result.iter().map(|m| &m.path).collect::<Vec<_>>()
+    );
+    // Verify path-sorted order (byte-lexicographic).
+    assert!(
+        result[0].path.ends_with("/a.sql") || result[0].path == "models/a.sql",
+        "first model should be a; got {}",
+        result[0].path
+    );
+    assert!(
+        result[1].path.ends_with("/b.sql") || result[1].path == "models/b.sql",
+        "second model should be b; got {}",
+        result[1].path
+    );
+    assert!(
+        result[2].path.ends_with("/c.sql") || result[2].path == "models/c.sql",
+        "third model should be c; got {}",
+        result[2].path
+    );
+
+    // Per-element fields.
+    assert_eq!(result[0].name, "a");
+    assert!(result[0].tags.contains(&"cohort".to_string()));
+    assert_eq!(result[0].model_name_for_columns, "a");
+}
+
+/// `models_with_tag` honours merged tags: smelt.yml tags + frontmatter tags.
+///
+/// Sets up a model with `tags: [cohort]` in smelt.yml and `tags: [audit]` in
+/// SQL frontmatter. The model must match both `with_tag("cohort")` and
+/// `with_tag("audit")`.
+#[test]
+fn models_with_tag_uses_merged_tag_set() {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    // Model has frontmatter tag `audit`.
+    let path = PathBuf::from("models/merged.sql");
+    db.set_file_text(
+        path.clone(),
+        Arc::new("---\ntags: [audit]\n---\nSELECT 1 AS id FROM source.raw".to_string()),
+    );
+    db.set_file_project_root(path.clone(), root.clone());
+
+    // smelt.yml gives this model the `cohort` tag.
+    // `name:` and `targets:` are required by the Config deserialiser.
+    let smelt_yml = concat!(
+        "name: test_project\n",
+        "targets:\n  dev:\n    type: duckdb\n    database: t.duckdb\n    schema: main\n",
+        "models:\n  merged:\n    tags: [cohort]\n",
+    );
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    // Set the smelt.yml text on the project after it's been registered.
+    db.db.set_project_smelt_yml(&root, smelt_yml.to_string());
+
+    let ws = db.sync_workspace();
+
+    let cohort = models_with_tag(&db.db, ws, "cohort".to_string());
+    let audit = models_with_tag(&db.db, ws, "audit".to_string());
+
+    assert_eq!(cohort.len(), 1, "model must match smelt.yml tag 'cohort'");
+    assert_eq!(audit.len(), 1, "model must match frontmatter tag 'audit'");
+    assert_eq!(cohort[0].name, "merged");
+    assert_eq!(audit[0].name, "merged");
+}
+
+/// `models_with_tag` correctly invalidates when the model's frontmatter changes.
+///
+/// After changing the tag from `cohort` to `other`, the query must return the
+/// updated (empty) set for `cohort`.
+#[test]
+fn models_with_tag_invalidates_on_tag_change() {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    let path = PathBuf::from("models/mutable.sql");
+    db.set_file_text(
+        path.clone(),
+        Arc::new("---\ntags: [cohort]\n---\nSELECT 1 AS id FROM source.raw".to_string()),
+    );
+    db.set_file_project_root(path.clone(), root.clone());
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    let ws = db.sync_workspace();
+    let before = models_with_tag(&db.db, ws, "cohort".to_string());
+    assert_eq!(before.len(), 1, "model should be tagged cohort before edit");
+
+    // Update the model to remove the `cohort` tag.
+    db.set_file_text(
+        path.clone(),
+        Arc::new("---\ntags: [other]\n---\nSELECT 1 AS id FROM source.raw".to_string()),
+    );
+    let ws2 = db.sync_workspace();
+    let after = models_with_tag(&db.db, ws2, "cohort".to_string());
+    assert_eq!(
+        after.len(),
+        0,
+        "after tag change, model must not match cohort"
+    );
+}
+
+/// `models_all` returns every model in the workspace in path-sorted order.
+/// Running it twice over the same workspace produces byte-equal results (Salsa
+/// memoisation / determinism invariant).
+#[test]
+fn models_all_returns_all_models_path_sorted() {
+    let (db, ws) = setup_cohort_workspace();
+
+    let result1 = models_all(&db.db, ws);
+    let result2 = models_all(&db.db, ws);
+
+    // All 4 models present.
+    assert_eq!(
+        result1.len(),
+        4,
+        "workspace has 4 models; got {:?}",
+        result1.iter().map(|m| &m.path).collect::<Vec<_>>()
+    );
+
+    // Path-sorted order.
+    let paths: Vec<&str> = result1.iter().map(|m| m.path.as_str()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(paths, sorted, "models_all must return path-sorted results");
+
+    // Determinism: two calls on same input are byte-equal.
+    assert_eq!(result1, result2, "models_all must be deterministic");
+}
+
+/// `sources_with_tag` and `sources_all` mirror the models behaviour for sources.
+///
+/// Sets up two sources in a temp directory: one tagged `analytics`, one not.
+/// Verifies that `sources_with_tag("analytics")` returns exactly the tagged one
+/// and `sources_all` returns both in path-sorted order.
+#[test]
+fn sources_with_tag_and_sources_all_mirror_models_behaviour() {
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let models_dir = root.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+
+    // Source YAML with `tags: [analytics]`.
+    let analytics_yml = models_dir.join("analytics_source.yml");
+    std::fs::File::create(&analytics_yml)
+        .unwrap()
+        .write_all(b"tags: [analytics]\ncolumns:\n  - name: id\n    type: Integer\n")
+        .unwrap();
+
+    // Source YAML without tags.
+    let plain_yml = models_dir.join("plain_source.yml");
+    std::fs::File::create(&plain_yml)
+        .unwrap()
+        .write_all(b"columns:\n  - name: val\n    type: Text\n")
+        .unwrap();
+
+    // smelt.yml with paths: [models].
+    let smelt_yml_path = root.join("smelt.yml");
+    std::fs::File::create(&smelt_yml_path)
+        .unwrap()
+        .write_all(b"paths:\n  - models\n")
+        .unwrap();
+
+    let mut db_wrapper = TestDb::default();
+    db_wrapper.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db_wrapper.set_all_project_roots(Arc::new(vec![root.clone()]));
+    db_wrapper.sync_workspace();
+
+    let project = db_wrapper
+        .db
+        .project_input(&root)
+        .expect("project registered");
+
+    let tagged = sources_with_tag(&db_wrapper.db, project, "analytics".to_string());
+    assert_eq!(
+        tagged.len(),
+        1,
+        "one source tagged analytics; got {:?}",
+        tagged.iter().map(|s| &s.path).collect::<Vec<_>>()
+    );
+    assert_eq!(tagged[0].name, "analytics_source");
+    assert!(tagged[0].tags.contains(&"analytics".to_string()));
+
+    let all = sources_all(&db_wrapper.db, project);
+    assert_eq!(
+        all.len(),
+        2,
+        "two sources total; got {:?}",
+        all.iter().map(|s| &s.path).collect::<Vec<_>>()
+    );
+
+    // Path-sorted.
+    let paths: Vec<&str> = all.iter().map(|s| s.path.as_str()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(paths, sorted, "sources_all must return path-sorted results");
+}
+
+/// `ModelRefValue::model_name_for_columns` routes through `columns_of_for_table_expr`.
+///
+/// Given a model `m` in the workspace, `columns_of_for_table_expr(db, ws, m.model_name_for_columns)`
+/// returns the same column list as querying the model directly. This verifies
+/// the re-dispatch routing that underpins `m.columns`.
+#[test]
+fn model_ref_columns_routes_through_columns_of_query() {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    let path = PathBuf::from("models/orders.sql");
+    db.set_file_text(
+        path.clone(),
+        Arc::new(
+            "---\ntags: [cohort]\n---\nSELECT 1 AS order_id, 9.99 AS amount FROM source.raw"
+                .to_string(),
+        ),
+    );
+    db.set_file_project_root(path.clone(), root.clone());
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    let ws = db.sync_workspace();
+
+    let models = models_with_tag(&db.db, ws, "cohort".to_string());
+    assert_eq!(models.len(), 1);
+    let model_ref = &models[0];
+
+    // Route m.columns through columns_of_for_table_expr using model_name_for_columns.
+    let columns_via_ref =
+        columns_of_for_table_expr(&db.db, ws, model_ref.model_name_for_columns.clone())
+            .expect("columns_of_for_table_expr must succeed for an existing model");
+
+    // Also get directly.
+    let columns_direct = columns_of_for_table_expr(&db.db, ws, "orders".to_string())
+        .expect("columns_of_for_table_expr must succeed directly");
+
+    // Byte-equal: same column list via both paths.
+    assert_eq!(
+        *columns_via_ref, *columns_direct,
+        "m.columns routing via model_name_for_columns must produce same result as direct call"
+    );
+    assert_eq!(columns_via_ref.len(), 2);
+    assert_eq!(columns_via_ref[0].name, "order_id");
+    assert_eq!(columns_via_ref[1].name, "amount");
+}
+
+// ============================================================================
+// Phase E1 TDD tests — DiagnosticCode completeness
+// ============================================================================
+
+/// Test 11: `diagnostic_codes_record_set_complete`
+///
+/// Every record diagnostic code exists in `DiagnosticCode` and renders the
+/// spec message format from `meta_language.md` §"Record diagnostic codes".
+#[test]
+fn diagnostic_codes_record_set_complete() {
+    // SmeltRecordRedefinition
+    let code = DiagnosticCode::SmeltRecordRedefinition;
+    assert!(matches!(code, DiagnosticCode::SmeltRecordRedefinition));
+    let msg = meta_record_diagnostic_message(
+        code,
+        Some("Foo"),
+        None,
+        Some("models/foo.sql"),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("Foo") && msg.contains("models/foo.sql") && msg.contains("workspace-wide"),
+        "SmeltRecordRedefinition message must match spec; got: {msg}"
+    );
+
+    // RecordFieldUnknown
+    let code = DiagnosticCode::RecordFieldUnknown;
+    assert!(matches!(code, DiagnosticCode::RecordFieldUnknown));
+    let msg = meta_record_diagnostic_message(
+        code,
+        Some("Entry"),
+        Some("bar"),
+        None,
+        None,
+        None,
+        Some("name, type"),
+    );
+    assert!(
+        msg.contains("Entry") && msg.contains("bar") && msg.contains("name, type"),
+        "RecordFieldUnknown message must match spec; got: {msg}"
+    );
+
+    // RecordFieldMissing
+    let code = DiagnosticCode::RecordFieldMissing;
+    assert!(matches!(code, DiagnosticCode::RecordFieldMissing));
+    let msg =
+        meta_record_diagnostic_message(code, Some("Entry"), Some("name"), None, None, None, None);
+    assert!(
+        msg.contains("Entry") && msg.contains("name") && msg.contains("missing"),
+        "RecordFieldMissing message must match spec; got: {msg}"
+    );
+
+    // RecordFieldDuplicate
+    let code = DiagnosticCode::RecordFieldDuplicate;
+    assert!(matches!(code, DiagnosticCode::RecordFieldDuplicate));
+    let msg = meta_record_diagnostic_message(code, None, Some("name"), None, None, None, None);
+    assert!(
+        msg.contains("name") && msg.contains("already appears"),
+        "RecordFieldDuplicate message must match spec; got: {msg}"
+    );
+
+    // RecordFieldTypeMismatch
+    let code = DiagnosticCode::RecordFieldTypeMismatch;
+    assert!(matches!(code, DiagnosticCode::RecordFieldTypeMismatch));
+    let msg = meta_record_diagnostic_message(
+        code,
+        None,
+        Some("amount"),
+        None,
+        Some("Integer"),
+        Some("Text"),
+        None,
+    );
+    assert!(
+        msg.contains("amount") && msg.contains("Integer") && msg.contains("Text"),
+        "RecordFieldTypeMismatch message must match spec; got: {msg}"
+    );
+
+    // RecordLiteralUnknownTarget
+    let code = DiagnosticCode::RecordLiteralUnknownTarget;
+    assert!(matches!(code, DiagnosticCode::RecordLiteralUnknownTarget));
+    let msg = meta_record_diagnostic_message(code, None, None, None, None, None, None);
+    assert!(
+        msg.contains("cannot infer record type"),
+        "RecordLiteralUnknownTarget message must match spec; got: {msg}"
+    );
+
+    // RecordFieldNotProjectable
+    let code = DiagnosticCode::RecordFieldNotProjectable;
+    assert!(matches!(code, DiagnosticCode::RecordFieldNotProjectable));
+    let msg =
+        meta_record_diagnostic_message(code, Some("Integer"), Some("foo"), None, None, None, None);
+    assert!(
+        msg.contains("Integer") && msg.contains("foo") && msg.contains("no fields"),
+        "RecordFieldNotProjectable message must match spec; got: {msg}"
+    );
+
+    // RecordFieldTypeForbidden
+    let code = DiagnosticCode::RecordFieldTypeForbidden;
+    assert!(matches!(code, DiagnosticCode::RecordFieldTypeForbidden));
+    let msg = meta_record_diagnostic_message(code, Some("ModelRef"), None, None, None, None, None);
+    assert!(
+        msg.contains("ModelRef") && msg.contains("not user-writable"),
+        "RecordFieldTypeForbidden message must match spec; got: {msg}"
+    );
+
+    // RecordCyclicDeclaration
+    let code = DiagnosticCode::RecordCyclicDeclaration;
+    assert!(matches!(code, DiagnosticCode::RecordCyclicDeclaration));
+    let msg = meta_record_diagnostic_message(code, Some("Node"), None, None, None, None, None);
+    assert!(
+        msg.contains("Node") && msg.contains("cycle"),
+        "RecordCyclicDeclaration message must match spec; got: {msg}"
+    );
+
+    // RecordInDataWorld
+    let code = DiagnosticCode::RecordInDataWorld;
+    assert!(matches!(code, DiagnosticCode::RecordInDataWorld));
+    let msg = meta_record_diagnostic_message(code, None, None, None, None, None, None);
+    assert!(
+        msg.contains("Data-World") || msg.contains("data-world") || msg.contains("SQL"),
+        "RecordInDataWorld message must reference Data-World position; got: {msg}"
+    );
+}
+
+/// Test 12: `diagnostic_codes_map_set_complete`
+///
+/// Every map diagnostic code exists in `DiagnosticCode` and renders per spec.
+#[test]
+fn diagnostic_codes_map_set_complete() {
+    // MapKeyTypeNotText
+    let code = DiagnosticCode::MapKeyTypeNotText;
+    assert!(matches!(code, DiagnosticCode::MapKeyTypeNotText));
+    let msg =
+        meta_map_diagnostic_message(code, None, None, None, None, Some("Integer"), None, None);
+    assert!(
+        msg.contains("Integer") && msg.contains("Text"),
+        "MapKeyTypeNotText message must match spec; got: {msg}"
+    );
+
+    // MapApiUnknown
+    let code = DiagnosticCode::MapApiUnknown;
+    assert!(matches!(code, DiagnosticCode::MapApiUnknown));
+    let msg = meta_map_diagnostic_message(code, None, Some("merge"), None, None, None, None, None);
+    assert!(
+        msg.contains("merge") && msg.contains("entries"),
+        "MapApiUnknown message must match spec; got: {msg}"
+    );
+
+    // MapApiArityMismatch
+    let code = DiagnosticCode::MapApiArityMismatch;
+    assert!(matches!(code, DiagnosticCode::MapApiArityMismatch));
+    let msg =
+        meta_map_diagnostic_message(code, Some("get"), None, None, Some("0"), None, None, None);
+    assert!(
+        msg.contains("get") && msg.contains("0"),
+        "MapApiArityMismatch message must match spec; got: {msg}"
+    );
+
+    // MapApiNamedArgument
+    let code = DiagnosticCode::MapApiNamedArgument;
+    assert!(matches!(code, DiagnosticCode::MapApiNamedArgument));
+    let msg = meta_map_diagnostic_message(code, Some("get"), None, None, None, None, None, None);
+    assert!(
+        msg.contains("get") && msg.contains("named"),
+        "MapApiNamedArgument message must match spec; got: {msg}"
+    );
+
+    // MapApiUnexpectedArgument
+    let code = DiagnosticCode::MapApiUnexpectedArgument;
+    assert!(matches!(code, DiagnosticCode::MapApiUnexpectedArgument));
+    let msg = meta_map_diagnostic_message(code, Some("keys"), None, None, None, None, None, None);
+    assert!(
+        msg.contains("keys") && msg.contains("no arguments"),
+        "MapApiUnexpectedArgument message must match spec; got: {msg}"
+    );
+
+    // MapGetMissingKey
+    let code = DiagnosticCode::MapGetMissingKey;
+    assert!(matches!(code, DiagnosticCode::MapGetMissingKey));
+    let msg = meta_map_diagnostic_message(code, None, None, Some("prod"), None, None, None, None);
+    assert!(
+        msg.contains("prod") && msg.contains("binding"),
+        "MapGetMissingKey message must match spec; got: {msg}"
+    );
+
+    // MapApiArgTypeMismatch
+    let code = DiagnosticCode::MapApiArgTypeMismatch;
+    assert!(matches!(code, DiagnosticCode::MapApiArgTypeMismatch));
+    let msg = meta_map_diagnostic_message(
+        code,
+        Some("get"),
+        None,
+        None,
+        None,
+        None,
+        Some("Text"),
+        Some("Integer"),
+    );
+    assert!(
+        msg.contains("get") && msg.contains("Text") && msg.contains("Integer"),
+        "MapApiArgTypeMismatch message must match spec; got: {msg}"
+    );
+}
+
+/// Test 13: `diagnostic_codes_loader_set_complete`
+///
+/// Every loader diagnostic code exists in `DiagnosticCode` and renders
+/// per `meta_config_loading.md` §"Validation diagnostics".
+#[test]
+fn diagnostic_codes_loader_set_complete() {
+    // ConfigLoaderPathNotLiteral
+    let code = DiagnosticCode::ConfigLoaderPathNotLiteral;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderPathNotLiteral));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        Some("path_var"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("path_var") && msg.contains("literal"),
+        "ConfigLoaderPathNotLiteral message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderPathEscapesWorkspace
+    let code = DiagnosticCode::ConfigLoaderPathEscapesWorkspace;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderPathEscapesWorkspace
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("/etc/passwd"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("/etc/passwd") && msg.contains("workspace-relative"),
+        "ConfigLoaderPathEscapesWorkspace message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderPathBackslash
+    let code = DiagnosticCode::ConfigLoaderPathBackslash;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderPathBackslash));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("config\\data.yaml"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("config\\data.yaml"),
+        "ConfigLoaderPathBackslash message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderFileNotFound
+    let code = DiagnosticCode::ConfigLoaderFileNotFound;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderFileNotFound));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("config/missing.yaml"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("config/missing.yaml") && msg.contains("not found"),
+        "ConfigLoaderFileNotFound message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderSchemaForbidden
+    let code = DiagnosticCode::ConfigLoaderSchemaForbidden;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderSchemaForbidden));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("Integer"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("Integer") && msg.contains("record type"),
+        "ConfigLoaderSchemaForbidden message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderTomlNotYetSupported
+    let code = DiagnosticCode::ConfigLoaderTomlNotYetSupported;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderTomlNotYetSupported
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    );
+    assert!(
+        msg.contains("load_toml") && msg.contains("reserved"),
+        "ConfigLoaderTomlNotYetSupported message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderParseError
+    let code = DiagnosticCode::ConfigLoaderParseError;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderParseError));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        Some("config.yaml"),
+        Some("YAML"),
+        Some("unexpected token"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("YAML") && msg.contains("config.yaml") && msg.contains("unexpected token"),
+        "ConfigLoaderParseError message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderRequiredFieldMissing
+    let code = DiagnosticCode::ConfigLoaderRequiredFieldMissing;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderRequiredFieldMissing
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("name"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("name") && msg.contains("required") && msg.contains("missing"),
+        "ConfigLoaderRequiredFieldMissing message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderUnknownField
+    let code = DiagnosticCode::ConfigLoaderUnknownField;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderUnknownField));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("extra"),
+        Some("name, value"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("extra") && msg.contains("name, value"),
+        "ConfigLoaderUnknownField message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderTypeMismatch
+    let code = DiagnosticCode::ConfigLoaderTypeMismatch;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderTypeMismatch));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("count"),
+        None,
+        Some("Integer"),
+        Some("String"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("count") && msg.contains("Integer") && msg.contains("String"),
+        "ConfigLoaderTypeMismatch message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderRootShapeMismatch
+    let code = DiagnosticCode::ConfigLoaderRootShapeMismatch;
+    assert!(matches!(
+        code,
+        DiagnosticCode::ConfigLoaderRootShapeMismatch
+    ));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("List<Entry>"),
+        None,
+        Some("sequence"),
+        Some("mapping"),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        msg.contains("List<Entry>") && msg.contains("sequence") && msg.contains("mapping"),
+        "ConfigLoaderRootShapeMismatch message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderDuplicateMapKey
+    let code = DiagnosticCode::ConfigLoaderDuplicateMapKey;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderDuplicateMapKey));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("prod"),
+        Some("line 5"),
+        Some("line 2"),
+    );
+    assert!(
+        msg.contains("prod") && msg.contains("line 5") && msg.contains("line 2"),
+        "ConfigLoaderDuplicateMapKey message must match spec; got: {msg}"
+    );
+
+    // ConfigLoaderNullCoercion
+    let code = DiagnosticCode::ConfigLoaderNullCoercion;
+    assert!(matches!(code, DiagnosticCode::ConfigLoaderNullCoercion));
+    let msg = meta_loader_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("line 3"),
+        None,
+    );
+    assert!(
+        msg.contains("line 3") && msg.contains("empty string"),
+        "ConfigLoaderNullCoercion message must match spec; got: {msg}"
+    );
+}
+
+// ============================================================================
+// Phase E1 Phase 5 — Salsa loader input invalidation + record declarations
+// ============================================================================
+
+/// Verify that `loader_file_parsed` is re-evaluated when the `LoaderFileInput`
+/// text changes (Salsa cache invalidation).
+///
+/// When the same path is registered a second time with different text, the
+/// result of `loader_file_parsed` must reflect the new content.
+#[test]
+fn loader_file_text_is_salsa_input() {
+    let mut db = Database::default();
+
+    // Register a loader file with initial YAML text.
+    let path: Arc<str> = Arc::from("data/config.yaml");
+    let text_v1: Arc<str> = Arc::from("name: Alice\nage: 30\n");
+    let input_v1 = db.set_loader_file(path.clone(), text_v1, true);
+
+    // First parse: should succeed and return the v1 text.
+    let result_v1 = loader_file_parsed(&db, input_v1);
+    assert!(
+        result_v1.is_ok(),
+        "v1 parse must succeed; got: {:?}",
+        result_v1.as_ref().as_ref().err()
+    );
+
+    // Update the same path with new text.
+    let text_v2: Arc<str> = Arc::from("name: Bob\nage: 42\n");
+    let input_v2 = db.set_loader_file(path.clone(), text_v2.clone(), true);
+
+    // The returned input handle must be the same Salsa entity (update-in-place).
+    assert!(
+        input_v1 == input_v2,
+        "set_loader_file must return the same input handle on update"
+    );
+
+    // Second parse: Salsa re-evaluates and the text is now v2.
+    let result_v2 = loader_file_parsed(&db, input_v2);
+    assert!(result_v2.is_ok(), "v2 parse must succeed");
+
+    // Confirm the root now reflects the updated text (root mapping contains "Bob").
+    let parsed = result_v2.as_ref().as_ref().unwrap();
+    match &parsed.root {
+        crate::loader::ParsedNode::Mapping { entries, .. } => {
+            let name_entry = entries.iter().find(|(k, _, _)| k == "name");
+            let name_node = name_entry.map(|(_, _, v)| v);
+            match name_node {
+                Some(crate::loader::ParsedNode::String { value, .. }) => {
+                    assert_eq!(
+                        value, "Bob",
+                        "after update, root.name must be 'Bob'; got '{}'",
+                        value
+                    );
+                }
+                other => panic!(
+                    "expected String node for 'name' after update; got {:?}",
+                    other
+                ),
+            }
+        }
+        other => panic!("expected Mapping at root after update; got {:?}", other),
+    }
+}
+
+/// Verify that `loader_resolved_value` is invalidated when the `LoaderFileInput`
+/// text changes (Salsa cache invalidation for content-validation).
+///
+/// When the loader file is updated via `set_loader_file`, the
+/// `loader_resolved_value` result must reflect the new content.
+#[test]
+fn loader_resolved_value_invalidated_on_file_change() {
+    let mut db = Database::default();
+
+    // Register a loader file with v1 YAML text ({name: us_west}).
+    let loader_path: Arc<str> = Arc::from("cohorts.yaml");
+    let text_v1: Arc<str> = Arc::from("{name: us_west, threshold: 100}");
+    let input_v1 = db.set_loader_file(loader_path.clone(), text_v1, true);
+
+    // Build a LoaderCallSiteId for a hypothetical `smelt.config.load_yaml` call.
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: loader_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // First resolution: should parse the v1 text.
+    let resolved_v1 = loader_resolved_value(&db, input_v1, call_site.clone());
+    assert!(
+        resolved_v1.parsed.is_some(),
+        "v1 resolution must produce a parsed result"
+    );
+    assert!(
+        resolved_v1.diagnostics.is_empty(),
+        "v1 resolution must have no diagnostics for a valid file; got: {:?}",
+        resolved_v1.diagnostics
+    );
+
+    // Verify the v1 value has the expected content.
+    match &resolved_v1.parsed {
+        Some(p) => match &p.root {
+            crate::loader::ParsedNode::Mapping { entries, .. } => {
+                let name_entry = entries.iter().find(|(k, _, _)| k == "name");
+                match name_entry.map(|(_, _, v)| v) {
+                    Some(crate::loader::ParsedNode::String { value, .. }) => {
+                        assert_eq!(
+                            value, "us_west",
+                            "v1 name must be 'us_west'; got '{}'",
+                            value
+                        );
+                    }
+                    other => panic!("expected String for 'name' in v1; got {:?}", other),
+                }
+            }
+            other => panic!("expected Mapping in v1; got {:?}", other),
+        },
+        None => panic!("v1 parsed must be Some"),
+    }
+
+    // Update the loader file to v2 ({name: us_east, threshold: 200}).
+    let text_v2: Arc<str> = Arc::from("{name: us_east, threshold: 200}");
+    let input_v2 = db.set_loader_file(loader_path.clone(), text_v2, true);
+
+    // The input handle must be the same Salsa entity (update-in-place).
+    assert!(
+        input_v1 == input_v2,
+        "set_loader_file must return the same input handle on update"
+    );
+
+    // Second resolution: Salsa must invalidate and re-evaluate because the
+    // loader file text changed.
+    let resolved_v2 = loader_resolved_value(&db, input_v2, call_site);
+    assert!(
+        resolved_v2.parsed.is_some(),
+        "v2 resolution must produce a parsed result"
+    );
+    assert!(
+        resolved_v2.diagnostics.is_empty(),
+        "v2 resolution must have no diagnostics; got: {:?}",
+        resolved_v2.diagnostics
+    );
+
+    // The v2 value must reflect the updated file content.
+    match &resolved_v2.parsed {
+        Some(p) => match &p.root {
+            crate::loader::ParsedNode::Mapping { entries, .. } => {
+                let name_entry = entries.iter().find(|(k, _, _)| k == "name");
+                match name_entry.map(|(_, _, v)| v) {
+                    Some(crate::loader::ParsedNode::String { value, .. }) => {
+                        assert_eq!(
+                            value, "us_east",
+                            "v2 name must be 'us_east' after update; got '{}'",
+                            value
+                        );
+                    }
+                    other => panic!("expected String for 'name' in v2; got {:?}", other),
+                }
+            }
+            other => panic!("expected Mapping in v2; got {:?}", other),
+        },
+        None => panic!("v2 parsed must be Some"),
+    }
+}
+
+/// Verify that the production diagnostic orchestrator (`file_diagnostics`) wires
+/// through `loader_resolved_value` end-to-end.
+///
+/// Registers a workspace with a `.sql` file containing a
+/// `smelt.config.load_yaml('cohorts.yaml', {name: Text})` call, registers a
+/// `LoaderFileInput` for `cohorts.yaml` with valid content `{name: us_west}`,
+/// and asserts that `file_diagnostics` produces NO
+/// `ConfigLoaderRequiredFieldMissing` diagnostic.
+///
+/// Then mutates the loader file to `{wrong_field: x}` via `set_loader_file`,
+/// runs `file_diagnostics` again, and asserts that a
+/// `ConfigLoaderRequiredFieldMissing` diagnostic is now present.
+///
+/// This proves the production orchestrator wires through `workspace.loader_files`
+/// rather than the no-op closure.
+#[test]
+fn file_diagnostics_end_to_end_loader_content_validation() {
+    use std::path::PathBuf;
+
+    let mut db = Database::default();
+    let project_root = PathBuf::from("/tmp/smelt_test_loader_e2e");
+
+    // Register a project and a sql file containing a load_yaml call.
+    let project = db.set_project_input(project_root.clone(), String::new());
+    let sql_content = "SELECT smelt.config.load_yaml('cohorts.yaml', {name: Text}) AS cfg";
+    let sql_path = project_root.join("models/cohorts.sql");
+    let sql_file = db.set_source_file(
+        sql_path.clone(),
+        sql_content.to_string(),
+        project_root.clone(),
+    );
+
+    // Register the workspace (loader_files starts empty).
+    db.set_workspace(vec![sql_file], vec![project]);
+
+    // Register a loader file with valid content — 'name' field is present.
+    let loader_path: Arc<str> = Arc::from("cohorts.yaml");
+    let text_v1: Arc<str> = Arc::from("{name: us_west}");
+    db.set_loader_file(loader_path.clone(), text_v1, true);
+
+    let workspace = db.workspace();
+
+    // Phase 1: file_diagnostics must NOT have a ConfigLoaderRequiredFieldMissing.
+    let diags_v1 = file_diagnostics(&db, workspace, sql_file);
+    let missing_v1: Vec<_> = diags_v1
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ConfigLoaderRequiredFieldMissing))
+        .collect();
+    assert!(
+        missing_v1.is_empty(),
+        "file_diagnostics must not report ConfigLoaderRequiredFieldMissing \
+         when the loader file satisfies the schema; got: {:?}",
+        missing_v1
+    );
+
+    // Phase 2: mutate the loader file to have a wrong field — 'name' is now absent.
+    let text_v2: Arc<str> = Arc::from("{wrong_field: x}");
+    db.set_loader_file(loader_path.clone(), text_v2, true);
+
+    // file_diagnostics must now report ConfigLoaderRequiredFieldMissing.
+    let diags_v2 = file_diagnostics(&db, workspace, sql_file);
+    let missing_v2: Vec<_> = diags_v2
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ConfigLoaderRequiredFieldMissing))
+        .collect();
+    assert!(
+        !missing_v2.is_empty(),
+        "file_diagnostics must report ConfigLoaderRequiredFieldMissing \
+         after the loader file no longer satisfies the schema; got diags: {:?}",
+        diags_v2
+    );
+}
+
+// ============================================================================
+// Phase 6: Per-target overlay Salsa wiring tests
+// ============================================================================
+
+/// When a `<basename>.<target>.<ext>` overlay file exists and the overlay
+/// has an invalid field value (type mismatch), the validation diagnostic must
+/// be anchored at the **overlay file's row**, not the base file or call site.
+///
+/// This exercises the spec rule: "A target overlay file that does not validate
+/// against the schema emits the same diagnostic family as a base-file mismatch,
+/// anchored at the overlay file's offending row."
+#[test]
+fn overlay_validation_failure_anchors_at_overlay_row() {
+    let mut db = Database::default();
+
+    // Base: {name: "us_west", threshold: 100} — valid
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    // Overlay: {threshold: "not_an_integer"} — invalid (type mismatch on line 1)
+    let overlay_path: Arc<str> = Arc::from("configs/cohorts.prod.yaml");
+    let overlay_text: Arc<str> = Arc::from("threshold: not_an_integer\n");
+    let overlay_input = db.set_loader_file(overlay_path.clone(), overlay_text, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // Call the overlay query.
+    let resolved = loader_resolved_value_with_overlay(&db, base_input, overlay_input, call_site);
+
+    // Must have at least one diagnostic (overlay threshold has wrong type).
+    assert!(
+        !resolved.diagnostics.is_empty(),
+        "overlay type-mismatch must produce at least one diagnostic; got none"
+    );
+
+    // The diagnostic must be anchored at the overlay row (line 0 in the overlay file),
+    // NOT at the base file.
+    let has_overlay_anchor = resolved.diagnostics.iter().any(|d| {
+        // primary_span.line == 0 means line 1 in 1-indexed (the threshold row).
+        // Any diagnostic anchored at the overlay file is acceptable.
+        d.primary_span.line == 0
+    });
+    assert!(
+        has_overlay_anchor,
+        "overlay diagnostic must be anchored at the overlay file's row (line 0/1-indexed 1); \
+         got: {:?}",
+        resolved.diagnostics
+    );
+}
+
+/// When no `<basename>.<target>.<ext>` overlay file exists (overlay is absent),
+/// `loader_resolved_value_with_overlay` falls through to return a result
+/// equal to `loader_resolved_value` on the base file alone — no overlay diagnostics.
+///
+/// The spec rule: "An absent overlay file is a no-op; the base value is used as-is."
+/// We test this by passing `None` for the overlay (conceptually a missing overlay).
+/// The implementation must expose a variant that accepts `Option<LoaderFileInput>`.
+#[test]
+fn overlay_absent_falls_through_to_base() {
+    let mut db = Database::default();
+
+    // Base: {name: "us_west", threshold: 100} — valid
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // Base-only resolution via the original query.
+    let resolved_base = loader_resolved_value(&db, base_input, call_site.clone());
+
+    // Absent overlay (mark as not-existing) — must equal base result.
+    let overlay_path: Arc<str> = Arc::from("configs/cohorts.prod.yaml");
+    let overlay_input = db.set_loader_file(overlay_path.clone(), Arc::from(""), false);
+    let resolved_with_absent =
+        loader_resolved_value_with_overlay(&db, base_input, overlay_input, call_site);
+
+    // Diagnostics must both be empty (base is valid, absent overlay is no-op).
+    assert!(
+        resolved_base.diagnostics.is_empty(),
+        "base-only resolution must have no diagnostics; got: {:?}",
+        resolved_base.diagnostics
+    );
+    assert!(
+        resolved_with_absent.diagnostics.is_empty(),
+        "absent-overlay resolution must have no diagnostics; got: {:?}",
+        resolved_with_absent.diagnostics
+    );
+
+    // Both must have a parsed result.
+    assert!(
+        resolved_base.parsed.is_some(),
+        "base-only resolution must produce a parsed result"
+    );
+    assert!(
+        resolved_with_absent.parsed.is_some(),
+        "absent-overlay resolution must produce a parsed result"
+    );
+}
+
+/// Verify that modifying the overlay file invalidates `loader_resolved_value_with_overlay`.
+///
+/// After the overlay text changes (via `set_loader_file`), a subsequent call must
+/// reflect the new overlay content.
+#[test]
+fn overlay_file_change_invalidates_loader_value() {
+    let mut db = Database::default();
+
+    // Base: {name: "us_west", threshold: 100} — valid
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    // Overlay v1: {threshold: 50} — valid, overrides threshold only
+    let overlay_path: Arc<str> = Arc::from("configs/cohorts.prod.yaml");
+    let overlay_v1: Arc<str> = Arc::from("threshold: 50\n");
+    let overlay_input_v1 = db.set_loader_file(overlay_path.clone(), overlay_v1, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // First resolution with overlay v1 — must have no diagnostics.
+    let resolved_v1 =
+        loader_resolved_value_with_overlay(&db, base_input, overlay_input_v1, call_site.clone());
+    assert!(
+        resolved_v1.diagnostics.is_empty(),
+        "v1 overlay resolution must have no diagnostics; got: {:?}",
+        resolved_v1.diagnostics
+    );
+    // Merged threshold must be 50 (from overlay).
+    if let Some(ref p) = resolved_v1.merged {
+        match p {
+            crate::loader::MetaValue::Record(fields) => {
+                assert_eq!(
+                    fields.get("threshold"),
+                    Some(&crate::loader::MetaValue::Integer(50)),
+                    "merged threshold must be 50 from overlay v1; got: {:?}",
+                    fields.get("threshold")
+                );
+            }
+            other => panic!("expected Record merged value; got: {:?}", other),
+        }
+    } else {
+        panic!("v1 merged value must be Some");
+    }
+
+    // Update overlay to v2: {threshold: 999}
+    let overlay_v2: Arc<str> = Arc::from("threshold: 999\n");
+    let overlay_input_v2 = db.set_loader_file(overlay_path.clone(), overlay_v2, true);
+    assert!(
+        overlay_input_v1 == overlay_input_v2,
+        "set_loader_file must return same handle on update"
+    );
+
+    // Second resolution — Salsa must invalidate and re-evaluate.
+    let resolved_v2 =
+        loader_resolved_value_with_overlay(&db, base_input, overlay_input_v2, call_site);
+    assert!(
+        resolved_v2.diagnostics.is_empty(),
+        "v2 overlay resolution must have no diagnostics; got: {:?}",
+        resolved_v2.diagnostics
+    );
+    // Merged threshold must now be 999 (from overlay v2).
+    if let Some(ref p) = resolved_v2.merged {
+        match p {
+            crate::loader::MetaValue::Record(fields) => {
+                assert_eq!(
+                    fields.get("threshold"),
+                    Some(&crate::loader::MetaValue::Integer(999)),
+                    "merged threshold must be 999 from overlay v2; got: {:?}",
+                    fields.get("threshold")
+                );
+            }
+            other => panic!("expected Record merged value; got: {:?}", other),
+        }
+    } else {
+        panic!("v2 merged value must be Some");
+    }
+}
+
+/// Verify that `smelt_record_declarations` collects declarations from all
+/// files in the workspace and returns them in file order.
+///
+/// Two files each contribute one `smelt.record` declaration; the query must
+/// return exactly two entries with the correct names.
+#[test]
+fn smelt_record_declarations_query_collects_workspace_decls() {
+    let mut db = TestDb::default();
+
+    // File 1: declares smelt.record SourceEntry.
+    db.set_file_text(
+        PathBuf::from("models/sources.sql"),
+        Arc::new(
+            "smelt.record SourceEntry = { name: Text, age: Integer }\n\
+             SELECT 1"
+                .to_string(),
+        ),
+    );
+
+    // File 2: declares smelt.record MetricConfig.
+    db.set_file_text(
+        PathBuf::from("models/metrics.sql"),
+        Arc::new(
+            "smelt.record MetricConfig = { metric_name: Text, threshold: Float }\n\
+             SELECT 1"
+                .to_string(),
+        ),
+    );
+
+    let workspace = db.sync_workspace();
+    let decls = smelt_record_declarations(&db.db, workspace);
+
+    assert_eq!(
+        decls.len(),
+        2,
+        "workspace with two smelt.record declarations must produce exactly 2 entries; got {}: {:?}",
+        decls.len(),
+        decls.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+
+    let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"SourceEntry"),
+        "decls must include SourceEntry; got {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"MetricConfig"),
+        "decls must include MetricConfig; got {:?}",
+        names
+    );
+}

@@ -49,6 +49,19 @@ nav:
   - Concepts:
     - How smelt Works: concepts/how-it-works.md
     - Project Structure: concepts/project-structure.md
+  - Meta-Language:
+    - Overview: meta-language/index.md
+    - Lists & Spread: meta-language/lists.md
+    - Lambdas: meta-language/lambdas.md
+    - Higher-Order Functions: meta-language/hofs.md
+    - Pipe Operator: meta-language/pipes.md
+    - Reducers: meta-language/reducers.md
+    - Config Variables: meta-language/config-vars.md
+    - Reflection: meta-language/reflection.md
+    - Records: meta-language/records.md
+    - Maps: meta-language/maps.md
+    - Config Loaders: meta-language/config-loaders.md
+    - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md
     - Sources: guide/sources.md

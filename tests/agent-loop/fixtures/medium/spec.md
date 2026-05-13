@@ -101,3 +101,243 @@ The validator also checks that a `functions/` directory with at least one
   `functions/`, **not** the filename stem. A function `safe_revenue` in
   `functions/revenue.sql` is called as `smelt.functions.safe_revenue(...)`, not
   `smelt.functions.revenue.safe_revenue(...)`. Including the stem is an error.
+
+## Optional: meta-list lift (Phase A surface)
+
+Once the required outputs above are passing, try this extension: `stg_orders`
+joins `raw_customers` and surfaces two VARCHAR identity columns —
+`customer_name` and `country` — that you might repeat across intermediate CTEs.
+Lift that repeated VARCHAR projection into a homogeneous `List<Expr<Text>>`
+literal spread into each SELECT list:
+
+```sql
+-- Spread two same-typed VARCHAR columns from raw_customers
+SELECT order_id, customer_id, ...[customer_name, country], order_date, status, amount
+FROM ...
+```
+
+The smelt LSP will show `List<Expr<TEXT>>` on hover for the literal and emit a helpful
+diagnostic if you mis-shape it — for example `MetaListHeterogeneous` if the
+elements don't all share a common type, or `MetaSpreadInForbiddenPosition` if
+you accidentally place the spread inside a WHERE clause instead of the SELECT
+list.  This extension is not validated by `validate.py`; it is workflow practice
+only.
+
+## Optional: HOF pipeline and config vars (Phase B surface)
+
+After the Phase A lift, try using Phase B HOFs and `smelt.config.var` together.
+Add a `vars:` block to your `smelt.yml`:
+
+```yaml
+vars:
+  min_revenue: 50
+```
+
+Then use `smelt.config.var` in a model to read it at compile time, and compose
+HOFs with the pipe operator to filter and map a list of amounts inline:
+
+```sql
+-- Filter out low-revenue orders, then double each remaining amount for illustration
+SELECT [10, 75, 200, 30, 120]
+         |> filter(fn x => x > smelt.config.var('min_revenue'))
+         |> map(fn x => x * 2)
+```
+
+You can also fold a boolean column list with `and_all` or `or_any` reducers:
+
+```sql
+-- True if every order in a hardcoded set is above the threshold
+SELECT reduce([75, 200, 120], and_all)
+```
+
+Wait — `and_all` expects `List<Boolean>`, not `List<Numeric>`. The LSP will
+surface `ReducerInputTypeMismatch`. Fix it by adjusting the list to booleans:
+
+```sql
+SELECT reduce([true, true, false], or_any)
+```
+
+Key Phase B diagnostics to watch for:
+
+- `ReducerInputTypeMismatch` — list element type doesn't match the reducer's expected input
+- `ReducerEmptyNoIdentity` — `reduce([], union_all)` where `union_all` has no identity
+- `HofExpectsLambda` — passing a bare name instead of `fn x => ...` to `map` or `filter`
+- `ConfigVarNotFound` — referencing a `vars:` key that doesn't exist in `smelt.yml`
+- `PipeRhsNotCall` — `list |> 3 + 4` (RHS of `|>` must be a call expression)
+
+This extension is not validated by `validate.py`; it is workflow practice only.
+
+## Optional: column reflection with smelt.columns_of (Phase C surface)
+
+After the Phase B extension, try using Phase C column reflection to generate
+per-column expressions automatically from a model's schema.
+
+First, add a schema YAML for `raw_orders` under `models/sources/raw/raw_orders.yml`
+that declares `amount` and `customer_id` as numeric columns:
+
+```yaml
+description: Raw orders
+columns:
+  - name: order_id
+    type: INTEGER
+  - name: customer_id
+    type: INTEGER
+  - name: order_date
+    type: DATE
+  - name: status
+    type: VARCHAR
+  - name: amount
+    type: DOUBLE
+```
+
+Then write a function that uses `smelt.columns_of` and a HOF pipeline to wrap
+every numeric column in `COALESCE`:
+
+```sql
+-- functions/coalesce_numeric.sql
+smelt.define coalesce_numeric(t: TableExpr) -> SelectItems<Scalar, t> AS (
+    smelt.columns_of(t)
+      |> filter(fn c => c.is_numeric)
+      |> map(fn c => COALESCE(c.name, 0))
+)
+```
+
+And call it in a model using the spread form:
+
+```sql
+-- models/stg_orders_safe.sql
+SELECT
+    order_id,
+    status,
+    order_date,
+    ...smelt.functions.coalesce_numeric(smelt.stg_orders)
+FROM smelt.stg_orders
+```
+
+Phase C diagnostics to watch for when experimenting:
+
+- `ColumnsOfRequiresTableExpr` — `smelt.columns_of(42)` where the argument is not a model reference
+- `ColumnsOfNamedArgument` — `smelt.columns_of(t => orders)` uses an unsupported named argument
+- `ColumnsOfUnresolvableSchema` — the model passed to `smelt.columns_of` has no resolvable schema
+- `ColumnRefFieldUnknown` — `c.label` where `label` is not in the ColumnRef field set `{name, type, is_numeric}`
+
+This extension is not validated by `validate.py`; it is workflow practice only.
+
+## Optional: wide reflection with smelt.models.with_tag (Phase D surface)
+
+After the Phase C extension, try using Phase D wide reflection to introspect
+the workspace and iterate over models by tag.
+
+First, tag two of your models with a `cohort` tag in their YAML frontmatter:
+
+```sql
+---
+tags: [cohort]
+---
+SELECT ...
+```
+
+Then write a model that maps over all cohort models to collect their names:
+
+```sql
+-- models/cohort_inventory.sql
+-- smelt.models.with_tag('cohort') returns List<ModelRef> — all models tagged
+-- 'cohort' in workspace-relative path order.
+-- map projects each ModelRef to its name field (Text).
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)
+```
+
+You can also explore `smelt.models.all()` (all workspace models) and field
+projection:
+
+```sql
+-- All model paths in the workspace
+SELECT map(smelt.models.all(), fn m => m.path)
+
+-- Column list for every cohort model (m.columns is equivalent to smelt.columns_of(m))
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.columns)
+```
+
+Phase D rules to remember:
+- `with_tag` takes exactly one positional Text literal: `with_tag('my-tag')`. Named
+  arguments (`tag => 'cohort'`) emit `WithTagNamedArgument`; a runtime expression
+  like `UPPER('cohort')` emits `WithTagRequiresText`.
+- `all()` takes no arguments. Any argument emits `WideReflectionUnexpectedArgument`.
+- ModelRef fields are exactly `{path, name, tags, columns}`. Any other field name
+  emits `ModelRefFieldUnknown`.
+- You do NOT need `m.table_expr` to use a ModelRef as a TableExpr — the subtyping
+  lift `ModelRef <: TableExpr` is automatic.
+
+Phase D diagnostics to watch for:
+
+- `WithTagRequiresText` — `with_tag(42)` or `with_tag(UPPER('x'))` — argument must be a compile-time literal
+- `WithTagNamedArgument` — `with_tag(tag => 'cohort')` — use positional syntax
+- `WideReflectionUnknownAccessor` — `smelt.models.bogus()` — only `with_tag` and `all` are valid
+- `WideReflectionUnexpectedArgument` — `smelt.models.all(42)` — `all` takes no arguments
+- `ModelRefFieldUnknown` — `m.materialization` — field is not in the closed set
+
+This extension is not validated by `validate.py`; it is workflow practice only.
+
+## Optional: records, maps, and config loaders
+
+After the wide-reflection extension, try loading per-tenant configuration from a
+YAML file using `smelt.config.load_yaml` and a `Map<Text, …>` schema.
+
+**Step 1 — declare a named record type** for the tenant shape. In any model
+file (or a new top-level file), add:
+
+```sql
+smelt.record Tenant = { plan: Text, threshold: Integer }
+```
+
+**Step 2 — author the config file** at `configs/tenants.yaml` in your project
+root:
+
+```yaml
+tenant_a:
+  plan: pro
+  threshold: 100
+tenant_b:
+  plan: free
+  threshold: 10
+```
+
+**Step 3 — load the file as a `Map<Text, Tenant>`** and iterate over entries to
+build a SELECT:
+
+```sql
+-- models/tenant_summary.sql
+smelt.record Tenant = { plan: Text, threshold: Integer }
+
+SELECT
+    smelt.config.load_yaml('configs/tenants.yaml', Map<Text, Tenant>)
+    |> m => m.entries()
+    |> map(fn e => e.key)
+```
+
+`m.entries()` returns `List<{key: Text, value: Tenant}>` sorted **byte-lex
+ascending by key** — `tenant_a` before `tenant_b`, regardless of YAML file
+order. `e.key` is a `Text` meta value that lifts to a SQL identifier at splice
+time.
+
+**Things to watch for:**
+
+- `ConfigLoaderPathNotLiteral` — the path must be a string literal, not a
+  variable. `smelt.config.load_yaml(my_var, …)` is an error.
+- `ConfigLoaderFileNotFound` — the file at the given path must exist relative to
+  the workspace root.
+- `ConfigLoaderSchemaForbidden` — the schema must be a record type, `List<record>`,
+  or `Map<Text, record>`. Bare scalars (`Integer`, `Text`) emit this diagnostic.
+- `MapGetMissingKey` — `m.get('missing')` on a statically-known map is a
+  compile-time error, not a silent null. Guard with `m.has(k)`.
+- `RecordFieldTypeForbidden` — `ColumnRef`, `ModelRef`, and `SourceRef` are not
+  valid field types in a `smelt.record` declaration.
+- Width subtyping: a `Tenant`-typed value is assignable to `{plan: Text}` (the
+  wider record is the subtype), so HOF lambdas that only consume `e.value.plan`
+  do not need an explicit projection.
+
+This extension is not validated by `validate.py`; it is workflow practice only.
+
+<!-- TODO: extend validate.py to assert on tenant_summary table contents when
+     the table shape is stabilised. For now, the acceptance gate is that the
+     LSP emits no diagnostics on the loaded model. -->

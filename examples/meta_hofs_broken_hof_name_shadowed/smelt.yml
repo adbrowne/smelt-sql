@@ -1,0 +1,13 @@
+name: meta_hofs_broken_hof_name_shadowed
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

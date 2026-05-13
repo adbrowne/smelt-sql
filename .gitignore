@@ -4,6 +4,7 @@ target/
 !.claude/settings.json
 !.claude/commands/
 !.claude/skills/
+!.claude/scripts/
 /.vscode/
 datagen.duckdb
 output/

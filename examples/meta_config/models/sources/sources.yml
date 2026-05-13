@@ -1,0 +1,13 @@
+sources:
+  raw:
+    tables:
+      orders:
+        schema:
+          - name: id
+            type: Integer
+          - name: tenant_id
+            type: Text
+          - name: amount
+            type: Float
+          - name: created_at
+            type: Timestamp

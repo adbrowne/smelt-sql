@@ -1,0 +1,15 @@
+description: Raw event data for meta-workspace examples
+tags: [audit, raw]
+columns:
+- name: id
+  type: INTEGER
+  description: Unique event identifier
+- name: user_id
+  type: INTEGER
+  description: User who triggered the event
+- name: event_type
+  type: VARCHAR
+  description: Type of event
+- name: created_at
+  type: TIMESTAMP
+  description: When the event occurred

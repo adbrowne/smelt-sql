@@ -1,0 +1,10 @@
+description: Raw user data for meta-list broken examples
+columns:
+- name: id
+  type: INTEGER
+- name: name
+  type: VARCHAR
+- name: email
+  type: VARCHAR
+- name: created_at
+  type: TIMESTAMP

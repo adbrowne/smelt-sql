@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-09
 owners: [andrew]
 ---
 
@@ -54,8 +54,14 @@ Parameter and return positions accept fragment sorts:
 | Table | `TableExpr` or `TableExpr<{col: T, …}>` | `TableExpr<{user_id: Text, ts: Timestamp}>` |
 | Select list | `SelectItems<Kind[, ctx]>` | `SelectItems<Agg, base>` |
 | Open struct value | `Expr<Struct<{f: T, …}>>` | `Expr<Struct<{ts: Timestamp, ..r}>>` |
+| Meta list | `List<T>` | `List<Expr<Numeric>>`, `List<TableExpr>`, `List<List<Text>>` |
+| Lambda | `Lambda<T, U>` | `Lambda<Expr<Integer>, Expr<Boolean>>` |
 
 `T` is one of: a concrete `DataType`, a `TypeConstraint` (`Numeric`, `Ordered`, `Any`), or — in built-ins / `smelt.extern` only — a generic parameter (`<T: Constraint>`). Row-tail markers on `TableExpr<{…}>` and `Struct<{…}>`: omitted (closed), `..` (anonymous tail accepted), `..r` (named tail bound).
+
+`List<T>` is a meta-only sort: it never appears as a `DataType` in a runtime column, and `Array<U>` is its Data-World counterpart. The element type `T` may be any other fragment sort (including a nested `List<U>`) or another meta-only type (`ColumnRef`, `ModelRef`, record types). `List<T>` is **covariant** in `T` — if `S <: T` under the fragment-sort subtyping rules below, then `List<S> <: List<T>`. The runtime witness is `SmeltType::List(Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full surface and semantics for list literals and spread live in `meta_language.md` §"Lists and spread".
+
+`Lambda<T, U>` is a meta-only sort representing a compile-time function value with input sort `T` and output sort `U`. It is **invariant** in both `T` and `U`: `Lambda<S1, T1> <: Lambda<S2, T2>` holds only when `S1 = S2` AND `T1 = T2`. `Lambda<T, U>` values are produced by `fn param => body` syntax and consumed by higher-order functions (`map`, `filter`, `reduce`). The runtime witness is `SmeltType::Lambda(Box<SmeltType>, Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full surface and semantics for HOFs and lambdas live in `meta_language.md` §"Lambdas and higher-order functions". `Lambda<T, U>` is meta-only — it is not user-writable as a `smelt.define` parameter sort or return type, and is constructed only at HOF positional argument positions; the `LambdaInForbiddenPosition` diagnostic enforces this.
 
 `Kind` ∈ `{Scalar, Agg, Window}`. `ctx` is the name of a sibling parameter whose schema scopes the items.
 
@@ -130,14 +136,27 @@ A constraint is satisfied iff the actual type is a member. Constraints are **not
 
 ### 7. Fragment sort subtyping
 
-The only subtype relations are linear chains:
+The subtype relations include two linear chains for expression and select-item sorts:
 
 ```
 Expr<T>             <:  AggExpr<T>             <:  WindowExpr<T>
 SelectItems<Scalar> <:  SelectItems<Agg>       <:  SelectItems<Window>
 ```
 
-`TableExpr` and `OrderSpec` are unrelated to the expression chain. Splice points enforce a kind ceiling:
+And two one-way closed-record rules for wide-reflection meta types:
+
+```
+ModelRef   <:  TableExpr
+SourceRef  <:  TableExpr
+```
+
+**`ModelRef <: TableExpr`.** A `ModelRef` value lifts to a `TableExpr` wherever a `TableExpr` is required — reducer-`union_all` arguments, `smelt.columns_of` arguments, and FROM-clause splice positions. The lifted `TableExpr` is the same table representation that `smelt.<model-path>` resolves to for that model. The rule is **one-way**: the reverse direction (`TableExpr → ModelRef`) does not exist; only values originating from `smelt.models.*` accessors are `ModelRef`-typed.
+
+**`SourceRef <: TableExpr`.** The same lifting rule applies to `SourceRef` values produced by `smelt.sources.*` accessors. The lifted `TableExpr` is the same table representation that the source's `smelt.<source-path>` resolves to.
+
+**List covariance applies.** Because `List<T>` is covariant in `T` (§"smelt.define type annotations"), `List<ModelRef> <: List<TableExpr>` and `List<SourceRef> <: List<TableExpr>` follow automatically. This means `reduce(smelt.models.with_tag('cohort'), union_all)` requires no explicit projection — the list element type lifts to `TableExpr` through the single rule above.
+
+`TableExpr`, `ModelRef`, `SourceRef`, and `OrderSpec` are otherwise unrelated to the expression chain. Splice points enforce a kind ceiling:
 
 | Position | Accepted kinds |
 |----------|----------------|
@@ -221,7 +240,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - Function call inference is **local**: row-variable unification, generic binding, and constraint discharge all happen at the call site without cross-module constraint solving.
 - `Numeric ⊂ Ordered` is structural — callers do not need to restate constraints.
 - Adding a type to `Ordered` is non-breaking; removing one is breaking.
-- Fragment sort subtyping is linear-only — no branching subtype relations are permitted.
+- Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain rules; no further branching is permitted without a spec edit.
 - One canonical built-in registry (per `signatures.rs::BuiltinRegistry`); per-dialect registries are out of scope. Backend availability is a per-function `backends:` property, not a registry split.
 - **Out of scope for v1**: nullability in parameter types; `Decimal(p,s)` precision arithmetic; multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`.
 
@@ -230,7 +249,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double` (with the integer/Decimal mixing rule producing `Decimal(38,10)`). `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (§16 #9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. Implementation conformance is a follow-up plan.
 - **Decimal arithmetic v1 fallback.** Decimal arithmetic in v1 produces `Decimal(38,10)` regardless of operand precision (e.g. `Decimal(19,2) + Decimal(19,2) → Decimal(38,10)`), where DuckDB native produces `Decimal(19,2)`. The fallback is conservative and avoids precision-loss; precision-aware inference is open. (See `architecture.md` §"Specs not yet authored".)
 - **Nullability scope mismatch.** The column-level `nullable: bool` flag is implemented and load-bearing in inference, but it does not appear in `smelt.define` parameter types (§16 #10). This spec scopes nullability to the column form only.
-- **Fragment sort coverage.** `Expr<T>`, `TableExpr`, and `TableExpr<{…}>` are landed. `AggExpr<T>` and `WindowExpr<T>` are partially landed: the `ExprKind` axis enforces the kind ceiling at splice points (`WindowInScalarContext`), but type-annotation parsing for `AggExpr<T>` / `WindowExpr<T>` may still be in flight per the smelt-functions plan (Step 3, Phase 13). Validate against the live `crates/smelt-types/src/signatures.rs::SmeltType` enum.
+- **Fragment sort coverage.** `Expr<T>`, `TableExpr`, and `TableExpr<{…}>` are landed. `AggExpr<T>` and `WindowExpr<T>` are partially landed: the `ExprKind` axis enforces the kind ceiling at splice points (`WindowInScalarContext`), but type-annotation parsing for `AggExpr<T>` / `WindowExpr<T>` may still be in flight (tracked in `docs/plans/20260422-smelt-functions.md`). Validate against the live `crates/smelt-types/src/signatures.rs::SmeltType` enum.
 - **`Float` as a distinct DataType.** `DataType::Float` exists in code; research treats Float as Double. This spec aligns with research and lists `Float` collapsing into `Double` as the normative rule. `Float` may be removed from the enum in a future plan.
 - **`docs/type_semantics.md` overlap.** The legacy quasi-spec contains backend-divergence material that is still useful (DuckDB/Spark divergence registry). Recommendation: keep it as a backend-divergence appendix referenced from this spec; over time, fold or trim.
 - **`Map<K,V>` rules.** `DataType::Map` exists in the vocabulary but research is silent on its semantics. This spec marks `Map` as non-`Ordered`; broader rules for Map equality, ordering, and arithmetic remain open.
@@ -266,6 +285,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
 - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
+- `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; this spec only registers the vocabulary entry, the meta-language spec owns the rules.
 
 ### Backend divergence appendix
 

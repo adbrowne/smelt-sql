@@ -1,0 +1,13 @@
+name: meta_config_broken_config_loader_path_escapes_workspace
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

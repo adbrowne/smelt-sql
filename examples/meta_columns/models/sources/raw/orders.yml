@@ -1,0 +1,14 @@
+description: Raw order data for meta-columns examples
+columns:
+- name: id
+  type: INTEGER
+  description: Unique order identifier
+- name: customer_name
+  type: VARCHAR
+  description: Customer display name
+- name: amount
+  type: DOUBLE
+  description: Order amount in dollars
+- name: discount
+  type: DOUBLE
+  description: Discount applied to the order

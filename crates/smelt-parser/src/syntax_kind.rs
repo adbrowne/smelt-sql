@@ -74,6 +74,8 @@ pub enum SyntaxKind {
     REPEATABLE_KW,
     // Phase 15: Aggregate function keywords
     FILTER_KW,
+    // Phase B (meta-language): `fn` reserved keyword
+    FN_KW,
     // SQL data type/constructor keywords
     ARRAY_KW,
     VALUES_KW,
@@ -97,12 +99,13 @@ pub enum SyntaxKind {
     FETCH_KW,
     NEXT_KW,
     ONLY_KW,
-
     // Operators & punctuation
     LPAREN,       // (
     RPAREN,       // )
     COMMA,        // ,
     DOT,          // .
+    DOT_DOT,      // .. (struct/row spread)
+    DOT_DOT_DOT,  // ... (list spread)
     STAR,         // *
     EQ,           // =
     NE,           // !=
@@ -249,6 +252,18 @@ pub enum SyntaxKind {
     SMELT_AS_STRUCT_CALL, // smelt.as_struct(alias [EXCEPT col1, col2, ...])
     EXCEPT_COL_LIST,      // EXCEPT col1, col2, ... inside SMELT_AS_STRUCT_CALL
 
+    // Phase 1 (meta-language): list spread operator `...xs` in comma-separated positions
+    LIST_SPREAD, // `...expr` — spread a List<T> into a comma-separated position
+
+    // Phase B (meta-language): `|>` pipe-arrow token
+    PIPE_ARROW, // `|>` — meta-language pipe operator
+
+    // Phase B (meta-language): lambda and pipe CST nodes
+    // LAMBDA: `fn IDENT => EXPR` or `fn (IDENT, ...) => EXPR` (multi-arg reserved for Phase F)
+    // PIPE_EXPR: `EXPR |> CALL(args...)` — left-associative, lowest meta-language precedence
+    LAMBDA,
+    PIPE_EXPR,
+
     // Phase 13: structured TypeRef children for TableExpr / AggExpr /
     // WindowExpr / SelectItems parameter sorts. These are emitted as
     // children of a TYPE_REF node by parse_type_ref when the leading
@@ -268,6 +283,24 @@ pub enum SyntaxKind {
     SELECTITEMS_KIND, // Capital-Kind argument of SelectItems<K, ctx>
     SELECTITEMS_CTX,  // lowercase context argument of SelectItems<K, ctx>
     EXPR_CTX,         // lowercase context argument of Expr<T, ctx>
+
+    // Phase 2 (meta-language): record declarations, literals, inline types, map methods
+    //
+    // SMELT_RECORD_DECL: top-level `smelt.record Name = { field: Type, ... }` declaration.
+    // RECORD_FIELD: shared `IDENT COLON …` triple inside a record decl body, literal, or
+    //   inline-record type.
+    // RECORD_LITERAL: `{f1: v1, f2: v2}` in a value position — fields have expression values.
+    // RECORD_TYPE_INLINE: `{f1: T1, f2: T2}` in a type-annotation position — fields have
+    //   type-ref values.
+    // MAP_METHOD_CALL: `expr.method(args)` where the method is a Map API method
+    //   (entries, get, keys, values, contains_key, etc.). Emitted as a distinct node kind so
+    //   Phase 4 type inference can dispatch the closed Map API without ambiguity against
+    //   field-projection on records/structs.
+    SMELT_RECORD_DECL,
+    RECORD_FIELD,
+    RECORD_LITERAL,
+    RECORD_TYPE_INLINE,
+    MAP_METHOD_CALL,
 
     // Error handling
     ERROR, // Invalid syntax
@@ -346,6 +379,7 @@ impl SyntaxKind {
                 | SYSTEM_KW
                 | REPEATABLE_KW
                 | FILTER_KW
+                | FN_KW
                 | ARRAY_KW
                 | VALUES_KW
                 | STRUCT_KW

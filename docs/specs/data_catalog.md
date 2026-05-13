@@ -160,6 +160,12 @@ Topic paths correspond to relative paths under `docs-site/docs/`, without the `.
 
 When `--select` is specified, only selected models appear in the output. Test models (`materialization: test`) are excluded from catalog output regardless of selector.
 
+### Wide-reflection visibility
+
+The wide-reflection accessors `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` observe the same model and source identities that the catalog renders: workspace-relative `path`, short `name`, and merged `tags`. The `path` and `name` fields on `ModelRef` / `SourceRef` values are derived from the same entity resolution that produces catalog page paths and model names. The `tags` field on `ModelRef` is the same merged set (smelt.yml first, then frontmatter) that drives the catalog's tag index.
+
+No normative extension to catalog rendering is introduced by the wide-reflection accessors. Deeper catalog changes — such as per-model cohort-of-origin fields or multi-source-of-origin column tracking — are deferred to later work tracked in `docs/plans/20260509-meta-language-overall.md`.
+
 ## Design
 
 **Two formats serve different consumers.** Markdown is human-readable and suitable for static site deployment (e.g., GitHub Pages, Confluence). JSON is the integration format for programmatic consumers — data portals, lineage tools, BI catalog integrations. A single-format output was rejected: pure Markdown excludes programmatic consumers; pure JSON excludes human readers who want to browse catalog pages without writing a script.

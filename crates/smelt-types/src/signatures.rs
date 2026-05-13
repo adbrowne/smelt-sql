@@ -23,9 +23,9 @@ use smelt_parser::ast::{
     File as AstFile, Param as AstParam, Range, SmeltDefine, SmeltExtern, TypeRef,
 };
 use smelt_parser::offset_to_position;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 /// Linear subtyping rank of an expression-typed AST node (Phase 14, §16 #24).
 ///
@@ -144,12 +144,42 @@ impl TypeConstraint {
 /// Phase 4 only models the `Expr<T>` sort. Later phases will extend this with
 /// `TableExpr`, `AggExpr`, etc. Unsupported sorts surface as
 /// [`SmeltTypeParseError::UnsupportedSort`] rather than panicking.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **PartialEq design note (Phase E1):** `SmeltType` implements `PartialEq`
+/// manually rather than via `derive` so that `Record` structural equality
+/// ignores the optional `name` metadata field. Two `Record` values with
+/// identical `fields` maps and differing `name` values (`Some("X")` vs `None`)
+/// compare equal. This matches the spec's structural-equality rule (rule 4):
+/// the `name` field is hover/attribution metadata, not a structural type
+/// discriminant. All other variants delegate to field-by-field equality as
+/// `derive` would produce.
+#[derive(Debug, Clone)]
 pub enum SmeltType {
     /// `Expr<T>` where T is a [`TypeConstraint`] — either a concrete
     /// [`DataType`] or one of the abstract constraints in
     /// [`TypeConstraint`].
     Expr(TypeConstraint),
+    /// `List<T>` — a compile-time meta-list of elements typed `T` (Phase A,
+    /// meta-language). `T` is itself a [`SmeltType`] (enabling `List<List<T>>`
+    /// nesting). No `List<T>` value reaches the database engine.
+    List(Box<SmeltType>),
+    /// `Lambda<T, U>` — a meta-language lambda value (Phase B).
+    ///
+    /// Constructed only at HOF positional-argument positions (e.g. the
+    /// second argument of `map`, `filter`). **Meta-only** — not user-writable
+    /// as a `smelt.define` parameter sort or return type. No `Lambda<T, U>`
+    /// value reaches the database engine.
+    ///
+    /// Lambda is **invariant**: `is_subtype_of(Lambda<S1, T1>, Lambda<S2, T2>)`
+    /// is `true` only when `S1 = S2` and `T1 = T2` (byte-equal).
+    Lambda(Box<SmeltType>, Box<SmeltType>),
+    /// Compiler's "already told you about this" type for list elements (Phase A).
+    ///
+    /// `Unknown` is produced when a list literal's element types cannot be
+    /// unified (heterogeneous) or when an empty literal has no target context.
+    /// It does NOT silently become `Any` — downstream consumers see it as a
+    /// known-error marker per `gradual_typing.md` §"List<Unknown> widening".
+    Unknown,
     /// `TableExpr` / `TableExpr<{…}>` — a row-polymorphic table parameter.
     ///
     /// - `TableExpr(None)` — bare `TableExpr` (Phase 15, §16 #7). The
@@ -191,6 +221,755 @@ pub enum SmeltType {
         fields: Vec<(String, DataType)>,
         tail: StructRowTail,
     },
+    /// `ColumnRef` — a closed meta-only record type produced by
+    /// `smelt.columns_of` (Phase C, meta-language reflection).
+    ///
+    /// Values of this type describe a single column from a `TableExpr`'s
+    /// schema. The type has exactly three fields (see [`COLUMN_REF_FIELDS`]):
+    ///   - `name: Text` — the column identifier (un-quoted, case-preserved)
+    ///   - `type: DataType` (meta literal) — the column's smelt `DataType`
+    ///   - `is_numeric: Boolean` — `TRUE` iff `type` is in the `Numeric` constraint set
+    ///
+    /// **Meta-only**: not user-writable as a `smelt.define` parameter or
+    /// return type. Values originate only from `smelt.columns_of` (Phase C)
+    /// and future reflection accessors (Phase D). No `ColumnRef` value
+    /// reaches the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{name, type, is_numeric}`.
+    /// Adding a field requires a spec edit and a compiler change.
+    ColumnRef,
+    /// `ModelRef` — a closed meta-only record type produced by wide-reflection
+    /// accessors `smelt.models.with_tag` and `smelt.models.all` (Phase D,
+    /// meta-language reflection).
+    ///
+    /// Values of this type describe a single model in the workspace. The type
+    /// has exactly four fields (see [`MODEL_REF_FIELDS`]):
+    ///   - `path: Text` — workspace-relative file path with `/` separators
+    ///   - `name: Text` — the model's identifier (final path segment without `.sql`)
+    ///   - `tags: List<Text>` — the model's merged tag set
+    ///   - `columns: List<ColumnRef>` — the model's column list
+    ///
+    /// **Meta-only**: not user-writable as a `smelt.define` parameter or
+    /// return type. Values originate only from `smelt.models.*` accessors.
+    /// No `ModelRef` value reaches the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{path, name, tags, columns}`.
+    ModelRef,
+    /// `SourceRef` — a closed meta-only record type produced by wide-reflection
+    /// accessors `smelt.sources.with_tag` and `smelt.sources.all` (Phase D,
+    /// meta-language reflection).
+    ///
+    /// Values of this type describe a single source in the workspace. The type
+    /// has exactly four fields (see [`SOURCE_REF_FIELDS`]):
+    ///   - `path: Text` — workspace-relative file path of the source YAML
+    ///   - `name: Text` — the source's identifier (final path segment without `.yml`)
+    ///   - `tags: List<Text>` — the source's tag set as declared in the YAML
+    ///   - `columns: List<ColumnRef>` — the source's column list
+    ///
+    /// **Meta-only**: not user-writable as a `smelt.define` parameter or
+    /// return type. Values originate only from `smelt.sources.*` accessors.
+    /// No `SourceRef` value reaches the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{path, name, tags, columns}`.
+    SourceRef,
+    /// `Record<{f1: T1, …}>` or a named record type `TypeName` (Phase E1,
+    /// meta-language records).
+    ///
+    /// A user-writable meta-only record type introduced by `smelt.record`
+    /// declarations (named) or inline brace notation at type-annotation
+    /// positions (anonymous). No `Record` value reaches the database engine.
+    ///
+    /// **Structural equality ignores `name`:** two `Record` values with the
+    /// same `fields` map compare equal regardless of their `name` metadata.
+    /// This satisfies spec rule 4: the type system treats `{a: Text, b: Integer}`
+    /// and a named `SourceEntry = {a: Text, b: Integer}` identically for
+    /// subtyping and assignability. The `name` field is attribution-only
+    /// (hover strings, goto-definition).
+    ///
+    /// **Width subtyping:** `{a: T, b: U} <: {a: T}` — a record with more
+    /// fields is a subtype of a record with fewer fields, provided the shared
+    /// fields have assignable types. See [`is_subtype_of`].
+    Record {
+        /// Canonical sorted field map. `BTreeMap` ensures iteration order is
+        /// deterministic (lex on field name), so structural equality is
+        /// insensitive to insertion order.
+        fields: BTreeMap<String, SmeltType>,
+        /// Optional name metadata from a `smelt.record TypeName = {…}`
+        /// declaration. `None` for inline record types. This field is
+        /// **excluded from `PartialEq`**; see the `SmeltType` doc comment.
+        name: Option<String>,
+    },
+    /// `Map<K, V>` — a meta-only key-value collection (Phase E1).
+    ///
+    /// In v1 `K` is constrained to `Text`; a `Map<K, V>` with `K != Text`
+    /// emits `MapKeyTypeNotText`. `Map<K, V>` is **invariant** in both axes:
+    /// `Map<Text, Integer>` is not assignable to `Map<Text, Number>` even
+    /// though `Integer <: Number`. No `Map` value reaches the database engine.
+    Map {
+        /// Key type (constrained to `Text` in v1).
+        key: Box<SmeltType>,
+        /// Value type (any meta-language type).
+        value: Box<SmeltType>,
+    },
+}
+
+/// Manual `PartialEq` for `SmeltType` — `Record` equality ignores the `name`
+/// metadata field (structural equality rule, Phase E1 spec §4).
+///
+/// All other variants delegate to field-by-field equality as `derive` would.
+impl PartialEq for SmeltType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (SmeltType::Expr(a), SmeltType::Expr(b)) => a == b,
+            (SmeltType::List(a), SmeltType::List(b)) => a == b,
+            (SmeltType::Lambda(a1, a2), SmeltType::Lambda(b1, b2)) => a1 == b1 && a2 == b2,
+            (SmeltType::Unknown, SmeltType::Unknown) => true,
+            (SmeltType::TableExpr(a), SmeltType::TableExpr(b)) => a == b,
+            (
+                SmeltType::SelectItems {
+                    kind: ka,
+                    context: ca,
+                },
+                SmeltType::SelectItems {
+                    kind: kb,
+                    context: cb,
+                },
+            ) => ka == kb && ca == cb,
+            (
+                SmeltType::Struct {
+                    fields: fa,
+                    tail: ta,
+                },
+                SmeltType::Struct {
+                    fields: fb,
+                    tail: tb,
+                },
+            ) => fa == fb && ta == tb,
+            (SmeltType::ColumnRef, SmeltType::ColumnRef) => true,
+            (SmeltType::ModelRef, SmeltType::ModelRef) => true,
+            (SmeltType::SourceRef, SmeltType::SourceRef) => true,
+            // Record structural equality: `name` is deliberately excluded.
+            // Two records with the same `fields` map compare equal regardless of
+            // their `name` metadata (spec rule 4, Phase E1).
+            (SmeltType::Record { fields: fa, .. }, SmeltType::Record { fields: fb, .. }) => {
+                fa == fb
+            }
+            // Map equality: both `key` and `value` must be equal (invariance —
+            // equality already implies invariance since there's no widening).
+            (SmeltType::Map { key: ka, value: va }, SmeltType::Map { key: kb, value: vb }) => {
+                ka == kb && va == vb
+            }
+            // Cross-variant: never equal.
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SmeltType {}
+
+/// Subtype check for [`SmeltType`] (Phase A, meta-language).
+///
+/// Returns `true` iff `sub` is a subtype of `sup` under the following rules:
+///
+/// * Every type is a subtype of itself (reflexivity).
+/// * `Expr<S> <: Expr<T>` iff the `ExprKind` ordering holds per
+///   [`subkind_of`] — but we're checking data-type constraints here, so
+///   `Expr<S> <: Expr<T>` only when `S == T` (concrete equality) or `T` is
+///   an abstract constraint that `S` satisfies.
+/// * `List<S> <: List<T>` iff `S <: T` — lists are **covariant** because
+///   they are immutable compile-time values.
+/// * All other combinations return `false`.
+///
+/// Pure function — no Salsa dependency.
+pub fn is_subtype_of(sub: &SmeltType, sup: &SmeltType) -> bool {
+    match (sub, sup) {
+        // Reflexivity for identical variants.
+        (a, b) if a == b => true,
+        // List covariance: List<S> <: List<T> iff S <: T.
+        (SmeltType::List(s_inner), SmeltType::List(t_inner)) => is_subtype_of(s_inner, t_inner),
+        // Lambda invariance: Lambda<S1, T1> <: Lambda<S2, T2> only when S1 = S2 and T1 = T2.
+        // The reflexivity arm above already handles the equal case (`a == b`), so
+        // any non-equal Lambda pair falls through to the `_ => false` arm.
+        // We add this arm for documentation clarity; it is unreachable in practice
+        // because the reflexivity arm already fires for equal Lambdas.
+        (SmeltType::Lambda(_, _), SmeltType::Lambda(_, _)) => false,
+        // Expr<S> <: Expr<T> — the inner constraint determines compatibility.
+        (SmeltType::Expr(s_tc), SmeltType::Expr(t_tc)) => {
+            match (s_tc, t_tc) {
+                // Concrete <: abstract constraint: the concrete type must
+                // satisfy the abstract constraint.
+                (TypeConstraint::Concrete(dt), TypeConstraint::Numeric) => {
+                    TypeConstraint::Numeric.satisfies(dt)
+                }
+                (TypeConstraint::Concrete(dt), TypeConstraint::Ordered) => {
+                    TypeConstraint::Ordered.satisfies(dt)
+                }
+                (TypeConstraint::Concrete(_), TypeConstraint::Any) => true,
+                (TypeConstraint::Numeric, TypeConstraint::Any) => true,
+                (TypeConstraint::Ordered, TypeConstraint::Any) => true,
+                (TypeConstraint::Numeric, TypeConstraint::Ordered) => true,
+                // Any other pair that isn't identical is not a subtype.
+                _ => false,
+            }
+        }
+        // Fragment-sort subtyping: ModelRef <: TableExpr and SourceRef <: TableExpr.
+        //
+        // A `ModelRef` or `SourceRef` value's `TableExpr` projection is the same
+        // `TableExpr` that `smelt.<path>` resolves to for that model/source. The
+        // subtyping rule is one-way: `ModelRef` and `SourceRef` lift to `TableExpr`
+        // wherever a `TableExpr` is required (reducer-`union_all` arguments,
+        // `smelt.columns_of` arguments, FROM-clause splice positions).
+        //
+        // The reverse direction (`TableExpr → ModelRef`) does not exist: only values
+        // originating from `smelt.models.*` / `smelt.sources.*` are `ModelRef`/`SourceRef`-typed.
+        //
+        // List covariance (above) automatically lifts `List<ModelRef>` → `List<TableExpr>`
+        // once this element rule is in place.
+        (SmeltType::ModelRef, SmeltType::TableExpr(_)) => true,
+        (SmeltType::SourceRef, SmeltType::TableExpr(_)) => true,
+        // Record width subtyping (Phase E1, spec rule 8):
+        // `sub <: sup` iff every field in `sup` exists in `sub` with an assignable type.
+        // A record with MORE fields is the subtype (it satisfies every requirement of the
+        // less-specific supertype). The `name` field is not consulted — subtyping is
+        // purely structural over the `fields` map.
+        (
+            SmeltType::Record {
+                fields: sub_fields, ..
+            },
+            SmeltType::Record {
+                fields: sup_fields, ..
+            },
+        ) => sup_fields.iter().all(|(name, sup_ty)| {
+            sub_fields
+                .get(name)
+                .is_some_and(|sub_ty| is_subtype_of(sub_ty, sup_ty))
+        }),
+        // Map invariance (Phase E1, spec §"Map invariants"):
+        // `Map<K1, V1> <: Map<K2, V2>` iff `K1 == K2` AND `V1 == V2`.
+        // The reflexivity arm above (`a == b`) already handles equal maps; any
+        // unequal-by-PartialEq Map pair falls here and returns false, enforcing invariance.
+        (SmeltType::Map { .. }, SmeltType::Map { .. }) => false,
+        // All other cross-sort combinations are not subtypes.
+        _ => false,
+    }
+}
+
+/// `Display` for `SmeltType` (Phase E1).
+///
+/// - `Record { name: Some("TypeName"), .. }` renders as `<TypeName>`.
+/// - `Record { name: None, fields }` renders as `Record<{f1: T1, f2: T2}>` with
+///   fields in lex order (BTreeMap iteration order, which equals lex order).
+/// - `Map { key, value }` renders as `Map<K, V>`.
+/// - Other variants render as their type-annotation text.
+impl std::fmt::Display for SmeltType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SmeltType::Expr(tc) => match tc {
+                TypeConstraint::Concrete(dt) => write!(f, "Expr<{dt}>"),
+                TypeConstraint::Numeric => write!(f, "Expr<Numeric>"),
+                TypeConstraint::Ordered => write!(f, "Expr<Ordered>"),
+                TypeConstraint::Any => write!(f, "Expr<Any>"),
+            },
+            SmeltType::List(inner) => write!(f, "List<{inner}>"),
+            SmeltType::Lambda(t, u) => write!(f, "Lambda<{t}, {u}>"),
+            SmeltType::Unknown => write!(f, "Unknown"),
+            SmeltType::TableExpr(_) => write!(f, "TableExpr"),
+            SmeltType::SelectItems { kind, .. } => match kind {
+                ExprKind::Scalar => write!(f, "SelectItems<Scalar>"),
+                ExprKind::Agg => write!(f, "SelectItems<Agg>"),
+                ExprKind::Window => write!(f, "SelectItems<Window>"),
+            },
+            SmeltType::Struct { .. } => write!(f, "Struct<{{…}}>"),
+            SmeltType::ColumnRef => write!(f, "ColumnRef"),
+            SmeltType::ModelRef => write!(f, "ModelRef"),
+            SmeltType::SourceRef => write!(f, "SourceRef"),
+            SmeltType::Record { fields, name } => {
+                if let Some(n) = name {
+                    // Named declaration: display as the type name.
+                    write!(f, "{n}")
+                } else {
+                    // Inline: display structural form in lex order.
+                    let field_str: Vec<String> =
+                        fields.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                    write!(f, "Record<{{{}}}>", field_str.join(", "))
+                }
+            }
+            SmeltType::Map { key, value } => write!(f, "Map<{key}, {value}>"),
+        }
+    }
+}
+
+// ============================================================================
+// Map API registry (Phase E1)
+// ============================================================================
+
+/// Arity descriptor for Map API methods and future built-in registries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arity {
+    /// Exactly `n` positional arguments required (no variadic).
+    Exact(usize),
+}
+
+/// Discriminates the dispatch behaviour of a Map API method.
+///
+/// Adding a new method to the registry requires choosing a `kind`, which
+/// determines whether key-type validation and static-key resolution are
+/// performed at the call site. This makes the registry the sole source of
+/// truth: changing a method's kind changes its dispatch behaviour without
+/// touching call-site code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapApiMethodKind {
+    /// Zero-argument iteration method (`entries`, `keys`, `values`).
+    /// No key argument — no key-type check, no static-key resolution.
+    ZeroArg,
+    /// One-argument lookup that resolves to the value type (`get`).
+    /// Validates the key-argument type; resolves statically to the per-entry
+    /// type when the key is a string literal and the map contents are known.
+    KeyedGet,
+    /// One-argument presence check that resolves to `Boolean` (`has`).
+    /// Validates the key-argument type; resolves statically to `Bool(true)`
+    /// or `Bool(false)` when the key is a string literal and map contents
+    /// are known.
+    KeyedHas,
+}
+
+/// A single entry in the closed Map API method registry.
+///
+/// The five entries are: `entries`, `keys`, `values`, `get`, `has`.
+/// Named arguments are never supported on Map API methods.
+pub struct MapApiMethod {
+    /// The method name (e.g. `"entries"`).
+    pub name: &'static str,
+    /// Required positional argument count.
+    pub arity: Arity,
+    /// Dispatch kind — controls key-arg validation and static-resolution behaviour.
+    pub kind: MapApiMethodKind,
+    /// Whether named arguments are accepted (always `false` in v1).
+    pub named_args_allowed: bool,
+    /// Return type formula. Takes the receiver's `K` and `V` types and
+    /// returns the synthesised result type. The formula uses owned values
+    /// so the returned `SmeltType` is self-contained.
+    pub return_type_formula: fn(&SmeltType, &SmeltType) -> SmeltType,
+}
+
+impl std::fmt::Debug for MapApiMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MapApiMethod {{ name: {:?}, arity: {:?}, kind: {:?} }}",
+            self.name, self.arity, self.kind
+        )
+    }
+}
+
+/// Build the `List<{key: K, value: V}>` return type for `m.entries()`.
+fn map_entries_return(k: &SmeltType, v: &SmeltType) -> SmeltType {
+    let mut fields = BTreeMap::new();
+    fields.insert("key".to_string(), k.clone());
+    fields.insert("value".to_string(), v.clone());
+    SmeltType::List(Box::new(SmeltType::Record { fields, name: None }))
+}
+
+/// Build `List<K>` for `m.keys()`.
+fn map_keys_return(k: &SmeltType, _v: &SmeltType) -> SmeltType {
+    SmeltType::List(Box::new(k.clone()))
+}
+
+/// Build `List<V>` for `m.values()`.
+fn map_values_return(_k: &SmeltType, v: &SmeltType) -> SmeltType {
+    SmeltType::List(Box::new(v.clone()))
+}
+
+/// Build `V` for `m.get(k)`.
+fn map_get_return(_k: &SmeltType, v: &SmeltType) -> SmeltType {
+    v.clone()
+}
+
+/// Build `Boolean` for `m.has(k)`.
+fn map_has_return(_k: &SmeltType, _v: &SmeltType) -> SmeltType {
+    SmeltType::Expr(TypeConstraint::Concrete(crate::DataType::Boolean))
+}
+
+/// Closed Map API method registry (Phase E1).
+///
+/// The five entries are the entire Map surface in v1.
+/// `entries`, `keys`, `values` — arity 0 (no arguments).
+/// `get`, `has` — arity 1 (one positional key argument).
+///
+/// Named arguments are not permitted on any Map API method.
+pub static MAP_API_METHODS: &[MapApiMethod] = &[
+    MapApiMethod {
+        name: "entries",
+        arity: Arity::Exact(0),
+        kind: MapApiMethodKind::ZeroArg,
+        named_args_allowed: false,
+        return_type_formula: map_entries_return,
+    },
+    MapApiMethod {
+        name: "keys",
+        arity: Arity::Exact(0),
+        kind: MapApiMethodKind::ZeroArg,
+        named_args_allowed: false,
+        return_type_formula: map_keys_return,
+    },
+    MapApiMethod {
+        name: "values",
+        arity: Arity::Exact(0),
+        kind: MapApiMethodKind::ZeroArg,
+        named_args_allowed: false,
+        return_type_formula: map_values_return,
+    },
+    MapApiMethod {
+        name: "get",
+        arity: Arity::Exact(1),
+        kind: MapApiMethodKind::KeyedGet,
+        named_args_allowed: false,
+        return_type_formula: map_get_return,
+    },
+    MapApiMethod {
+        name: "has",
+        arity: Arity::Exact(1),
+        kind: MapApiMethodKind::KeyedHas,
+        named_args_allowed: false,
+        return_type_formula: map_has_return,
+    },
+];
+
+/// Look up a Map API method by name. Returns `None` for any name outside
+/// the closed set `{entries, keys, values, get, has}`.
+pub fn lookup_map_api_method(name: &str) -> Option<&'static MapApiMethod> {
+    MAP_API_METHODS.iter().find(|m| m.name == name)
+}
+
+// ============================================================================
+// Record registry (Phase E1)
+// ============================================================================
+
+/// Diagnostic code for the record registry builder.
+///
+/// This is a local enum living in `smelt-types` so that `signatures.rs` and
+/// `build_record_registry` can produce typed sentinels without depending on
+/// `smelt-db::DiagnosticCode` (which would create a circular crate dependency).
+/// The wiring layer in `smelt-db` translates these into `DiagnosticCode` values
+/// for the LSP accumulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecordRegistryCode {
+    /// A second `smelt.record` declaration in the workspace shares an existing
+    /// record's name. First-declaration-wins; the sentinel anchors at the
+    /// second declaration's `name_span`.
+    SmeltRecordRedefinition,
+    /// A field's declared type contains a meta-only witness type that is not
+    /// user-writable (`ColumnRef`, `ModelRef`, `SourceRef`, `Lambda`). Anchored
+    /// at the offending field's type span.
+    RecordFieldTypeForbidden,
+    /// A record declaration references its own name directly or transitively
+    /// through other record declarations, forming a cycle. v1 records must
+    /// form a DAG. Anchored at the cycle-introducing field-type span.
+    RecordCyclicDeclaration,
+}
+
+/// A diagnostic produced by the record registry builder.
+///
+/// Carries the typed [`RecordRegistryCode`] (for pattern-matching), the source
+/// span (for diagnostic anchoring), and a pre-rendered message string.
+#[derive(Debug, Clone)]
+pub struct DiagnosticSentinel {
+    /// The registry-layer diagnostic code.
+    pub code: RecordRegistryCode,
+    /// Source span of the offending token (e.g. the second declaration's name
+    /// or the forbidden field-type expression). May be a zero-length span when
+    /// the syntactic position was not tracked.
+    pub span: smelt_parser::TextRange,
+    /// Pre-rendered diagnostic message per the spec's message format.
+    pub message: String,
+}
+
+/// A single `smelt.record` declaration parsed from source.
+///
+/// Phase E1: this struct carries the declaration's name, field list (with
+/// per-field type and source span), the name-token span (for
+/// `SmeltRecordRedefinition` anchoring), and the source-file path (included in
+/// the redefinition message).
+///
+/// Pure — no Salsa dependency. Produced by the Phase 2 parser and consumed by
+/// `build_record_registry`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmeltRecordDeclaration {
+    /// The declared record name (e.g. `"SourceEntry"`).
+    pub name: String,
+    /// Ordered field list: `(field_name, field_type, type_span)`.
+    /// `type_span` anchors `RecordFieldTypeForbidden` and
+    /// `RecordCyclicDeclaration` sentinels.
+    pub fields: Vec<(String, SmeltType, smelt_parser::TextRange)>,
+    /// Span of the name token in `smelt.record TypeName = {…}`.
+    /// Used to anchor `SmeltRecordRedefinition` at the second declaration's
+    /// name token.
+    pub name_span: smelt_parser::TextRange,
+    /// Workspace-relative source file path for the first-declaration message.
+    pub source_path: Arc<str>,
+}
+
+/// Map from declared record name to its declaration. The authoritative
+/// declaration for each name (first-wins on redefinition).
+///
+/// Phase E1: built by `build_record_registry` and passed into the inference
+/// layer (`TypeContext`) in Phase 3/5.
+#[derive(Debug)]
+pub struct RecordRegistry {
+    inner: HashMap<String, SmeltRecordDeclaration>,
+}
+
+impl RecordRegistry {
+    /// Look up a record declaration by name.
+    pub fn lookup(&self, name: &str) -> Option<&SmeltRecordDeclaration> {
+        self.inner.get(name)
+    }
+
+    /// All declared record names (in unspecified order).
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.inner.keys().map(|s| s.as_str())
+    }
+
+    /// Create an empty registry (no declarations). Used as the default for
+    /// pre-Phase-5 callers that have not wired the Salsa side yet.
+    pub fn empty() -> Self {
+        RecordRegistry {
+            inner: HashMap::new(),
+        }
+    }
+}
+
+impl Default for RecordRegistry {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Returns `true` if the given `SmeltType` directly or transitively references
+/// any of the record names in `declared_names`. Used by cycle detection to
+/// identify field types that create edges in the record DAG.
+fn field_type_references_record(ty: &SmeltType, declared_names: &HashSet<String>) -> Vec<String> {
+    let mut refs = Vec::new();
+    collect_record_references(ty, declared_names, &mut refs);
+    refs
+}
+
+fn collect_record_references(
+    ty: &SmeltType,
+    declared_names: &HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match ty {
+        SmeltType::Record { name: Some(n), .. } if declared_names.contains(n) => {
+            out.push(n.clone());
+        }
+        SmeltType::Record { fields, .. } => {
+            for v in fields.values() {
+                collect_record_references(v, declared_names, out);
+            }
+        }
+        SmeltType::List(inner) => collect_record_references(inner, declared_names, out),
+        SmeltType::Map { key, value } => {
+            collect_record_references(key, declared_names, out);
+            collect_record_references(value, declared_names, out);
+        }
+        _ => {}
+    }
+}
+
+/// Build the workspace record registry from a list of parsed declarations.
+///
+/// **Algorithm:**
+/// 1. Walk declarations in order. For each name:
+///    - If already seen: emit `SmeltRecordRedefinition` at the second
+///      declaration's `name_span`; skip the duplicate.
+///    - Otherwise: record as authoritative.
+/// 2. Validate each authoritative declaration's field types:
+///    - Any field type containing `ColumnRef`, `ModelRef`, `SourceRef`, or
+///      `Lambda` emits `RecordFieldTypeForbidden` at the field's type span.
+/// 3. Cycle detection via DFS over the graph where nodes are declared record
+///    names and edges are "field type references another declared record name":
+///    - Any name reachable from itself (directly or via a chain) emits
+///      `RecordCyclicDeclaration` at the introducing edge's field-type span.
+///    - DFS is over the *directed* graph; back-edges (Gray → Gray in the DFS
+///      coloring) detect cycles. We emit **one sentinel per cycle** (at the
+///      first back-edge found in DFS traversal order).
+///
+/// **Returns:** `(RecordRegistry, Vec<DiagnosticSentinel>)`.
+/// The registry contains only authoritative (first-wins) declarations.
+/// The sentinel list carries redefinition, forbidden-type, and cycle errors.
+///
+/// Pure — no Salsa, no I/O.
+pub fn build_record_registry(
+    decls: &[SmeltRecordDeclaration],
+) -> (RecordRegistry, Vec<DiagnosticSentinel>) {
+    let mut sentinels: Vec<DiagnosticSentinel> = Vec::new();
+    let mut registry_map: HashMap<String, SmeltRecordDeclaration> = HashMap::new();
+
+    // Step 1: collect authoritative declarations (first-wins on redefinition).
+    for decl in decls {
+        if let Some(existing) = registry_map.get(&decl.name) {
+            // Redefinition: emit sentinel anchored at the second declaration's name_span.
+            sentinels.push(DiagnosticSentinel {
+                code: RecordRegistryCode::SmeltRecordRedefinition,
+                span: decl.name_span,
+                message: format!(
+                    "record `{}` is already declared in {}; record names must be unique workspace-wide",
+                    decl.name,
+                    existing.source_path,
+                ),
+            });
+        } else {
+            registry_map.insert(decl.name.clone(), decl.clone());
+        }
+    }
+
+    // Step 2: validate field types for forbidden witnesses.
+    for decl in registry_map.values() {
+        for (_, field_ty, type_span) in &decl.fields {
+            // Check if the field type itself is forbidden (not just recursively).
+            // We check the immediate type and its components.
+            if let Some(forbidden_name) = find_forbidden_type_name(field_ty) {
+                sentinels.push(DiagnosticSentinel {
+                    code: RecordRegistryCode::RecordFieldTypeForbidden,
+                    span: *type_span,
+                    message: format!(
+                        "record field types may not reference {forbidden_name}; reflection witnesses are not user-writable"
+                    ),
+                });
+            }
+        }
+    }
+
+    // Step 3: cycle detection via DFS.
+    // Build the adjacency graph: for each declared name, the set of other
+    // declared names directly or transitively referenced in its field types.
+    let declared_names: HashSet<String> = registry_map.keys().cloned().collect();
+
+    // DFS cycle detection using iterative approach with explicit color tracking.
+    // Nodes are record names (String). Colors: White=unvisited, Gray=in-stack, Black=done.
+    //
+    // We use String keys throughout to avoid lifetime complexity.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    let mut color: HashMap<String, Color> = HashMap::new();
+    let mut cycle_emitted: HashSet<String> = HashSet::new();
+
+    // Iterate in deterministic (sorted) order.
+    let mut sorted_names: Vec<String> = declared_names.iter().cloned().collect();
+    sorted_names.sort();
+
+    // Iterative DFS using an explicit call stack to avoid Rust recursive fn lifetime issues.
+    // Each stack frame: (node_name, edge_list_index, edge_targets).
+    // We collect edges lazily per frame.
+    for start in sorted_names {
+        if color.get(&start).copied().unwrap_or(Color::White) != Color::White {
+            continue;
+        }
+
+        // DFS stack: each entry is (node, edge_list, current_edge_index).
+        type DfsEdge = (String, smelt_parser::TextRange);
+        type DfsFrame = (String, Vec<DfsEdge>, usize);
+        let mut dfs_stack: Vec<DfsFrame> = Vec::new();
+
+        color.insert(start.clone(), Color::Gray);
+
+        // Build edges for start node.
+        let start_edges = {
+            let mut edges: Vec<(String, smelt_parser::TextRange)> = Vec::new();
+            if let Some(decl) = registry_map.get(&start) {
+                for (_, field_ty, span) in &decl.fields {
+                    let refs = field_type_references_record(field_ty, &declared_names);
+                    for r in refs {
+                        edges.push((r, *span));
+                    }
+                }
+            }
+            edges.sort_by(|a, b| a.0.cmp(&b.0));
+            edges
+        };
+        dfs_stack.push((start, start_edges, 0));
+
+        'dfs: while let Some(frame) = dfs_stack.last_mut() {
+            let (node, edges, idx) = frame;
+            if *idx >= edges.len() {
+                // All edges processed — mark Black.
+                let node_done = node.clone();
+                dfs_stack.pop();
+                color.insert(node_done, Color::Black);
+                continue 'dfs;
+            }
+
+            let (target, span) = edges[*idx].clone();
+            *idx += 1;
+
+            let target_color = color.get(&target).copied().unwrap_or(Color::White);
+            match target_color {
+                Color::White => {
+                    // Push new frame.
+                    color.insert(target.clone(), Color::Gray);
+                    let target_edges = {
+                        let mut edges: Vec<(String, smelt_parser::TextRange)> = Vec::new();
+                        if let Some(decl) = registry_map.get(&target) {
+                            for (_, field_ty, fspan) in &decl.fields {
+                                let refs = field_type_references_record(field_ty, &declared_names);
+                                for r in refs {
+                                    edges.push((r, *fspan));
+                                }
+                            }
+                        }
+                        edges.sort_by(|a, b| a.0.cmp(&b.0));
+                        edges
+                    };
+                    dfs_stack.push((target, target_edges, 0));
+                }
+                Color::Gray => {
+                    // Back-edge → cycle detected.
+                    if !cycle_emitted.contains(&target) {
+                        cycle_emitted.insert(target.clone());
+                        sentinels.push(DiagnosticSentinel {
+                            code: RecordRegistryCode::RecordCyclicDeclaration,
+                            span,
+                            message: format!(
+                                "record `{target}` forms a cycle; recursive record declarations are not supported in v1"
+                            ),
+                        });
+                    }
+                }
+                Color::Black => {}
+            }
+        }
+    }
+
+    (
+        RecordRegistry {
+            inner: registry_map,
+        },
+        sentinels,
+    )
+}
+
+/// Find the name of the first forbidden type in `ty`, if any.
+/// Returns the type name (`"ColumnRef"`, `"ModelRef"`, `"SourceRef"`, `"Lambda"`)
+/// or `None` if no forbidden type is present.
+fn find_forbidden_type_name(ty: &SmeltType) -> Option<String> {
+    match ty {
+        SmeltType::ColumnRef => Some("ColumnRef".to_string()),
+        SmeltType::ModelRef => Some("ModelRef".to_string()),
+        SmeltType::SourceRef => Some("SourceRef".to_string()),
+        SmeltType::Lambda(_, _) => Some("Lambda".to_string()),
+        SmeltType::List(inner) => find_forbidden_type_name(inner),
+        SmeltType::Record { fields, .. } => fields.values().find_map(find_forbidden_type_name),
+        SmeltType::Map { key, value } => {
+            find_forbidden_type_name(key).or_else(|| find_forbidden_type_name(value))
+        }
+        _ => None,
+    }
 }
 
 /// Trailing row-polymorphism marker on a `Struct<{…}>` parameter type
@@ -554,25 +1333,33 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
 
     // `<` in the inner means another generic — reject as nested Expr if the
     // inner sort is `Expr`, otherwise unsupported sort.
-    if let Some(inner_lt) = inner_raw.find('<') {
+    if inner_raw.contains('<') {
+        let inner_lt = inner_raw.find('<').unwrap();
         let inner_sort = inner_raw[..inner_lt].trim();
-        if sort == "Expr" && inner_sort == "Expr" {
+        // Also check for comma-prefixed sorts like ", Expr<...>" (second Lambda param).
+        let actual_sort = inner_sort.trim_start_matches(',').trim();
+        if sort == "Expr" && (actual_sort == "Expr") {
             return Err(SmeltTypeParseError::NestedExpr {
                 span_text: text.to_string(),
             });
         }
-        // Other nested sort in an Expr<...> — still malformed from Step 1's
-        // perspective. Surface the outer sort decision first.
-        if sort != "Expr" {
+        // `List<T>` and `Lambda<T, U>` allow nested generics — fall through to
+        // sort dispatch so `List<Expr<Integer>>`, `Lambda<Expr<T>, Expr<U>>`, etc.
+        // parse correctly.
+        if sort == "List" || sort == "Lambda" || sort == "SelectItems" {
+            // Fall through to the sort dispatch match below.
+        } else if sort != "Expr" {
+            // Other nested sort — surface the outer sort decision first.
             return Err(SmeltTypeParseError::UnsupportedSort {
                 sort: sort.to_string(),
                 span_text: text.to_string(),
             });
+        } else {
+            return Err(SmeltTypeParseError::UnknownInner {
+                inner: inner_raw.to_string(),
+                span_text: text.to_string(),
+            });
         }
-        return Err(SmeltTypeParseError::UnknownInner {
-            inner: inner_raw.to_string(),
-            span_text: text.to_string(),
-        });
     }
 
     // Sort dispatch.
@@ -591,6 +1378,17 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
                 }
             })?;
             Ok(SmeltType::Expr(constraint))
+        }
+        "List" => {
+            // `List<T>` — recursive parse of the inner type.
+            // `inner_raw` already has the leading `<` / trailing `>` stripped
+            // (they were split off by the lt_idx / gt_idx logic above).
+            let inner_ty =
+                parse_smelt_type(inner_raw).map_err(|_| SmeltTypeParseError::UnknownInner {
+                    inner: inner_raw.to_string(),
+                    span_text: text.to_string(),
+                })?;
+            Ok(SmeltType::List(Box::new(inner_ty)))
         }
         "SelectItems" => {
             // `SelectItems<Kind>` or `SelectItems<Kind, ctx_name>` (Phase 21).
@@ -615,6 +1413,27 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
             let context = ctx_part.filter(|s| !s.is_empty()).map(ContextRef);
             Ok(SmeltType::SelectItems { kind, context })
         }
+        "Lambda" => {
+            // `Lambda<T, U>` — parse T and U as two comma-separated SmeltTypes.
+            // `inner_raw` has outer `<>` stripped, e.g. "Expr<INTEGER>, Expr<TEXT>".
+            // We need to split on the comma that separates the two type args,
+            // respecting nested angle brackets.
+            let split_pos =
+                find_lambda_comma(inner_raw).ok_or_else(|| SmeltTypeParseError::Malformed {
+                    span_text: text.to_string(),
+                })?;
+            let t_raw = inner_raw[..split_pos].trim();
+            let u_raw = inner_raw[split_pos + 1..].trim();
+            let t = parse_smelt_type(t_raw).map_err(|_| SmeltTypeParseError::UnknownInner {
+                inner: t_raw.to_string(),
+                span_text: text.to_string(),
+            })?;
+            let u = parse_smelt_type(u_raw).map_err(|_| SmeltTypeParseError::UnknownInner {
+                inner: u_raw.to_string(),
+                span_text: text.to_string(),
+            })?;
+            Ok(SmeltType::Lambda(Box::new(t), Box::new(u)))
+        }
         "TableExpr" | "AggExpr" | "WindowExpr" | "OrderSpec" => {
             Err(SmeltTypeParseError::UnsupportedSort {
                 sort: sort.to_string(),
@@ -631,6 +1450,24 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
             span_text: text.to_string(),
         }),
     }
+}
+
+/// Find the position of the top-level comma separating the two type parameters
+/// in a `Lambda<T, U>` inner string (after the outer `<>` are stripped).
+///
+/// Respects nested angle brackets so `Lambda<Expr<Integer>, Expr<Text>>` correctly
+/// splits at the comma between the two top-level parameters, not at a nested one.
+fn find_lambda_comma(inner: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Recognise the inner payload of an `Expr<...>`.
@@ -747,6 +1584,167 @@ pub struct FrameInfo {
     /// file that *contains* the call — distinct from `decl_path`, which
     /// points at where the callee is defined).
     pub call_site_range: Option<Range>,
+    /// Identifier of the declaring function in the function registry.
+    /// `None` for anonymous frames (e.g. HOF inline-expansion frames produced
+    /// by `map`, `filter`, `reduce`). Named `smelt.define` frames carry `Some`.
+    pub fn_id: Option<String>,
+    /// Zero-based index into the source list literal at the HOF call site,
+    /// identifying which element the expanded lambda body was operating on.
+    /// `None` when the source list was not a literal or the information is
+    /// not statically available (the common v1 case).
+    pub element_index: Option<usize>,
+    /// Phase C (meta-language) extension: the source span of the column's
+    /// declaration in the upstream `ModelSchema`, when the HOF source list
+    /// came from `smelt.columns_of(t)`. `None` for literal-sourced lists,
+    /// unresolvable schemas, or non-`columns_of` HOF sources.
+    ///
+    /// Producer-side only in v1 — the LSP renderer does not yet surface this
+    /// field (tracked as a Known Divergence in `expansion.md`).
+    pub column_origin: Option<smelt_parser::TextRange>,
+    /// Wide-reflection extension: source-model provenance for HOF frames whose
+    /// source list came from `smelt.models.*`. Carries the model's workspace-
+    /// relative path and the frontmatter declaration span when statically
+    /// traceable. `None` for all other HOF frame sources.
+    ///
+    /// Producer-side only in v1 — the LSP renderer does not yet surface this
+    /// field (tracked as a Known Divergence in `expansion.md`).
+    pub model_origin: Option<ModelOrigin>,
+    /// Wide-reflection extension: source-yaml provenance for HOF frames whose
+    /// source list came from `smelt.sources.*`. Carries the source YAML's
+    /// workspace-relative path and the YAML declaration span when statically
+    /// traceable. `None` for all other HOF frame sources.
+    ///
+    /// Producer-side only in v1 — the LSP renderer does not yet surface this
+    /// field (tracked as a Known Divergence in `expansion.md`).
+    pub source_origin: Option<SourceOrigin>,
+}
+
+/// Phase C (meta-language): concrete value produced by `smelt.columns_of`.
+///
+/// Each element of the `List<ColumnRef>` returned by `smelt.columns_of(t)`
+/// is one `ColumnRefValue`. The list preserves the source schema's declared
+/// column order (Phase C spec §"ColumnRef ordering").
+///
+/// This struct is pure (no Salsa dependency) and lives in `smelt-types` so
+/// that both `smelt-db` (which produces the list via the Salsa query
+/// `columns_of_for_table_expr`) and any future consumer (e.g. the planner)
+/// can use it without gaining a Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnRefValue {
+    /// The column's declared name (identifier text from the source schema).
+    pub name: String,
+    /// The column's declared data type (from `TypedColumn::data_type`).
+    /// `None` when the column's type was not statically known (e.g. no
+    /// type annotation and inference could not determine it).
+    pub data_type: Option<crate::DataType>,
+    /// Whether the column's type satisfies the `Numeric` constraint —
+    /// `DataType::is_numeric()` per `types.md` §"Type constraints".
+    /// `false` when `data_type` is `None`.
+    pub is_numeric: bool,
+    /// Source span of this column's declaration in the upstream `ModelSchema`
+    /// (the `Column::range` field). `None` when the span is not statically
+    /// resolvable (e.g. source came from an external YAML with no SQL range).
+    pub source_span: Option<smelt_parser::TextRange>,
+}
+
+/// Source-model provenance attached to a wide-reflection HOF frame
+/// (Phase D, `smelt.models.*`-sourced lists).
+///
+/// Captures the model's workspace-relative path and the frontmatter
+/// declaration span (if statically resolvable). The producer stamps this
+/// on each per-element anonymous HOF frame when the source list comes from
+/// `smelt.models.with_tag` or `smelt.models.all`.
+///
+/// Producer-side only in v1 — the LSP renderer does not yet surface this
+/// field (tracked as a Known Divergence in `expansion.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelOrigin {
+    /// Workspace-relative path of the model's source `.sql` file, with `/`
+    /// separators. This is the same path used in `ModelRefValue::path`.
+    pub path: String,
+    /// Source span of the model's frontmatter block (if present and parseable).
+    /// `None` when the model has no frontmatter or when the span is otherwise
+    /// not statically resolvable.
+    pub frontmatter_span: Option<smelt_parser::TextRange>,
+}
+
+/// Source-yaml provenance attached to a wide-reflection HOF frame
+/// (Phase D, `smelt.sources.*`-sourced lists).
+///
+/// Captures the source YAML file's workspace-relative path and the
+/// YAML declaration span (if statically resolvable). The producer stamps
+/// this on each per-element anonymous HOF frame when the source list comes
+/// from `smelt.sources.with_tag` or `smelt.sources.all`.
+///
+/// Producer-side only in v1 — the LSP renderer does not yet surface this
+/// field (tracked as a Known Divergence in `expansion.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOrigin {
+    /// Workspace-relative path of the source's YAML file, with `/` separators.
+    /// This is the same path used in `SourceRefValue::path`.
+    pub path: String,
+    /// Source span of the YAML declaration (currently always `None` in v1
+    /// since source YAMLs are not tracked by the Rowan CST — reserved for
+    /// a future pass that parses span information from the YAML).
+    pub declaration_span: Option<smelt_parser::TextRange>,
+}
+
+/// Concrete value produced by `smelt.models.with_tag` / `smelt.models.all`
+/// at expansion time (Phase D, wide reflection).
+///
+/// Each element of the `List<ModelRef>` returned by those accessors is
+/// one `ModelRefValue`. The list is sorted ascending by `path`
+/// (byte-lexicographic on the workspace-relative path with `/` separators).
+///
+/// This struct is pure (no Salsa dependency) and lives in `smelt-types` so
+/// that both `smelt-db` (which produces the list via the Salsa queries
+/// `models_with_tag` / `models_all`) and any future consumer can use it
+/// without gaining a Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRefValue {
+    /// Workspace-relative file path with `/` separators (e.g.
+    /// `"models/orders.sql"`).
+    pub path: String,
+    /// Model name — the final path segment without the `.sql` extension
+    /// (e.g. `"orders"`).
+    pub name: String,
+    /// Merged tag set: union of `smelt.yml` `models.<name>.tags` and SQL
+    /// frontmatter `tags:`, deduplicated by `Config::get_tags`. In the
+    /// order returned by that function (smelt.yml tags first, then
+    /// frontmatter tags not already present).
+    pub tags: Vec<String>,
+    /// The model name used to route `m.columns` through `columns_of_for_table_expr`.
+    /// This is the model's short name (same as `name`) — the Salsa query
+    /// accepts this to resolve the column list at expansion time.
+    pub model_name_for_columns: String,
+}
+
+/// Concrete value produced by `smelt.sources.with_tag` / `smelt.sources.all`
+/// at expansion time (Phase D, wide reflection).
+///
+/// Each element of the `List<SourceRef>` returned by those accessors is
+/// one `SourceRefValue`. The list is sorted ascending by `path`
+/// (byte-lexicographic on the workspace-relative path with `/` separators).
+///
+/// This struct is pure (no Salsa dependency) and lives in `smelt-types` so
+/// that both `smelt-db` (which produces the list via the Salsa queries
+/// `sources_with_tag` / `sources_all`) and any future consumer can use it
+/// without gaining a Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRefValue {
+    /// Workspace-relative file path of the source YAML with `/` separators
+    /// (e.g. `"models/sources/raw/users.yml"`).
+    pub path: String,
+    /// Source name — the final path segment without the `.yml` / `.yaml`
+    /// extension (e.g. `"users"`).
+    pub name: String,
+    /// Tag set as declared in the source YAML's `tags:` list. No merge with
+    /// a second source (source YAMLs are the single source of tag truth for
+    /// sources).
+    pub tags: Vec<String>,
+    /// Address segments for routing `s.columns` through the source resolution
+    /// machinery. These are the `address_segments` from `SourceInfo`.
+    pub address_segments: Vec<String>,
 }
 
 /// Tier of a function, derived from annotation completeness.
@@ -2078,7 +3076,266 @@ impl BuiltinRegistry {
     pub fn names() -> impl Iterator<Item = &'static str> {
         REGISTRY.keys().map(|s| s.as_str())
     }
+
+    /// Look up a smelt meta-builtin by its dotted path name (case-insensitive).
+    ///
+    /// These are smelt-specific meta-language builtins that operate on meta types
+    /// (`SmeltType`) rather than SQL types. Examples: `smelt.columns_of`.
+    ///
+    /// Returns `Some(&'static SmeltMetaSignature)` when the name matches, `None`
+    /// otherwise.
+    pub fn lookup(name: &str) -> Option<&'static SmeltMetaSignature> {
+        META_REGISTRY.get(&name.to_ascii_lowercase())
+    }
 }
+
+/// The meta-type of a single field in a closed meta-record.
+///
+/// Used by [`COLUMN_REF_FIELDS`] to express the types of `ColumnRef`'s three
+/// fields. Each field maps to a [`SmeltType`].
+pub type ColumnRefFieldType = SmeltType;
+
+/// The closed field set of [`SmeltType::ColumnRef`] (Phase C, meta-language).
+///
+/// Invariant: exactly three entries — `name`, `type`, `is_numeric` — in this order.
+/// This is the single source of truth for the v1 field set. Any future addition
+/// requires a spec edit AND a change to this constant AND a bump of the field count
+/// in all exhaustiveness checks.
+///
+/// Field types:
+/// - `name`       → `Expr<Text>`   (the column identifier as plain Text)
+/// - `type`       → `Unknown`      (represents the DataType meta-literal; the
+///   concrete meta type is not yet in SmeltType v1)
+/// - `is_numeric` → `Expr<Boolean>` (TRUE iff `type` ∈ Numeric constraint set)
+pub const COLUMN_REF_FIELDS: &[(&str, ColumnRefFieldType)] = &[
+    (
+        "name",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+    ),
+    // `type` is a DataType meta-literal; Phase C maps it to Unknown as a
+    // forward-compatibility placeholder. Phase D will introduce a proper
+    // meta-DataType representation.
+    ("type", SmeltType::Unknown),
+    (
+        "is_numeric",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+];
+
+/// Look up a [`ColumnRef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"name"`, `"type"`, or `"is_numeric"`;
+/// `None` for any other identifier (the closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn column_ref_field(name: &str) -> Option<&'static ColumnRefFieldType> {
+    COLUMN_REF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// The closed field set of [`SmeltType::ModelRef`] (Phase D, meta-language).
+///
+/// Invariant: exactly four entries — `path`, `name`, `tags`, `columns` — in
+/// this canonical order. This is the single source of truth for the v1 field
+/// set. Any future addition requires a spec edit AND a change to this constant.
+///
+/// Field types:
+/// - `path`    → `Expr<Text>`         — workspace-relative file path
+/// - `name`    → `Expr<Text>`         — model identifier (path segment sans `.sql`)
+/// - `tags`    → `List<Expr<Text>>`   — merged tag set
+/// - `columns` → `List<ColumnRef>`    — model column list
+///
+/// Uses `LazyLock` because `SmeltType::List` contains a `Box`, which cannot
+/// be constructed in `const` context. The logical invariants are still that this
+/// is the single, immutable source of truth for the field set.
+pub static MODEL_REF_FIELDS: LazyLock<Vec<(&'static str, SmeltType)>> = LazyLock::new(|| {
+    vec![
+        (
+            "path",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "name",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "tags",
+            SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text,
+            )))),
+        ),
+        ("columns", SmeltType::List(Box::new(SmeltType::ColumnRef))),
+    ]
+});
+
+/// The closed field set of [`SmeltType::SourceRef`] (Phase D, meta-language).
+///
+/// Invariant: exactly four entries — `path`, `name`, `tags`, `columns` — in
+/// this canonical order, identical in shape to [`MODEL_REF_FIELDS`] (uniformity
+/// invariant from the design rationale). The semantic meanings differ (source
+/// YAML path vs model SQL path; source tags vs merged model tags; etc.) but the
+/// structural types are the same.
+pub static SOURCE_REF_FIELDS: LazyLock<Vec<(&'static str, SmeltType)>> = LazyLock::new(|| {
+    vec![
+        (
+            "path",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "name",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "tags",
+            SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text,
+            )))),
+        ),
+        ("columns", SmeltType::List(Box::new(SmeltType::ColumnRef))),
+    ]
+});
+
+/// Look up a [`ModelRef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"path"`, `"name"`, `"tags"`, or `"columns"`;
+/// `None` for any other identifier (the closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn model_ref_field(name: &str) -> Option<&'static SmeltType> {
+    MODEL_REF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// Look up a [`SourceRef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"path"`, `"name"`, `"tags"`, or `"columns"`;
+/// `None` for any other identifier (the closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn source_ref_field(name: &str) -> Option<&'static SmeltType> {
+    SOURCE_REF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// The closed accessor set for the `smelt.models` namespace.
+///
+/// Returns `Some(&'static SmeltMetaSignature)` when `name` is a known accessor;
+/// `None` when `name` is not in the closed set (trigger for
+/// `WideReflectionUnknownAccessor`).
+///
+/// Pure — no Salsa dependency.
+pub fn models_accessor(name: &str) -> Option<&'static SmeltMetaSignature> {
+    MODELS_ACCESSORS.get(name)
+}
+
+/// The closed accessor set for the `smelt.sources` namespace.
+///
+/// Returns `Some(&'static SmeltMetaSignature)` when `name` is a known accessor;
+/// `None` when `name` is not in the closed set (trigger for
+/// `WideReflectionUnknownAccessor`).
+///
+/// Pure — no Salsa dependency.
+pub fn sources_accessor(name: &str) -> Option<&'static SmeltMetaSignature> {
+    SOURCES_ACCESSORS.get(name)
+}
+
+/// Signature for a smelt meta-language builtin (Phase C).
+///
+/// Unlike [`Signature`] (which uses SQL-world [`SigParam`] / [`TypeExpr`]),
+/// `SmeltMetaSignature` uses [`SmeltType`] for both parameters and return type.
+/// This is necessary because meta-builtins like `smelt.columns_of` operate on
+/// meta sorts (`TableExpr`, `ColumnRef`, `List<ColumnRef>`) rather than scalar
+/// SQL types.
+///
+/// Constraints:
+/// - `params` are positional only (no variadics, no named args in Phase C).
+/// - The registry stores `'static` instances via [`META_REGISTRY`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmeltMetaSignature {
+    /// Dotted canonical name (lowercase), e.g. `"smelt.columns_of"`.
+    pub name: &'static str,
+    /// Positional parameter types in declaration order. Phase C has no variadics
+    /// and no named-arg support for meta-builtins.
+    pub params: Vec<SmeltType>,
+    /// Return type.
+    pub return_type: SmeltType,
+}
+
+static META_REGISTRY: LazyLock<HashMap<String, SmeltMetaSignature>> = LazyLock::new(|| {
+    let mut m: HashMap<String, SmeltMetaSignature> = HashMap::new();
+
+    // `smelt.columns_of(t: TableExpr) -> List<ColumnRef>`
+    // One positional `TableExpr` parameter; no variadics; no named args.
+    m.insert(
+        "smelt.columns_of".to_string(),
+        SmeltMetaSignature {
+            name: "smelt.columns_of",
+            params: vec![SmeltType::TableExpr(None)],
+            return_type: SmeltType::List(Box::new(SmeltType::ColumnRef)),
+        },
+    );
+
+    m
+});
+
+/// Closed accessor namespace for `smelt.models`.
+///
+/// Keys are the accessor names (lowercase); values are the signatures. The two
+/// accessors are:
+/// - `with_tag`: `(Text) -> List<ModelRef>` — one positional `Expr<Text>` param.
+/// - `all`: `() -> List<ModelRef>` — zero parameters.
+static MODELS_ACCESSORS: LazyLock<HashMap<&'static str, SmeltMetaSignature>> =
+    LazyLock::new(|| {
+        let mut m: HashMap<&'static str, SmeltMetaSignature> = HashMap::new();
+        m.insert(
+            "with_tag",
+            SmeltMetaSignature {
+                name: "smelt.models.with_tag",
+                params: vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))],
+                return_type: SmeltType::List(Box::new(SmeltType::ModelRef)),
+            },
+        );
+        m.insert(
+            "all",
+            SmeltMetaSignature {
+                name: "smelt.models.all",
+                params: vec![],
+                return_type: SmeltType::List(Box::new(SmeltType::ModelRef)),
+            },
+        );
+        m
+    });
+
+/// Closed accessor namespace for `smelt.sources`.
+///
+/// Keys are the accessor names (lowercase); values are the signatures. The two
+/// accessors are:
+/// - `with_tag`: `(Text) -> List<SourceRef>` — one positional `Expr<Text>` param.
+/// - `all`: `() -> List<SourceRef>` — zero parameters.
+static SOURCES_ACCESSORS: LazyLock<HashMap<&'static str, SmeltMetaSignature>> =
+    LazyLock::new(|| {
+        let mut m: HashMap<&'static str, SmeltMetaSignature> = HashMap::new();
+        m.insert(
+            "with_tag",
+            SmeltMetaSignature {
+                name: "smelt.sources.with_tag",
+                params: vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))],
+                return_type: SmeltType::List(Box::new(SmeltType::SourceRef)),
+            },
+        );
+        m.insert(
+            "all",
+            SmeltMetaSignature {
+                name: "smelt.sources.all",
+                params: vec![],
+                return_type: SmeltType::List(Box::new(SmeltType::SourceRef)),
+            },
+        );
+        m
+    });
 
 fn tp(name: &str, c: TypeConstraint) -> TypeParam {
     TypeParam {
@@ -2935,6 +4192,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
 pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
     match ty {
         SmeltType::Expr(tc) => format!("Expr<{}>", format_type_constraint_hover(tc)),
+        SmeltType::List(inner) => format!("List<{}>", format_smelt_type_hover(inner)),
+        SmeltType::Lambda(param_ty, body_ty) => format!(
+            "Lambda<{}, {}>",
+            format_smelt_type_hover(param_ty),
+            format_smelt_type_hover(body_ty)
+        ),
         SmeltType::TableExpr(None) => "TableExpr".to_string(),
         SmeltType::TableExpr(Some(req)) => {
             let mut s = String::from("TableExpr<{");
@@ -3006,6 +4269,28 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
             s.push_str("}>");
             s.push('>');
             s
+        }
+        SmeltType::Unknown => "Unknown".to_string(),
+        SmeltType::ColumnRef => "ColumnRef".to_string(),
+        SmeltType::ModelRef => "ModelRef".to_string(),
+        SmeltType::SourceRef => "SourceRef".to_string(),
+        SmeltType::Record { fields, name } => {
+            if let Some(n) = name {
+                n.clone()
+            } else {
+                let field_str: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", format_smelt_type_hover(v)))
+                    .collect();
+                format!("Record<{{{}}}>", field_str.join(", "))
+            }
+        }
+        SmeltType::Map { key, value } => {
+            format!(
+                "Map<{}, {}>",
+                format_smelt_type_hover(key),
+                format_smelt_type_hover(value)
+            )
         }
     }
 }
@@ -3756,6 +5041,11 @@ mod tests {
             decl_path: None,
             decl_range: None,
             call_site_range: None,
+            fn_id: None,
+            element_index: None,
+            column_origin: None,
+            model_origin: None,
+            source_origin: None,
         };
         assert!(frame.decl_path.is_none());
         assert!(frame.decl_range.is_none());
@@ -4153,5 +5443,932 @@ mod tests {
         let res = unify_call_with_expected(sig, std::slice::from_ref(&dt), None, &numeric_lub)
             .expect("unification ok");
         assert_eq!(res.return_type, dt);
+    }
+
+    // === Phase A (meta-language) TDD tests: SmeltType::List ===
+
+    /// `List<Expr<Integer>>` round-trips through `parse_smelt_type` and
+    /// `format_smelt_type_hover`.
+    #[test]
+    fn list_type_round_trip() {
+        let ty = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Integer,
+        ))));
+        // format_smelt_type_hover produces "List<Expr<Integer>>"
+        let rendered = format_smelt_type_hover(&ty);
+        assert_eq!(rendered, "List<Expr<INTEGER>>");
+        // parse_smelt_type parses it back.
+        let parsed = parse_smelt_type(&rendered).expect("List<Expr<Integer>> should parse");
+        assert_eq!(parsed, ty);
+    }
+
+    /// `List<List<Expr<Varchar>>>` round-trips.
+    ///
+    /// Note: `DataType::Text` renders as `"TEXT"` via `to_sql()` but `parse_type("TEXT")`
+    /// returns `Varchar { max_length: None }`, so we use `Varchar` directly for a clean
+    /// round-trip. The types.md annotation surface uses `Varchar` / `TEXT` interchangeably,
+    /// and `DataType::Text` normalises to `Varchar`.
+    #[test]
+    fn list_type_nested() {
+        let inner = SmeltType::Expr(TypeConstraint::Concrete(DataType::Varchar {
+            max_length: None,
+        }));
+        let middle = SmeltType::List(Box::new(inner));
+        let outer = SmeltType::List(Box::new(middle));
+        let rendered = format_smelt_type_hover(&outer);
+        assert_eq!(rendered, "List<List<Expr<VARCHAR>>>");
+        let parsed = parse_smelt_type(&rendered).expect("List<List<Expr<Varchar>>> should parse");
+        assert_eq!(parsed, outer);
+    }
+
+    /// Covariance: `List<Expr<Integer>> <: List<Expr<Numeric>>` (Integer satisfies Numeric).
+    /// Anti-covariance: `List<Expr<Numeric>> <: List<Expr<Integer>>` is false.
+    #[test]
+    fn list_subtype_covariant() {
+        let list_int = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Integer,
+        ))));
+        let list_numeric = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Numeric)));
+
+        // List<Expr<Integer>> <: List<Expr<Numeric>> — Integer satisfies Numeric.
+        assert!(
+            is_subtype_of(&list_int, &list_numeric),
+            "List<Expr<Integer>> must be a subtype of List<Expr<Numeric>>"
+        );
+        // List<Expr<Numeric>> is NOT <: List<Expr<Integer>>.
+        assert!(
+            !is_subtype_of(&list_numeric, &list_int),
+            "List<Expr<Numeric>> must NOT be a subtype of List<Expr<Integer>>"
+        );
+    }
+
+    /// Unrelated element sorts: `List<TableExpr>` is not a subtype of `List<Expr<Numeric>>`.
+    #[test]
+    fn list_subtype_invariant_when_element_unrelated() {
+        let list_table = SmeltType::List(Box::new(SmeltType::TableExpr(None)));
+        let list_numeric = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Numeric)));
+
+        assert!(
+            !is_subtype_of(&list_table, &list_numeric),
+            "List<TableExpr> must NOT be a subtype of List<Expr<Numeric>>"
+        );
+        assert!(
+            !is_subtype_of(&list_numeric, &list_table),
+            "List<Expr<Numeric>> must NOT be a subtype of List<TableExpr>"
+        );
+    }
+
+    // === Phase B (meta-language) TDD tests: SmeltType::Lambda ===
+
+    /// `Lambda<Expr<Integer>, Expr<Text>>` round-trips through
+    /// `format_smelt_type_hover` and `parse_smelt_type`.
+    ///
+    /// Note: `DataType::Text` renders as `"TEXT"` via `to_sql()` but
+    /// `parse_type("TEXT")` returns `Varchar { max_length: None }`. We use
+    /// `Varchar` directly for a clean round-trip, consistent with `list_type_nested`.
+    #[test]
+    fn lambda_type_round_trip() {
+        let ty = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Varchar { max_length: None },
+            ))),
+        );
+        let rendered = format_smelt_type_hover(&ty);
+        assert_eq!(rendered, "Lambda<Expr<INTEGER>, Expr<VARCHAR>>");
+        let parsed =
+            parse_smelt_type(&rendered).expect("Lambda<Expr<INTEGER>, Expr<VARCHAR>> should parse");
+        assert_eq!(parsed, ty);
+    }
+
+    /// Lambda is invariant: `Lambda<Expr<Integer>, Expr<Text>>` is NOT a subtype of
+    /// `Lambda<Expr<Numeric>, Expr<Text>>` even though `Expr<Integer> <: Expr<Numeric>`.
+    #[test]
+    fn lambda_type_invariant() {
+        let lambda_int_text = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        let lambda_numeric_text = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Numeric)),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        // Lambda is invariant — Integer does NOT widen to Numeric for subtyping.
+        assert!(
+            !is_subtype_of(&lambda_int_text, &lambda_numeric_text),
+            "Lambda<Expr<Integer>, Expr<Text>> must NOT be a subtype of Lambda<Expr<Numeric>, Expr<Text>> (invariant)"
+        );
+        assert!(
+            !is_subtype_of(&lambda_numeric_text, &lambda_int_text),
+            "Lambda<Expr<Numeric>, Expr<Text>> must NOT be a subtype of Lambda<Expr<Integer>, Expr<Text>> (invariant)"
+        );
+    }
+
+    /// `is_subtype_of(L, L) == true` only for byte-equal `L` (reflexivity).
+    #[test]
+    fn lambda_type_equality_only_when_exact() {
+        let lambda = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        assert!(
+            is_subtype_of(&lambda, &lambda),
+            "Lambda must be a subtype of itself (reflexivity)"
+        );
+        let lambda2 = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))),
+        );
+        assert!(
+            !is_subtype_of(&lambda, &lambda2),
+            "Lambda with different body type must NOT be a subtype"
+        );
+    }
+
+    // === Phase C (meta-language) TDD tests — ColumnRef witness + smelt.columns_of ===
+
+    #[test]
+    fn columns_of_signature_returns_list_of_column_ref() {
+        // BuiltinRegistry::lookup("smelt.columns_of") must return a SmeltMetaSignature
+        // with one positional TableExpr parameter and List<ColumnRef> return.
+        let sig = BuiltinRegistry::lookup("smelt.columns_of")
+            .expect("smelt.columns_of must be in the smelt meta registry");
+        assert_eq!(
+            sig.params.len(),
+            1,
+            "smelt.columns_of takes exactly one param"
+        );
+        assert!(
+            matches!(&sig.params[0], SmeltType::TableExpr(None)),
+            "smelt.columns_of param must be TableExpr, got: {:?}",
+            sig.params[0]
+        );
+        assert!(
+            matches!(&sig.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "smelt.columns_of must return List<ColumnRef>, got: {:?}",
+            sig.return_type
+        );
+    }
+
+    #[test]
+    fn column_ref_field_set_is_closed() {
+        // COLUMN_REF_FIELDS must expose exactly {name: Text, type: DataType, is_numeric: Boolean}
+        // and nothing else.
+        let expected = ["name", "type", "is_numeric"];
+        for field in &expected {
+            assert!(
+                column_ref_field(field).is_some(),
+                "COLUMN_REF_FIELDS must contain field '{field}'"
+            );
+        }
+        // Any other identifier must return None.
+        assert!(
+            column_ref_field("foo").is_none(),
+            "COLUMN_REF_FIELDS must not contain 'foo'"
+        );
+        assert!(
+            column_ref_field("column_name").is_none(),
+            "COLUMN_REF_FIELDS must not contain 'column_name'"
+        );
+        // Exactly three fields in the constant.
+        assert_eq!(
+            COLUMN_REF_FIELDS.len(),
+            3,
+            "COLUMN_REF_FIELDS must have exactly 3 entries"
+        );
+        // Verify field types.
+        let name_ty = column_ref_field("name").unwrap();
+        assert!(
+            matches!(
+                name_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "name field must be Text (Expr<Text>), got: {name_ty:?}"
+        );
+        let type_ty = column_ref_field("type").unwrap();
+        // c.type maps to SmeltType::Unknown as the Phase C sentinel for "DataType (meta literal)".
+        // Phase D will introduce a proper meta-DataType representation; for now Unknown
+        // is the documented placeholder per the Phase C plan.
+        assert!(
+            matches!(type_ty, SmeltType::Unknown),
+            "c.type maps to SmeltType::Unknown as the Phase C sentinel for DataType (meta literal); \
+             Phase D will introduce a proper meta-DataType representation; got: {:?}",
+            type_ty
+        );
+        let is_numeric_ty = column_ref_field("is_numeric").unwrap();
+        assert!(
+            matches!(
+                is_numeric_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+            ),
+            "is_numeric field must be Boolean, got: {is_numeric_ty:?}"
+        );
+    }
+
+    // === Phase D (meta-language) TDD tests — ModelRef / SourceRef + wide reflection ===
+
+    /// `smelt.models.with_tag` resolves to `(Text) -> List<ModelRef>` with one
+    /// positional parameter; `smelt.models.all` resolves to `() -> List<ModelRef>` with
+    /// zero parameters; analogous for `smelt.sources.*` returning `List<SourceRef>`.
+    #[test]
+    fn wide_reflection_accessor_signatures() {
+        // smelt.models.with_tag: (Text) -> List<ModelRef>
+        let with_tag_m =
+            models_accessor("with_tag").expect("models_accessor(with_tag) must be registered");
+        assert_eq!(
+            with_tag_m.params.len(),
+            1,
+            "smelt.models.with_tag must have exactly one positional parameter"
+        );
+        assert!(
+            matches!(
+                &with_tag_m.params[0],
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "smelt.models.with_tag param must be Expr<Text>, got: {:?}",
+            with_tag_m.params[0]
+        );
+        assert!(
+            matches!(&with_tag_m.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ModelRef)),
+            "smelt.models.with_tag must return List<ModelRef>, got: {:?}",
+            with_tag_m.return_type
+        );
+
+        // smelt.models.all: () -> List<ModelRef>
+        let all_m = models_accessor("all").expect("models_accessor(all) must be registered");
+        assert_eq!(
+            all_m.params.len(),
+            0,
+            "smelt.models.all must have zero parameters"
+        );
+        assert!(
+            matches!(&all_m.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ModelRef)),
+            "smelt.models.all must return List<ModelRef>, got: {:?}",
+            all_m.return_type
+        );
+
+        // smelt.sources.with_tag: (Text) -> List<SourceRef>
+        let with_tag_s =
+            sources_accessor("with_tag").expect("sources_accessor(with_tag) must be registered");
+        assert_eq!(
+            with_tag_s.params.len(),
+            1,
+            "smelt.sources.with_tag must have exactly one positional parameter"
+        );
+        assert!(
+            matches!(
+                &with_tag_s.params[0],
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "smelt.sources.with_tag param must be Expr<Text>, got: {:?}",
+            with_tag_s.params[0]
+        );
+        assert!(
+            matches!(&with_tag_s.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::SourceRef)),
+            "smelt.sources.with_tag must return List<SourceRef>, got: {:?}",
+            with_tag_s.return_type
+        );
+
+        // smelt.sources.all: () -> List<SourceRef>
+        let all_s = sources_accessor("all").expect("sources_accessor(all) must be registered");
+        assert_eq!(
+            all_s.params.len(),
+            0,
+            "smelt.sources.all must have zero parameters"
+        );
+        assert!(
+            matches!(&all_s.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::SourceRef)),
+            "smelt.sources.all must return List<SourceRef>, got: {:?}",
+            all_s.return_type
+        );
+    }
+
+    /// `MODEL_REF_FIELDS` exposes exactly `{path: Text, name: Text, tags: List<Text>,
+    /// columns: List<ColumnRef>}` and no other field; same for `SOURCE_REF_FIELDS`.
+    #[test]
+    fn model_ref_field_set_is_closed() {
+        let expected = ["path", "name", "tags", "columns"];
+        for field in &expected {
+            assert!(
+                model_ref_field(field).is_some(),
+                "MODEL_REF_FIELDS must contain field '{field}'"
+            );
+            assert!(
+                source_ref_field(field).is_some(),
+                "SOURCE_REF_FIELDS must contain field '{field}'"
+            );
+        }
+        // Unknown fields must return None.
+        assert!(
+            model_ref_field("foo").is_none(),
+            "MODEL_REF_FIELDS must not contain 'foo'"
+        );
+        assert!(
+            model_ref_field("is_numeric").is_none(),
+            "MODEL_REF_FIELDS must not contain 'is_numeric'"
+        );
+        assert!(
+            source_ref_field("foo").is_none(),
+            "SOURCE_REF_FIELDS must not contain 'foo'"
+        );
+        // Exactly four fields in each constant.
+        assert_eq!(
+            MODEL_REF_FIELDS.len(),
+            4,
+            "MODEL_REF_FIELDS must have exactly 4 entries"
+        );
+        assert_eq!(
+            SOURCE_REF_FIELDS.len(),
+            4,
+            "SOURCE_REF_FIELDS must have exactly 4 entries"
+        );
+        // Verify types: path → Text, name → Text
+        let path_ty = model_ref_field("path").unwrap();
+        assert!(
+            matches!(
+                path_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "path field must be Expr<Text>, got: {path_ty:?}"
+        );
+        let name_ty = model_ref_field("name").unwrap();
+        assert!(
+            matches!(
+                name_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "name field must be Expr<Text>, got: {name_ty:?}"
+        );
+        // tags → List<Expr<Text>>
+        let tags_ty = model_ref_field("tags").unwrap();
+        assert!(
+            matches!(tags_ty, SmeltType::List(inner)
+                if matches!(inner.as_ref(), SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)))),
+            "tags field must be List<Expr<Text>>, got: {tags_ty:?}"
+        );
+        // columns → List<ColumnRef>
+        let cols_ty = model_ref_field("columns").unwrap();
+        assert!(
+            matches!(cols_ty, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "columns field must be List<ColumnRef>, got: {cols_ty:?}"
+        );
+
+        // Same checks on source_ref_field
+        let s_path_ty = source_ref_field("path").unwrap();
+        assert!(
+            matches!(
+                s_path_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "SourceRef path field must be Expr<Text>, got: {s_path_ty:?}"
+        );
+        let s_cols_ty = source_ref_field("columns").unwrap();
+        assert!(
+            matches!(s_cols_ty, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "SourceRef columns field must be List<ColumnRef>, got: {s_cols_ty:?}"
+        );
+    }
+
+    // === Phase D Phase 2 TDD tests — ModelRef/SourceRef subtype TableExpr ===
+
+    /// `ModelRef <: TableExpr` — the subtyping rule fires in the forward direction.
+    #[test]
+    fn model_ref_is_subtype_of_table_expr() {
+        assert!(
+            is_subtype_of(&SmeltType::ModelRef, &SmeltType::TableExpr(None)),
+            "ModelRef must be a subtype of TableExpr (forward direction)"
+        );
+    }
+
+    /// `SourceRef <: TableExpr` — the subtyping rule fires in the forward direction.
+    #[test]
+    fn source_ref_is_subtype_of_table_expr() {
+        assert!(
+            is_subtype_of(&SmeltType::SourceRef, &SmeltType::TableExpr(None)),
+            "SourceRef must be a subtype of TableExpr (forward direction)"
+        );
+    }
+
+    /// `TableExpr <: ModelRef` does NOT hold — the rule is one-way.
+    #[test]
+    fn table_expr_not_subtype_of_model_ref() {
+        assert!(
+            !is_subtype_of(&SmeltType::TableExpr(None), &SmeltType::ModelRef),
+            "TableExpr must NOT be a subtype of ModelRef (reverse direction forbidden)"
+        );
+        assert!(
+            !is_subtype_of(&SmeltType::TableExpr(None), &SmeltType::SourceRef),
+            "TableExpr must NOT be a subtype of SourceRef (reverse direction forbidden)"
+        );
+    }
+
+    /// `List<ModelRef> <: List<TableExpr>` — List covariance lifts the element rule
+    /// automatically.
+    #[test]
+    fn list_of_model_ref_is_subtype_of_list_of_table_expr() {
+        let list_model_ref = SmeltType::List(Box::new(SmeltType::ModelRef));
+        let list_table_expr = SmeltType::List(Box::new(SmeltType::TableExpr(None)));
+        assert!(
+            is_subtype_of(&list_model_ref, &list_table_expr),
+            "List<ModelRef> must be a subtype of List<TableExpr> via List covariance"
+        );
+        // Reverse does not hold.
+        assert!(
+            !is_subtype_of(&list_table_expr, &list_model_ref),
+            "List<TableExpr> must NOT be a subtype of List<ModelRef>"
+        );
+
+        let list_source_ref = SmeltType::List(Box::new(SmeltType::SourceRef));
+        assert!(
+            is_subtype_of(&list_source_ref, &list_table_expr),
+            "List<SourceRef> must be a subtype of List<TableExpr> via List covariance"
+        );
+    }
+
+    /// `MODEL_REF_FIELDS` and `SOURCE_REF_FIELDS` have the same field names and
+    /// types in the same order (uniformity invariant from the design rationale).
+    #[test]
+    fn model_ref_and_source_ref_field_sets_are_identical_shape() {
+        assert_eq!(
+            MODEL_REF_FIELDS.len(),
+            SOURCE_REF_FIELDS.len(),
+            "MODEL_REF_FIELDS and SOURCE_REF_FIELDS must have the same number of fields"
+        );
+        for (i, ((model_name, model_ty), (source_name, source_ty))) in MODEL_REF_FIELDS
+            .iter()
+            .zip(SOURCE_REF_FIELDS.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                model_name, source_name,
+                "field {i}: MODEL_REF_FIELDS name '{model_name}' != SOURCE_REF_FIELDS name '{source_name}'"
+            );
+            assert_eq!(
+                model_ty, source_ty,
+                "field {i} ({model_name}): MODEL_REF_FIELDS type does not match SOURCE_REF_FIELDS type"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Phase E1 TDD tests — Record, Map, MAP_API_METHODS, SmeltRecordRegistry
+    // =========================================================================
+
+    /// Helper: build a `SmeltRecordDeclaration` with no source span for testing.
+    fn make_decl(name: &str, fields: Vec<(&str, SmeltType)>) -> SmeltRecordDeclaration {
+        use smelt_parser::TextRange;
+        SmeltRecordDeclaration {
+            name: name.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|(f, ty)| (f.to_string(), ty, TextRange::new(0.into(), 0.into())))
+                .collect(),
+            name_span: TextRange::new(0.into(), 0.into()),
+            source_path: Arc::from("models/test.sql"),
+        }
+    }
+
+    /// Helper: build a `SmeltType::Record` from a slice of `(name, SmeltType)` pairs.
+    fn record_type(fields: &[(&str, SmeltType)]) -> SmeltType {
+        let mut map = BTreeMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v.clone());
+        }
+        SmeltType::Record {
+            fields: map,
+            name: None,
+        }
+    }
+
+    fn named_record_type(name: &str, fields: &[(&str, SmeltType)]) -> SmeltType {
+        let mut map = BTreeMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v.clone());
+        }
+        SmeltType::Record {
+            fields: map,
+            name: Some(name.to_string()),
+        }
+    }
+
+    fn expr_text() -> SmeltType {
+        SmeltType::Expr(TypeConstraint::Concrete(crate::DataType::Text))
+    }
+
+    fn expr_integer() -> SmeltType {
+        SmeltType::Expr(TypeConstraint::Concrete(crate::DataType::Integer))
+    }
+
+    fn expr_number() -> SmeltType {
+        SmeltType::Expr(TypeConstraint::Numeric)
+    }
+
+    fn map_text_integer() -> SmeltType {
+        SmeltType::Map {
+            key: Box::new(expr_text()),
+            value: Box::new(expr_integer()),
+        }
+    }
+
+    fn map_text_number() -> SmeltType {
+        SmeltType::Map {
+            key: Box::new(expr_text()),
+            value: Box::new(expr_number()),
+        }
+    }
+
+    /// Test 1: `record_type_round_trips_field_order_canonicalised`
+    ///
+    /// `SmeltType::Record { fields: BTreeMap, name: Some("SourceEntry") }` constructed
+    /// twice with field-insertion in different orders compares equal under `==`.
+    /// The `Display` impl renders fields in lex order when `name` is `None`;
+    /// as the type name when `name` is `Some`.
+    #[test]
+    fn record_type_round_trips_field_order_canonicalised() {
+        // Build in two different insertion orders.
+        let mut fields_a = BTreeMap::new();
+        fields_a.insert("b".to_string(), expr_integer());
+        fields_a.insert("a".to_string(), expr_text());
+
+        let mut fields_b = BTreeMap::new();
+        fields_b.insert("a".to_string(), expr_text());
+        fields_b.insert("b".to_string(), expr_integer());
+
+        let rec_a = SmeltType::Record {
+            fields: fields_a,
+            name: Some("SourceEntry".to_string()),
+        };
+        let rec_b = SmeltType::Record {
+            fields: fields_b,
+            name: Some("SourceEntry".to_string()),
+        };
+
+        assert_eq!(
+            rec_a, rec_b,
+            "Records with same fields in different insertion orders must be equal"
+        );
+
+        // Display: named → renders as type name.
+        let display_named = format!("{rec_a}");
+        assert_eq!(
+            display_named, "SourceEntry",
+            "Named record Display must render as the type name"
+        );
+
+        // Display: unnamed → renders in lex order.
+        let rec_unnamed = record_type(&[("b", expr_integer()), ("a", expr_text())]);
+        let display_unnamed = format!("{rec_unnamed}");
+        // Lex order: a, b.
+        assert!(
+            display_unnamed.starts_with("Record<{"),
+            "Unnamed record Display must start with Record<{{"
+        );
+        assert!(
+            display_unnamed.contains("a:"),
+            "Unnamed record Display must include field 'a'"
+        );
+        assert!(
+            display_unnamed.contains("b:"),
+            "Unnamed record Display must include field 'b'"
+        );
+        // 'a' must appear before 'b' in lex order.
+        let a_pos = display_unnamed.find("a:").unwrap();
+        let b_pos = display_unnamed.find("b:").unwrap();
+        assert!(
+            a_pos < b_pos,
+            "Unnamed record Display must render fields in lex order (a before b)"
+        );
+    }
+
+    /// Test 2: `record_inline_and_named_with_same_field_set_are_structurally_equal`
+    ///
+    /// Inline and named records with the same fields are structurally equal.
+    /// The `name` field is accessible and distinguishable for hover.
+    #[test]
+    fn record_inline_and_named_with_same_field_set_are_structurally_equal() {
+        let inline = record_type(&[("a", expr_text())]);
+        let named = named_record_type("X", &[("a", expr_text())]);
+
+        // Structural equality: equal (name ignored).
+        assert_eq!(
+            inline, named,
+            "Inline record and named record with same fields must be structurally equal"
+        );
+
+        // The `name` field is accessible and distinguishable.
+        let name_val = match &named {
+            SmeltType::Record { name, .. } => name.as_deref(),
+            _ => panic!("expected Record"),
+        };
+        assert_eq!(
+            name_val,
+            Some("X"),
+            "Named record must expose its name via the `name` field"
+        );
+
+        let inline_name = match &inline {
+            SmeltType::Record { name, .. } => name.as_deref(),
+            _ => panic!("expected Record"),
+        };
+        assert_eq!(inline_name, None, "Inline record must have name = None");
+    }
+
+    /// Test 3: `map_type_invariant_both_axes`
+    ///
+    /// `Map<K, V>` is invariant in both `K` and `V`.
+    #[test]
+    fn map_type_invariant_both_axes() {
+        // Map<Text, Integer> is NOT a subtype of Map<Text, Number> (covariance forbidden).
+        assert!(
+            !is_subtype_of(&map_text_integer(), &map_text_number()),
+            "Map<Text, Integer> must NOT be subtype of Map<Text, Number> (invariance)"
+        );
+        // Map<Text, Number> is NOT a subtype of Map<Text, Integer> (contravariance forbidden).
+        assert!(
+            !is_subtype_of(&map_text_number(), &map_text_integer()),
+            "Map<Text, Number> must NOT be subtype of Map<Text, Integer> (invariance)"
+        );
+        // Map<Text, Integer> IS a subtype of Map<Text, Integer> (reflexivity).
+        assert!(
+            is_subtype_of(&map_text_integer(), &map_text_integer()),
+            "Map<Text, Integer> must be subtype of Map<Text, Integer> (reflexivity)"
+        );
+    }
+
+    /// Test 4: `map_api_methods_registry_is_closed_and_exact`
+    ///
+    /// `MAP_API_METHODS` exposes exactly the five names: `{entries, keys, values, get, has}`.
+    #[test]
+    fn map_api_methods_registry_is_closed_and_exact() {
+        let expected_names = ["entries", "keys", "values", "get", "has"];
+        let actual_names: Vec<&str> = MAP_API_METHODS.iter().map(|m| m.name).collect();
+
+        // Exact five names.
+        assert_eq!(
+            actual_names.len(),
+            5,
+            "MAP_API_METHODS must have exactly 5 entries"
+        );
+        for name in &expected_names {
+            assert!(
+                actual_names.contains(name),
+                "MAP_API_METHODS must contain '{name}'"
+            );
+        }
+
+        // Lookup of any other identifier returns None.
+        assert!(
+            lookup_map_api_method("filter").is_none(),
+            "lookup of 'filter' must return None"
+        );
+        assert!(
+            lookup_map_api_method("").is_none(),
+            "lookup of '' must return None"
+        );
+        assert!(
+            lookup_map_api_method("ENTRIES").is_none(),
+            "lookup is case-sensitive; 'ENTRIES' must return None"
+        );
+
+        // Arities: entries/keys/values → Exact(0), get/has → Exact(1).
+        let entries = lookup_map_api_method("entries").expect("entries must be in MAP_API_METHODS");
+        assert_eq!(
+            entries.arity,
+            Arity::Exact(0),
+            "entries arity must be Exact(0)"
+        );
+        assert!(
+            !entries.named_args_allowed,
+            "entries must not allow named args"
+        );
+
+        let keys = lookup_map_api_method("keys").expect("keys must be in MAP_API_METHODS");
+        assert_eq!(keys.arity, Arity::Exact(0), "keys arity must be Exact(0)");
+
+        let values = lookup_map_api_method("values").expect("values must be in MAP_API_METHODS");
+        assert_eq!(
+            values.arity,
+            Arity::Exact(0),
+            "values arity must be Exact(0)"
+        );
+
+        let get = lookup_map_api_method("get").expect("get must be in MAP_API_METHODS");
+        assert_eq!(get.arity, Arity::Exact(1), "get arity must be Exact(1)");
+
+        let has = lookup_map_api_method("has").expect("has must be in MAP_API_METHODS");
+        assert_eq!(has.arity, Arity::Exact(1), "has arity must be Exact(1)");
+
+        // Return type of `entries`: List<Record<{key: K, value: V}>>.
+        let k = expr_text();
+        let v = expr_integer();
+        let entries_result = (entries.return_type_formula)(&k, &v);
+        match &entries_result {
+            SmeltType::List(inner) => match inner.as_ref() {
+                SmeltType::Record { fields, .. } => {
+                    assert_eq!(fields.len(), 2, "entries result record must have 2 fields");
+                    assert!(
+                        fields.contains_key("key"),
+                        "entries result must have 'key' field"
+                    );
+                    assert!(
+                        fields.contains_key("value"),
+                        "entries result must have 'value' field"
+                    );
+                    assert_eq!(fields["key"], k, "entries 'key' field must be K");
+                    assert_eq!(fields["value"], v, "entries 'value' field must be V");
+                }
+                other => panic!("entries result inner must be Record, got: {other:?}"),
+            },
+            other => panic!("entries result must be List, got: {other:?}"),
+        }
+    }
+
+    /// Test 5: `record_width_subtyping_rule`
+    ///
+    /// Width subtyping: `{a: Text, b: Integer} <: {a: Text}` but not the reverse.
+    #[test]
+    fn record_width_subtyping_rule() {
+        let wide = record_type(&[("a", expr_text()), ("b", expr_integer())]);
+        let narrow = record_type(&[("a", expr_text())]);
+        let incompatible = record_type(&[("a", expr_integer())]);
+
+        // Wide <: Narrow (width subtyping).
+        assert!(
+            is_subtype_of(&wide, &narrow),
+            "Record with more fields must be a subtype of record with fewer fields"
+        );
+        // Narrow is NOT <: Wide (missing field `b`).
+        assert!(
+            !is_subtype_of(&narrow, &wide),
+            "Record with fewer fields must NOT be a subtype of record with more fields"
+        );
+        // Type mismatch on shared field.
+        assert!(
+            !is_subtype_of(&narrow, &incompatible),
+            "Record with wrong field type must NOT be a subtype"
+        );
+    }
+
+    /// Test 6: `record_subtyping_through_nested_field`
+    ///
+    /// Width subtyping composes through nested record fields.
+    #[test]
+    fn record_subtyping_through_nested_field() {
+        // sub: Record{a: Record{x: Text, y: Integer}}
+        // sup: Record{a: Record{x: Text}}
+        let inner_wide = record_type(&[("x", expr_text()), ("y", expr_integer())]);
+        let inner_narrow = record_type(&[("x", expr_text())]);
+
+        let sub = record_type(&[("a", inner_wide)]);
+        let sup = record_type(&[("a", inner_narrow)]);
+
+        assert!(
+            is_subtype_of(&sub, &sup),
+            "Width subtyping must compose through nested record fields"
+        );
+    }
+
+    /// Test 7: `smelt_record_registry_builder_detects_redefinition`
+    ///
+    /// Two declarations with the same name produce a redefinition sentinel.
+    #[test]
+    fn smelt_record_registry_builder_detects_redefinition() {
+        let decl1 = make_decl("Foo", vec![("x", expr_text())]);
+        let decl2 = make_decl("Foo", vec![("y", expr_integer())]);
+
+        let (registry, sentinels) = build_record_registry(&[decl1, decl2]);
+
+        // One redefinition sentinel.
+        let redef_sentinels: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::SmeltRecordRedefinition)
+            .collect();
+        assert_eq!(
+            redef_sentinels.len(),
+            1,
+            "Expected exactly one SmeltRecordRedefinition sentinel; got: {redef_sentinels:?}"
+        );
+
+        // First declaration is authoritative.
+        let decl = registry.lookup("Foo").expect("Foo must be in registry");
+        assert_eq!(
+            decl.fields.len(),
+            1,
+            "First declaration (x field) must be authoritative"
+        );
+        assert_eq!(decl.fields[0].0, "x", "First declaration field must be 'x'");
+    }
+
+    /// Test 8: `smelt_record_registry_builder_detects_cycle_self`
+    ///
+    /// A single self-referential declaration emits one `RecordCyclicDeclaration` sentinel.
+    #[test]
+    fn smelt_record_registry_builder_detects_cycle_self() {
+        // Node = {child: Node} — self-referential.
+        // We model the field type as a named Record with name "Node".
+        let node_field_ty = named_record_type("Node", &[]);
+        let decl = make_decl("Node", vec![("child", node_field_ty)]);
+
+        let (_, sentinels) = build_record_registry(&[decl]);
+
+        let cycle_sentinels: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::RecordCyclicDeclaration)
+            .collect();
+        assert_eq!(
+            cycle_sentinels.len(),
+            1,
+            "Expected exactly one RecordCyclicDeclaration sentinel for self-cycle; got {cycle_sentinels:?}"
+        );
+        assert!(
+            cycle_sentinels[0].message.contains("Node"),
+            "Cycle sentinel message must mention the cycle participant 'Node'"
+        );
+    }
+
+    /// Test 9: `smelt_record_registry_builder_detects_cycle_mutual`
+    ///
+    /// Two mutually referential declarations emit exactly one `RecordCyclicDeclaration` sentinel.
+    #[test]
+    fn smelt_record_registry_builder_detects_cycle_mutual() {
+        // A = {b: B}, B = {a: A}
+        let b_ref = named_record_type("B", &[]);
+        let a_ref = named_record_type("A", &[]);
+
+        let decl_a = make_decl("A", vec![("b", b_ref)]);
+        let decl_b = make_decl("B", vec![("a", a_ref)]);
+
+        let (_, sentinels) = build_record_registry(&[decl_a, decl_b]);
+
+        let cycle_sentinels: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::RecordCyclicDeclaration)
+            .collect();
+        assert_eq!(
+            cycle_sentinels.len(),
+            1,
+            "Expected exactly one RecordCyclicDeclaration sentinel for mutual cycle; got {cycle_sentinels:?}"
+        );
+    }
+
+    /// Test 10: `smelt_record_registry_builder_rejects_reflection_witness_field_types`
+    ///
+    /// A declaration with `ModelRef`, `ColumnRef`, or `SourceRef` field types emits
+    /// `RecordFieldTypeForbidden`.
+    #[test]
+    fn smelt_record_registry_builder_rejects_reflection_witness_field_types() {
+        // Cohort = {model: ModelRef}
+        let decl_model = make_decl("Cohort", vec![("model", SmeltType::ModelRef)]);
+        let (_, sentinels) = build_record_registry(&[decl_model]);
+        let forbidden: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::RecordFieldTypeForbidden)
+            .collect();
+        assert_eq!(
+            forbidden.len(),
+            1,
+            "Expected one RecordFieldTypeForbidden for ModelRef field; got {forbidden:?}"
+        );
+        assert!(
+            forbidden[0].message.contains("ModelRef"),
+            "Forbidden sentinel message must mention 'ModelRef'"
+        );
+
+        // Same for ColumnRef.
+        let decl_col = make_decl("Cohort", vec![("col", SmeltType::ColumnRef)]);
+        let (_, sentinels2) = build_record_registry(&[decl_col]);
+        assert_eq!(
+            sentinels2
+                .iter()
+                .filter(|s| s.code == RecordRegistryCode::RecordFieldTypeForbidden)
+                .count(),
+            1,
+            "Expected one RecordFieldTypeForbidden for ColumnRef field"
+        );
+
+        // Same for SourceRef.
+        let decl_src = make_decl("Cohort", vec![("src", SmeltType::SourceRef)]);
+        let (_, sentinels3) = build_record_registry(&[decl_src]);
+        assert_eq!(
+            sentinels3
+                .iter()
+                .filter(|s| s.code == RecordRegistryCode::RecordFieldTypeForbidden)
+                .count(),
+            1,
+            "Expected one RecordFieldTypeForbidden for SourceRef field"
+        );
+
+        // Lambda is also forbidden.
+        let lambda_ty = SmeltType::Lambda(Box::new(expr_text()), Box::new(expr_text()));
+        let decl_lambda = make_decl("Cohort", vec![("fn_field", lambda_ty)]);
+        let (_, sentinels4) = build_record_registry(&[decl_lambda]);
+        assert_eq!(
+            sentinels4
+                .iter()
+                .filter(|s| s.code == RecordRegistryCode::RecordFieldTypeForbidden)
+                .count(),
+            1,
+            "Expected one RecordFieldTypeForbidden for Lambda field"
+        );
     }
 }

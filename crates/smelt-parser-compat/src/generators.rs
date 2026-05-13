@@ -66,6 +66,7 @@ fn is_keyword(s: &str) -> bool {
         "fetch",
         "filter",
         "first",
+        "fn",
         "for",
         "foreign",
         "freeze",

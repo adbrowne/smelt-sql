@@ -61,6 +61,7 @@ Use `docs/specs/SPEC_TEMPLATE.md` as the starting structure. Hard rules:
 - **Known Divergences is honest.** If DESIGN.md says one thing and code does another, name it. Don't pretend the spec matches reality if it doesn't.
 - **References point to current paths**, not commit-pinned ones. Plans go under "Plans (history)" oldest first.
 - **Frontmatter `last_reviewed` = today's date** (use `date -I`).
+- **Timeless-oracle rule (see `CLAUDE.md`).** Spec body sections (Surface, Semantics, Design, Constraints) describe the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline labels (`Meta list (Phase A)`), no plan-vocabulary callouts (`[deferred to Phase E1]`, `Phase 0 scaffold`). Implementation status goes in **Known Divergences** described in terms of behaviour with a plan link, or under **References → Plans (history)**. Phase numbers tolerated in Known Divergences only when paired with a plan-file link.
 
 ### Step 5: Update the index, if any
 
@@ -86,7 +87,7 @@ Suggested next steps:
 
 ## Important Rules
 
-1. **Spec is normative.** It describes what is true, not what was true. If you're unsure, flag it under Known Divergences instead of guessing.
+1. **Spec is normative and timeless.** It describes what is true, written as if the feature has always existed. No plan-phase references in body sections — see the Timeless-oracle rule above and in `CLAUDE.md`. If you're unsure, flag it under Known Divergences instead of guessing.
 2. **Capture design and invariants; skip implementation choices.** The spec records the surface, the rules, the design rationale (why this shape, what alternatives were rejected), and the invariants the implementation must preserve. It does *not* prescribe specific data structures, function names, or code layout — those change without spec drift. "What vs how" collapses two distinct things; the right cut is "design vs implementation".
 3. **Read source files in your own context first.** A spec written from delegated summaries is unreliable.
 4. **Don't refactor while specing.** Note divergences; let the next plan fix them.

@@ -1,0 +1,13 @@
+name: meta_config_broken_config_loader_null_coercion
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
