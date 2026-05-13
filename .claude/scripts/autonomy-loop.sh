@@ -77,13 +77,43 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # --permission-mode:               unattended; bypass by default (autonomy loop)
   # --no-session-persistence:        each iteration is genuinely fresh
   # --model:                         orchestrator on opus per meta-plan
+  # --output-format json:            single-envelope result with .usage + .total_cost_usd,
+  #                                  so we can record per-iteration spend below.
+  #                                  Sentinels still grep-able from the raw text.
   # Prompt is "continue" — Claude reads plan files to discover Phase X.
   claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --no-session-persistence \
     --model "${MODEL}" \
+    --output-format json \
     "continue" 2>&1 | tee "${log}"
   rc="${PIPESTATUS[0]}"
+
+  # Capture per-iteration token usage to .claude/usage-log.jsonl. The json
+  # envelope from `claude --output-format json` includes .usage and
+  # .total_cost_usd; if the log isn't valid json (e.g. claude crashed mid-output)
+  # this is a no-op.
+  USAGE_LOG="${REPO_ROOT}/.claude/usage-log.jsonl"
+  mkdir -p "$(dirname "${USAGE_LOG}")"
+  jq -c \
+    --arg ts "${ts}" \
+    --argjson iter "${iteration}" \
+    --argjson rc "${rc}" \
+    '{
+       ts: $ts,
+       event: "headless-iter",
+       iter: $iter,
+       rc: $rc,
+       session: .session_id,
+       total_cost_usd: .total_cost_usd,
+       duration_ms: .duration_ms,
+       num_turns: .num_turns,
+       input: .usage.input_tokens,
+       output: .usage.output_tokens,
+       cache_create: .usage.cache_creation_input_tokens,
+       cache_read: .usage.cache_read_input_tokens
+     }' "${log}" >> "${USAGE_LOG}" 2>/dev/null || \
+    echo "{\"ts\":\"${ts}\",\"event\":\"headless-iter\",\"iter\":${iteration},\"rc\":${rc},\"note\":\"unparseable-log\"}" >> "${USAGE_LOG}"
 
   echo
 

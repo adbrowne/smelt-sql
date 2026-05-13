@@ -122,6 +122,37 @@ npm run package
 npm run watch
 ```
 
+## Token efficiency
+
+These rules apply to every subagent and every Bash invocation. The autonomous
+loop dispatches dozens of subagents per phase, so one large tool result repeated
+across phases is a real cost.
+
+- **Search with `rg` (ripgrep), not `grep -r` or `find`.** `rg` honors
+  `.gitignore` by default; `grep -r`/`find` traverse `docs-site/site/`,
+  `target/`, `node_modules/`, and other build artifacts. A single `grep -r`
+  over the workspace has previously returned 2+ MB of minified JS source maps
+  from `docs-site/site/assets/javascripts/*.min.js.map` — ~500K tokens dropped
+  into one tool result.
+- **Never search into build artifacts.** Specifically:
+  `docs-site/site/`, `target/`, `examples/*/target/`, `examples/*/.smelt/`,
+  `ui/dist/`, `ui/node_modules/`, `__pycache__/`. If you must use `grep`,
+  pass `--exclude-dir=site --exclude-dir=target --exclude-dir=node_modules`.
+- **`cargo test` output:** for verification gates use
+  `cargo test --quiet 2>&1 | tail -40`. The full pass listing of the workspace
+  is ~3,000 lines per run — only worth feeding back when investigating an
+  actual failure. Failures still surface; their context is in the tail.
+- **`cargo build` / `cargo check`:** silence routine warnings the same way:
+  `2>&1 | tail -50`. The first failure line is what matters.
+- **`git diff` to a reviewer:** prefer per-crate or per-file diffs over
+  whole-repo diffs when the change is bounded to one area.
+
+A usage log is written to `.claude/usage-log.jsonl` by the PostToolUse and
+SessionEnd hooks (see `.claude/settings.json`) and by `autonomy-loop.sh` for
+headless iterations. Summarize it with
+`bash .claude/scripts/usage-summary.sh` to see top tool-result outliers and
+per-iteration cost after an autonomous run.
+
 ## Architecture
 
 ### High-Level Design
