@@ -1,0 +1,1275 @@
+//! Per-model schema queries and `TypeContext` construction.
+//!
+//! Most of this file is **pure**: `build_type_context`, the
+//! `RefSchemaProvider` trait, and `StaticRefSchemaProvider`. Only a handful
+//! of `#[salsa::tracked]` wrappers (`model_schema`, `available_columns`,
+//! `type_context`, `typed_model_schema`, `resolved_model_schema`,
+//! `columns_of_for_table_expr`, `model_input_constraints`,
+//! `model_function_type`) thread Salsa lookups into the pure helpers.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use rowan::TextRange;
+use smelt_parser::{self, File as AstFile, TableRef};
+use smelt_types::{parse_type, DataType, TypedColumn};
+
+use crate::queries::functions::{file_signature_inputs, function_signature, resolve_function};
+use crate::queries::parse::parse_file;
+use crate::queries::project::{project_seeds, project_sources, sources_config};
+use crate::schema::{
+    self, Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
+    ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
+};
+use crate::type_inference::{self, TypeContext};
+use crate::{resolve_ref, SourceFile, Workspace};
+
+use smelt_core::SourceInfo;
+
+// ============================================================================
+// Schema queries
+// ============================================================================
+
+#[salsa::tracked]
+pub fn model_schema(db: &dyn salsa::Database, file: SourceFile) -> Arc<ModelSchema> {
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+
+    let ast = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return Arc::new(ModelSchema::empty()),
+    };
+
+    let select_stmt = match ast.select_stmt() {
+        Some(s) => s,
+        None => return Arc::new(ModelSchema::empty()),
+    };
+
+    let select_list = match select_stmt.select_list() {
+        Some(l) => l,
+        None => return Arc::new(ModelSchema::empty()),
+    };
+
+    let from_refs: Vec<String> = if let Some(from_clause) = select_stmt.from_clause() {
+        from_clause
+            .table_refs()
+            .filter_map(|table_ref| {
+                // Path-form: smelt.models.foo → leaf segment "foo"
+                table_ref
+                    .smelt_path_ref()
+                    .and_then(|pr| pr.segments().last().cloned())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut columns = Vec::new();
+    let mut row_extensions = Vec::new();
+
+    for item in select_list.items() {
+        if item.is_wildcard() {
+            for ref_name in &from_refs {
+                row_extensions.push(schema::RowExtension {
+                    ref_name: ref_name.clone(),
+                    excluded_columns: vec![],
+                    range: item.range(),
+                });
+            }
+            continue;
+        }
+
+        let name = match item.column_name() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let alias = item.alias();
+        let expression = item.expression().map(|e| e.text()).unwrap_or_default();
+
+        let source = if let Some(expr) = item.expression() {
+            if expr.as_function_call().is_some() {
+                ColumnSource::Computed
+            } else if let Some(col_ref) = expr.as_column_ref() {
+                let column_name = col_ref.name().to_string();
+                if from_refs.len() == 1 {
+                    ColumnSource::FromModel {
+                        model_name: from_refs[0].clone(),
+                        column_name,
+                    }
+                } else if from_refs.is_empty() {
+                    ColumnSource::ExternalTable {
+                        table_name: col_ref.qualifier().unwrap_or("unknown").to_string(),
+                    }
+                } else {
+                    ColumnSource::Unknown
+                }
+            } else {
+                ColumnSource::Computed
+            }
+        } else {
+            ColumnSource::Unknown
+        };
+
+        columns.push(Column {
+            name,
+            alias,
+            source,
+            expression,
+            range: item.range(),
+            data_type: None,
+        });
+    }
+
+    if !row_extensions.is_empty() {
+        let explicit_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+        for ext in &mut row_extensions {
+            ext.excluded_columns = explicit_names.clone();
+        }
+    }
+
+    Arc::new(ModelSchema {
+        columns,
+        row_extensions,
+        input_constraints: vec![],
+    })
+}
+
+#[salsa::tracked]
+pub fn available_columns(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<Vec<Column>> {
+    let schema = model_schema(db, file);
+    let mut available = schema.columns.clone();
+
+    // Walk FROM/JOIN clause SmeltPathRef nodes for smelt.models.* refs and
+    // include upstream model columns (used by LSP column completion).
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+
+    if let Some(ast) = AstFile::cast(syntax) {
+        if let Some(select_stmt) = ast.select_stmt() {
+            if let Some(from_clause) = select_stmt.from_clause() {
+                for table_ref in from_clause.table_refs() {
+                    if let Some(path_ref) = table_ref.smelt_path_ref() {
+                        let segs = path_ref.segments();
+                        if segs.first().map(|s| s.as_str()) == Some("models") {
+                            if let Some(model_name) = segs.last().cloned() {
+                                if let Some(upstream) = resolve_ref(db, workspace, model_name) {
+                                    let upstream_schema = model_schema(db, upstream);
+                                    for col in upstream_schema.columns.iter() {
+                                        available.push(col.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Arc::new(available)
+}
+
+// ============================================================================
+// Type checking queries (with cycle recovery via cycle_initial)
+// ============================================================================
+
+fn typed_model_schema_initial(
+    _db: &dyn salsa::Database,
+    _id: salsa::Id,
+    _workspace: Workspace,
+    _file: SourceFile,
+) -> Arc<ModelSchema> {
+    Arc::new(ModelSchema::empty())
+}
+
+fn type_context_initial(
+    _db: &dyn salsa::Database,
+    _id: salsa::Id,
+    _workspace: Workspace,
+    _file: SourceFile,
+) -> Arc<TypeContext> {
+    Arc::new(TypeContext::new())
+}
+
+fn resolved_model_schema_initial(
+    _db: &dyn salsa::Database,
+    _id: salsa::Id,
+    _workspace: Workspace,
+    _file: SourceFile,
+) -> Arc<ResolvedSchema> {
+    Arc::new(ResolvedSchema {
+        columns: vec![],
+        is_fully_resolved: true,
+        unresolved_extensions: vec![],
+    })
+}
+
+/// Provider for upstream `smelt.ref()` schema lookups, used by the pure
+/// `build_type_context` function.
+///
+/// The Salsa version uses [`SalsaRefSchemaProvider`] (delegates to the new
+/// 0.26-API free functions `resolve_ref` + `resolved_model_schema`).
+/// The CLI batch compiler uses [`StaticRefSchemaProvider`], which is fully
+/// pure and takes pre-computed maps.
+pub trait RefSchemaProvider {
+    /// Returns the typed columns for the model named `model_name`, if known.
+    fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+    /// Returns the typed columns for the seed named `seed_name`, if known.
+    /// Seeds and model refs are looked up separately because the type-context
+    /// loop wants to distinguish them (CSV files don't participate in
+    /// SELECT * schema resolution, etc.).
+    fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+    /// Returns the typed columns for the `smelt.functions.<name>(...)` call in
+    /// FROM position, by resolving the function's `TableExpr` return schema.
+    /// The default implementation returns `None`; `SalsaRefSchemaProvider`
+    /// overrides this with a full Salsa-backed resolution.
+    fn smelt_path_call_columns(
+        &self,
+        _call: &smelt_parser::ast::SmeltPathCall,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        None
+    }
+}
+
+/// `RefSchemaProvider` impl that delegates to the Salsa database. Used by the
+/// `type_context()` Salsa query so the LSP keeps benefiting from
+/// incremental recomputation.
+pub struct SalsaRefSchemaProvider<'a> {
+    db: &'a dyn salsa::Database,
+    workspace: Workspace,
+}
+
+impl<'a> SalsaRefSchemaProvider<'a> {
+    pub fn new(db: &'a dyn salsa::Database, workspace: Workspace) -> Self {
+        Self { db, workspace }
+    }
+}
+
+impl SalsaRefSchemaProvider<'_> {
+    /// Phase 45: resolve a `TableRef` (FROM/JOIN entry) to the columns it
+    /// contributes. Used by [`function_body_check::register_join_alias_schemas`]
+    /// from the `infer_tableexpr_return_schema` path so that `<alias>.*`
+    /// projections from joined tables expand correctly.
+    pub fn resolve_table_ref_schema(
+        &self,
+        table_ref: &smelt_parser::ast::TableRef,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        // smelt.functions.<name>(...) in FROM/JOIN position — resolve schema.
+        if let Some(path_call) = table_ref.smelt_path_call() {
+            return self.resolve_smelt_path_call_schema(&path_call);
+        }
+
+        // smelt.<path> value-form in FROM/JOIN position.
+        if let Some(path_ref) = table_ref.smelt_path_ref() {
+            let segs = path_ref.segments();
+            let model_name = segs.last().cloned().unwrap_or_default();
+            let seed_key = segs.join("_");
+            return self
+                .resolved_columns(&model_name)
+                .or_else(|| self.seed_columns(&seed_key));
+        }
+
+        None
+    }
+
+    /// Resolve a `smelt.functions.<name>(...)` path-call in FROM position
+    /// to its inferred output schema.
+    ///
+    /// Flow:
+    ///   1. Resolve the path's tail segment to a workspace `FunctionSig`.
+    ///   2. If the signature's return type isn't `TableExpr`, return `None`.
+    ///   3. Re-parse the callee's file and find the body `SelectStmt`.
+    ///   4. Build a body ctx by resolving each `TableExpr` argument to its
+    ///      schema, seeding via `add_tableexpr_param`. Other `Expr<T>` params
+    ///      are seeded to `Unknown`.
+    ///   5. Call `infer_tableexpr_return_schema` on the body and return cols.
+    fn resolve_smelt_path_call_schema(
+        &self,
+        call: &smelt_parser::ast::SmeltPathCall,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        use smelt_parser::ast::Expr as AstExpr;
+        use smelt_types::signatures::SmeltType;
+
+        let segments = call.segments();
+        let name = segments.last()?.clone();
+        let sig_arc = resolve_function(self.db, self.workspace, name)?;
+        let sig: &smelt_types::signatures::FunctionSig = sig_arc.as_ref();
+
+        // Only `TableExpr`-returning functions contribute a FROM schema.
+        match &sig.return_type {
+            Some(Ok(SmeltType::TableExpr(_))) => {}
+            _ => return None,
+        }
+
+        // Find the callee's file + body SelectStmt.
+        let files: Vec<SourceFile> = self.workspace.files(self.db).to_vec();
+        let mut body_select: Option<smelt_parser::ast::SelectStmt> = None;
+        for f in &files {
+            let sigs = file_signature_inputs(self.db, *f);
+            if !sigs.iter().any(|s| s.name == sig.name) {
+                continue;
+            }
+            let f_parse = parse_file(self.db, *f);
+            let f_syntax = f_parse.syntax();
+            if let Some(ast) = AstFile::cast(f_syntax) {
+                for define in ast.defines() {
+                    if define.name().as_deref() == Some(&sig.name) {
+                        if let Some(body) = define.body() {
+                            if let Some(stmt) = body.select_stmt() {
+                                body_select = Some(stmt);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if body_select.is_some() {
+                break;
+            }
+        }
+        let body_select = body_select?;
+
+        // Bind args to params by position / name.
+        let arg_list = call.arg_list();
+        let positional: Vec<AstExpr> = arg_list
+            .as_ref()
+            .map(|al| al.positional_args())
+            .unwrap_or_default();
+        let named: Vec<smelt_parser::ast::NamedParam> = arg_list
+            .as_ref()
+            .map(|al| al.named_params().collect())
+            .unwrap_or_default();
+
+        let mut bindings: std::collections::HashMap<String, AstExpr> =
+            std::collections::HashMap::new();
+        for (i, arg) in positional.iter().enumerate() {
+            if let Some(p) = sig.params.get(i) {
+                bindings.insert(p.name.clone(), arg.clone());
+            }
+        }
+        for np in &named {
+            if let (Some(nm), Some(value)) = (np.name(), np.value_expr()) {
+                bindings.insert(nm, value);
+            }
+        }
+
+        // Seed the body ctx with every parameter's caller schema / type.
+        let mut body_ctx = TypeContext::new();
+        for param in &sig.params {
+            if param.name.is_empty() {
+                continue;
+            }
+            if matches!(&param.type_ref, Some(Ok(SmeltType::TableExpr(_)))) {
+                // Resolve the TableExpr argument to its column schema.
+                if let Some(arg_expr) = bindings.get(&param.name) {
+                    // If the argument is itself a smelt.functions.* call, resolve
+                    // it recursively to get the inner call's output schema.
+                    if let Some(nested) = arg_expr.as_smelt_path_call() {
+                        if let Some(cols) = self.resolve_smelt_path_call_schema(&nested) {
+                            body_ctx.add_tableexpr_param(&param.name, &cols);
+                        }
+                        continue;
+                    }
+                    // Walk the arg expression for a smelt.<path> ref.
+                    for node in arg_expr.syntax().descendants() {
+                        if node.kind() == smelt_parser::SyntaxKind::SMELT_PATH_REF {
+                            if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
+                                let segs = path_ref.segments();
+                                let model_name = segs.last().cloned().unwrap_or_default();
+                                let seed_key = segs.join("_");
+                                if let Some(cols) = self
+                                    .resolved_columns(&model_name)
+                                    .or_else(|| self.seed_columns(&seed_key))
+                                {
+                                    body_ctx.add_tableexpr_param(&param.name, &cols);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Expr<T> param — bind to Unknown for schema inference.
+                let dt = match &param.type_ref {
+                    Some(Ok(SmeltType::Expr(
+                        smelt_types::signatures::TypeConstraint::Concrete(dt),
+                    ))) => dt.clone(),
+                    _ => DataType::Unknown,
+                };
+                body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt));
+            }
+        }
+
+        // Seed workspace signatures so nested function calls in the
+        // body infer their return types.
+        let mut wsp_files = files.clone();
+        wsp_files.sort_by(|a, b| a.path(self.db).cmp(b.path(self.db)));
+        for f in &wsp_files {
+            let sigs = file_signature_inputs(self.db, *f);
+            for s in sigs.iter() {
+                body_ctx.add_function_signature(&s.name, s.clone());
+            }
+        }
+
+        // Extract CTE schemas from the body's WITH clause so that
+        // `infer_tableexpr_return_schema` can resolve bare column references
+        // from CTE-derived rows. Cycle diagnostics are discarded — they're
+        // surfaced separately by `cte_cycle_diagnostics_for_file`.
+        let (body_ctx_with_ctes, _cycle_diags) =
+            function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
+        let mut body_ctx = body_ctx_with_ctes;
+
+        // Seed JOIN-aliased schemas so that `infer_tableexpr_return_schema`
+        // can expand `<alias>.*` projections from joined tables.
+        let join_lookup =
+            |table_ref: &smelt_parser::ast::TableRef| -> Option<Vec<(String, TypedColumn)>> {
+                self.resolve_table_ref_schema(table_ref)
+            };
+        function_body_check::register_join_alias_schemas(
+            &mut body_ctx,
+            &body_select,
+            sig,
+            &join_lookup,
+        );
+
+        let schema = infer_tableexpr_return_schema(&body_select, &body_ctx)?;
+        // Project to (name, TypedColumn) pairs.
+        let cols: Vec<(String, TypedColumn)> = schema
+            .columns
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.data_type.clone().unwrap_or(TypedColumn {
+                        data_type: DataType::Unknown,
+                        nullable: true,
+                    }),
+                )
+            })
+            .collect();
+        Some(cols)
+    }
+}
+
+impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
+    fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        let upstream = resolve_ref(self.db, self.workspace, model_name.to_string())?;
+        let resolved = resolved_model_schema(self.db, self.workspace, upstream);
+        Some(
+            resolved
+                .columns
+                .iter()
+                .map(|col| {
+                    let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
+                        data_type: DataType::Unknown,
+                        nullable: true,
+                    });
+                    (col.name.clone(), typed_col)
+                })
+                .collect(),
+        )
+    }
+
+    fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        // Seeds aren't part of the file-based resolve_ref graph; walk all
+        // projects in the workspace and look in each project's seeds.
+        for project in self.workspace.projects(self.db).iter().copied() {
+            for seed in project_seeds(self.db, project).iter() {
+                if seed.address_segments.join("_") == seed_name {
+                    return Some(
+                        seed.columns
+                            .iter()
+                            .map(|(name, dt)| {
+                                (
+                                    name.clone(),
+                                    TypedColumn {
+                                        data_type: dt.clone(),
+                                        nullable: true,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    fn smelt_path_call_columns(
+        &self,
+        call: &smelt_parser::ast::SmeltPathCall,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        self.resolve_smelt_path_call_schema(call)
+    }
+}
+
+/// Fully pure `RefSchemaProvider` for batch compilation (CLI, planner). Holds
+/// pre-computed maps of model and seed schemas so it can answer lookups
+/// without touching Salsa.
+pub struct StaticRefSchemaProvider<'a> {
+    pub models: &'a HashMap<String, Vec<(String, TypedColumn)>>,
+    pub seeds: &'a HashMap<String, Vec<(String, TypedColumn)>>,
+}
+
+impl RefSchemaProvider for StaticRefSchemaProvider<'_> {
+    fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        self.models.get(model_name).cloned()
+    }
+
+    fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        self.seeds.get(seed_name).cloned()
+    }
+}
+
+/// Pure (Salsa-free) builder for a `TypeContext` from a parsed AST and the
+/// surrounding source/seed/model schemas.
+///
+/// This is the canonical builder; the `type_context()` Salsa query is a thin
+/// wrapper that gathers Salsa inputs (sources_config, parsed file, upstream
+/// schemas) and delegates here. The CLI batch compiler uses
+/// `StaticRefSchemaProvider` to call this directly without a `Database`.
+///
+/// See CLAUDE.md "Pure Function Rule" for why this matters.
+pub fn build_type_context(
+    file: &AstFile,
+    sources_config: &SourcesConfig,
+    refs: &dyn RefSchemaProvider,
+) -> TypeContext {
+    let mut ctx = TypeContext::new();
+
+    // Source columns from sources.yml.
+    for source in &sources_config.sources {
+        for table in &source.tables {
+            for col in &table.columns {
+                let data_type = col.data_type.clone().unwrap_or(DataType::Unknown);
+                ctx.add_source_column(
+                    &source.name,
+                    &table.name,
+                    &col.name,
+                    TypedColumn {
+                        data_type,
+                        nullable: true,
+                    },
+                );
+            }
+        }
+    }
+
+    if let Some(select_stmt) = file.select_stmt() {
+        // Process WITH clause CTEs first (CTEs shadow outer scope).
+        if let Some(with_clause) = select_stmt.with_clause() {
+            for cte in with_clause.ctes() {
+                if let Some(cte_name) = cte.name() {
+                    // For recursive CTEs with explicit column list, bootstrap
+                    // with Unknown types so the recursive reference can find
+                    // the columns.
+                    if with_clause.is_recursive() {
+                        for col_name in cte.column_names() {
+                            ctx.add_cte_column(
+                                &cte_name,
+                                &col_name,
+                                TypedColumn {
+                                    data_type: DataType::Unknown,
+                                    nullable: true,
+                                },
+                            );
+                        }
+                    }
+
+                    if let Some(cte_select) = cte.query().and_then(|q| q.select_stmt()) {
+                        process_from_clause_pure(&cte_select, refs, &mut ctx);
+                    }
+
+                    let columns = infer_cte_columns(&cte, &ctx);
+                    for (col_name, typed_col) in &columns {
+                        ctx.add_cte_column(&cte_name, col_name, typed_col.clone());
+                    }
+
+                    ctx.add_alias(&cte_name, &cte_name);
+
+                    // If the CTE body is a wildcard SELECT from a
+                    // smelt.functions.* call that couldn't be resolved,
+                    // mark the CTE opaque so outer column references
+                    // don't cascade false-positive UndeclaredColumn
+                    // diagnostics.
+                    //
+                    // Note: we cannot rely on `columns.is_empty()` here
+                    // because `infer_cte_columns` always returns at least
+                    // one entry for `SELECT *` (a synthetic "col1" with
+                    // Unknown type). Instead, check directly whether the
+                    // FROM source is a SMELT_PATH_CALL that didn't resolve.
+                    {
+                        let should_mark_opaque = cte
+                            .query()
+                            .and_then(|q| q.select_stmt())
+                            .map(|s| {
+                                let has_wildcard = s
+                                    .select_list()
+                                    .map(|sl| sl.items().any(|item| item.is_wildcard()))
+                                    .unwrap_or(false);
+                                if !has_wildcard {
+                                    return false;
+                                }
+                                // The FROM clause has a smelt path call
+                                // that couldn't be resolved.
+                                s.from_clause()
+                                    .and_then(|fc| {
+                                        fc.table_refs().find_map(|tr| tr.smelt_path_call())
+                                    })
+                                    .map(|path_call| {
+                                        refs.smelt_path_call_columns(&path_call).is_none()
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if should_mark_opaque {
+                            ctx.mark_cte_opaque(&cte_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        process_from_clause_pure(&select_stmt, refs, &mut ctx);
+    }
+
+    ctx
+}
+
+fn process_from_clause_pure(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            process_table_ref_pure(&table_ref, refs, ctx);
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                process_table_ref_pure(&table_ref, refs, ctx);
+            }
+        }
+    }
+}
+
+fn process_table_ref_pure(
+    table_ref: &TableRef,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    // `smelt.<path>` call-form references (SMELT_PATH_CALL) in the FROM
+    // clause. Ask the provider for the inferred TableExpr return schema.
+    // If the provider resolves it, seed all columns under the alias binding
+    // so the caller's SELECT can validate projections (e.g. UndeclaredColumn
+    // for columns not in the function's return schema). If not resolved,
+    // fall back to an opaque alias registration.
+    if let Some(path_call) = table_ref.smelt_path_call() {
+        let segments = path_call.segments();
+        let fn_name = segments.last().cloned().unwrap_or_default();
+        let bind_to = table_ref.alias().unwrap_or_else(|| fn_name.clone());
+        if let Some(cols) = refs.smelt_path_call_columns(&path_call) {
+            for (col_name, typed_col) in &cols {
+                ctx.add_model_column(&bind_to, col_name, typed_col.clone());
+            }
+            if !bind_to.is_empty() {
+                ctx.add_alias(&bind_to, &bind_to);
+            }
+        } else if !bind_to.is_empty() {
+            // Opaque fallback: alias is registered but no column types.
+            ctx.add_alias(&bind_to, &bind_to);
+        }
+        // Don't fall through to the generic identifier path.
+        return;
+    }
+
+    // `smelt.<path>` value-form references (SMELT_PATH_REF) in the
+    // FROM clause. The path tuple is used to determine the entity name for
+    // schema lookup: the full segments joined with "_" are used as the seed
+    // key, while the last segment is used for model lookup.
+    if let Some(path_ref) = table_ref.smelt_path_ref() {
+        let segments = path_ref.segments();
+        let model_name = segments.last().cloned().unwrap_or_default();
+        let seed_key = segments.join("_");
+        // Try seed first, then model.
+        if let Some((entity_name, cols)) = refs
+            .seed_columns(&seed_key)
+            .map(|c| (seed_key.clone(), c))
+            .or_else(|| {
+                refs.resolved_columns(&model_name)
+                    .map(|c| (model_name.clone(), c))
+            })
+        {
+            for (col_name, typed_col) in &cols {
+                ctx.add_model_column(&entity_name, col_name, typed_col.clone());
+            }
+            let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
+            ctx.add_alias(&bind_to, &entity_name);
+        } else if segments.first().map(|s| s.as_str()) == Some("sources") {
+            // smelt.sources.<source_name>.<table_name> path refs. The source
+            // columns were already seeded into `ctx` by `build_type_context`
+            // (via `add_source_column`). We just need to register the alias
+            // so that `lookup_identifier` can resolve `alias → entity_name`
+            // and correctly validate qualified refs like `alias.col_name`
+            // as well as bare alias references (e.g. `smelt.functions.f(e)`
+            // where `e` is an alias for a source table).
+            let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
+            ctx.add_alias(&bind_to, &model_name);
+        }
+        return;
+    }
+
+    // CTE references with aliases (e.g. "FROM daily_totals dt")
+    // OR bare upstream MODEL/seed references (e.g. "FROM main.stg_orders AS o"
+    // — produced by the dialect printer after `smelt.models.stg_orders` is
+    // resolved). Without this branch, the alias `o` is never bound and
+    // `o.line_revenue` resolves to Unknown, which silently narrows
+    // `SUM(o.line_revenue)` to BIGINT in `_smelt_typed`. See B8.
+    if table_ref.function_call().is_none() && table_ref.subquery().is_none() {
+        if let Some(raw_name) = table_ref.identifier() {
+            // Strip an optional leading schema qualifier (`schema.table`).
+            // The dialect printer emits `<schema>.<model_name>`; we want the
+            // last segment to look up against the schema provider.
+            let table_name = bare_table_name(table_ref).unwrap_or(raw_name.clone());
+
+            if ctx.is_cte(&table_name) {
+                if let Some(explicit_alias) = table_ref.alias() {
+                    ctx.add_alias(&explicit_alias, &table_name);
+                }
+            } else if let Some(cols) = refs
+                .resolved_columns(&table_name)
+                .or_else(|| refs.seed_columns(&table_name))
+            {
+                for (col_name, typed_col) in cols {
+                    ctx.add_model_column(&table_name, &col_name, typed_col);
+                }
+                // Bind the alias (or the table name itself, so qualified
+                // refs like `stg_orders.col` also resolve).
+                let bind_to = table_ref.alias().unwrap_or_else(|| table_name.clone());
+                ctx.add_alias(&bind_to, &table_name);
+            }
+        }
+    }
+
+    // Subqueries / LATERAL subqueries
+    if let Some(subquery) = table_ref.subquery() {
+        if let Some(alias) = table_ref.alias() {
+            if let Some(select_stmt) = subquery.select_stmt() {
+                if let Some(select_list) = select_stmt.select_list() {
+                    let mut subquery_ctx = ctx.clone();
+                    process_from_clause_pure(&select_stmt, refs, &mut subquery_ctx);
+
+                    let column_types = infer_select_column_types(&select_stmt, &subquery_ctx);
+
+                    for (i, item) in select_list.items().enumerate() {
+                        let col_name = if let Some(item_alias) = item.alias() {
+                            item_alias
+                        } else if let Some(expr) = item.expression() {
+                            if let Some(col_ref) = expr.as_column_ref() {
+                                col_ref.name().to_string()
+                            } else {
+                                format!("col{}", i + 1)
+                            }
+                        } else {
+                            format!("col{}", i + 1)
+                        };
+
+                        let typed_col = column_types.get(i).cloned().unwrap_or(TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        });
+
+                        ctx.add_cte_column(&alias, &col_name, typed_col);
+                    }
+
+                    ctx.add_alias(&alias, &alias);
+                }
+            }
+        }
+    }
+}
+
+/// Extract the table-name segment from a bare `TableRef` like `schema.table`,
+/// stripping an optional schema qualifier. Used by `process_table_ref_pure`
+/// to look up upstream MODEL/seed schemas after the dialect printer has
+/// resolved `smelt.models.foo` to `<schema>.foo`.
+///
+/// Returns `None` for function calls and subqueries (those have their own
+/// handling paths).
+fn bare_table_name(table_ref: &TableRef) -> Option<String> {
+    use smelt_parser::SyntaxKind::{AS_KW, DOT, IDENT};
+
+    if table_ref.function_call().is_some() || table_ref.subquery().is_some() {
+        return None;
+    }
+
+    // Walk tokens and collect the IDENTs that come BEFORE any AS keyword.
+    // The last such IDENT (after any DOT segments) is the table name.
+    let mut idents: Vec<String> = Vec::new();
+    let mut last_was_dot = false;
+    let mut started = false;
+    for tok in table_ref
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        match tok.kind() {
+            AS_KW => break,
+            IDENT => {
+                if !started || last_was_dot {
+                    idents.push(tok.text().to_string());
+                } else {
+                    // Implicit alias (no AS keyword): bail out, take what
+                    // we have so far.
+                    break;
+                }
+                started = true;
+                last_was_dot = false;
+            }
+            DOT => {
+                last_was_dot = true;
+            }
+            _ => {}
+        }
+    }
+
+    idents.last().cloned()
+}
+
+/// Pure function: populate a `TypeContext` with column type information from
+/// Phase 6 per-entity `SourceInfo` records.
+///
+/// The source's identity in the TypeContext is `(schema, table)` where:
+///   schema = `address_segments[address_segments.len() - 2]` (e.g. "raw")
+///   table  = `address_segments[address_segments.len() - 1]` (e.g. "users")
+///
+/// This mirrors how `smelt.sources.raw.users` is resolved: the last two
+/// segments of the path are the schema and table.
+pub fn add_source_info_to_type_context(sources: &[SourceInfo], ctx: &mut TypeContext) {
+    for source in sources {
+        let segs = &source.address_segments;
+        if segs.len() < 2 {
+            continue; // degenerate address — skip
+        }
+        let schema_name = &segs[segs.len() - 2];
+        let table_name = &segs[segs.len() - 1];
+        for col in &source.columns {
+            ctx.add_source_column(
+                schema_name,
+                table_name,
+                &col.name,
+                TypedColumn {
+                    data_type: col.data_type.clone(),
+                    nullable: col.nullable,
+                },
+            );
+        }
+    }
+}
+
+#[salsa::tracked(cycle_initial = type_context_initial)]
+pub fn type_context(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<TypeContext> {
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    // Phase 6: per-entity sources take precedence when present; fall back to
+    // the legacy aggregate `sources.yml` for projects not yet migrated.
+    let per_entity_sources: Arc<Vec<SourceInfo>> = project
+        .map(|p| project_sources(db, p))
+        .unwrap_or_else(|| Arc::new(Vec::new()));
+
+    let legacy_sources: Arc<SourcesConfig> = if per_entity_sources.is_empty() {
+        project
+            .map(|p| sources_config(db, p))
+            .unwrap_or_else(|| Arc::new(SourcesConfig::default()))
+    } else {
+        Arc::new(SourcesConfig::default())
+    };
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+
+    let ast = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return Arc::new(TypeContext::new()),
+    };
+
+    let provider = SalsaRefSchemaProvider::new(db, workspace);
+    let mut ctx = build_type_context(&ast, &legacy_sources, &provider);
+
+    // Phase 6: add per-entity source columns to the TypeContext.
+    // Source address_segments like ["sources", "raw", "users"] → schema="raw", table="users".
+    add_source_info_to_type_context(&per_entity_sources, &mut ctx);
+
+    // Seed the workspace's `smelt.define` signatures so path-call type
+    // inference can resolve declared return types when a SELECT projects a
+    // `smelt.functions.*` call. Kept pure — we only hand the signature data to
+    // the `TypeContext`; analysis logic doesn't call back into Salsa.
+    let mut wsp_files: Vec<SourceFile> = workspace.files(db).to_vec();
+    wsp_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    for f in &wsp_files {
+        let sigs = file_signature_inputs(db, *f);
+        for sig in sigs.iter() {
+            ctx.add_function_signature(&sig.name, sig.clone());
+        }
+    }
+
+    Arc::new(ctx)
+}
+
+#[salsa::tracked(cycle_initial = typed_model_schema_initial)]
+pub fn typed_model_schema(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<ModelSchema> {
+    let base_schema = model_schema(db, file);
+    let ctx = type_context(db, workspace, file);
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+
+    let ast = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return base_schema,
+    };
+
+    let select_stmt = match ast.select_stmt() {
+        Some(s) => s,
+        None => return base_schema,
+    };
+
+    let inferred_types = infer_select_column_types(&select_stmt, &ctx);
+
+    let mut typed_columns = Vec::new();
+    for (i, col) in base_schema.columns.iter().enumerate() {
+        let mut col = col.clone();
+        if let Some(typed_col) = inferred_types.get(i) {
+            col.data_type = Some(typed_col.clone());
+        }
+        typed_columns.push(col);
+    }
+
+    Arc::new(ModelSchema {
+        columns: typed_columns,
+        row_extensions: base_schema.row_extensions.clone(),
+        input_constraints: base_schema.input_constraints.clone(),
+    })
+}
+
+#[salsa::tracked(cycle_initial = resolved_model_schema_initial)]
+pub fn resolved_model_schema(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<ResolvedSchema> {
+    let typed_schema = typed_model_schema(db, workspace, file);
+
+    if typed_schema.row_extensions.is_empty() {
+        return Arc::new(ResolvedSchema {
+            columns: typed_schema.columns.clone(),
+            is_fully_resolved: true,
+            unresolved_extensions: vec![],
+        });
+    }
+
+    let mut columns = Vec::new();
+    let mut unresolved_extensions = Vec::new();
+    let mut is_fully_resolved = true;
+
+    for ext in &typed_schema.row_extensions {
+        if let Some(upstream) = resolve_ref(db, workspace, ext.ref_name.clone()) {
+            let upstream_resolved = resolved_model_schema(db, workspace, upstream);
+            for col in &upstream_resolved.columns {
+                if !ext.excluded_columns.contains(&col.name) {
+                    columns.push(col.clone());
+                }
+            }
+            if !upstream_resolved.is_fully_resolved {
+                is_fully_resolved = false;
+                for upstream_ext in &upstream_resolved.unresolved_extensions {
+                    unresolved_extensions.push(upstream_ext.clone());
+                }
+            }
+        } else {
+            is_fully_resolved = false;
+            unresolved_extensions.push(ext.clone());
+        }
+    }
+
+    for col in &typed_schema.columns {
+        columns.push(col.clone());
+    }
+
+    Arc::new(ResolvedSchema {
+        columns,
+        is_fully_resolved,
+        unresolved_extensions,
+    })
+}
+
+/// Phase C (meta-language) — Salsa-cached query that materialises the concrete
+/// `Vec<ColumnRefValue>` for a given model path at expansion time.
+///
+/// Takes a `model_name` (the leaf segment of a `smelt.<path>` reference, e.g.
+/// `"orders"`) and resolves it via [`resolve_ref`] + [`resolved_model_schema`] to
+/// produce a [`smelt_types::ColumnRefValue`] per column, preserving the source
+/// schema's declared column order.
+///
+/// Returns `Ok(columns)` when the schema resolves to a concrete (non-empty)
+/// column list, or `Err(())` when:
+/// - the model is not found in the workspace (`resolve_ref` returns `None`), or
+/// - the resolved schema has no columns and is not fully resolved (upstream
+///   `Unknown`).
+///
+/// The error token is `()` — callers emit `ColumnsOfUnresolvableSchema` and
+/// drop the surrounding splice on `Err`.
+///
+/// This query obeys the `smelt-db` pure-function rule: the analysis (building
+/// `ColumnRefValue`s from `Column`s) is pure; the Salsa wrapper only wires up
+/// the inputs.
+#[salsa::tracked]
+pub fn columns_of_for_table_expr(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    model_name: String,
+) -> Result<Arc<Vec<smelt_types::ColumnRefValue>>, ()> {
+    // Resolve the model name to a SourceFile via the existing resolution machinery.
+    let file = match resolve_ref(db, workspace, model_name.clone()) {
+        Some(f) => f,
+        None => return Err(()),
+    };
+
+    // Use the typed + row-extended schema so callers see the full column list
+    // (including wildcard-expanded columns from upstream models).
+    let schema = resolved_model_schema(db, workspace, file);
+
+    // If the schema is unresolvable (no columns and not fully resolved), signal
+    // an unknown schema so the caller can emit ColumnsOfUnresolvableSchema.
+    if schema.columns.is_empty() && !schema.is_fully_resolved {
+        return Err(());
+    }
+
+    // Project each Column into a ColumnRefValue.
+    let columns: Vec<smelt_types::ColumnRefValue> = columns_to_column_ref_values(&schema.columns);
+
+    Ok(Arc::new(columns))
+}
+
+/// Pure helper: convert a slice of [`schema::Column`]s into
+/// [`smelt_types::ColumnRefValue`]s in declaration order.
+///
+/// This function is deliberately separated from the Salsa query body so that
+/// the conversion logic is independently testable without a database.
+pub fn columns_to_column_ref_values(
+    columns: &[schema::Column],
+) -> Vec<smelt_types::ColumnRefValue> {
+    columns
+        .iter()
+        .map(|col| {
+            let data_type = col.data_type.as_ref().map(|tc| tc.data_type.clone());
+            let is_numeric = data_type
+                .as_ref()
+                .map(|dt| dt.is_numeric())
+                .unwrap_or(false);
+            smelt_types::ColumnRefValue {
+                name: col.name.clone(),
+                data_type,
+                is_numeric,
+                source_span: Some(col.range),
+            }
+        })
+        .collect()
+}
+
+#[salsa::tracked]
+pub fn model_input_constraints(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<Vec<InputConstraint>> {
+    use schema::{ColumnConstraint, InputConstraint};
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let ctx = type_context(db, workspace, file);
+
+    let ast = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return Arc::new(vec![]),
+    };
+
+    let select_stmt = match ast.select_stmt() {
+        Some(s) => s,
+        None => return Arc::new(vec![]),
+    };
+
+    let mut alias_to_ref: HashMap<String, String> = HashMap::new();
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            // smelt.<path> table references in FROM position.
+            if let Some(path_ref) = table_ref.smelt_path_ref() {
+                let segs = path_ref.segments();
+                if let Some(entity_name) = segs.last().cloned() {
+                    if !entity_name.is_empty() {
+                        alias_to_ref.insert(entity_name.clone(), entity_name.clone());
+                        if let Some(alias) = table_ref.alias() {
+                            alias_to_ref.insert(alias, entity_name);
+                        }
+                    }
+                }
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                // smelt.<path> table references in JOIN position.
+                if let Some(path_ref) = table_ref.smelt_path_ref() {
+                    let segs = path_ref.segments();
+                    if let Some(entity_name) = segs.last().cloned() {
+                        if !entity_name.is_empty() {
+                            alias_to_ref.insert(entity_name.clone(), entity_name.clone());
+                            if let Some(alias) = table_ref.alias() {
+                                alias_to_ref.insert(alias, entity_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if alias_to_ref.is_empty() {
+        return Arc::new(vec![]);
+    }
+
+    let mut constraints_map: HashMap<String, HashMap<String, ColumnConstraint>> = HashMap::new();
+
+    let mut record_constraint =
+        |ref_name: &str, col_name: &str, expected_type: Option<TypedColumn>, range: TextRange| {
+            let entry = constraints_map
+                .entry(ref_name.to_string())
+                .or_default()
+                .entry(col_name.to_string())
+                .or_insert_with(|| ColumnConstraint {
+                    expected_type: None,
+                    usage_sites: vec![],
+                });
+            if entry.expected_type.is_none() {
+                entry.expected_type = expected_type;
+            }
+            entry.usage_sites.push(range);
+        };
+
+    {
+        let mut visitor = |qualifier: Option<&str>,
+                           col_name: &str,
+                           type_hint: Option<&TypedColumn>,
+                           range: TextRange| {
+            if col_name == "*" {
+                return;
+            }
+            let inferred_type = type_hint.cloned();
+            if let Some(q) = qualifier {
+                let resolved = ctx.resolve_alias(q).unwrap_or_else(|| q.to_string());
+                if let Some(ref_name) = alias_to_ref.get(&resolved) {
+                    let final_type =
+                        inferred_type.or_else(|| ctx.lookup_column(Some(q), col_name).cloned());
+                    record_constraint(ref_name, col_name, final_type, range);
+                }
+            } else {
+                let unique_refs: std::collections::HashSet<&String> =
+                    alias_to_ref.values().collect();
+                if unique_refs.len() == 1 {
+                    let ref_name = alias_to_ref
+                        .values()
+                        .next()
+                        .expect("unique_refs.len() == 1 guarantees at least one value");
+                    let final_type =
+                        inferred_type.or_else(|| ctx.lookup_column(None, col_name).cloned());
+                    record_constraint(ref_name, col_name, final_type, range);
+                }
+            }
+        };
+
+        type_inference::walk_select_columns_with_visitor(&select_stmt, &ctx, None, &mut visitor);
+    }
+
+    let constraints: Vec<InputConstraint> = constraints_map
+        .into_iter()
+        .map(|(ref_name, required_columns)| InputConstraint {
+            ref_name,
+            required_columns,
+        })
+        .collect();
+
+    Arc::new(constraints)
+}
+
+#[salsa::tracked]
+pub fn model_function_type(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<schema::ModelFunctionType> {
+    use schema::{FunctionInput, FunctionOutput, TypedField};
+
+    let path = file.path(db);
+    let model_name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let input_constraints = model_input_constraints(db, workspace, file);
+
+    let mut inputs: Vec<FunctionInput> = input_constraints
+        .iter()
+        .map(|ic| {
+            let mut columns: Vec<TypedField> = ic
+                .required_columns
+                .iter()
+                .map(|(col_name, constraint)| TypedField {
+                    name: col_name.clone(),
+                    constraint: constraint.expected_type.clone(),
+                })
+                .collect();
+            columns.sort_by(|a, b| a.name.cmp(&b.name));
+            FunctionInput {
+                ref_name: ic.ref_name.clone(),
+                columns,
+            }
+        })
+        .collect();
+
+    inputs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+
+    let typed_schema = typed_model_schema(db, workspace, file);
+
+    let outputs: Vec<FunctionOutput> = typed_schema
+        .columns
+        .iter()
+        .filter(|col| col.name != "*")
+        .map(|col| FunctionOutput {
+            name: col.name.clone(),
+            data_type: col.data_type.clone(),
+        })
+        .collect();
+
+    let has_wildcard_output = !typed_schema.row_extensions.is_empty();
+
+    Arc::new(schema::ModelFunctionType {
+        model_name,
+        inputs,
+        outputs,
+        has_wildcard_output,
+    })
+}
+
