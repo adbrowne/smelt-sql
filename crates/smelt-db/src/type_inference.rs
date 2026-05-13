@@ -8,15 +8,15 @@ use smelt_parser::ast::{
     SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
-    kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, SmeltType,
-    TypeConstraint,
+    kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
+    SmeltType, TypeConstraint,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Context for type inference - provides source and upstream model schemas
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TypeContext {
     // NOTE: PartialEq, Eq, Clone are implemented manually below to handle missed_lookups
     /// Source columns: source_name.table_name.column_name -> type
@@ -106,6 +106,16 @@ pub struct TypeContext {
     /// Consulted in the non-literal first-argument path of
     /// [`infer_hof_call_from_function_call_with_expected`].
     function_param_smelt_types: HashMap<String, SmeltType>,
+    /// Workspace record declaration registry (Phase E1, Phase 3).
+    ///
+    /// Carries the set of `smelt.record` declarations visible to type inference.
+    /// Empty by default — pre-Phase-5 callers do not populate it. Phase 5 will
+    /// wire the Salsa side; Phase 3 establishes the shape and inference paths.
+    ///
+    /// `Arc` so that cloning `TypeContext` (e.g. for nested lambda scopes) does
+    /// not copy the full registry. The registry is built once per workspace
+    /// compilation pass and is immutable thereafter.
+    record_registry: Arc<RecordRegistry>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -126,11 +136,35 @@ impl PartialEq for TypeContext {
             && self.fragment_param_kinds == other.fragment_param_kinds
             && self.expected_return == other.expected_return
             && self.function_param_smelt_types == other.function_param_smelt_types
-        // missed_lookups is intentionally excluded — it's transient tracking state
+        // record_registry and missed_lookups are intentionally excluded —
+        // the registry is shared state and missed_lookups is transient tracking state.
     }
 }
 
 impl Eq for TypeContext {}
+
+impl Default for TypeContext {
+    fn default() -> Self {
+        Self {
+            source_columns: HashMap::new(),
+            model_columns: HashMap::new(),
+            cte_columns: HashMap::new(),
+            cte_names: std::collections::HashSet::new(),
+            aliases: HashMap::new(),
+            function_params: HashMap::new(),
+            lambda_params: HashMap::new(),
+            function_signatures: HashMap::new(),
+            tableexpr_param_schemas: HashMap::new(),
+            row_var_env: HashMap::new(),
+            opaque_ctes: std::collections::HashSet::new(),
+            fragment_param_kinds: HashMap::new(),
+            expected_return: None,
+            function_param_smelt_types: HashMap::new(),
+            record_registry: Arc::new(RecordRegistry::default()),
+            missed_lookups: Mutex::new(Vec::new()),
+        }
+    }
+}
 
 impl Clone for TypeContext {
     fn clone(&self) -> Self {
@@ -149,6 +183,7 @@ impl Clone for TypeContext {
             fragment_param_kinds: self.fragment_param_kinds.clone(),
             expected_return: self.expected_return.clone(),
             function_param_smelt_types: self.function_param_smelt_types.clone(),
+            record_registry: Arc::clone(&self.record_registry),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -559,6 +594,30 @@ impl TypeContext {
         self.function_signatures
             .iter()
             .map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Seed the workspace `RecordRegistry` (Phase E1, Phase 3).
+    ///
+    /// Called by Phase 5 when wiring the Salsa-backed query. Phase 3 callers
+    /// (pure tests) call this directly with a registry built by
+    /// `build_record_registry`. Pre-Phase-5 callers that do not call this
+    /// method see an empty registry (no `smelt.record` declarations in scope).
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn set_record_registry(&mut self, registry: Arc<RecordRegistry>) {
+        self.record_registry = registry;
+    }
+
+    /// Look up a named record declaration from the workspace registry.
+    ///
+    /// Returns `None` when the name is not a declared `smelt.record` type.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn lookup_record_decl(
+        &self,
+        name: &str,
+    ) -> Option<&smelt_types::signatures::SmeltRecordDeclaration> {
+        self.record_registry.lookup(name)
     }
 
     /// Seed a lambda parameter binding into the context (Phase B meta-language).
@@ -6332,6 +6391,524 @@ pub fn check_meta_text_lift_diagnostics(
     Vec::new()
 }
 
+// ─── Phase E1 Record inference (Phase 3) ──────────────────────────────────────
+
+/// Diagnostic emitted by the record literal checker (Phase E1 Phase 3).
+///
+/// Each sentinel carries the [`crate::DiagnosticCode`] variant, an anchoring
+/// [`TextRange`], and a pre-rendered message. The orchestrating layer in
+/// `smelt-db::lib.rs` converts these into [`crate::Diagnostic`] values.
+#[derive(Debug, Clone)]
+pub struct RecordLiteralSentinel {
+    /// The diagnostic code identifying which rule fired.
+    pub code: crate::DiagnosticCode,
+    /// Source span of the offending token or position.
+    pub span: TextRange,
+    /// Human-readable message per the spec's message format.
+    pub message: String,
+}
+
+/// Result of type-checking a record literal (Phase E1 Phase 3).
+#[derive(Debug)]
+pub struct RecordLiteralResult {
+    /// The synthesised type. On success, `Record{name: Some("TypeName"), fields: ...}`.
+    /// On `RecordLiteralUnknownTarget`, `Record<Unknown>` (i.e. `Record { name: None,
+    /// fields: BTreeMap::new() }`). On partial error, the declared type with `Unknown`
+    /// for failed fields (drop-on-error).
+    pub inferred: SmeltType,
+    /// All diagnostics emitted during checking (0 on happy path).
+    pub sentinels: Vec<RecordLiteralSentinel>,
+}
+
+/// Check a `RecordLiteral` node against a named target type from the workspace
+/// registry (Phase E1 Phase 3).
+///
+/// Implements the bidirectional checking algorithm from spec §Semantics rules 5–6:
+/// - Required field check: each field declared in the target must appear in the
+///   literal exactly once (`RecordFieldMissing` at closing brace).
+/// - Unknown field check: each field in the literal not declared in the target
+///   emits `RecordFieldUnknown` at the field-name token; the field is dropped.
+/// - Duplicate field check: a field name appearing twice emits `RecordFieldDuplicate`
+///   at the second occurrence; the duplicate is dropped.
+/// - Type mismatch check: a field value whose inferred type is not assignable to
+///   the declared field type emits `RecordFieldTypeMismatch` at the value expression;
+///   the field carries `Unknown` (drop-on-error).
+/// - No target: emits `RecordLiteralUnknownTarget` at the opening brace.
+///
+/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
+/// span positions are not under test.
+pub fn check_record_literal(
+    lit: &smelt_parser::ast::RecordLiteral,
+    ctx: &TypeContext,
+    target_type: Option<&SmeltType>,
+    _text: &str,
+) -> RecordLiteralResult {
+    use smelt_parser::SyntaxKind::RBRACE;
+    use std::collections::BTreeMap;
+
+    let mut sentinels: Vec<RecordLiteralSentinel> = Vec::new();
+
+    // Resolve target to a Record declaration (named or inline fields).
+    let target_record = match target_type {
+        None => {
+            // No inferable target — emit RecordLiteralUnknownTarget at the opening brace.
+            // The opening brace is the first token of the node.
+            let open_brace_range = lit
+                .syntax()
+                .children_with_tokens()
+                .find_map(|e| {
+                    let tok = e.into_token()?;
+                    if tok.kind() == smelt_parser::SyntaxKind::LBRACE {
+                        Some(tok.text_range())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(lit.syntax().text_range());
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::RecordLiteralUnknownTarget,
+                span: open_brace_range,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordLiteralUnknownTarget,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+            return RecordLiteralResult {
+                inferred: SmeltType::Record {
+                    fields: BTreeMap::new(),
+                    name: None,
+                },
+                sentinels,
+            };
+        }
+        Some(SmeltType::Record { fields, name }) => {
+            // Use these fields and name directly.
+            (fields.clone(), name.clone())
+        }
+        Some(other) => {
+            // Target is not a record type — treat as unknown target.
+            let open_brace_range = lit
+                .syntax()
+                .children_with_tokens()
+                .find_map(|e| {
+                    let tok = e.into_token()?;
+                    if tok.kind() == smelt_parser::SyntaxKind::LBRACE {
+                        Some(tok.text_range())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(lit.syntax().text_range());
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::RecordLiteralUnknownTarget,
+                span: open_brace_range,
+                message: format!(
+                    "cannot infer record type from context (target is {}); annotate the target type",
+                    other
+                ),
+            });
+            return RecordLiteralResult {
+                inferred: SmeltType::Record {
+                    fields: BTreeMap::new(),
+                    name: None,
+                },
+                sentinels,
+            };
+        }
+    };
+
+    let (declared_fields, record_name) = target_record;
+    let type_display = record_name.as_deref().unwrap_or("record").to_string();
+
+    // Build a sorted display of declared field names for diagnostic messages.
+    let declared_fields_list: Vec<String> = declared_fields.keys().cloned().collect();
+    let declared_fields_str = declared_fields_list.join(", ");
+
+    // Walk literal fields left-to-right, collecting results.
+    let mut seen_names: HashMap<String, ()> = HashMap::new();
+    let mut provided: HashMap<String, SmeltType> = HashMap::new();
+
+    for field in lit.fields() {
+        let Some(field_name) = field.name() else {
+            continue;
+        };
+
+        // Find the name token span (for unknown/duplicate anchoring).
+        let name_span = field
+            .syntax()
+            .children_with_tokens()
+            .find_map(|e| {
+                let tok = e.into_token()?;
+                if tok.kind() == smelt_parser::SyntaxKind::IDENT {
+                    Some(tok.text_range())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(field.syntax().text_range());
+
+        // Duplicate check.
+        if seen_names.contains_key(&field_name) {
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::RecordFieldDuplicate,
+                span: name_span,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordFieldDuplicate,
+                    None,
+                    Some(&field_name),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+            continue; // drop duplicate
+        }
+        seen_names.insert(field_name.clone(), ());
+
+        // Unknown field check.
+        if !declared_fields.contains_key(&field_name) {
+            // Find the closest valid field names for the message.
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::RecordFieldUnknown,
+                span: name_span,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordFieldUnknown,
+                    Some(&type_display),
+                    Some(&field_name),
+                    None,
+                    None,
+                    None,
+                    Some(&declared_fields_str),
+                ),
+            });
+            continue; // drop unknown field
+        }
+
+        let declared_ty = &declared_fields[&field_name];
+
+        // Type-check the value expression.
+        let field_ty = if let Some(value_expr) = field.value_expr() {
+            let inferred = infer_expression_type(&value_expr, ctx);
+            let inferred_ty = match &inferred {
+                Some(tc) => SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                    tc.data_type.clone(),
+                )),
+                None => SmeltType::Unknown,
+            };
+
+            // Check assignability: inferred_ty <: declared_ty.
+            if !smelt_types::signatures::is_subtype_of(&inferred_ty, declared_ty) {
+                // For concrete Expr types, also check DataType compatibility.
+                let compatible = match (&inferred_ty, declared_ty) {
+                    (
+                        SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                            found_dt,
+                        )),
+                        SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(exp_dt)),
+                    ) => types_assignable(found_dt, exp_dt),
+                    _ => false,
+                };
+
+                if !compatible {
+                    let found_str = format!("{}", inferred_ty);
+                    let exp_str = format!("{}", declared_ty);
+                    let value_span = value_expr.syntax().text_range();
+                    sentinels.push(RecordLiteralSentinel {
+                        code: crate::DiagnosticCode::RecordFieldTypeMismatch,
+                        span: value_span,
+                        message: crate::meta_record_diagnostic_message(
+                            crate::DiagnosticCode::RecordFieldTypeMismatch,
+                            Some(&type_display),
+                            Some(&field_name),
+                            None,
+                            Some(&exp_str),
+                            Some(&found_str),
+                            None,
+                        ),
+                    });
+                    provided.insert(field_name, SmeltType::Unknown); // drop-on-error
+                    continue;
+                }
+            }
+            declared_ty.clone()
+        } else {
+            SmeltType::Unknown
+        };
+
+        provided.insert(field_name, field_ty);
+    }
+
+    // Missing field check: every declared field must appear in `provided`.
+    // Anchor at the closing brace.
+    let close_brace_range = lit
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| {
+            let tok = e.into_token()?;
+            if tok.kind() == RBRACE {
+                Some(tok.text_range())
+            } else {
+                None
+            }
+        })
+        .last()
+        .unwrap_or(lit.syntax().text_range());
+
+    let mut missing_fields: Vec<String> = declared_fields
+        .keys()
+        .filter(|k| !provided.contains_key(*k) && !seen_names.contains_key(*k))
+        .cloned()
+        .collect();
+    missing_fields.sort();
+
+    for missing in &missing_fields {
+        sentinels.push(RecordLiteralSentinel {
+            code: crate::DiagnosticCode::RecordFieldMissing,
+            span: close_brace_range,
+            message: crate::meta_record_diagnostic_message(
+                crate::DiagnosticCode::RecordFieldMissing,
+                Some(&type_display),
+                Some(missing),
+                None,
+                None,
+                None,
+                None,
+            ),
+        });
+    }
+
+    // Build the synthesised type: use declared fields, substituting Unknown for errors.
+    let mut result_fields: BTreeMap<String, SmeltType> = BTreeMap::new();
+    for k in declared_fields.keys() {
+        let field_ty = provided.get(k).cloned().unwrap_or(SmeltType::Unknown);
+        result_fields.insert(k.clone(), field_ty);
+    }
+
+    RecordLiteralResult {
+        inferred: SmeltType::Record {
+            fields: result_fields,
+            name: record_name,
+        },
+        sentinels,
+    }
+}
+
+/// Check whether `found` is assignable to `expected` for record field
+/// type-checking. Equality, Text/Varchar interop, and widening-only numeric
+/// promotion per `docs/specs/types.md §"Numeric promotion chain"`.
+fn types_assignable(found: &DataType, expected: &DataType) -> bool {
+    if found == expected {
+        return true;
+    }
+    let found_is_text = matches!(found, DataType::Text | DataType::Varchar { .. });
+    let expected_is_text = matches!(expected, DataType::Text | DataType::Varchar { .. });
+    if found_is_text && expected_is_text {
+        return true;
+    }
+    if found.is_numeric() && expected.is_numeric() {
+        // Widening-only: found must fit inside expected per the promotion chain.
+        return numeric_rank(found).is_some_and(|f| numeric_rank(expected).is_some_and(|e| f <= e));
+    }
+    false
+}
+
+/// Position in the numeric promotion chain. Lower rank fits inside higher rank.
+/// SmallInt < Integer < BigInt < Float < Double < Decimal. Decimal precision
+/// widening is deferred (see `types.md §Known Divergences`).
+fn numeric_rank(t: &DataType) -> Option<u8> {
+    match t {
+        DataType::SmallInt => Some(0),
+        DataType::Integer => Some(1),
+        DataType::BigInt => Some(2),
+        DataType::Float => Some(3),
+        DataType::Double => Some(4),
+        DataType::Decimal { .. } => Some(5),
+        _ => None,
+    }
+}
+
+/// Result of field-projection inference on a record-typed value (Phase E1 Phase 3).
+#[derive(Debug)]
+pub struct RecordFieldProjectionResult {
+    /// The synthesised field type, or `Unknown` if the field was not found or
+    /// the receiver was not projectable.
+    pub inferred: SmeltType,
+    /// Diagnostics emitted (0 on happy path).
+    pub sentinels: Vec<RecordLiteralSentinel>,
+}
+
+/// Infer the type of `<binding_name>.<field_name>` where `binding_name` is
+/// registered in `ctx` as a `Record<…>` type (Phase E1 Phase 3).
+///
+/// Rules per spec §Semantics rule 7:
+/// - If the receiver is `Record{...}`, look up `field_name` in the declared
+///   field set. If found, return the field type. If not found, emit
+///   `RecordFieldUnknown` at `field_span` and return `Unknown`.
+/// - If the receiver is NOT a record type, emit `RecordFieldNotProjectable` at
+///   `field_span` and return `Unknown`.
+/// - If `binding_name` resolves to a named record (via the registry), the field
+///   set is the declaration's closed set. For width-subtyping rule 11: the
+///   declared static type governs projections — a wider runtime type doesn't
+///   expand the closed set.
+///
+/// Pure — no Salsa dependency.
+pub fn infer_record_field_projection(
+    receiver_type: &SmeltType,
+    field_name: &str,
+    field_span: TextRange,
+    _text: &str,
+) -> RecordFieldProjectionResult {
+    let mut sentinels = Vec::new();
+
+    match receiver_type {
+        SmeltType::Record { fields, name } => {
+            if let Some(field_ty) = fields.get(field_name) {
+                RecordFieldProjectionResult {
+                    inferred: field_ty.clone(),
+                    sentinels,
+                }
+            } else {
+                // RecordFieldUnknown at the field token.
+                let type_display = name.as_deref().unwrap_or("record");
+                let mut field_list: Vec<String> = fields.keys().cloned().collect();
+                field_list.sort();
+                let fields_str = field_list.join(", ");
+                sentinels.push(RecordLiteralSentinel {
+                    code: crate::DiagnosticCode::RecordFieldUnknown,
+                    span: field_span,
+                    message: crate::meta_record_diagnostic_message(
+                        crate::DiagnosticCode::RecordFieldUnknown,
+                        Some(type_display),
+                        Some(field_name),
+                        None,
+                        None,
+                        None,
+                        Some(&fields_str),
+                    ),
+                });
+                RecordFieldProjectionResult {
+                    inferred: SmeltType::Unknown,
+                    sentinels,
+                }
+            }
+        }
+        other => {
+            // RecordFieldNotProjectable at the field token.
+            let type_display = format!("{}", other);
+            sentinels.push(RecordLiteralSentinel {
+                code: crate::DiagnosticCode::RecordFieldNotProjectable,
+                span: field_span,
+                message: crate::meta_record_diagnostic_message(
+                    crate::DiagnosticCode::RecordFieldNotProjectable,
+                    Some(&type_display),
+                    Some(field_name),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            });
+            RecordFieldProjectionResult {
+                inferred: SmeltType::Unknown,
+                sentinels,
+            }
+        }
+    }
+}
+
+/// Check whether a record-typed value is being referenced in a Data-World
+/// (SQL) position (non-splice) — emits `RecordInDataWorld` (Phase E1 Phase 3).
+///
+/// Per spec §Semantics rule 10: a record value never reaches the database
+/// engine. A bare record-typed binding reference at a non-splice SQL position
+/// emits this diagnostic. Field projections that produce a non-record type
+/// (e.g. `c.name` → `Text`) do NOT emit this diagnostic — the projection
+/// exits into Data-World via the field's type.
+///
+/// `is_splice_context` should be `true` when the caller is inside a
+/// meta-language splice point (e.g. a HOF argument, a `smelt.fn` argument).
+/// When `false`, and `receiver_type` is `Record{…}`, the diagnostic fires.
+///
+/// Pure — no Salsa dependency.
+pub fn check_record_in_data_world(
+    receiver_type: &SmeltType,
+    reference_span: TextRange,
+    is_splice_context: bool,
+    _text: &str,
+) -> Option<RecordLiteralSentinel> {
+    if is_splice_context {
+        return None;
+    }
+    if matches!(receiver_type, SmeltType::Record { .. }) {
+        let message = crate::meta_record_diagnostic_message(
+            crate::DiagnosticCode::RecordInDataWorld,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        Some(RecordLiteralSentinel {
+            code: crate::DiagnosticCode::RecordInDataWorld,
+            span: reference_span,
+            message,
+        })
+    } else {
+        None
+    }
+}
+
+/// Build the workspace `RecordRegistry` from a list of `SmeltRecordDeclaration`s.
+///
+/// This is the pure builder function used in Phase 3 tests and the Phase 5
+/// Salsa wrapper. It delegates directly to
+/// [`smelt_types::signatures::build_record_registry`] and returns both the
+/// registry and diagnostic sentinels.
+///
+/// **Note:** Phase 5 will call this from a Salsa tracked function. Phase 3
+/// callers (pure tests) call it directly with a hand-built declaration list.
+///
+/// Pure — no Salsa dependency, no I/O.
+pub fn record_registry_for_workspace(
+    decls: &[smelt_types::signatures::SmeltRecordDeclaration],
+) -> (
+    smelt_types::signatures::RecordRegistry,
+    Vec<smelt_types::signatures::DiagnosticSentinel>,
+) {
+    smelt_types::signatures::build_record_registry(decls)
+}
+
+/// Convert a `RecordRegistryCode` sentinel from `build_record_registry` into a
+/// `crate::DiagnosticCode` for the LSP accumulator.
+///
+/// Called by the Phase 5 Salsa orchestration layer when wiring registry
+/// sentinels into `file_diagnostics`.
+///
+/// Pure — no Salsa dependency.
+pub fn registry_code_to_diagnostic_code(
+    code: smelt_types::signatures::RecordRegistryCode,
+) -> crate::DiagnosticCode {
+    use smelt_types::signatures::RecordRegistryCode;
+    match code {
+        RecordRegistryCode::SmeltRecordRedefinition => {
+            crate::DiagnosticCode::SmeltRecordRedefinition
+        }
+        RecordRegistryCode::RecordFieldTypeForbidden => {
+            crate::DiagnosticCode::RecordFieldTypeForbidden
+        }
+        RecordRegistryCode::RecordCyclicDeclaration => {
+            crate::DiagnosticCode::RecordCyclicDeclaration
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9895,5 +10472,698 @@ mod tests {
         // (verified by the columns_of_signature_returns_list_of_column_ref test in signatures.rs).
         // At this level we just confirm no diagnostic fires — the full semantic equivalence
         // is enforced at expansion time (Phase 3).
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase E1 Phase 3 TDD tests — record type inference
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Build a `Cohort` record declaration: `{ name: Text, threshold: Integer }`.
+    fn make_cohort_decl() -> smelt_types::signatures::SmeltRecordDeclaration {
+        use smelt_types::signatures::{SmeltRecordDeclaration, TypeConstraint};
+        let zero_range = rowan::TextRange::new(0.into(), 0.into());
+        SmeltRecordDeclaration {
+            name: "Cohort".to_string(),
+            fields: vec![
+                (
+                    "name".to_string(),
+                    SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+                    zero_range,
+                ),
+                (
+                    "threshold".to_string(),
+                    SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+                    zero_range,
+                ),
+            ],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/cohort.sql"),
+        }
+    }
+
+    /// Build a `TypeContext` with the `Cohort` record registered.
+    fn make_cohort_ctx() -> TypeContext {
+        let decl = make_cohort_decl();
+        let (registry, _sentinels) = record_registry_for_workspace(&[decl]);
+        let mut ctx = TypeContext::new();
+        ctx.set_record_registry(std::sync::Arc::new(registry));
+        ctx
+    }
+
+    /// Parse a `RecordLiteral` node from `SELECT smelt.foo({...}) FROM t`.
+    fn parse_record_literal(sql: &str) -> smelt_parser::ast::RecordLiteral {
+        let parse = smelt_parser::parse(sql);
+        parse
+            .syntax()
+            .descendants()
+            .find_map(smelt_parser::ast::RecordLiteral::cast)
+            .expect("must find RecordLiteral node in SQL")
+    }
+
+    /// Resolve the `Cohort` target type from the registry in `ctx`.
+    fn cohort_target_type(ctx: &TypeContext) -> SmeltType {
+        let decl = ctx
+            .lookup_record_decl("Cohort")
+            .expect("Cohort must be registered");
+        let mut fields = std::collections::BTreeMap::new();
+        for (name, ty, _span) in &decl.fields {
+            fields.insert(name.clone(), ty.clone());
+        }
+        SmeltType::Record {
+            fields,
+            name: Some("Cohort".to_string()),
+        }
+    }
+
+    // ─── Test 1: happy path ───────────────────────────────────────────────
+    #[test]
+    fn infer_record_literal_against_named_target_emits_no_diagnostic_on_happy_path() {
+        let ctx = make_cohort_ctx();
+        let target = cohort_target_type(&ctx);
+        // {name: 'us_west', threshold: 100} — threshold=100 is SmallInt from literal
+        // but we accept it as Integer via DataType compatibility (same family).
+        // Actually 100 is SmallInt. Use 100000 which is Integer.
+        let lit =
+            parse_record_literal("SELECT smelt.foo({name: 'us_west', threshold: 100000}) FROM t");
+        let result = check_record_literal(&lit, &ctx, Some(&target), "");
+        assert!(
+            result.sentinels.is_empty(),
+            "happy path must emit no diagnostics, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(&result.inferred, SmeltType::Record { name: Some(n), .. } if n == "Cohort"),
+            "must synthesise Record{{Cohort}}, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // ─── Test 2: RecordFieldMissing ───────────────────────────────────────
+    #[test]
+    fn infer_record_literal_emits_record_field_missing() {
+        let ctx = make_cohort_ctx();
+        let target = cohort_target_type(&ctx);
+        // Missing `threshold`
+        let lit = parse_record_literal("SELECT smelt.foo({name: 'us_west'}) FROM t");
+        let result = check_record_literal(&lit, &ctx, Some(&target), "");
+
+        let missing: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldMissing)
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "must emit exactly 1 RecordFieldMissing, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            missing[0].message.contains("threshold"),
+            "RecordFieldMissing must name `threshold`, got: {}",
+            missing[0].message
+        );
+        // Synthesised type is still Record{Cohort} (recoverable).
+        assert!(
+            matches!(&result.inferred, SmeltType::Record { name: Some(n), .. } if n == "Cohort"),
+            "must synthesise Record{{Cohort}} on missing field, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // ─── Test 3: RecordFieldUnknown (literal unknown field) ───────────────
+    #[test]
+    fn infer_record_literal_emits_record_field_unknown() {
+        let ctx = make_cohort_ctx();
+        let target = cohort_target_type(&ctx);
+        // Extra `bogus` field
+        let lit = parse_record_literal(
+            "SELECT smelt.foo({name: 'us_west', threshold: 100000, bogus: true}) FROM t",
+        );
+        let result = check_record_literal(&lit, &ctx, Some(&target), "");
+
+        let unknown: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldUnknown)
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "must emit exactly 1 RecordFieldUnknown for bogus field, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            unknown[0].message.contains("bogus"),
+            "RecordFieldUnknown must name `bogus`, got: {}",
+            unknown[0].message
+        );
+        // No follow-on diagnostics: only RecordFieldUnknown (no RecordFieldMissing).
+        let non_unknown: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code != crate::DiagnosticCode::RecordFieldUnknown)
+            .collect();
+        assert!(
+            non_unknown.is_empty(),
+            "must have no follow-on diagnostics after RecordFieldUnknown, got: {:?}",
+            non_unknown
+        );
+    }
+
+    // ─── Test 4: RecordFieldDuplicate ─────────────────────────────────────
+    #[test]
+    fn infer_record_literal_emits_record_field_duplicate() {
+        let ctx = make_cohort_ctx();
+        let target = cohort_target_type(&ctx);
+        // Second `name` occurrence
+        let lit = parse_record_literal(
+            "SELECT smelt.foo({name: 'us_west', name: 'eu', threshold: 100000}) FROM t",
+        );
+        let result = check_record_literal(&lit, &ctx, Some(&target), "");
+
+        let dupes: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldDuplicate)
+            .collect();
+        assert_eq!(
+            dupes.len(),
+            1,
+            "must emit exactly 1 RecordFieldDuplicate, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            dupes[0].message.contains("name"),
+            "RecordFieldDuplicate must mention field `name`, got: {}",
+            dupes[0].message
+        );
+    }
+
+    // ─── Test 5: RecordFieldTypeMismatch ──────────────────────────────────
+    #[test]
+    fn infer_record_literal_emits_record_field_type_mismatch() {
+        let ctx = make_cohort_ctx();
+        let target = cohort_target_type(&ctx);
+        // `threshold: 'lots'` — string literal for an Integer field.
+        let lit =
+            parse_record_literal("SELECT smelt.foo({name: 'us_west', threshold: 'lots'}) FROM t");
+        let result = check_record_literal(&lit, &ctx, Some(&target), "");
+
+        let mismatches: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldTypeMismatch)
+            .collect();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "must emit exactly 1 RecordFieldTypeMismatch, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            mismatches[0].message.contains("threshold"),
+            "RecordFieldTypeMismatch must name `threshold`, got: {}",
+            mismatches[0].message
+        );
+        // The synthesised record carries `Unknown` at `threshold`.
+        if let SmeltType::Record { fields, .. } = &result.inferred {
+            let threshold_ty = fields
+                .get("threshold")
+                .expect("threshold must be in result");
+            assert!(
+                matches!(threshold_ty, SmeltType::Unknown),
+                "threshold must be Unknown after type mismatch, got: {:?}",
+                threshold_ty
+            );
+        } else {
+            panic!("result must be Record, got: {:?}", result.inferred);
+        }
+    }
+
+    // ─── Test 6: RecordLiteralUnknownTarget ───────────────────────────────
+    #[test]
+    fn infer_record_literal_emits_record_literal_unknown_target_when_unanchored() {
+        let ctx = TypeContext::new(); // no registry
+        let lit =
+            parse_record_literal("SELECT smelt.foo({name: 'us_west', threshold: 100000}) FROM t");
+        let result = check_record_literal(&lit, &ctx, None, "");
+
+        let unknown_target: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordLiteralUnknownTarget)
+            .collect();
+        assert_eq!(
+            unknown_target.len(),
+            1,
+            "must emit exactly 1 RecordLiteralUnknownTarget, got: {:?}",
+            result.sentinels
+        );
+        // Type is Record<Unknown> (name: None, empty fields).
+        assert!(
+            matches!(&result.inferred, SmeltType::Record { name: None, fields } if fields.is_empty()),
+            "unanchored literal must have type Record<Unknown>, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // ─── Test 7: field projection synthesises field type ──────────────────
+    #[test]
+    fn infer_record_field_projection_synthesises_field_type() {
+        use smelt_types::signatures::TypeConstraint;
+        // Build a Cohort record type directly.
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let cohort_ty = SmeltType::Record {
+            fields,
+            name: Some("Cohort".to_string()),
+        };
+
+        let zero = rowan::TextRange::new(0.into(), 0.into());
+
+        // c.name → Text
+        let result_name = infer_record_field_projection(&cohort_ty, "name", zero, "");
+        assert!(
+            result_name.sentinels.is_empty(),
+            "c.name must emit no diagnostics, got: {:?}",
+            result_name.sentinels
+        );
+        assert!(
+            matches!(
+                &result_name.inferred,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "c.name must synthesise Expr<Text>, got: {:?}",
+            result_name.inferred
+        );
+
+        // c.threshold → Integer
+        let result_threshold = infer_record_field_projection(&cohort_ty, "threshold", zero, "");
+        assert!(
+            result_threshold.sentinels.is_empty(),
+            "c.threshold must emit no diagnostics, got: {:?}",
+            result_threshold.sentinels
+        );
+        assert!(
+            matches!(
+                &result_threshold.inferred,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))
+            ),
+            "c.threshold must synthesise Expr<Integer>, got: {:?}",
+            result_threshold.inferred
+        );
+    }
+
+    // ─── Test 8: field projection on unknown field emits RecordFieldUnknown ─
+    #[test]
+    fn infer_record_field_projection_emits_record_field_unknown_on_miss() {
+        use smelt_types::signatures::TypeConstraint;
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let cohort_ty = SmeltType::Record {
+            fields,
+            name: Some("Cohort".to_string()),
+        };
+
+        let zero = rowan::TextRange::new(0.into(), 0.into());
+        let result = infer_record_field_projection(&cohort_ty, "bogus", zero, "");
+
+        let unknown: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldUnknown)
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "c.bogus must emit exactly 1 RecordFieldUnknown, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(&result.inferred, SmeltType::Unknown),
+            "c.bogus projection must synthesise Unknown, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // ─── Test 9: RecordFieldNotProjectable mid-chain ──────────────────────
+    #[test]
+    fn infer_record_field_projection_emits_record_field_not_projectable_mid_chain() {
+        use smelt_types::signatures::TypeConstraint;
+
+        // c.name is Expr<Text>; then .foo is projection on Text (not a Record).
+        let text_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Text));
+        let zero = rowan::TextRange::new(0.into(), 0.into());
+
+        let result = infer_record_field_projection(&text_ty, "foo", zero, "");
+        let not_projectable: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldNotProjectable)
+            .collect();
+        assert_eq!(
+            not_projectable.len(),
+            1,
+            "projection on Text must emit exactly 1 RecordFieldNotProjectable, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(&result.inferred, SmeltType::Unknown),
+            "projection on non-record must synthesise Unknown, got: {:?}",
+            result.inferred
+        );
+    }
+
+    // ─── Test 10: width subtyping admits wider to narrower ───────────────
+    #[test]
+    fn record_width_subtyping_assigns_wider_to_narrower() {
+        use smelt_types::signatures::{is_subtype_of, TypeConstraint};
+
+        // Cohort = { name: Text, threshold: Integer }  (wider)
+        let mut cohort_fields = std::collections::BTreeMap::new();
+        cohort_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        cohort_fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let cohort_ty = SmeltType::Record {
+            fields: cohort_fields,
+            name: Some("Cohort".to_string()),
+        };
+
+        // Narrow target: { name: Text }
+        let mut narrow_fields = std::collections::BTreeMap::new();
+        narrow_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        let narrow_ty = SmeltType::Record {
+            fields: narrow_fields.clone(),
+            name: None,
+        };
+
+        // Cohort (wider) <: {name: Text} (narrower) — admitted with no diagnostic.
+        assert!(
+            is_subtype_of(&cohort_ty, &narrow_ty),
+            "Cohort must be assignable to {{name: Text}} (width subtyping)"
+        );
+
+        // Reverse: {name: Text} is NOT a subtype of Cohort (missing `threshold`).
+        assert!(
+            !is_subtype_of(&narrow_ty, &cohort_ty),
+            "{{name: Text}} must NOT be assignable to Cohort (missing threshold)"
+        );
+    }
+
+    // ─── Test 11: width subtyping — projection diagnostics use declared (narrower) type ─
+    #[test]
+    fn record_width_subtyping_projection_diagnostic_unchanged_under_widening() {
+        use smelt_types::signatures::TypeConstraint;
+
+        // When checking against the narrower type {name: Text}, projecting
+        // .threshold must emit RecordFieldUnknown (the closed declared set of
+        // the narrower type doesn't include `threshold`).
+        let mut narrow_fields = std::collections::BTreeMap::new();
+        narrow_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        let narrow_ty = SmeltType::Record {
+            fields: narrow_fields,
+            name: None,
+        };
+
+        let zero = rowan::TextRange::new(0.into(), 0.into());
+        let result = infer_record_field_projection(&narrow_ty, "threshold", zero, "");
+
+        let unknown: Vec<_> = result
+            .sentinels
+            .iter()
+            .filter(|s| s.code == crate::DiagnosticCode::RecordFieldUnknown)
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "projecting .threshold on {{name: Text}} must emit RecordFieldUnknown; got: {:?}",
+            result.sentinels
+        );
+    }
+
+    // ─── Test 12: SmeltRecordRedefinition ────────────────────────────────
+    #[test]
+    fn smelt_record_declaration_redefinition_emits_diagnostic() {
+        use smelt_types::signatures::{RecordRegistryCode, SmeltRecordDeclaration, TypeConstraint};
+
+        let zero_range = rowan::TextRange::new(0.into(), 0.into());
+        let second_range = rowan::TextRange::new(10.into(), 16.into());
+
+        let decl1 = SmeltRecordDeclaration {
+            name: "Cohort".to_string(),
+            fields: vec![(
+                "name".to_string(),
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+                zero_range,
+            )],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/a.sql"),
+        };
+        let decl2 = SmeltRecordDeclaration {
+            name: "Cohort".to_string(),
+            fields: vec![(
+                "count".to_string(),
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+                zero_range,
+            )],
+            name_span: second_range,
+            source_path: std::sync::Arc::from("models/b.sql"),
+        };
+
+        let (_registry, sentinels) = record_registry_for_workspace(&[decl1, decl2]);
+        let redef: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::SmeltRecordRedefinition)
+            .collect();
+        assert_eq!(
+            redef.len(),
+            1,
+            "two Cohort declarations must emit exactly 1 SmeltRecordRedefinition, got: {:?}",
+            sentinels
+        );
+        // Anchored at the second declaration's name_span.
+        assert_eq!(
+            redef[0].span, second_range,
+            "SmeltRecordRedefinition must be anchored at the second declaration's name_span"
+        );
+        // First declaration is authoritative.
+        assert!(
+            _registry.lookup("Cohort").is_some(),
+            "Cohort must still be in the registry (first wins)"
+        );
+    }
+
+    // ─── Test 13: RecordCyclicDeclaration ────────────────────────────────
+    #[test]
+    fn smelt_record_cyclic_declaration_emits_diagnostic() {
+        use smelt_types::signatures::{RecordRegistryCode, SmeltRecordDeclaration};
+
+        let zero_range = rowan::TextRange::new(0.into(), 0.into());
+
+        // A = {b: B}, B = {a: A} — mutual cycle.
+        let decl_a = SmeltRecordDeclaration {
+            name: "A".to_string(),
+            fields: vec![(
+                "b".to_string(),
+                SmeltType::Record {
+                    fields: std::collections::BTreeMap::new(),
+                    name: Some("B".to_string()),
+                },
+                zero_range,
+            )],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/a.sql"),
+        };
+        let decl_b = SmeltRecordDeclaration {
+            name: "B".to_string(),
+            fields: vec![(
+                "a".to_string(),
+                SmeltType::Record {
+                    fields: std::collections::BTreeMap::new(),
+                    name: Some("A".to_string()),
+                },
+                zero_range,
+            )],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/b.sql"),
+        };
+
+        let (registry, sentinels) = record_registry_for_workspace(&[decl_a, decl_b]);
+        let cyclic: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::RecordCyclicDeclaration)
+            .collect();
+        assert!(
+            !cyclic.is_empty(),
+            "mutually cyclic declarations must emit at least 1 RecordCyclicDeclaration, got: {:?}",
+            sentinels
+        );
+        // Downstream uses: A and B still in the registry (continue to type-check).
+        assert!(
+            registry.lookup("A").is_some() && registry.lookup("B").is_some(),
+            "A and B must remain in registry after cycle detection"
+        );
+    }
+
+    // ─── Test 14: RecordFieldTypeForbidden ───────────────────────────────
+    #[test]
+    fn record_field_type_forbidden_for_reflection_witnesses() {
+        use smelt_types::signatures::{RecordRegistryCode, SmeltRecordDeclaration};
+
+        let zero_range = rowan::TextRange::new(0.into(), 0.into());
+
+        // Bad = {m: ModelRef}
+        let decl_model_ref = SmeltRecordDeclaration {
+            name: "BadModelRef".to_string(),
+            fields: vec![("m".to_string(), SmeltType::ModelRef, zero_range)],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/bad.sql"),
+        };
+        // Bad2 = {c: ColumnRef}
+        let decl_column_ref = SmeltRecordDeclaration {
+            name: "BadColumnRef".to_string(),
+            fields: vec![("c".to_string(), SmeltType::ColumnRef, zero_range)],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/bad2.sql"),
+        };
+        // Bad3 = {s: SourceRef}
+        let decl_source_ref = SmeltRecordDeclaration {
+            name: "BadSourceRef".to_string(),
+            fields: vec![("s".to_string(), SmeltType::SourceRef, zero_range)],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/bad3.sql"),
+        };
+        // Bad4 = {f: Lambda<Unknown, Unknown>}
+        let decl_lambda = SmeltRecordDeclaration {
+            name: "BadLambda".to_string(),
+            fields: vec![(
+                "f".to_string(),
+                SmeltType::Lambda(Box::new(SmeltType::Unknown), Box::new(SmeltType::Unknown)),
+                zero_range,
+            )],
+            name_span: zero_range,
+            source_path: std::sync::Arc::from("models/bad4.sql"),
+        };
+
+        let (_registry, sentinels) = record_registry_for_workspace(&[
+            decl_model_ref,
+            decl_column_ref,
+            decl_source_ref,
+            decl_lambda,
+        ]);
+        let forbidden: Vec<_> = sentinels
+            .iter()
+            .filter(|s| s.code == RecordRegistryCode::RecordFieldTypeForbidden)
+            .collect();
+        assert_eq!(
+            forbidden.len(),
+            4,
+            "must emit 4 RecordFieldTypeForbidden sentinels (one per bad decl), got: {:?}",
+            sentinels
+        );
+    }
+
+    // ─── Test 15: RecordInDataWorld ───────────────────────────────────────
+    #[test]
+    fn record_in_data_world_emits_diagnostic_when_consumed_at_sql_position() {
+        use smelt_types::signatures::TypeConstraint;
+
+        let zero = rowan::TextRange::new(0.into(), 0.into());
+
+        // A record-typed binding reference in a non-splice SQL position (is_splice_context=false).
+        let mut cohort_fields = std::collections::BTreeMap::new();
+        cohort_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        let cohort_ty = SmeltType::Record {
+            fields: cohort_fields,
+            name: Some("Cohort".to_string()),
+        };
+
+        let sentinel = check_record_in_data_world(&cohort_ty, zero, false, "");
+        assert!(
+            sentinel.is_some(),
+            "Record-typed binding in non-splice SQL position must emit RecordInDataWorld"
+        );
+        assert!(
+            matches!(
+                sentinel.as_ref().unwrap().code,
+                crate::DiagnosticCode::RecordInDataWorld
+            ),
+            "diagnostic code must be RecordInDataWorld, got: {:?}",
+            sentinel.unwrap().code
+        );
+
+        // Projecting `c.name` produces Expr<Text>, which is NOT a Record — no diagnostic.
+        let text_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Text));
+        let no_sentinel = check_record_in_data_world(&text_ty, zero, false, "");
+        assert!(
+            no_sentinel.is_none(),
+            "Expr<Text> in SQL position must NOT emit RecordInDataWorld, got: {:?}",
+            no_sentinel
+        );
+    }
+
+    // ─── Test 16: inline and named records with same fields are assignable ─
+    #[test]
+    fn inline_record_and_named_record_with_same_field_set_are_assignable() {
+        use smelt_types::signatures::{is_subtype_of, TypeConstraint};
+
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+
+        let named = SmeltType::Record {
+            fields: fields.clone(),
+            name: Some("Cohort".to_string()),
+        };
+        let inline = SmeltType::Record {
+            fields: fields.clone(),
+            name: None,
+        };
+
+        // Named <: inline
+        assert!(
+            is_subtype_of(&named, &inline),
+            "Record{{Cohort}} must be assignable to inline {{name: Text, threshold: Integer}}"
+        );
+        // Inline <: named
+        assert!(
+            is_subtype_of(&inline, &named),
+            "inline {{name: Text, threshold: Integer}} must be assignable to Record{{Cohort}}"
+        );
     }
 }

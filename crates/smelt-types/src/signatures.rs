@@ -684,6 +684,7 @@ pub struct SmeltRecordDeclaration {
 ///
 /// Phase E1: built by `build_record_registry` and passed into the inference
 /// layer (`TypeContext`) in Phase 3/5.
+#[derive(Debug)]
 pub struct RecordRegistry {
     inner: HashMap<String, SmeltRecordDeclaration>,
 }
@@ -697,6 +698,20 @@ impl RecordRegistry {
     /// All declared record names (in unspecified order).
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.inner.keys().map(|s| s.as_str())
+    }
+
+    /// Create an empty registry (no declarations). Used as the default for
+    /// pre-Phase-5 callers that have not wired the Salsa side yet.
+    pub fn empty() -> Self {
+        RecordRegistry {
+            inner: HashMap::new(),
+        }
+    }
+}
+
+impl Default for RecordRegistry {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
