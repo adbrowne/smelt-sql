@@ -1633,29 +1633,44 @@ pub fn hover_text_for_record_literal_brace(ty: &smelt_types::signatures::SmeltTy
     format!("`{}`", format_smelt_type_hover(ty))
 }
 
-/// Return the closed set of field names for completion at a record literal field-key
-/// position, excluding fields already filled.
+/// Return the closed set of field names plus their declared type detail for
+/// completion at a record literal field-key position, excluding fields already
+/// filled.
 ///
-/// Pure — callers supply the declared field names and the already-filled names.
+/// Each entry is `(field_name, formatted_type)` so the backend can surface the
+/// declared type as the completion-item detail per spec §"LSP support for
+/// records".
+///
+/// Pure — callers supply the declared `(name, type)` pairs and the
+/// already-filled names.
 pub fn record_literal_field_completions(
-    declared: &[String],
+    declared: &[(String, smelt_types::signatures::SmeltType)],
     already_filled: &[String],
-) -> Vec<String> {
+) -> Vec<(String, String)> {
+    use smelt_types::format_smelt_type_hover;
     declared
         .iter()
-        .filter(|f| !already_filled.contains(f))
-        .cloned()
+        .filter(|(name, _)| !already_filled.contains(name))
+        .map(|(name, ty)| (name.clone(), format_smelt_type_hover(ty)))
         .collect()
 }
 
-/// Return the closed set of field names for completion at a record field-projection
-/// site (`r.<cursor>`).
+/// Return the closed set of field names plus their declared type detail for
+/// completion at a record field-projection site (`r.<cursor>`).
 ///
-/// Pure — callers supply the declared field names.
+/// Each entry is `(field_name, formatted_type)` so the backend can surface the
+/// declared type as the completion-item detail per spec §"LSP support for
+/// records".
+///
+/// Pure — callers supply the declared field map.
 pub fn record_field_projection_completions(
     fields: &std::collections::BTreeMap<String, smelt_types::signatures::SmeltType>,
-) -> Vec<String> {
-    fields.keys().cloned().collect()
+) -> Vec<(String, String)> {
+    use smelt_types::format_smelt_type_hover;
+    fields
+        .iter()
+        .map(|(name, ty)| (name.clone(), format_smelt_type_hover(ty)))
+        .collect()
 }
 
 // ============================================================================
@@ -1704,15 +1719,23 @@ pub fn hover_text_for_map_typed_binding(
 
 /// Render hover text for a Map method call site.
 ///
-/// Shows the method signature and, when the map is statically resolved, the
-/// resolved length of the result (for `entries`/`keys`/`values`).
+/// Shows the method signature and, when statically resolvable, a resolution
+/// hint appropriate to the method:
 ///
-/// Pure — callers supply the method name, key/val types, and optional resolved length.
+/// - `entries`, `keys`, `values` — render the length of the resulting list via
+///   `resolved_len`.
+/// - `get` — render the concrete bound value (when the key is statically known
+///   and present) via `resolved_value`.
+/// - `has` — render the boolean result via `resolved_value`.
+///
+/// Pure — callers supply the method name, key/val types, optional resolved
+/// length, and optional resolved value summary.
 pub fn hover_text_for_map_method_call(
     method: &str,
     key_ty: &smelt_types::signatures::SmeltType,
     val_ty: &smelt_types::signatures::SmeltType,
     resolved_len: Option<usize>,
+    resolved_value: Option<&str>,
 ) -> String {
     use smelt_types::format_smelt_type_hover;
     let signature = MAP_API_METHODS
@@ -1732,8 +1755,17 @@ pub fn hover_text_for_map_method_call(
         .replace(", K)", &format!(", {k})"))
         .replace(", K> ", &format!(", {k}> "));
     let mut text = format!("`m.{method}()`\n\n`{concrete_sig}`");
-    if let Some(len) = resolved_len {
-        text.push_str(&format!("\n\n*Resolved: {len} entries*"));
+    match method {
+        "get" | "has" => {
+            if let Some(value) = resolved_value {
+                text.push_str(&format!("\n\n*Resolved: {value}*"));
+            }
+        }
+        _ => {
+            if let Some(len) = resolved_len {
+                text.push_str(&format!("\n\n*Resolved: {len} entries*"));
+            }
+        }
     }
     text
 }
@@ -1859,12 +1891,14 @@ pub fn goto_def_for_record_literal_field(
 }
 
 /// Goto-definition on a loader's `path` argument — resolves to the loaded file
-/// at row 0, column 0 (the beginning of the file).
+/// at the beginning of the file.
 ///
-/// Returns `Some(Location { uri: file://{ws_root/rel_path}, range: row 0:0 })`.
+/// Returns `Some(Location { uri: file://{ws_root/rel_path}, range: line 0 col 0 })`.
 ///
 /// Per spec §"LSP support (loader subset)": *"Goto-definition on the `path`
-/// argument resolves to the loaded file (cursor on row 1)."*
+/// argument resolves to the loaded file (cursor on row 1)."* The spec speaks
+/// in user-visible 1-indexed rows; the LSP protocol encodes positions
+/// 0-indexed, so user-visible row 1 is `Position { line: 0, character: 0 }`.
 ///
 /// Pure — callers supply the workspace root and the relative path string.
 pub fn goto_def_for_loader_path(

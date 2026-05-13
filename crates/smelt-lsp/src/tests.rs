@@ -1986,31 +1986,54 @@ fn hover_on_record_literal_opening_brace_shows_inferred_target() {
     );
 }
 
-/// Completion at a record literal field-key position offers unfilled fields.
+/// Completion at a record literal field-key position offers unfilled fields,
+/// each carrying the declared type as a detail string.
 #[test]
 fn completion_at_record_literal_field_key_offers_unfilled_fields() {
+    use smelt_types::signatures::SmeltType;
+    use smelt_types::{DataType, TypeConstraint};
     let declared = vec![
-        "name".to_string(),
-        "region".to_string(),
-        "threshold".to_string(),
+        (
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "region".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        ),
     ];
     let already_filled = vec!["name".to_string()];
     let completions = record_literal_field_completions(&declared, &already_filled);
+    let names: Vec<&str> = completions.iter().map(|(n, _)| n.as_str()).collect();
     assert!(
-        completions.contains(&"region".to_string()),
-        "completions must include 'region', got: {completions:?}"
+        names.contains(&"region"),
+        "completions must include 'region', got: {names:?}"
     );
     assert!(
-        completions.contains(&"threshold".to_string()),
-        "completions must include 'threshold', got: {completions:?}"
+        names.contains(&"threshold"),
+        "completions must include 'threshold', got: {names:?}"
     );
     assert!(
-        !completions.contains(&"name".to_string()),
-        "completions must NOT include already-filled 'name', got: {completions:?}"
+        !names.contains(&"name"),
+        "completions must NOT include already-filled 'name', got: {names:?}"
+    );
+    let threshold_detail = completions
+        .iter()
+        .find(|(n, _)| n == "threshold")
+        .map(|(_, d)| d.as_str())
+        .unwrap_or("");
+    assert!(
+        threshold_detail.to_uppercase().contains("INTEGER"),
+        "threshold completion must carry the Integer type as detail, got: {threshold_detail}"
     );
 }
 
-/// Completion at a record field-projection site offers the closed declared set.
+/// Completion at a record field-projection site offers the closed declared set,
+/// each carrying the declared type as a detail string.
 #[test]
 fn completion_at_record_field_projection_offers_closed_set() {
     use smelt_types::signatures::SmeltType;
@@ -2025,18 +2048,28 @@ fn completion_at_record_field_projection_offers_closed_set() {
         SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
     );
     let completions = record_field_projection_completions(&fields);
+    let names: Vec<&str> = completions.iter().map(|(n, _)| n.as_str()).collect();
     assert!(
-        completions.contains(&"name".to_string()),
-        "completions must include 'name', got: {completions:?}"
+        names.contains(&"name"),
+        "completions must include 'name', got: {names:?}"
     );
     assert!(
-        completions.contains(&"threshold".to_string()),
-        "completions must include 'threshold', got: {completions:?}"
+        names.contains(&"threshold"),
+        "completions must include 'threshold', got: {names:?}"
     );
     assert_eq!(
         completions.len(),
         2,
         "completions must have exactly 2 items, got: {completions:?}"
+    );
+    let name_detail = completions
+        .iter()
+        .find(|(n, _)| n == "name")
+        .map(|(_, d)| d.as_str())
+        .unwrap_or("");
+    assert!(
+        name_detail.to_uppercase().contains("TEXT"),
+        "name completion must carry the Text type as detail, got: {name_detail}"
     );
 }
 
@@ -2073,7 +2106,7 @@ fn hover_on_map_method_call_shows_signature_and_resolution() {
     use smelt_types::{DataType, TypeConstraint};
     let key_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Text));
     let val_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
-    let text = hover_text_for_map_method_call("entries", &key_ty, &val_ty, Some(3));
+    let text = hover_text_for_map_method_call("entries", &key_ty, &val_ty, Some(3), None);
     assert!(
         text.contains("entries"),
         "hover must contain method name 'entries', got: {text}"
@@ -2085,6 +2118,33 @@ fn hover_on_map_method_call_shows_signature_and_resolution() {
     assert!(
         text.contains("3"),
         "hover must show resolved length, got: {text}"
+    );
+}
+
+/// Hover on `m.get(k)` shows the value type `V` and the concrete bound value
+/// when the key is statically known and present.
+#[test]
+fn hover_on_map_get_call_shows_value_type_and_resolved_value() {
+    use smelt_types::signatures::SmeltType;
+    use smelt_types::{DataType, TypeConstraint};
+    let key_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Text));
+    let val_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+    let text = hover_text_for_map_method_call("get", &key_ty, &val_ty, None, Some("100"));
+    assert!(
+        text.contains("get"),
+        "hover must contain method name 'get', got: {text}"
+    );
+    assert!(
+        text.to_uppercase().contains("INTEGER"),
+        "hover must contain the value type (Integer), got: {text}"
+    );
+    assert!(
+        text.contains("100"),
+        "hover must show resolved value '100', got: {text}"
+    );
+    assert!(
+        !text.contains("entries*"),
+        "hover for get must NOT show 'entries' resolution suffix, got: {text}"
     );
 }
 
