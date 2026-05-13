@@ -238,6 +238,31 @@ impl<'a> Parser<'a> {
         ])
     }
 
+    // ===== Map method name allowlist =====
+
+    /// Returns true when `name` is a recognised Map<K,V> API method name.
+    /// This keeps `schema.func()` producing `FUNCTION_CALL` while routing
+    /// known map methods through the `MAP_METHOD_CALL` node kind. The
+    /// spec's closed API is `{entries, keys, values, get, has}`; the other
+    /// names are routed too so type inference emits `MapApiUnknown` rather
+    /// than silently degrading to a `FUNCTION_CALL`.
+    fn is_map_method_name(name: &str) -> bool {
+        matches!(
+            name,
+            "entries"
+                | "get"
+                | "has"
+                | "keys"
+                | "values"
+                | "contains_key"
+                | "insert"
+                | "remove"
+                | "len"
+                | "is_empty"
+                | "merge"
+        )
+    }
+
     // ===== Parsing rules =====
 
     fn parse_file(&mut self) {
@@ -259,6 +284,12 @@ impl<'a> Parser<'a> {
 
             if self.at_smelt_extern_trigger() {
                 self.parse_smelt_extern();
+                self.skip_trivia();
+                continue;
+            }
+
+            if self.at_smelt_record_trigger() {
+                self.parse_smelt_record_decl();
                 self.skip_trivia();
                 continue;
             }
@@ -354,6 +385,53 @@ impl<'a> Parser<'a> {
         }
         let text = &self.input[offset..offset + tok.len];
         text.eq_ignore_ascii_case("define")
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a top-level `smelt.record` declaration. Does not consume
+    /// any tokens. The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("record")
+    fn at_smelt_record_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "record".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("record")
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is
@@ -669,7 +747,7 @@ impl<'a> Parser<'a> {
         self.finish_node(); // SMELT_AS_STRUCT_CALL
     }
 
-    /// Sync forward to EOF or the start of the next top-level `smelt.define`.
+    /// Sync forward to EOF or the start of the next top-level declaration.
     /// Anything skipped is wrapped in ERROR nodes (one per token).
     fn sync_to_top_level(&mut self) {
         while !self.at(EOF) {
@@ -678,7 +756,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            if self.at_smelt_define_trigger() || self.at_smelt_extern_trigger() {
+            if self.at_smelt_define_trigger()
+                || self.at_smelt_extern_trigger()
+                || self.at_smelt_record_trigger()
+            {
                 return;
             }
             self.start_node(ERROR);
@@ -889,6 +970,332 @@ impl<'a> Parser<'a> {
         self.finish_node(); // SMELT_EXTERN
     }
 
+    /// Parse a top-level `smelt.record Name = { field: Type, ... }` declaration.
+    /// The caller must have verified `at_smelt_record_trigger()` first.
+    ///
+    /// Grammar:
+    ///   smelt.record NAME = { RECORD_FIELD (, RECORD_FIELD)* ,? }
+    ///
+    /// Each RECORD_FIELD is:
+    ///   IDENT : TYPE_REF
+    /// where the TYPE_REF may itself be an inline record type `{ ... }` (RECORD_TYPE_INLINE).
+    fn parse_smelt_record_decl(&mut self) {
+        self.start_node(SMELT_RECORD_DECL);
+
+        // Consume `smelt . record`
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "record"
+
+        // NAME identifier
+        self.skip_trivia();
+        if self.at(IDENT) {
+            self.advance(); // Name token (SourceEntry, Cohort, etc.)
+        } else {
+            self.error("Expected record type name after smelt.record".to_string());
+            self.sync_to(&[EQ, LBRACE, EOF]);
+        }
+
+        // `=` separator
+        self.skip_trivia();
+        if self.at(EQ) {
+            self.advance(); // `=`
+        } else {
+            self.error("Expected '=' after record type name in smelt.record".to_string());
+        }
+
+        // Body: `{ field: Type, ... }` — wrapped as RECORD_TYPE_INLINE so that
+        // the body node has the same kind as an inline-record type annotation.
+        self.skip_trivia();
+        if self.at(LBRACE) {
+            self.parse_record_type_inline();
+        } else {
+            self.error("Expected '{' to start record type body".to_string());
+        }
+
+        self.finish_node(); // SMELT_RECORD_DECL
+    }
+
+    /// Parse a `{ field: Type, ... }` record body as a sequence of RECORD_FIELD nodes.
+    /// Used for `SMELT_RECORD_DECL` bodies and `RECORD_TYPE_INLINE` nodes.
+    ///
+    /// Each field is `IDENT : TYPE_REF` where TYPE_REF may be another
+    /// inline record type (when the next token after `:` is `{`).
+    ///
+    /// Error recovery: when a field is malformed (missing type), advance to the
+    /// next COMMA or RBRACE sync point so remaining fields still parse.
+    fn parse_record_body_as_type(&mut self) {
+        self.advance(); // consume `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // We must see IDENT here for a field name.
+            if !self.at(IDENT) {
+                self.error("Expected field name in record type".to_string());
+                // Recover: skip to the next COMMA or RBRACE.
+                self.sync_to(&[COMMA, RBRACE, EOF]);
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                }
+                continue;
+            }
+
+            // RECORD_FIELD: IDENT COLON TYPE_REF
+            self.start_node(RECORD_FIELD);
+            self.advance(); // IDENT (field name)
+            self.skip_trivia();
+
+            if self.at(COLON) {
+                self.advance(); // COLON
+                self.skip_trivia();
+                // If next token is `{`, parse as RECORD_TYPE_INLINE.
+                // Otherwise parse as a flat type ref.
+                if self.at(LBRACE) {
+                    self.parse_record_type_inline();
+                } else if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                    // Normal type ref: flat type name like Text, Integer, List<Text>, etc.
+                    self.parse_record_field_type_ref();
+                } else {
+                    // Missing type — emit error token and let recovery proceed.
+                    self.error("Expected type after ':' in record field".to_string());
+                }
+            } else {
+                self.error("Expected ':' after field name in record type".to_string());
+                // Try to recover at the type position by looking for COMMA / RBRACE
+                self.sync_to(&[COMMA, RBRACE, EOF]);
+            }
+
+            self.finish_node(); // RECORD_FIELD
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance(); // COMMA
+                self.skip_trivia();
+                // Trailing comma is allowed.
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected '}' to close record type body".to_string());
+        }
+    }
+
+    /// Parse an inline record type `{ field: Type, ... }` as a RECORD_TYPE_INLINE node.
+    /// The caller must have verified `self.at(LBRACE)` first.
+    fn parse_record_type_inline(&mut self) {
+        self.start_node(RECORD_TYPE_INLINE);
+        self.parse_record_body_as_type();
+        self.finish_node(); // RECORD_TYPE_INLINE
+    }
+
+    /// Parse a type reference for use inside a record field (either inline or
+    /// in a smelt.record body). Stops at depth-0 COMMA, RBRACE, GT, EQ, AS, `->`, or EOF.
+    /// Handles generic types like `List<Text>`, `Map<Text, Integer>`, etc.
+    ///
+    /// When `{` is encountered inside `<...>` angle brackets, it is parsed as
+    /// a `RECORD_TYPE_INLINE` node so that `List<{ name: Text }>` produces the
+    /// correct structured CST.
+    fn parse_record_field_type_ref(&mut self) {
+        self.start_node(TYPE_REF);
+        // Consume the type until we hit a depth-0 boundary.
+        // Track angle bracket depth to handle List<Text>, Map<K, V>, etc.
+        let mut angle_depth: i32 = 0;
+        loop {
+            self.skip_trivia();
+            let k = self.current();
+            if k == EOF {
+                break;
+            }
+            if angle_depth == 0
+                && matches!(k, COMMA | RBRACE | EQ | AS_KW | JSON_ARROW | RPAREN | GT)
+            {
+                break;
+            }
+            // When inside angle brackets and we see `{`, parse it as an inline
+            // record type so the RECORD_TYPE_INLINE node is produced for
+            // List<{ name: Text }> etc.
+            if angle_depth > 0 && k == LBRACE {
+                self.parse_record_type_inline();
+                self.skip_trivia();
+                continue;
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => angle_depth = angle_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+        self.finish_node(); // TYPE_REF
+    }
+
+    /// Dispatcher for type annotations in parameter position. Handles:
+    /// 1. Inline record types: `{field: Type, ...}` → `RECORD_TYPE_INLINE`
+    /// 2. Known expression sorts: `Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`,
+    ///    `TableExpr`, `SelectItems<...>` → full `parse_type_ref` (validates sort head,
+    ///    emits error for unknown sorts like `FooExpr`)
+    /// 3. Other type heads: `Map<K,V>`, `List<T>`, named types like `Cohort`,
+    ///    plain types like `Integer`, `Text` → flat `parse_record_field_type_ref`
+    fn parse_param_type_annotation(&mut self) {
+        if self.at(LBRACE) {
+            // Inline record type in annotation position.
+            self.parse_record_type_inline();
+        } else if self.at(IDENT) {
+            // Check if the head looks like a known expression sort head.
+            // These go through the full parse_type_ref which validates them.
+            let head = self.current_text().to_string();
+            if matches!(
+                head.as_str(),
+                "Expr"
+                    | "AggExpr"
+                    | "WindowExpr"
+                    | "TableExpr"
+                    | "SelectItems"
+                    | "FooExpr"
+                    | "BarExpr" // pattern: anything ending in "Expr" uses full validator
+            ) || head.ends_with("Expr")
+            {
+                self.parse_type_ref();
+            } else {
+                // Plain/generic type: use flat consumer — no sort validation, no errors.
+                self.parse_record_field_type_ref();
+            }
+        } else {
+            // Nothing recognizable — fall back to full type_ref for error reporting.
+            self.parse_type_ref();
+        }
+    }
+
+    /// Parse a record literal `{key: value, key2: value2}` in a VALUE position.
+    /// Produces a RECORD_LITERAL node with RECORD_FIELD children.
+    ///
+    /// Each field is `IDENT : EXPRESSION`.
+    /// Error recovery: missing value → advance to COMMA/RBRACE sync point.
+    fn parse_record_literal(&mut self) {
+        self.start_node(RECORD_LITERAL);
+        self.advance(); // consume `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Field name must be IDENT.
+            if !self.at(IDENT) {
+                self.error("Expected field name in record literal".to_string());
+                self.sync_to(&[COMMA, RBRACE, EOF]);
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                }
+                continue;
+            }
+
+            self.start_node(RECORD_FIELD);
+            self.advance(); // IDENT (key)
+            self.skip_trivia();
+
+            if self.at(COLON) {
+                self.advance(); // COLON
+                self.skip_trivia();
+                // Parse the value expression.
+                if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                    self.parse_expression();
+                } else {
+                    // Missing value — emit an error token for recovery.
+                    self.error(
+                        "Expected expression value after ':' in record literal field".to_string(),
+                    );
+                }
+            } else {
+                self.error("Expected ':' after field name in record literal".to_string());
+                self.sync_to(&[COMMA, RBRACE, EOF]);
+            }
+
+            self.finish_node(); // RECORD_FIELD
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance(); // COMMA
+                self.skip_trivia();
+                // Trailing comma is allowed.
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected '}' to close record literal".to_string());
+        }
+
+        self.finish_node(); // RECORD_LITERAL
+    }
+
+    /// Returns true when the current `{` starts a record literal rather than a
+    /// brace-struct literal. A record literal uses `IDENT : expr` fields,
+    /// while a brace-struct uses `expr AS alias` fields.
+    ///
+    /// Peek after `{` (skipping trivia): if we see `IDENT COLON` (and the IDENT
+    /// is NOT followed by `AS`), treat as a record literal. Otherwise treat as a
+    /// brace-struct literal (legacy Phase 35 behaviour).
+    ///
+    /// An empty `{}` is treated as a record literal (no fields).
+    fn is_record_literal_start(&self) -> bool {
+        // Must be at LBRACE.
+        debug_assert!(self.at(LBRACE));
+        // Peek past the `{` to find the next non-trivia token.
+        let mut i = 1; // start after `{`
+        while let Some(t) = self.tokens.get(self.pos + i) {
+            if t.kind.is_trivia() {
+                i += 1;
+                continue;
+            }
+            if t.kind == RBRACE {
+                // Empty `{}` — treat as record literal.
+                return true;
+            }
+            if t.kind != IDENT {
+                // Not IDENT — must be a brace-struct (spread `..`, etc.).
+                return false;
+            }
+            // We found an IDENT. Look at the next non-trivia token.
+            let mut j = i + 1;
+            while let Some(t2) = self.tokens.get(self.pos + j) {
+                if t2.kind.is_trivia() {
+                    j += 1;
+                    continue;
+                }
+                // If next non-trivia is COLON → record literal.
+                return t2.kind == COLON;
+            }
+            return false;
+        }
+        false
+    }
+
     /// Parse the parenthesized parameter list of a smelt.define.
     fn parse_param_list(&mut self) {
         self.start_node(PARAM_LIST);
@@ -945,7 +1352,7 @@ impl<'a> Parser<'a> {
         if self.at(COLON) {
             self.advance();
             self.skip_trivia();
-            self.parse_type_ref();
+            self.parse_param_type_annotation();
         }
 
         // Optional `= DefaultValue`.
@@ -2972,8 +3379,15 @@ impl<'a> Parser<'a> {
         } else if self.at(STRUCT_KW) && self.is_keyword_followed_by_lparen() {
             self.parse_struct_literal();
         } else if self.at(LBRACE) {
-            // Phase 35: brace-struct literal `{expr AS alias, ..spread}`
-            self.parse_brace_struct_literal();
+            // Phase 2 (meta-language): record literal `{key: value, ...}` or
+            // Phase 35: brace-struct literal `{expr AS alias, ..spread}`.
+            // Disambiguate by peeking: if `{` is followed by `IDENT COLON`,
+            // it's a record literal; otherwise it's a brace-struct literal.
+            if self.is_record_literal_start() {
+                self.parse_record_literal();
+            } else {
+                self.parse_brace_struct_literal();
+            }
         } else if self.at(CASE_KW) {
             self.parse_case_expr();
         } else if self.at(CAST_KW) {
@@ -3127,24 +3541,45 @@ impl<'a> Parser<'a> {
                     self.parse_window_spec();
                 }
             } else if self.at(DOT) {
-                // Could be table.column or namespace.func()
+                // Could be table.column, namespace.func(), or map.method()
                 self.advance(); // consume DOT
                 self.skip_trivia();
+                // Peek at the method name before consuming, so we can decide
+                // whether to emit MAP_METHOD_CALL vs FUNCTION_CALL.
+                let method_name = if self.at(IDENT) {
+                    Some(self.current_text().to_string())
+                } else {
+                    None
+                };
                 self.expect(IDENT); // consume second IDENT
                 self.skip_trivia();
 
                 if self.at(LPAREN) {
-                    // Namespaced function call: smelt.ref()
-                    self.start_node_at(checkpoint, FUNCTION_CALL);
-                    self.parse_arg_list();
-                    self.parse_within_group_if_present();
-                    self.parse_filter_clause_if_present();
-                    self.finish_node();
+                    // Determine whether to emit MAP_METHOD_CALL or FUNCTION_CALL.
+                    // MAP_METHOD_CALL is used for known Map<K,V> API method names.
+                    // This is parser-level minimal: type inference (Phase 4) validates
+                    // that the LHS is actually Map<K,V>.
+                    let is_map_method = method_name
+                        .as_deref()
+                        .map(Self::is_map_method_name)
+                        .unwrap_or(false);
+                    if is_map_method {
+                        self.start_node_at(checkpoint, MAP_METHOD_CALL);
+                        self.parse_arg_list();
+                        self.finish_node();
+                    } else {
+                        // Namespaced function call (e.g. schema.func())
+                        self.start_node_at(checkpoint, FUNCTION_CALL);
+                        self.parse_arg_list();
+                        self.parse_within_group_if_present();
+                        self.parse_filter_clause_if_present();
+                        self.finish_node();
 
-                    // Check for OVER clause (window function)
-                    self.skip_trivia();
-                    if self.at(OVER_KW) {
-                        self.parse_window_spec();
+                        // Check for OVER clause (window function)
+                        self.skip_trivia();
+                        if self.at(OVER_KW) {
+                            self.parse_window_spec();
+                        }
                     }
                 } else {
                     // Qualified name (table.column) — wrap in EXPRESSION
@@ -8958,6 +9393,374 @@ LIMIT 100
                 .descendants()
                 .any(|n| n.kind() == PIPE_EXPR),
             "WHEN_CLAUSE must contain a PIPE_EXPR node (parse_pipe_expr must be used, not parse_or_expr)"
+        );
+    }
+
+    // ===== Phase 2 (meta-language): record types, literals, map methods =====
+
+    #[test]
+    fn parse_smelt_record_decl_top_level() {
+        let input = "smelt.record SourceEntry = { name: Text, columns: List<Text>, }";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_smelt_record_decl_top_level: unexpected errors: {:?}",
+            parse.errors
+        );
+        let root = parse.syntax();
+        let decl = root
+            .children()
+            .find(|n| n.kind() == SMELT_RECORD_DECL)
+            .expect("must have a SMELT_RECORD_DECL node");
+        // The decl must contain a name token "SourceEntry"
+        let has_name = decl
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == IDENT && t.text() == "SourceEntry");
+        assert!(
+            has_name,
+            "SMELT_RECORD_DECL must contain an IDENT token 'SourceEntry'"
+        );
+        // The SMELT_RECORD_DECL wraps its body in a RECORD_TYPE_INLINE.
+        let body = decl
+            .children()
+            .find(|n| n.kind() == RECORD_TYPE_INLINE)
+            .expect("SMELT_RECORD_DECL must have a RECORD_TYPE_INLINE child");
+        let fields: Vec<_> = body
+            .children()
+            .filter(|n| n.kind() == RECORD_FIELD)
+            .collect();
+        assert_eq!(
+            fields.len(),
+            2,
+            "must have two direct RECORD_FIELD children, got {}",
+            fields.len()
+        );
+        // Each field must have an IDENT, COLON, and TYPE_REF child
+        for field in &fields {
+            let has_ident = field
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .any(|t| t.kind() == IDENT);
+            let has_colon = field
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .any(|t| t.kind() == COLON);
+            let has_type = field.children().any(|n| n.kind() == TYPE_REF);
+            assert!(has_ident, "RECORD_FIELD must have an IDENT token");
+            assert!(has_colon, "RECORD_FIELD must have a COLON token");
+            assert!(has_type, "RECORD_FIELD must have a TYPE_REF child");
+        }
+    }
+
+    #[test]
+    fn parse_smelt_record_decl_field_with_record_type() {
+        let input =
+            "smelt.record Cohort = { source: SourceEntry, settings: { threshold: Integer } }";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_smelt_record_decl_field_with_record_type: unexpected errors: {:?}",
+            parse.errors
+        );
+        let root = parse.syntax();
+        let decl = root
+            .children()
+            .find(|n| n.kind() == SMELT_RECORD_DECL)
+            .expect("must have a SMELT_RECORD_DECL node");
+        // The SMELT_RECORD_DECL wraps its body in a RECORD_TYPE_INLINE.
+        // Only the direct RECORD_FIELD children of that top-level RECORD_TYPE_INLINE are counted.
+        let body = decl
+            .children()
+            .find(|n| n.kind() == RECORD_TYPE_INLINE)
+            .expect("SMELT_RECORD_DECL must have a RECORD_TYPE_INLINE child");
+        let fields: Vec<_> = body
+            .children()
+            .filter(|n| n.kind() == RECORD_FIELD)
+            .collect();
+        assert_eq!(
+            fields.len(),
+            2,
+            "must have two direct RECORD_FIELD children, got {}",
+            fields.len()
+        );
+        // The second field's type must be a RECORD_TYPE_INLINE
+        let second_field = &fields[1];
+        let has_inline = second_field
+            .children()
+            .any(|n| n.kind() == RECORD_TYPE_INLINE);
+        assert!(
+            has_inline,
+            "second RECORD_FIELD must have a RECORD_TYPE_INLINE child (settings field)"
+        );
+        // The first field's type must be a bare TYPE_REF (SourceEntry)
+        let first_field = &fields[0];
+        let has_bare_type = first_field.children().any(|n| n.kind() == TYPE_REF);
+        assert!(
+            has_bare_type,
+            "first RECORD_FIELD must have a TYPE_REF child (SourceEntry)"
+        );
+    }
+
+    #[test]
+    fn parse_smelt_record_decl_recovers_on_malformed_field() {
+        // `y: ,` is missing the type — the parser should recover and produce three fields.
+        let input = "smelt.record Bad = { x: Text, y: , z: Integer }";
+        let parse = parse(input);
+        // We expect some errors (missing type for y) but no crash / avalanche.
+        let root = parse.syntax();
+        let decl = root
+            .children()
+            .find(|n| n.kind() == SMELT_RECORD_DECL)
+            .expect("must still produce a SMELT_RECORD_DECL node even with errors");
+        // Fields are direct children of the RECORD_TYPE_INLINE inside SMELT_RECORD_DECL.
+        let body = decl
+            .children()
+            .find(|n| n.kind() == RECORD_TYPE_INLINE)
+            .expect("SMELT_RECORD_DECL must have a RECORD_TYPE_INLINE child even with errors");
+        let fields: Vec<_> = body
+            .children()
+            .filter(|n| n.kind() == RECORD_FIELD)
+            .collect();
+        assert_eq!(
+            fields.len(),
+            3,
+            "must have three direct RECORD_FIELD children (recovered), got {}; errors: {:?}",
+            fields.len(),
+            parse.errors
+        );
+    }
+
+    #[test]
+    fn parse_record_literal_in_select_item() {
+        let input = "SELECT smelt.foo({a: 1, b: 'x'}) FROM t";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_record_literal_in_select_item: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A RECORD_LITERAL node must appear somewhere in the tree
+        let has_record_literal = parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_LITERAL);
+        assert!(has_record_literal, "must contain a RECORD_LITERAL node");
+        // The RECORD_LITERAL must have two RECORD_FIELD children
+        let record_lit = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == RECORD_LITERAL)
+            .unwrap();
+        let fields: Vec<_> = record_lit
+            .children()
+            .filter(|n| n.kind() == RECORD_FIELD)
+            .collect();
+        assert_eq!(
+            fields.len(),
+            2,
+            "RECORD_LITERAL must have two RECORD_FIELD children"
+        );
+    }
+
+    #[test]
+    fn parse_record_literal_in_define_default_value() {
+        let input = "smelt.define foo(cfg: Cohort = {threshold: 10}) AS (cfg)";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_record_literal_in_define_default_value: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A RECORD_LITERAL must appear in the DEFAULT_VALUE position
+        let has_record_literal = parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_LITERAL);
+        assert!(
+            has_record_literal,
+            "must contain a RECORD_LITERAL node in default value"
+        );
+    }
+
+    #[test]
+    fn parse_inline_record_type_at_define_parameter() {
+        let input = "smelt.define foo(cfg: { name: Text, count: Integer }) AS (cfg)";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_inline_record_type_at_define_parameter: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A RECORD_TYPE_INLINE must appear somewhere in the tree
+        let has_inline = parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_TYPE_INLINE);
+        assert!(has_inline, "must contain a RECORD_TYPE_INLINE node");
+    }
+
+    #[test]
+    fn parse_inline_record_type_nested_in_list() {
+        let input = "smelt.define foo(cs: List<{ name: Text }>) AS (cs)";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_inline_record_type_nested_in_list: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A RECORD_TYPE_INLINE must appear inside the type ref
+        let has_inline = parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_TYPE_INLINE);
+        assert!(
+            has_inline,
+            "must contain a RECORD_TYPE_INLINE node nested in List<...>"
+        );
+    }
+
+    #[test]
+    fn parse_map_method_call_entries() {
+        let input = "smelt.define foo(m: Map<Text, Integer>) AS (m.entries())";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_map_method_call_entries: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A MAP_METHOD_CALL node must appear
+        let has_map_method = parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == MAP_METHOD_CALL);
+        assert!(
+            has_map_method,
+            "must contain a MAP_METHOD_CALL node for m.entries()"
+        );
+    }
+
+    #[test]
+    fn parse_map_method_call_get_with_arg() {
+        let input = "smelt.define foo(m: Map<Text, Integer>) AS (m.get('k'))";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_map_method_call_get_with_arg: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A MAP_METHOD_CALL node must appear with at least one positional argument
+        let map_method = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == MAP_METHOD_CALL)
+            .expect("must contain a MAP_METHOD_CALL node for m.get('k')");
+        // Must have an ARG_LIST child with at least one positional argument
+        let has_arg_list = map_method.children().any(|n| n.kind() == ARG_LIST);
+        assert!(has_arg_list, "MAP_METHOD_CALL must have an ARG_LIST child");
+    }
+
+    #[test]
+    fn parse_map_method_call_has_with_arg() {
+        // The spec's closed Map API is {entries, keys, values, get, has};
+        // `has` must be routed through MAP_METHOD_CALL like `get`.
+        let input = "smelt.define foo(m: Map<Text, Integer>) AS (m.has('k'))";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_map_method_call_has_with_arg: unexpected errors: {:?}",
+            parse.errors
+        );
+        let map_method = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == MAP_METHOD_CALL)
+            .expect("must contain a MAP_METHOD_CALL node for m.has('k')");
+        let has_arg_list = map_method.children().any(|n| n.kind() == ARG_LIST);
+        assert!(has_arg_list, "MAP_METHOD_CALL must have an ARG_LIST child");
+    }
+
+    #[test]
+    fn record_literal_vs_inline_record_type_disambiguation() {
+        // Value position → RECORD_LITERAL
+        let value_input = "SELECT smelt.foo({a: 1}) FROM t";
+        let value_parse = parse(value_input);
+        assert!(
+            value_parse.errors.is_empty(),
+            "record_literal disambiguation (value): unexpected errors: {:?}",
+            value_parse.errors
+        );
+        let has_literal = value_parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_LITERAL);
+        assert!(
+            has_literal,
+            "value position {{a: 1}} must parse as RECORD_LITERAL"
+        );
+        let has_inline = value_parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_TYPE_INLINE);
+        assert!(
+            !has_inline,
+            "value position {{a: 1}} must NOT produce RECORD_TYPE_INLINE"
+        );
+
+        // Type-annotation position in smelt.record → RECORD_TYPE_INLINE
+        let type_input = "smelt.record Foo = { a: Integer }";
+        let type_parse = parse(type_input);
+        assert!(
+            type_parse.errors.is_empty(),
+            "record_literal disambiguation (type): unexpected errors: {:?}",
+            type_parse.errors
+        );
+        let has_inline2 = type_parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_TYPE_INLINE);
+        assert!(
+            has_inline2,
+            "type-annotation position {{a: Integer}} must parse as RECORD_TYPE_INLINE"
+        );
+        let has_literal2 = type_parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_LITERAL);
+        assert!(
+            !has_literal2,
+            "type-annotation position {{a: Integer}} must NOT produce RECORD_LITERAL"
+        );
+    }
+
+    #[test]
+    fn record_literal_recovers_on_missing_value() {
+        // `a: ,` has a missing value expression — parser should recover
+        let input = "smelt.define foo(cfg: Cohort = {a: , b: 2}) AS (cfg)";
+        let parse = parse(input);
+        // Expect errors but not a crash
+        let has_record_literal = parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == RECORD_LITERAL);
+        assert!(
+            has_record_literal,
+            "must still produce a RECORD_LITERAL node even with missing value"
+        );
+        let record_lit = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == RECORD_LITERAL)
+            .unwrap();
+        let fields: Vec<_> = record_lit
+            .children()
+            .filter(|n| n.kind() == RECORD_FIELD)
+            .collect();
+        assert_eq!(
+            fields.len(),
+            2,
+            "RECORD_LITERAL must have two RECORD_FIELD children even with error recovery, got {}",
+            fields.len()
         );
     }
 }

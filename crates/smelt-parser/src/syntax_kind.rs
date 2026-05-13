@@ -284,6 +284,24 @@ pub enum SyntaxKind {
     SELECTITEMS_CTX,  // lowercase context argument of SelectItems<K, ctx>
     EXPR_CTX,         // lowercase context argument of Expr<T, ctx>
 
+    // Phase 2 (meta-language): record declarations, literals, inline types, map methods
+    //
+    // SMELT_RECORD_DECL: top-level `smelt.record Name = { field: Type, ... }` declaration.
+    // RECORD_FIELD: shared `IDENT COLON …` triple inside a record decl body, literal, or
+    //   inline-record type.
+    // RECORD_LITERAL: `{f1: v1, f2: v2}` in a value position — fields have expression values.
+    // RECORD_TYPE_INLINE: `{f1: T1, f2: T2}` in a type-annotation position — fields have
+    //   type-ref values.
+    // MAP_METHOD_CALL: `expr.method(args)` where the method is a Map API method
+    //   (entries, get, keys, values, contains_key, etc.). Emitted as a distinct node kind so
+    //   Phase 4 type inference can dispatch the closed Map API without ambiguity against
+    //   field-projection on records/structs.
+    SMELT_RECORD_DECL,
+    RECORD_FIELD,
+    RECORD_LITERAL,
+    RECORD_TYPE_INLINE,
+    MAP_METHOD_CALL,
+
     // Error handling
     ERROR, // Invalid syntax
 

@@ -3476,3 +3476,342 @@ impl PipeExpr {
             .unwrap_or(false)
     }
 }
+
+// ===== Phase 2 (meta-language): record types, literals, map methods =====
+
+/// A top-level `smelt.record Name = { field: Type, ... }` declaration.
+///
+/// The body is wrapped in a `RECORD_TYPE_INLINE` child so that the declaration
+/// body shares the same node kind as an inline-record type annotation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltRecordDecl(SyntaxNode);
+
+impl SmeltRecordDecl {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `SMELT_RECORD_DECL` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_RECORD_DECL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The declared record type name (the `IDENT` token after `smelt . record`).
+    ///
+    /// Skips the leading `smelt` and `record` tokens to find the type name.
+    pub fn name(&self) -> Option<String> {
+        // The token sequence is: IDENT("smelt") DOT IDENT("record") [trivia] IDENT(Name) ...
+        // We skip the first two IDENTs ("smelt", "record") and return the third.
+        let idents: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        // index 0: "smelt", index 1: "record", index 2: TypeName
+        idents.get(2).map(|t| t.text().to_string())
+    }
+
+    /// The body as a `RECORD_TYPE_INLINE` node.
+    pub fn body(&self) -> Option<RecordTypeInline> {
+        self.0.children().find_map(RecordTypeInline::cast)
+    }
+
+    /// Iterate over the declared fields (direct children of the body).
+    pub fn fields(&self) -> impl Iterator<Item = RecordField> + '_ {
+        self.body().into_iter().flat_map(|b| {
+            b.syntax()
+                .children()
+                .filter_map(RecordField::cast)
+                .collect::<Vec<_>>()
+        })
+    }
+}
+
+/// A `{f1: v1, f2: v2, ...}` record literal expression at a value position.
+///
+/// Each field is a `RECORD_FIELD` child with an expression value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordLiteral(SyntaxNode);
+
+impl RecordLiteral {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `RECORD_LITERAL` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == RECORD_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over `RECORD_FIELD` children in declaration order.
+    pub fn fields(&self) -> impl Iterator<Item = RecordField> + '_ {
+        self.0.children().filter_map(RecordField::cast)
+    }
+
+    /// The text of this record literal as written in the source.
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
+    }
+}
+
+/// A `{f1: T1, f2: T2, ...}` inline-record type at a type-annotation position.
+///
+/// Produced by the parser when `{` appears in a type-annotation context (e.g.
+/// `smelt.record Name = { ... }` body or `smelt.define foo(x: { ... }) AS ...`
+/// parameter annotation).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordTypeInline(SyntaxNode);
+
+impl RecordTypeInline {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `RECORD_TYPE_INLINE` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == RECORD_TYPE_INLINE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over direct `RECORD_FIELD` children in declaration order.
+    pub fn fields(&self) -> impl Iterator<Item = RecordField> + '_ {
+        self.0.children().filter_map(RecordField::cast)
+    }
+
+    /// The text of this inline record type as written in the source.
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
+    }
+}
+
+/// A single `IDENT : ...` field inside a `RECORD_LITERAL`, `RECORD_TYPE_INLINE`,
+/// or `SMELT_RECORD_DECL` body. The trailing value is either an expression (in
+/// a literal) or a type reference (in a type context).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordField(SyntaxNode);
+
+impl RecordField {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `RECORD_FIELD` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == RECORD_FIELD {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The field name (the `IDENT` token before the `:`).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The value expression (only valid in a `RECORD_LITERAL` context).
+    pub fn value_expr(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The type reference (only valid in a type-annotation context).
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
+    }
+
+    /// The inline-record type (only valid when the field's type is `{ ... }`).
+    pub fn inline_record_type(&self) -> Option<RecordTypeInline> {
+        self.0.children().find_map(RecordTypeInline::cast)
+    }
+}
+
+/// A `expr.method(args)` call on a `Map<K, V>` typed expression.
+///
+/// Produced by the parser whenever it encounters `IDENT DOT IDENT (` and the
+/// method name is one of the recognised Map API methods (entries, get, keys,
+/// values, contains_key, insert, remove, len, is_empty, merge). Phase 4 type
+/// inference validates that the LHS is actually `Map<K, V>` and emits
+/// `MapApiUnknown` otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapMethodCall(SyntaxNode);
+
+impl MapMethodCall {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `MAP_METHOD_CALL` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == MAP_METHOD_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The name of the method (e.g. `"entries"`, `"get"`).
+    ///
+    /// Extracted from the second `IDENT` token in the `IDENT DOT IDENT (` shape.
+    pub fn method_name(&self) -> Option<String> {
+        // Shape: [ IDENT(lhs), DOT, IDENT(method), ... ]
+        let idents: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        idents.get(1).map(|t| t.text().to_string())
+    }
+
+    /// The argument list, if present.
+    pub fn arg_list(&self) -> Option<ArgList> {
+        self.0.children().find_map(ArgList::cast)
+    }
+
+    /// The text of the whole call as written in the source.
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse;
+
+    /// Round-trip helpers: parse text → find CST node → cast to AST → check text equality.
+    fn round_trip_text(node: &SyntaxNode) -> String {
+        node.text().to_string()
+    }
+
+    #[test]
+    fn ast_wrappers_for_record_constructs_round_trip() {
+        // 1. SmeltRecordDecl round-trip
+        {
+            let src = "smelt.record SourceEntry = { name: Text, age: Integer }";
+            let parse = parse(src);
+            assert!(
+                parse.errors.is_empty(),
+                "SmeltRecordDecl: unexpected parse errors: {:?}",
+                parse.errors
+            );
+            let decl = parse
+                .syntax()
+                .descendants()
+                .find_map(SmeltRecordDecl::cast)
+                .expect("must find SmeltRecordDecl node");
+            // Name round-trip
+            assert_eq!(
+                decl.name().as_deref(),
+                Some("SourceEntry"),
+                "SmeltRecordDecl::name() must return 'SourceEntry'"
+            );
+            // Body round-trip: CST → AST → CST text equality
+            let body = decl.body().expect("SmeltRecordDecl must have a body");
+            assert!(
+                round_trip_text(body.syntax()).contains("name: Text"),
+                "SmeltRecordDecl body text must contain 'name: Text'"
+            );
+            // Fields
+            let field_names: Vec<_> = decl.fields().filter_map(|f| f.name()).collect();
+            assert_eq!(field_names, vec!["name", "age"]);
+        }
+
+        // 2. RecordLiteral round-trip
+        {
+            let src = "SELECT smelt.foo({a: 1, b: 'x'}) FROM t";
+            let parse = parse(src);
+            assert!(
+                parse.errors.is_empty(),
+                "RecordLiteral: unexpected parse errors: {:?}",
+                parse.errors
+            );
+            let lit = parse
+                .syntax()
+                .descendants()
+                .find_map(RecordLiteral::cast)
+                .expect("must find RecordLiteral node");
+            // Text round-trip
+            let lit_text = round_trip_text(lit.syntax());
+            assert!(
+                lit_text.contains("a: 1") && lit_text.contains("b: 'x'"),
+                "RecordLiteral text must contain field entries, got: {}",
+                lit_text
+            );
+            // Fields
+            let field_names: Vec<_> = lit.fields().filter_map(|f| f.name()).collect();
+            assert_eq!(field_names, vec!["a", "b"]);
+        }
+
+        // 3. RecordTypeInline round-trip
+        {
+            let src = "smelt.define foo(cfg: { name: Text, count: Integer }) AS (cfg)";
+            let parse = parse(src);
+            assert!(
+                parse.errors.is_empty(),
+                "RecordTypeInline: unexpected parse errors: {:?}",
+                parse.errors
+            );
+            let inline = parse
+                .syntax()
+                .descendants()
+                .find_map(RecordTypeInline::cast)
+                .expect("must find RecordTypeInline node");
+            // Text round-trip
+            let text = round_trip_text(inline.syntax());
+            assert!(
+                text.contains("name: Text"),
+                "RecordTypeInline text must contain 'name: Text', got: {}",
+                text
+            );
+            // Fields
+            let field_names: Vec<_> = inline.fields().filter_map(|f| f.name()).collect();
+            assert_eq!(field_names, vec!["name", "count"]);
+        }
+
+        // 4. MapMethodCall round-trip
+        {
+            let src = "smelt.define foo(m: Map<Text, Integer>) AS (m.entries())";
+            let parse = parse(src);
+            assert!(
+                parse.errors.is_empty(),
+                "MapMethodCall: unexpected parse errors: {:?}",
+                parse.errors
+            );
+            let call = parse
+                .syntax()
+                .descendants()
+                .find_map(MapMethodCall::cast)
+                .expect("must find MapMethodCall node");
+            // Method name
+            assert_eq!(
+                call.method_name().as_deref(),
+                Some("entries"),
+                "MapMethodCall::method_name() must return 'entries'"
+            );
+            // Text round-trip: CST → AST → CST text equality
+            let call_text = round_trip_text(call.syntax());
+            assert!(
+                call_text.contains("entries"),
+                "MapMethodCall text must contain 'entries', got: {}",
+                call_text
+            );
+        }
+    }
+}
