@@ -58,6 +58,9 @@ nav:
     - Reducers: meta-language/reducers.md
     - Config Variables: meta-language/config-vars.md
     - Reflection: meta-language/reflection.md
+    - Records: meta-language/records.md
+    - Maps: meta-language/maps.md
+    - Config Loaders: meta-language/config-loaders.md
     - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md

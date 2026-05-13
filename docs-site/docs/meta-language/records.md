@@ -269,5 +269,3 @@ The loader validates each YAML record against the inline schema `{name: Text, re
     ```
 
     **What to fix:** Project a field of the record (`c.name`, `c.threshold`) instead of using the bare binding. Record values live in the meta-world; their projected scalar fields cross into the Data-World.
-
-    **What to fix:** Break the cycle by extracting a shared base record that both types reference, or remove the back-reference. Mutually recursive records are not supported in v1.
