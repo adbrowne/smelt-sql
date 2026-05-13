@@ -8,7 +8,6 @@
 //! - `WITH` clause / CTEs (including RECURSIVE and column lists)
 //! - `UNION` / `INTERSECT` / `EXCEPT` (set-op tails on a select stmt)
 
-use super::Parser;
 use crate::SyntaxKind::*;
 
 impl<'a> super::Parser<'a> {

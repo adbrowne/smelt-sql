@@ -13,7 +13,6 @@
 //! - small lookahead helpers used to disambiguate keywords-as-identifiers
 //!   and generic type expressions in call argument positions.
 
-use super::Parser;
 use crate::SyntaxKind::*;
 
 impl<'a> super::Parser<'a> {

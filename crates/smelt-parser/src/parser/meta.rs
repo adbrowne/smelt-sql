@@ -6,7 +6,6 @@
 //! `is_lambda_multi_param`) live alongside the productions they gate
 //! (`parse_fn_lambda`, `parse_lambda_expr`).
 
-use super::Parser;
 use crate::SyntaxKind::*;
 
 impl<'a> super::Parser<'a> {
