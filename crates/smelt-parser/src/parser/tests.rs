@@ -2164,6 +2164,31 @@ fn test_deeply_nested_subqueries_produces_error() {
 }
 
 #[test]
+fn test_deeply_nested_inline_record_types_produces_error() {
+    // 300 levels of nested inline record types — exceeds the 256 depth limit.
+    // Without a guard on `parse_record_type_inline`, this would blow the stack.
+    let depth = 300;
+    let mut input = String::new();
+    input.push_str("smelt.record Deep = ");
+    for _ in 0..depth {
+        input.push_str("{ a: ");
+    }
+    input.push_str("Text");
+    for _ in 0..depth {
+        input.push_str(" }");
+    }
+    let result = parse(&input);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("nesting depth")),
+        "Expected nesting depth error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
 fn test_normal_nesting_depth_unaffected() {
     // Reasonable nesting (depth ~20) should parse fine
     let input = "SELECT COALESCE(COALESCE(COALESCE(COALESCE(COALESCE(1, 2), 3), 4), 5), 6)";

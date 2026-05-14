@@ -84,7 +84,21 @@ impl<'a> Parser<'a> {
     /// The caller must have verified `self.at(LBRACE)` first.
     pub(super) fn parse_record_type_inline(&mut self) {
         self.start_node(RECORD_TYPE_INLINE);
+        if self.too_deep() {
+            // Bail out — emit an empty RECORD_TYPE_INLINE and skip the body.
+            // Recovery: advance past the `{`, then sync to the next sane boundary
+            // so the outer parser can continue.
+            self.advance(); // consume `{`
+            self.sync_to(&[RBRACE, COMMA, EOF]);
+            if self.at(RBRACE) {
+                self.advance();
+            }
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
         self.parse_record_body_as_type();
+        self.depth -= 1;
         self.finish_node(); // RECORD_TYPE_INLINE
     }
 
