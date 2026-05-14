@@ -18,20 +18,25 @@ selector = ['+'] method ['+']
 
 method = model_name
        | 'tag:' tag_name
+       | 'generator_file:' workspace_relative_path
 ```
 
 | Form | Meaning |
 |------|---------|
 | `model_name` | Select the named model only |
 | `tag:X` | Select all models with tag `X` |
+| `generator_file:path/to/file.gen.sql` | Select all models emitted by the named generator file (per `meta_language.md` §"Multi-model production"). The path is workspace-relative. |
 | `+model_name` | Select model + all its upstream dependencies (transitive) |
 | `model_name+` | Select model + all its downstream dependents (transitive) |
 | `+model_name+` | Select model + all upstream + all downstream |
 | `+tag:X` | Select models with tag X + their upstream dependencies |
 | `tag:X+` | Select models with tag X + their downstream dependents |
 | `+tag:X+` | Select models with tag X + upstream + downstream |
+| `+generator_file:path/to/file.gen.sql` | Select generator emissions + their upstream dependencies |
+| `generator_file:path/to/file.gen.sql+` | Select generator emissions + their downstream dependents |
+| `+generator_file:path/to/file.gen.sql+` | Select generator emissions + upstream + downstream |
 
-**Errors:** An empty selector, `tag:` with no tag name, or `+` in any position other than prefix/suffix is a parse error. `model++`, `++model`, `+a+b+` are all invalid.
+**Errors:** An empty selector, `tag:` with no tag name, `generator_file:` with no path, or `+` in any position other than prefix/suffix is a parse error. `model++`, `++model`, `+a+b+` are all invalid. A `generator_file:` selector whose path does not resolve to a workspace generator file matches nothing (no error; the working set may be empty).
 
 ### Flags
 
@@ -77,9 +82,11 @@ If no model in the project has the given tag, the selector matches nothing (no e
 
 ### Selection methods
 
-The only two selection methods are `ModelName` and `Tag`. There is no glob, regex, path, or directory-based selection.
+The selection methods are `ModelName`, `Tag`, and `GeneratorFile`. There is no glob, regex, or directory-based selection.
 
 A `ModelName` selector that names a model not in the project matches nothing (no error). The resulting working set may be empty.
+
+A `GeneratorFile` selector takes a workspace-relative path to a generator file (a `.sql` file whose YAML frontmatter declares `generates: models` per `meta_language.md` §"Multi-model production") and matches every model the file emits during workspace-shape resolution. The match set is computed at selector-evaluation time against the post-W3 workspace shape (per `meta_language.md` §"Multi-model production" rule 4); generator-emitted models that lost a collision (`ModelDefHandAuthoredCollision`) are not in the match set. A `GeneratorFile` selector pointing at a path that is not a generator file (a hand-authored model, a missing file, a non-`.sql` file) matches nothing (no error).
 
 ## Design
 
@@ -98,6 +105,7 @@ A `ModelName` selector that names a model not in the project matches nothing (no
 3. **Exclusion is applied after all inclusion expansions.** An excluded model cannot be re-included by a separate `--select`.
 4. **No-match is not an error.** A selector that matches no models produces no error; the working set may become empty.
 5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`. The case-sensitivity contract is owned by `models.md` §"Tag merging"; this rule cross-references it.
+6. **`GeneratorFile` selectors match against the post-resolution workspace shape.** The match set is what the workspace actually contains after multi-model production has resolved, including any collision losses. Generator emissions discarded by `ModelDefHandAuthoredCollision` are not selectable via the originating generator's `generator_file:` path.
 
 ## Known Divergences / Open Questions
 

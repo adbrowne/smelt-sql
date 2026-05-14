@@ -57,7 +57,7 @@ A smelt workspace is rooted at a directory containing `smelt.yml`. **Directory l
 
 | Path           | Convention                                                                        |
 |----------------|-----------------------------------------------------------------------------------|
-| `models/`      | `.sql` files containing bare-SELECT models (any number per file).                 |
+| `models/`      | `.sql` files containing bare-SELECT models (any number per file) or generator files (`generates: models` frontmatter, body of type `List<ModelDef>`). |
 | `functions/`   | `.sql` files containing `smelt.define` declarations.                              |
 | `seeds/`       | Static `.csv` inputs.                                                             |
 | `sources/`     | Per-source `.yml` declarations (schemas for external tables).                     |
@@ -106,6 +106,8 @@ A `.sql` file may mix declaration kinds — a model with co-located tests (each 
 **File kind is grammar, not location.** `data/foo.sql` containing a bare SELECT is a model addressable as `smelt.data.foo`; `random/x.sql` declaring `smelt.define helper(...)` is callable as `smelt.random.helper(...)` (the filename stem is not a path component). The recommended layout is convention; the resolver only cares about path and content.
 
 **Bare-model naming.** A `.sql` file may contain any number of bare-SELECT models. A file's *lone* bare SELECT takes its leaf name from the filename and the file uses no section delimiter. In a file with two or more bare SELECTs, each bare SELECT **must** declare itself with a `--- name: <name> ---` section delimiter line (Layer 1, see "Two-layer multi-model file format" below); the filename ceases to register as a model name and becomes purely a container. The model's full path is the directory path joined with the leaf name. Names within a file must be unique across bare SELECTs (including `materialization: test` ones), `smelt.define`s, and `smelt.extern`s. The canonical syntax for the section delimiter and worked examples live in `models.md` §"File format".
+
+**Generator files (`generates: models`).** A `.sql` file whose YAML frontmatter declares `generates: models` is a **generator file**: its body is a meta-language expression of type `List<ModelDef>`, and each emitted `ModelDef` becomes a model in the workspace. Generator files are mutually exclusive with bare-model identity — `generates: models` cannot coexist with a `name:` field or with `--- name: ---` Layer-1 delimiters in the same file. The number of emitted models is **statically computable** from the file's body during workspace-shape resolution; the result is deterministic over a given workspace input. Each emitted model's `smelt.<path>` is `<dir_with_dots>.<file_stem>.<modeldef.name>`, where `<file_stem>` is the generator file's stem (with `.gen.sql` or `.sql` stripped). The full normative surface for generator files — the frontmatter directive, the `ModelDef` record type, the workspace-shape resolution pipeline, collision handling, and the LSP support — lives in `meta_language.md` §"Multi-model production". This section names the file kind so the `smelt.<path>` resolver and the `paths:` scan-root rules apply uniformly; the meta-language spec owns the per-emission semantics.
 
 **Two-layer multi-model file format.** Multi-model `.sql` files use a two-layer stack with distinct grammars:
 
