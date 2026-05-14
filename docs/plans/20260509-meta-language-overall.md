@@ -42,7 +42,7 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 | B | HOFs, lambdas, pipe `\|>`, contextual reducers, `smelt.config.var` | done | `docs/plans/20260509-meta-language-B.md` | 2026-05-10 | 7380a94 |
 | C | Reflection narrow: `smelt.columns_of`, `ColumnRef` | done | `docs/plans/20260509-meta-language-C.md` | 2026-05-12 | 4a4c3e2 |
 | D | Reflection wide: `smelt.models.*`, `smelt.sources.*` | done | `docs/plans/20260509-meta-language-D.md` | 2026-05-13 | e6d9437 |
-| E1 | Records, `Map<K,V>`, YAML/JSON loaders | pending | `docs/plans/20260509-meta-language-E1.md` | — | — |
+| E1 | Records, `Map<K,V>`, YAML/JSON loaders | done | `docs/plans/20260509-meta-language-E1.md` | 2026-05-14 | b9df522 |
 | E2 | Multi-model production: `generates: models` frontmatter, `ModelDef` | pending | `docs/plans/20260509-meta-language-E2.md` | — | — |
 | F | Polish: parameterised reducers, multi-arg lambdas, ternary | pending | `docs/plans/20260509-meta-language-F.md` | — | — |
 | G | LSP completeness sweep, docs-site rewrite, `/smelt-loop` tier-3 | pending | `docs/plans/20260509-meta-language-G.md` | — | — |

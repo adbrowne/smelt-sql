@@ -98,7 +98,7 @@ This plan drives the implementation, examples, user docs, and skill update for t
 | 4     | done     | 08ff414 | 2026-05-13 |
 | 5     | done     | e117911 | 2026-05-13 |
 | 6     | done     | faca096 | 2026-05-13 |
-| 7     | pending  | —      | —    |
+| 7     | done     | b9df522 | 2026-05-14 |
 
 ---
 
@@ -608,6 +608,13 @@ This plan drives the implementation, examples, user docs, and skill update for t
   - **`ConfigLoaderDuplicateMapKey`** (1 code) — Cannot be triggered via a real YAML or JSON file on disk because `marked_yaml` (with `error_on_duplicate_keys: false`, the default) and `serde_json` both silently deduplicate keys before the validator sees them. The diagnostic is reachable only by constructing a synthetic `ParsedNode::Mapping` with duplicate entries, as done in `crates/smelt-db/src/loader.rs::tests::yaml_parse_map_root_emits_duplicate_key`. The corresponding `example_diagnostics` test is marked `#[ignore]` with an explanatory comment; the unit test provides coverage. No plan change is needed for this limitation — the spec's validation-diagnostic table remains normative; the gap is in the YAML/JSON parser layer, not in smelt.
 
 - Phase 6 (LSP wiring): The hover, completion, and goto-def behaviours for records, maps, and loaders are exposed as **pure helper functions** in `crates/smelt-lsp/src/lib.rs` (`hover_text_for_record_decl_name`, `record_field_projection_completions`, `goto_def_for_smelt_record_name`, etc.) with full unit-test coverage. They are **not yet dispatched** from the production `Backend::hover` / `Backend::completion` / `Backend::goto_definition` handlers — a user opening `examples/meta_config/` in an editor today will not see record/map/loader hover, completion, or goto-def. Reason: backend-dispatch wiring is mechanical but high-volume (it needs CST-walk + cursor-position detection per surface element, paralleling the existing `Phase B` lambda dispatch in the hover handler at line 5440). Precedent precision: Phases C/D DID dispatch their hover and completion helpers (`hover_text_for_columns_of_call`, `wide_reflection_accessor_completions`, `model_ref_field_completions`, `hover_text_for_model_ref_field` are all wired into `Backend::hover`/`Backend::completion`); only the `goto_def_*` no-op stubs for those phases (`goto_def_for_columns_of_call`, `goto_def_for_wide_reflection_accessor`, `goto_def_for_model_ref_value`) remained as undispatched pure helpers. E1's deferral therefore lags the prior-phase bar for hover/completion (where Phases C/D dispatched) but matches it for goto-def (where Phases C/D also deferred). Production wiring is tracked as a follow-up under `docs/plans/20260509-meta-language-overall.md` and will land alongside the LSP-smoke regression coverage in a focused phase.
+
+- Phase 7 expert review acceptance gate: parser-expert clean (R3), type-expert clean (R2), examples-curator clean (R2), lsp-expert clean (R3), docs-reviewer clean (R4). No stop-the-line condition fired. R3/R4 detail: docs-reviewer surfaced three additional pre-existing timeless-oracle violations on R3 (`index.md` "Planned but not yet implemented" section; `reference.md` `MetaSpreadInForbiddenPosition` / `ConfigVarNameNotLiteral` / `LambdaArityNotSupported` tails; `config-loaders.md` "reserved and not yet available"). The R3 findings were NEW (different from R1/R2 — not repeated failures of an attempted fix), so the "third repeat means the fix is wrong" rationale of the per-expert R3 bound did not apply; R4 confirmed clean. Each expert's commits:
+  - parser-expert: R1 = `834f19a`, R2 = `d03481c`, R3 = clean
+  - type-expert: R1 = `b7c36df`, R2 = clean
+  - examples-curator: R1 = `ce5a4dd`, R2 = clean
+  - lsp-expert: R1 = `0b66272`, R2 = `ec69c6e`, R3 = clean
+  - docs-reviewer: R1 = `dfca371`, R2 = `1dddbfd`, R3 = `b9df522`, R4 = clean
 
 ## Verification
 
