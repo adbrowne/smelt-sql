@@ -705,8 +705,6 @@ where `expr` evaluates to a `List<T>`.
 
 **Valid positions:** SELECT lists.
 
-**Planned but not yet supported:** GROUP BY, ORDER BY, positional function arguments, IN-lists, VALUES rows, inside other list literals.
-
 **Forbidden positions:** WHERE clauses, FROM clauses without an explicit reducer, boolean-composition contexts (`AND`/`OR`), named-argument positions (`name => value`). Each forbidden use emits `MetaSpreadInForbiddenPosition`.
 
 **Empty-list behaviour:** `...[]` elides itself and adjacent commas silently.

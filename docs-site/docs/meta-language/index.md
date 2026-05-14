@@ -6,7 +6,7 @@ smelt's meta-language is a compile-time evaluation layer that lets you compute S
 
 Every smelt model lives in two overlapping worlds:
 
-**Meta-world** — evaluated at compile time. Values are fragment sorts (`Expr<T>`, `TableExpr`, `OrderSpec`) and the meta types introduced by the meta-language (`List<T>`, `Lambda<T, U>`, with `Record<…>` and `Map<K,V>` planned). Meta values never reach the database engine; they are consumed during type-checking and codegen.
+**Meta-world** — evaluated at compile time. Values are fragment sorts (`Expr<T>`, `TableExpr`, `OrderSpec`) and the meta types introduced by the meta-language (`List<T>`, `Lambda<T, U>`, records declared with `smelt.record`, and `Map<K, V>`). Meta values never reach the database engine; they are consumed during type-checking and codegen.
 
 **Data-world** — the SQL the database engine sees. Types are the `DataType` vocabulary (`INTEGER`, `TEXT`, `BOOLEAN`, …). Data values exist at query runtime.
 
