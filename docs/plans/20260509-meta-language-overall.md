@@ -31,6 +31,8 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 
 **Mid-phase commit rule.** Never carry mid-phase state across a session reset. If a phase's commits don't all land together, treat the phase as not-done and re-run `/smelt:implement` from scratch on the same plan.
 
+**Subagent model rule.** The outer orchestrator runs on `opus` (autonomy loop default). Every delegated subagent — implementer, reviewer, every expert in the per-phase reviewer table (`parser-expert`, `type-expert`, `lsp-expert`, `docs-reviewer`, etc.), and any nested implementer dispatched to address findings — MUST be spawned with `model: "sonnet"` on the Agent tool. **Do not omit the `model` parameter** — without it, the subagent inherits `opus` from the parent, which silently burns the budget and was the failure mode of an earlier session. The single exception is when the per-phase plan header explicitly says otherwise. This mirrors the directive in `.claude/commands/smelt/implement.md` (lines 34, 51) and the per-phase reviewer tables (e.g. `20260509-meta-language-E1.md` rows pinned to `sonnet`).
+
 ## Phase status
 
 | # | Phase | Status | Plan path | Date | Commit |
