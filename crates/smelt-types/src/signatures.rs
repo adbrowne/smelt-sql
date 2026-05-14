@@ -792,8 +792,14 @@ fn collect_record_references(
 ///    - Any name reachable from itself (directly or via a chain) emits
 ///      `RecordCyclicDeclaration` at the introducing edge's field-type span.
 ///    - DFS is over the *directed* graph; back-edges (Gray → Gray in the DFS
-///      coloring) detect cycles. We emit **one sentinel per cycle** (at the
-///      first back-edge found in DFS traversal order).
+///      coloring) detect cycles. We emit **one sentinel per cyclic target name**:
+///      `cycle_emitted` is keyed on the back-edge's target, so the first
+///      back-edge to a given record fires the sentinel and any subsequent
+///      back-edges into the same target are suppressed. This means a single
+///      record participating in several overlapping cycles (e.g. `A↔B` and
+///      `A↔B↔C`) yields one sentinel per cyclic record rather than one per
+///      distinct cycle path — sufficient to mark the offending records as
+///      cyclic without flooding the user with overlapping reports.
 ///
 /// **Returns:** `(RecordRegistry, Vec<DiagnosticSentinel>)`.
 /// The registry contains only authoritative (first-wins) declarations.
