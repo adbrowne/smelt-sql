@@ -1496,8 +1496,12 @@ fn check_workspace_emits_exactly_one_phase_e1_diagnostic(
 }
 
 /// Phase E1 TDD: `examples/meta_config/` produces zero diagnostics.
-/// Exercises smelt.record declaration + YAML loader + Map<Text, Record> +
-/// m.entries() |> map(fn e => …) + per-target overlay.
+/// Exercises smelt.record declaration + inline record types + YAML loader
+/// (`Map<Text, Record>` and `List<Record>` root shapes) + per-target overlay.
+/// HOF consumption of loader results (`m.entries() |> map(fn e => …)`) is
+/// covered by unit tests in `smelt-db::type_inference`; production wiring of
+/// the loader-result type through SELECT expressions is a known follow-up
+/// (see `docs/plans/20260509-meta-language-E1.md` Deferred — Phase 5).
 #[test]
 fn meta_config_clean_workspace() {
     check_workspace_no_diagnostics_with_loaders("examples/meta_config");
