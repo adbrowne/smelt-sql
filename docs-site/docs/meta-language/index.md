@@ -58,15 +58,3 @@ The meta-language also provides iteration, transformation, compile-time configur
 | `smelt.config.load_json(path, schema)` | Load a JSON file as a typed meta value | [Config Loaders](config-loaders.md) |
 
 Quick reference for all constructs and diagnostic codes: [Reference](reference.md).
-
-## Planned but not yet implemented
-
-The following meta-language capabilities are planned but not yet available:
-
-| Capability | Content |
-|------------|---------|
-| **Multi-model production** | One file generates N models |
-| **Polish** | Multi-arg lambdas, meta ternary, parameterised reducers |
-| **LSP completeness** | Rename, completion, diagnostics-with-frame-stacks across all surface |
-
-These capabilities land incrementally. Each addition extends the [Reference](reference.md) page.

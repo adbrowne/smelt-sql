@@ -7,7 +7,7 @@ smelt.config.load_yaml(path, schema)
 smelt.config.load_json(path, schema)
 ```
 
-`smelt.config.load_toml(path, schema)` is **reserved** and not yet available. Calling it emits `ConfigLoaderTomlNotYetSupported`.
+`smelt.config.load_toml(path, schema)` is **reserved**. Calling it emits `ConfigLoaderTomlNotYetSupported`.
 
 ## Path argument
 

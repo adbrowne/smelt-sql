@@ -1041,7 +1041,7 @@ See [Config Loaders — `ConfigLoaderUnknownField`](config-loaders.md#configload
 
 **Message:** `smelt.config.var name must be a string literal`
 
-**Fix:** use a string literal: `smelt.config.var('my_var')`. Dynamic name resolution is planned but not yet implemented.
+**Fix:** use a string literal: `smelt.config.var('my_var')`.
 
 See [Config Variables — `ConfigVarNameNotLiteral`](config-vars.md#configvarnamenotliteral).
 
@@ -1113,7 +1113,7 @@ See [Higher-Order Functions — `HofNameShadowed`](hofs.md#hofnameshadowed).
 
 **Message:** `multi-argument lambdas are not supported in v1; use a single parameter`
 
-**Fix:** rewrite to use a single parameter. Multi-argument lambdas are planned but not yet implemented.
+**Fix:** rewrite to use a single parameter.
 
 See [Lambdas — `LambdaArityNotSupported`](lambdas.md#lambdaaritynotsupported).
 
@@ -1280,10 +1280,7 @@ FROM smelt.sources.raw.users
 WHERE id = 1 AND ...preds  -- MetaSpreadInForbiddenPosition
 ```
 
-**Fix:** move the spread to a SELECT list. For WHERE-clause predicate lists, use the `and_all` reducer. For IN-list membership, use `WHERE id IN (...vs)` (planned but not yet implemented).
-
-!!! note
-    Forbidden positions other than WHERE may currently emit parse errors rather than this diagnostic. The full set of friendly diagnostics for forbidden positions is planned but not yet wired everywhere.
+**Fix:** move the spread to a SELECT list. For WHERE-clause predicate lists, use the `and_all` reducer.
 
 ---
 
