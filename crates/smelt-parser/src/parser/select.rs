@@ -184,6 +184,17 @@ impl<'a> super::Parser<'a> {
 
             self.skip_trivia();
             if self.at(COMMA) {
+                // Peek BEFORE consuming the comma: if the token after the comma is
+                // `IDENT COLON`, this is a record-literal field boundary
+                // (e.g. `owner: 'team'` following `body: SELECT 1, …` inside a
+                // `ModelDef { … }`).  In SQL, `IDENT :` is not a valid select-item
+                // start; breaking WITHOUT consuming the comma leaves it for the
+                // enclosing record-literal parser to use as its field separator.
+                if self.peek_nth_non_trivia(1) == Some(IDENT)
+                    && self.peek_nth_non_trivia(2) == Some(COLON)
+                {
+                    break; // leave the COMMA in the stream
+                }
                 self.advance();
                 self.skip_trivia();
                 // Allow trailing comma - break if next token ends the SELECT list
@@ -206,6 +217,7 @@ impl<'a> super::Parser<'a> {
                     UNION_KW,
                     INTERSECT_KW,
                     EXCEPT_KW,
+                    RBRACE,
                 ]) {
                     break;
                 }

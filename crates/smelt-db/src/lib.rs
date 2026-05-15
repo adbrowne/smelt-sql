@@ -73,9 +73,10 @@ pub use smelt_types::{
 
 pub use diagnostics_types::{
     meta_hof_diagnostic_message, meta_list_diagnostic_message, meta_loader_diagnostic_message,
-    meta_map_diagnostic_message, meta_record_diagnostic_message,
-    meta_reflection_diagnostic_message, meta_reflection_diagnostic_message_with_table_expr,
-    Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity,
+    meta_map_diagnostic_message, meta_multi_model_diagnostic_message,
+    meta_record_diagnostic_message, meta_reflection_diagnostic_message,
+    meta_reflection_diagnostic_message_with_table_expr, Diagnostic, DiagnosticCode, DiagnosticData,
+    DiagnosticSeverity,
 };
 
 pub use function_body_check::{

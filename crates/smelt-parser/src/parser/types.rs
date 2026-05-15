@@ -187,6 +187,19 @@ impl<'a> Parser<'a> {
     /// Error recovery: missing value → advance to COMMA/RBRACE sync point.
     pub(super) fn parse_record_literal(&mut self) {
         self.start_node(RECORD_LITERAL);
+        self.parse_record_literal_body();
+        self.finish_node(); // RECORD_LITERAL
+    }
+
+    /// Parse the body of a record literal starting at `{`, including the closing `}`.
+    ///
+    /// This is the shared inner implementation used by both the anonymous `{…}`
+    /// form (`parse_record_literal`) and the named `TypeName {…}` form (where
+    /// the caller has already started a RECORD_LITERAL node via a checkpoint
+    /// and consumed the leading IDENT).
+    ///
+    /// Precondition: `self.at(LBRACE)`.
+    pub(super) fn parse_record_literal_body(&mut self) {
         self.advance(); // consume `{`
 
         loop {
@@ -256,8 +269,6 @@ impl<'a> Parser<'a> {
         } else {
             self.error("Expected '}' to close record literal".to_string());
         }
-
-        self.finish_node(); // RECORD_LITERAL
     }
 
     /// Returns true when the current `{` starts a record literal rather than a

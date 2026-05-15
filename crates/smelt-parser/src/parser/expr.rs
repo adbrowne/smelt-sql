@@ -560,6 +560,13 @@ impl<'a> super::Parser<'a> {
                     self.start_node_at(checkpoint, EXPRESSION);
                     self.finish_node();
                 }
+            } else if self.at(LBRACE) && self.is_record_literal_start() {
+                // Named record literal: `TypeName { field: value, … }`.
+                // The checkpoint includes the leading IDENT (the type name), so
+                // the RECORD_LITERAL node spans `TypeName { … }` in full.
+                self.start_node_at(checkpoint, RECORD_LITERAL);
+                self.parse_record_literal_body();
+                self.finish_node(); // RECORD_LITERAL
             } else if self.at(DOUBLE_COLON) {
                 // PostgreSQL cast: expr::type
                 // Wrap the identifier in EXPRESSION first, then wrap all in CAST_EXPR

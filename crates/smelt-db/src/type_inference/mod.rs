@@ -19,6 +19,7 @@ pub mod function_call;
 pub mod hof;
 pub mod literal;
 pub mod loader_and_reflection;
+pub mod multi_model;
 pub mod record;
 pub mod subquery;
 pub mod type_context;
@@ -89,4 +90,10 @@ pub use record::{
     record_registry_for_workspace, registry_code_to_diagnostic_code, validate_map_type_expression,
     MapCallArg, MapMethodCallResult, MetaTextLiftPosition, RecordFieldProjectionResult,
     RecordLiteralResult, RecordLiteralSentinel, StaticResolution,
+};
+
+pub use multi_model::{
+    check_generator_body_reflection_forbid, infer_generator_file_body, infer_model_def_literal,
+    validate_model_def_materialization, validate_model_def_name, GeneratorBodyInferResult,
+    ModelDefLiteralInferResult, MultiModelSentinel,
 };
