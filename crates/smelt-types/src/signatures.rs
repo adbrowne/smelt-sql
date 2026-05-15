@@ -272,6 +272,30 @@ pub enum SmeltType {
     ///
     /// **Closed**: the v1 field set is exactly `{path, name, tags, columns}`.
     SourceRef,
+    /// `ModelDef` — the built-in closed user-constructible meta record type
+    /// for multi-model generator files.
+    ///
+    /// Unlike `ColumnRef`, `ModelRef`, and `SourceRef` (which originate from
+    /// reflection), `ModelDef` values are constructed via record literals inside
+    /// a `generates: models` generator file body.
+    ///
+    /// The type has exactly five fields (see [`MODEL_DEF_FIELDS`]):
+    ///   - `name: Text` — model identifier (`[A-Za-z0-9_]+`, non-empty)
+    ///   - `body: TableExpr` — the model's SQL body (the single carve-out
+    ///     admitting `TableExpr` in a record-like field position)
+    ///   - `materialization: Text` — one of `view`, `table`, `incremental`
+    ///   - `tags: List<Text>` — tag set (merges with workspace-level overlays)
+    ///   - `description: Text` — human-readable description
+    ///
+    /// **Meta-only**: values never reach the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{name, body, materialization, tags, description}`.
+    /// Adding a field requires a spec edit and a compiler change.
+    ///
+    /// **Not assignable to `Record`**: `ModelDef` is the only user-constructible
+    /// closed meta record type. It is structurally distinguishable from any
+    /// user-declared `smelt.record` type, even one with identical fields.
+    ModelDef,
     /// `Record<{f1: T1, …}>` or a named record type `TypeName` (Phase E1,
     /// meta-language records).
     ///
@@ -348,6 +372,7 @@ impl PartialEq for SmeltType {
             (SmeltType::ColumnRef, SmeltType::ColumnRef) => true,
             (SmeltType::ModelRef, SmeltType::ModelRef) => true,
             (SmeltType::SourceRef, SmeltType::SourceRef) => true,
+            (SmeltType::ModelDef, SmeltType::ModelDef) => true,
             // Record structural equality: `name` is deliberately excluded.
             // Two records with the same `fields` map compare equal regardless of
             // their `name` metadata (spec rule 4, Phase E1).
@@ -483,6 +508,7 @@ impl std::fmt::Display for SmeltType {
             SmeltType::ColumnRef => write!(f, "ColumnRef"),
             SmeltType::ModelRef => write!(f, "ModelRef"),
             SmeltType::SourceRef => write!(f, "SourceRef"),
+            SmeltType::ModelDef => write!(f, "ModelDef"),
             SmeltType::Record { fields, name } => {
                 if let Some(n) = name {
                     // Named declaration: display as the type name.
@@ -3226,6 +3252,88 @@ pub fn source_ref_field(name: &str) -> Option<&'static SmeltType> {
         .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
 }
 
+/// The closed field set of [`SmeltType::ModelDef`].
+///
+/// Invariant: exactly five entries — `name`, `body`, `materialization`, `tags`,
+/// `description` — in this canonical order. This is the single source of truth
+/// for the v1 field set. Any future addition requires a spec edit AND a change
+/// to this constant.
+///
+/// Field types:
+/// - `name`            → `Expr<Text>`       — model identifier (`[A-Za-z0-9_]+`, non-empty)
+/// - `body`            → `TableExpr`        — the only carve-out admitting `TableExpr` in a record field
+/// - `materialization` → `Expr<Text>`       — one of `view`, `table`, `incremental`
+/// - `tags`            → `List<Expr<Text>>` — merged tag set
+/// - `description`     → `Expr<Text>`       — human-readable description
+///
+/// Uses `LazyLock` because `SmeltType::List` and `SmeltType::TableExpr` contain
+/// heap-allocated inner types that cannot be constructed in `const` context.
+pub static MODEL_DEF_FIELDS: LazyLock<Vec<(&'static str, SmeltType)>> = LazyLock::new(|| {
+    vec![
+        (
+            "name",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        // `body` is the single carve-out admitting `TableExpr` in a record-like
+        // field position. User-defined `smelt.record` declarations remain
+        // forbidden from declaring `TableExpr` fields.
+        ("body", SmeltType::TableExpr(None)),
+        (
+            "materialization",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "tags",
+            SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text,
+            )))),
+        ),
+        (
+            "description",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+    ]
+});
+
+/// Look up a [`ModelDef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"name"`, `"body"`, `"materialization"`,
+/// `"tags"`, or `"description"`; `None` for any other identifier (the
+/// closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn model_def_field(name: &str) -> Option<&'static SmeltType> {
+    MODEL_DEF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// Returns `true` for every [`SmeltType`] that is meta-only — i.e., values of
+/// this type never reach the database engine.
+///
+/// Meta-only types: `List<T>` (for any `T`), `Lambda<T,U>`, `TableExpr`,
+/// `SelectItems`, `ColumnRef`, `ModelRef`, `SourceRef`, `ModelDef`,
+/// `Record{…}`, `Map<K,V>`, and `Unknown`.
+///
+/// Data-world types: `Expr<T>` and `Struct{…}` (which represent SQL-level
+/// typed expressions).
+///
+/// Pure — no Salsa dependency.
+pub fn is_meta_only_type(ty: &SmeltType) -> bool {
+    !is_data_world_type(ty)
+}
+
+/// Returns `true` for every [`SmeltType`] that represents a value in the
+/// Data World (SQL execution layer).
+///
+/// Data-world types: `Expr<T>` and `Struct{…}`.
+/// All other sorts are meta-only.
+///
+/// Pure — no Salsa dependency.
+pub fn is_data_world_type(ty: &SmeltType) -> bool {
+    matches!(ty, SmeltType::Expr(_) | SmeltType::Struct { .. })
+}
+
 /// The closed accessor set for the `smelt.models` namespace.
 ///
 /// Returns `Some(&'static SmeltMetaSignature)` when `name` is a known accessor;
@@ -4280,6 +4388,7 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
         SmeltType::ColumnRef => "ColumnRef".to_string(),
         SmeltType::ModelRef => "ModelRef".to_string(),
         SmeltType::SourceRef => "SourceRef".to_string(),
+        SmeltType::ModelDef => "ModelDef".to_string(),
         SmeltType::Record { fields, name } => {
             if let Some(n) = name {
                 n.clone()
@@ -6375,6 +6484,169 @@ mod tests {
                 .count(),
             1,
             "Expected one RecordFieldTypeForbidden for Lambda field"
+        );
+    }
+
+    // ── ModelDef type system tests ────────────────────────────────────────────
+
+    /// `MODEL_DEF_FIELDS` exposes exactly five names and each entry's type
+    /// matches the spec table.
+    #[test]
+    fn model_def_fields_registry_is_closed_and_exact() {
+        // Exact five names in the spec-defined set.
+        let spec_names = ["name", "body", "materialization", "tags", "description"];
+        assert_eq!(
+            MODEL_DEF_FIELDS.len(),
+            5,
+            "MODEL_DEF_FIELDS must have exactly 5 entries; got {}",
+            MODEL_DEF_FIELDS.len()
+        );
+        for name in &spec_names {
+            assert!(
+                model_def_field(name).is_some(),
+                "MODEL_DEF_FIELDS must contain field '{name}'"
+            );
+        }
+        // Unknown identifiers return None (closed-field invariant).
+        assert!(
+            model_def_field("incremental").is_none(),
+            "MODEL_DEF_FIELDS must NOT contain 'incremental'"
+        );
+        assert!(
+            model_def_field("owner").is_none(),
+            "MODEL_DEF_FIELDS must NOT contain 'owner'"
+        );
+
+        // name → Expr<Text>
+        let name_ty = model_def_field("name").unwrap();
+        assert!(
+            matches!(
+                name_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "name field must be Expr<Text>, got: {name_ty:?}"
+        );
+        // body → TableExpr (the single carve-out)
+        let body_ty = model_def_field("body").unwrap();
+        assert!(
+            matches!(body_ty, SmeltType::TableExpr(None)),
+            "body field must be TableExpr, got: {body_ty:?}"
+        );
+        // materialization → Expr<Text>
+        let mat_ty = model_def_field("materialization").unwrap();
+        assert!(
+            matches!(
+                mat_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "materialization field must be Expr<Text>, got: {mat_ty:?}"
+        );
+        // tags → List<Expr<Text>>
+        let tags_ty = model_def_field("tags").unwrap();
+        assert!(
+            matches!(tags_ty, SmeltType::List(inner)
+                if matches!(inner.as_ref(), SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)))),
+            "tags field must be List<Expr<Text>>, got: {tags_ty:?}"
+        );
+        // description → Expr<Text>
+        let desc_ty = model_def_field("description").unwrap();
+        assert!(
+            matches!(
+                desc_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "description field must be Expr<Text>, got: {desc_ty:?}"
+        );
+    }
+
+    /// `SmeltType::ModelDef` exposes `field_type(name)` returning the
+    /// spec-declared type for each of the five names; returns `None` for unknown.
+    #[test]
+    fn model_def_smelt_type_round_trips_field_access() {
+        let ty = SmeltType::ModelDef;
+        // All five spec fields resolve.
+        for field in &["name", "body", "materialization", "tags", "description"] {
+            let from_static = model_def_field(field);
+            assert!(
+                from_static.is_some(),
+                "model_def_field must return Some for '{field}'"
+            );
+        }
+        // Unknown field returns None.
+        assert!(
+            model_def_field("unknown_xyz").is_none(),
+            "model_def_field must return None for unknown field"
+        );
+        // Verify ModelDef equality with itself.
+        assert_eq!(ty, SmeltType::ModelDef, "ModelDef must equal itself");
+    }
+
+    /// `SmeltType::ModelDef` does not unify with a structurally-identical
+    /// `SmeltType::Record` in either direction.
+    #[test]
+    fn model_def_is_assignment_isolated_from_record() {
+        use std::collections::BTreeMap;
+        // Build a Record with the same five field names and types as ModelDef.
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert("body".to_string(), SmeltType::TableExpr(None));
+        fields.insert(
+            "materialization".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "tags".to_string(),
+            SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text,
+            )))),
+        );
+        fields.insert(
+            "description".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        let record_twin = SmeltType::Record { fields, name: None };
+
+        // ModelDef != Record even with identical fields.
+        assert_ne!(
+            SmeltType::ModelDef,
+            record_twin,
+            "ModelDef must not equal a structurally-identical Record"
+        );
+        // Subtype checks in both directions must fail.
+        assert!(
+            !is_subtype_of(&SmeltType::ModelDef, &record_twin),
+            "ModelDef must NOT be a subtype of a structurally-identical Record"
+        );
+        assert!(
+            !is_subtype_of(&record_twin, &SmeltType::ModelDef),
+            "Record must NOT be a subtype of ModelDef"
+        );
+    }
+
+    /// The `body` field in `MODEL_DEF_FIELDS` is `TableExpr` — the only
+    /// carve-out that admits `TableExpr` in a record-like field position.
+    #[test]
+    fn model_def_admits_table_expr_in_body_field() {
+        let body_ty = model_def_field("body").unwrap();
+        assert!(
+            matches!(body_ty, SmeltType::TableExpr(None)),
+            "body field in MODEL_DEF_FIELDS must be TableExpr(None); got: {body_ty:?}"
+        );
+    }
+
+    /// `SmeltType::ModelDef` is meta-only and not a data-world type.
+    #[test]
+    fn model_def_is_meta_only_does_not_reach_data_world() {
+        assert!(
+            is_meta_only_type(&SmeltType::ModelDef),
+            "ModelDef must be meta-only"
+        );
+        assert!(
+            !is_data_world_type(&SmeltType::ModelDef),
+            "ModelDef must NOT be a data-world type"
         );
     }
 }

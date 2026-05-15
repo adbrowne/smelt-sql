@@ -108,6 +108,8 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
         // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
         // Inference wiring lands in Phase 3/5.
         Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown,
+        // `ModelDef` — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };

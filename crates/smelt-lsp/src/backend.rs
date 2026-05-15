@@ -271,6 +271,19 @@ impl Backend {
                 DbCode::ConfigLoaderRootShapeMismatch => "config-loader-root-shape-mismatch",
                 DbCode::ConfigLoaderDuplicateMapKey => "config-loader-duplicate-map-key",
                 DbCode::ConfigLoaderNullCoercion => "config-loader-null-coercion",
+                // Multi-model production diagnostic codes.
+                DbCode::GeneratesUnknownValue => "generates-unknown-value",
+                DbCode::GeneratesMixedWithBareModel => "generates-mixed-with-bare-model",
+                DbCode::GenerateFileBareSelectForbidden => "generate-file-bare-select-forbidden",
+                DbCode::GenerateFileBodyTypeError => "generate-file-body-type-error",
+                DbCode::ModelDefOutsideGeneratorFile => "model-def-outside-generator-file",
+                DbCode::ModelDefInvalidName => "model-def-invalid-name",
+                DbCode::ModelDefInvalidMaterialization => "model-def-invalid-materialization",
+                DbCode::ModelDefDuplicateName => "model-def-duplicate-name",
+                DbCode::ModelDefHandAuthoredCollision => "model-def-hand-authored-collision",
+                DbCode::GeneratorBodyForbidsModelReflection => {
+                    "generator-body-forbids-model-reflection"
+                }
             };
             NumberOrString::String(code_str.to_string())
         });

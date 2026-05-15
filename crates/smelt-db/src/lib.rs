@@ -642,6 +642,9 @@ fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
                 }
             }
             smelt_core::FileMetadata::Empty => {}
+            // Generator files produce models via meta-language evaluation;
+            // they are not test files.
+            smelt_core::FileMetadata::Generator { .. } => {}
         }
     }
     // 3. Default: Model.

@@ -255,6 +255,9 @@ pub fn discover_python_models(
                         .find(|section| section.metadata.name.as_deref() == Some(&output.name))
                         .map(|section| Box::new(section.metadata)),
                     FileMetadata::Empty => None,
+                    // Generator files produce models via meta-language evaluation;
+                    // Python model output is not a generator file.
+                    FileMetadata::Generator { .. } => None,
                 });
 
                 // Convert parse errors, attributing them to the Python file

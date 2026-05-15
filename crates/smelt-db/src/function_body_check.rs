@@ -475,6 +475,8 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
         // Inference wiring lands in Phase 3/5.
         Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown,
+        // `ModelDef` — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }

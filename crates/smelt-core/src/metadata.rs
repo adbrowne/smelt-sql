@@ -120,6 +120,14 @@ pub struct ModelMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
+    /// Generator directive: `"models"` marks the file as a multi-model
+    /// generator file whose body is a `List<ModelDef>` meta expression.
+    /// Any value other than `"models"` is rejected at parse time with
+    /// `MetadataError::GeneratesUnknownValue`. Mutually exclusive with
+    /// `name:` and with Layer-1 `--- name: foo ---` section delimiters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generates: Option<String>,
+
     /// Materialization strategy (table or view)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub materialization: Option<Materialization>,
@@ -178,8 +186,20 @@ pub enum FileMetadata {
         sql_offset: usize,
     },
 
-    /// Multiple models in one file
+    /// Multiple models in one file (Layer-1 section delimiter format)
     Multi { models: Vec<ModelSection> },
+
+    /// Generator file: `generates: models` frontmatter marks the body as a
+    /// meta-evaluable `List<ModelDef>` expression. Each emitted `ModelDef`
+    /// value becomes a model in the workspace.
+    Generator {
+        /// The parsed frontmatter (includes `generates: "models"` and any
+        /// other allowed keys such as `tags`, `owner`, etc.).
+        metadata: Box<ModelMetadata>,
+        /// Byte offset of the first character of the body (the byte
+        /// immediately after the closing `---\n` line of the frontmatter).
+        body_offset: usize,
+    },
 }
 
 /// One model section in a multi-model file
@@ -188,6 +208,25 @@ pub struct ModelSection {
     pub metadata: ModelMetadata,
     /// Byte range of SQL in file
     pub sql_range: Range<usize>,
+}
+
+/// Which mutual-exclusivity rule was violated in a `generates: models` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MixedKind {
+    /// The frontmatter contained a `name:` field alongside `generates: models`.
+    NameField,
+    /// The body contained at least one Layer-1 `--- name: foo ---` section
+    /// delimiter alongside `generates: models` frontmatter.
+    SectionDelimiter,
+}
+
+/// A 1-based line + column position within the source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSpan {
+    /// 1-based line number.
+    pub line: usize,
+    /// 1-based column number.
+    pub column: usize,
 }
 
 /// Errors that can occur during metadata extraction
@@ -204,6 +243,41 @@ pub enum MetadataError {
 
     #[error("Frontmatter not closed: missing closing '---' after line {0}")]
     UnclosedFrontmatter(usize),
+
+    /// `generates:` value other than `"models"` was supplied.
+    /// `value_span` is the 1-based line/column of the value token in the YAML.
+    #[error("generates must be `models`; found {value}")]
+    GeneratesUnknownValue {
+        value: String,
+        value_span: SourceSpan,
+    },
+
+    /// `generates: models` combined with a `name:` frontmatter field or
+    /// with Layer-1 `--- name: foo ---` section delimiters.
+    #[error("generates: models cannot coexist with bare-model identity (name field or section delimiter)")]
+    GeneratesMixedWithBareModel {
+        offending: MixedKind,
+        span: SourceSpan,
+    },
+}
+
+/// Check whether a `---\n`-prefixed source contains a `generates:` key in its
+/// frontmatter block (the text between the opening `---` and the first closing
+/// `---`). Returns `true` only when the key appears inside the frontmatter —
+/// not inside the body.
+fn frontmatter_has_generates(source: &str) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    // Skip first line ("---"), scan until closing "---" or EOF.
+    for line in lines.iter().skip(1) {
+        if line.trim() == "---" {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with("generates:") || trimmed == "generates:" {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extract metadata from SQL source text
@@ -214,7 +288,15 @@ pub fn extract_file_metadata(source: &str) -> Result<FileMetadata, MetadataError
 
     // Check for single-model frontmatter
     if trimmed.starts_with("---\n") || trimmed.starts_with("---\r\n") {
-        // Check if this is actually a multi-model file
+        // Generator files: `generates:` in frontmatter takes priority over
+        // `--- name:` section-delimiter detection. We must route to
+        // `extract_single_model` (which then dispatches to `extract_generator`)
+        // so the mutual-exclusivity guard fires before `extract_multi_model`
+        // swallows the section delimiters in the body.
+        if frontmatter_has_generates(trimmed) {
+            return extract_single_model(trimmed);
+        }
+        // Check if this is actually a multi-model file (Layer-1 section delimiter format)
         if trimmed.contains("--- name:") {
             extract_multi_model(trimmed)
         } else {
@@ -235,6 +317,107 @@ pub fn extract_file_metadata(source: &str) -> Result<FileMetadata, MetadataError
     }
 }
 
+/// Compute a 1-based `SourceSpan` for the YAML `generates:` value token given
+/// the raw frontmatter YAML content (the text between the two `---` delimiters).
+///
+/// The outer file always starts with `---\n` (line 1); the YAML block begins on
+/// line 2. We scan the YAML lines looking for `generates:` and return the
+/// 1-based column position of the first non-whitespace character after the colon.
+fn span_for_generates_value(yaml_content: &str) -> SourceSpan {
+    // Outer file line 1 is "---"; YAML starts on line 2.
+    let yaml_base_line = 2usize;
+    for (idx, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("generates:") {
+            let colon_rel = line.find(':').unwrap_or(0);
+            let rest = &line[colon_rel + 1..];
+            let value_col = colon_rel + 1 + rest.len() - rest.trim_start().len() + 1;
+            return SourceSpan {
+                line: yaml_base_line + idx,
+                column: value_col,
+            };
+        }
+    }
+    SourceSpan { line: 1, column: 1 }
+}
+
+/// Compute a 1-based `SourceSpan` for the `name:` key inside the YAML block.
+fn span_for_name_key(yaml_content: &str) -> SourceSpan {
+    let yaml_base_line = 2usize;
+    for (idx, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("name:") {
+            let col = line.find("name").unwrap_or(0) + 1;
+            return SourceSpan {
+                line: yaml_base_line + idx,
+                column: col,
+            };
+        }
+    }
+    SourceSpan { line: 1, column: 1 }
+}
+
+/// Extract a generator file: `generates: models` frontmatter with a body that
+/// is a meta-evaluable `List<ModelDef>` expression.
+///
+/// Returns `Err(MetadataError::GeneratesUnknownValue)` when the `generates:`
+/// value is not `"models"`, `Err(MetadataError::GeneratesMixedWithBareModel)`
+/// when `name:` appears alongside `generates: models`, or
+/// `Ok(FileMetadata::Generator { … })` on success.
+fn extract_generator(
+    source: &str,
+    metadata: ModelMetadata,
+    yaml_content: &str,
+    closing_line_index: usize,
+) -> Result<FileMetadata, MetadataError> {
+    // Validate the `generates:` value.
+    let value = metadata.generates.as_deref().unwrap_or("");
+    if value != "models" {
+        let value_span = span_for_generates_value(yaml_content);
+        return Err(MetadataError::GeneratesUnknownValue {
+            value: value.to_string(),
+            value_span,
+        });
+    }
+
+    // `name:` is mutually exclusive with `generates: models`.
+    if metadata.name.is_some() {
+        let span = span_for_name_key(yaml_content);
+        return Err(MetadataError::GeneratesMixedWithBareModel {
+            offending: MixedKind::NameField,
+            span,
+        });
+    }
+
+    // Calculate body_offset (byte just after the closing `---\n`).
+    let body_offset = source
+        .lines()
+        .take(closing_line_index + 1)
+        .map(|line| line.len() + 1) // +1 for newline
+        .sum();
+
+    // Check if the body contains Layer-1 section delimiters (`--- name: foo ---`).
+    let body = &source[body_offset..];
+    for (idx, line) in body.lines().enumerate() {
+        if line.trim().starts_with("--- name:") {
+            // Count actual file line number: closing_line_index+1 (0-based) + 1 (1-based) + body line offset.
+            let body_line = closing_line_index + 2 + idx;
+            return Err(MetadataError::GeneratesMixedWithBareModel {
+                offending: MixedKind::SectionDelimiter,
+                span: SourceSpan {
+                    line: body_line,
+                    column: 1,
+                },
+            });
+        }
+    }
+
+    Ok(FileMetadata::Generator {
+        metadata: Box::new(metadata),
+        body_offset,
+    })
+}
+
 /// Check if source contains lines that look like malformed section delimiters
 ///
 /// Returns the 1-based line number of the first malformed delimiter, if any.
@@ -252,7 +435,8 @@ fn has_malformed_delimiter(source: &str) -> Option<usize> {
     None
 }
 
-/// Extract metadata from a single-model file
+/// Extract metadata from a single-model file (or a generator file that starts
+/// with `---\n` frontmatter).
 fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
     let lines: Vec<&str> = source.lines().collect();
 
@@ -274,6 +458,11 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
 
     // Parse YAML
     let metadata: ModelMetadata = serde_yaml::from_str(&yaml_content)?;
+
+    // Route generator files to `extract_generator`.
+    if metadata.generates.is_some() {
+        return extract_generator(source, metadata, &yaml_content, closing_line);
+    }
 
     // Calculate SQL offset (after closing ---)
     let sql_offset = source
@@ -787,6 +976,149 @@ SELECT * FROM users"#;
                 assert_eq!(metadata.format, None);
             }
             _ => panic!("Expected Single variant"),
+        }
+    }
+
+    // ── Generator file metadata tests ─────────────────────────────────────────
+
+    /// A file with `generates: models` frontmatter routes to
+    /// `FileMetadata::Generator` with correct `body_offset`.
+    #[test]
+    fn parse_generates_models_frontmatter_routes_to_generator_variant() {
+        // Three-line frontmatter: "---\ngenerates: models\n---\n"
+        // byte offsets: 0-3="---\n", 4-20="generates: models\n", 21-24="---\n"
+        // body_offset should point to byte 25 (first byte after closing "---\n").
+        let source = "---\ngenerates: models\n---\n[]\n";
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Generator {
+                metadata,
+                body_offset,
+            } => {
+                assert_eq!(
+                    metadata.generates.as_deref(),
+                    Some("models"),
+                    "metadata.generates must be Some(\"models\")"
+                );
+                // body_offset must point past the closing "---\n".
+                assert_eq!(
+                    &source[body_offset..],
+                    "[]\n",
+                    "body_offset must point to byte after closing ---\\n"
+                );
+            }
+            other => panic!("Expected Generator variant, got: {:?}", other),
+        }
+    }
+
+    /// `generates:` with a value other than `models` produces
+    /// `MetadataError::GeneratesUnknownValue` carrying the offending value and a
+    /// 1-based `(line, column)` span pointing at the first non-whitespace
+    /// character after the `generates:` colon — the parser dispatch in Phase 2
+    /// anchors the surfaced diagnostic at this span.
+    #[test]
+    fn parse_generates_unknown_value_emits_metadata_error() {
+        let source = "---\ngenerates: views\n---\nSELECT 1";
+        let result = extract_file_metadata(source);
+        match result {
+            Err(MetadataError::GeneratesUnknownValue { value, value_span }) => {
+                assert_eq!(value, "views");
+                // Outer line 1 = "---"; YAML "generates: views" is line 2.
+                // "generates:" occupies columns 1..=10; " views" begins at column 12.
+                assert_eq!(
+                    value_span,
+                    SourceSpan {
+                        line: 2,
+                        column: 12,
+                    },
+                    "value_span should anchor at the first non-whitespace char after the colon"
+                );
+            }
+            other => panic!("Expected GeneratesUnknownValue(views), got: {:?}", other),
+        }
+    }
+
+    /// `generates: models` combined with a `name:` field produces
+    /// `MetadataError::GeneratesMixedWithBareModel { offending: MixedKind::NameField, .. }`.
+    #[test]
+    fn parse_generates_with_name_field_emits_mixed_error() {
+        let source = "---\ngenerates: models\nname: foo\n---\n[]";
+        let result = extract_file_metadata(source);
+        assert!(
+            matches!(
+                result,
+                Err(MetadataError::GeneratesMixedWithBareModel {
+                    offending: MixedKind::NameField,
+                    ..
+                })
+            ),
+            "Expected GeneratesMixedWithBareModel(NameField), got: {:?}",
+            result
+        );
+    }
+
+    /// `generates: models` combined with Layer-1 `--- name: foo ---` section
+    /// delimiters produces `MetadataError::GeneratesMixedWithBareModel { offending: MixedKind::SectionDelimiter, .. }`.
+    #[test]
+    fn parse_generates_with_section_delimiter_emits_mixed_error() {
+        let source = "---\ngenerates: models\n---\n--- name: foo ---\nSELECT 1\n--- name: bar ---\nSELECT 2\n";
+        let result = extract_file_metadata(source);
+        assert!(
+            matches!(
+                result,
+                Err(MetadataError::GeneratesMixedWithBareModel {
+                    offending: MixedKind::SectionDelimiter,
+                    ..
+                })
+            ),
+            "Expected GeneratesMixedWithBareModel(SectionDelimiter), got: {:?}",
+            result
+        );
+    }
+
+    /// Files without `generates:` frontmatter continue to parse to
+    /// `Single`, `Multi`, or `Empty` (regression guard).
+    #[test]
+    fn parse_no_generates_keeps_single_or_multi_variants() {
+        // Single variant.
+        let single = "---\nname: my_model\nmaterialization: table\n---\nSELECT 1";
+        assert!(
+            matches!(
+                extract_file_metadata(single).unwrap(),
+                FileMetadata::Single { .. }
+            ),
+            "Non-generates file must parse to Single"
+        );
+
+        // Multi variant.
+        let multi = "--- name: m1 ---\n---\nSELECT 1\n--- name: m2 ---\n---\nSELECT 2";
+        assert!(
+            matches!(
+                extract_file_metadata(multi).unwrap(),
+                FileMetadata::Multi { .. }
+            ),
+            "Non-generates file must parse to Multi"
+        );
+
+        // Empty variant.
+        let empty = "SELECT * FROM foo";
+        assert!(
+            matches!(extract_file_metadata(empty).unwrap(), FileMetadata::Empty),
+            "Non-frontmatter file must parse to Empty"
+        );
+    }
+
+    /// A generator file with extra frontmatter keys (`tags`, `owner`) admits them.
+    #[test]
+    fn parse_generates_models_with_other_frontmatter_keys_admits_them() {
+        let source = "---\ngenerates: models\ntags: [cohort]\nowner: data-team\n---\n[]";
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Generator { metadata, .. } => {
+                assert_eq!(metadata.tags, vec!["cohort".to_string()]);
+                assert_eq!(metadata.owner.as_deref(), Some("data-team"));
+            }
+            other => panic!("Expected Generator variant, got: {:?}", other),
         }
     }
 
