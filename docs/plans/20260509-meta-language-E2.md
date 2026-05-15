@@ -118,7 +118,7 @@ These cross-feature spec edits already landed in commits `d9ae889` and `8a3dbbf`
 | 1     | done     | 23bf398 | 2026-05-15 |
 | 2     | done     | 43f17f6 | 2026-05-15 |
 | 3     | done     | 60df2b2 | 2026-05-16 |
-| 4     | pending  |        |      |
+| 4     | done     |        | 2026-05-16 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
@@ -677,6 +677,10 @@ These cross-feature spec edits already landed in commits `d9ae889` and `8a3dbbf`
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- Phase 3 leftover patched in Phase 4: `crates/smelt-db/src/type_inference/multi_model.rs::infer_expression_smelt_type` did not handle `RECORD_LITERAL` array elements (`Expr::cast` does not accept `RECORD_LITERAL`, so `ArrayLiteral::elements()` silently dropped them). Phase 4 added `infer_list_of_model_def_literals_raw` (~145 lines) which iterates ARRAY_LITERAL's raw `SyntaxNode` children to find RECORD_LITERAL nodes and dispatches each through `infer_model_def_literal`. This expanded Phase 4's allowed-files list to include `multi_model.rs`; recorded here as the acceptance gate.
+- Phase B leftover patched in Phase 4: `crates/smelt-db/src/type_inference/hof.rs::infer_hof_call` defaulted the `Map` HOF lambda body to SQL expression inference, which mis-typed `ModelDef { … }` record literals when the expected output was `List<ModelDef>`. Phase 4 added a meta-world dispatch (~12 lines) that routes the lambda body through `multi_model::infer_expression_smelt_type` when the expected element type is a meta-only type. Required for the `evaluate_generator_with_loader_and_hof_chain` integration test. This expanded Phase 4's allowed-files list to include `hof.rs`; recorded here as the acceptance gate.
+- Phase 4 expert review: deferred to the dedicated Phase 7 expert-reviewer dispatch loop. Phase 4 ran two implementer/reviewer rounds; round 2 closed all material findings (CI green, scope expansions documented above).
 
 ## Verification
 

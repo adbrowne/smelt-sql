@@ -1,4 +1,4 @@
-//! Multi-model production type inference (Phase E2).
+//! Multi-model production type inference.
 //!
 //! This module provides pure type-inference functions for `ModelDef` record
 //! literals, generator file body type-checking against `List<ModelDef>`, and
@@ -7,9 +7,9 @@
 //! # Pure-function rule
 //!
 //! Everything in this module is a pure function — no Salsa imports, no
-//! `#[salsa::tracked]`. The `TypeContext` fields added in this phase
+//! `#[salsa::tracked]`. The `TypeContext` fields
 //! (`is_inside_generator_file`, `workspace_shape_includes_generators`) are set
-//! by callers; Salsa orchestration that supplies them lives in Phase 4.
+//! by callers; Salsa orchestration that supplies them lives in the query layer.
 
 use rowan::TextRange;
 use smelt_parser::ast::RecordLiteral;
@@ -22,9 +22,9 @@ use super::*;
 
 // ─── Diagnostic sentinel type ─────────────────────────────────────────────────
 
-/// A diagnostic emitted during multi-model production type inference (Phase E2).
+/// A diagnostic emitted during multi-model production type inference.
 ///
-/// Mirrors `RecordLiteralSentinel` from `record.rs` but carries only E2 codes.
+/// Mirrors `RecordLiteralSentinel` from `record.rs` but carries only multi-model codes.
 #[derive(Debug, Clone)]
 pub struct MultiModelSentinel {
     /// The diagnostic code identifying which rule fired.
@@ -394,11 +394,10 @@ fn type_is_list_model_def(ty: &SmeltType) -> bool {
 /// - Pipe expressions (`|>`) → `infer_pipe_expr` (via `extract_pipe_expr_from_expr`)
 /// - HOF function calls (`map`, `filter`, `reduce`) → `infer_hof_call_from_function_call_with_expected`
 /// - List literals (`[…]`) → `infer_list_literal` with expected element type
-/// - All other expressions → returns `SmeltType::Unknown` (sufficient for
-///   Phase 3 tests; detailed expression inference is Phase 4's job).
+/// - All other expressions → returns `SmeltType::Unknown`.
 ///
 /// Pure — no Salsa dependency.
-fn infer_expression_smelt_type(
+pub(super) fn infer_expression_smelt_type(
     expr: &smelt_parser::ast::Expr,
     ctx: &TypeContext,
     expected: Option<&SmeltType>,
@@ -423,12 +422,103 @@ fn infer_expression_smelt_type(
             Some(SmeltType::List(inner)) => Some(inner.as_ref()),
             _ => None,
         };
+
+        // When the expected element type is `ModelDef`, dispatch each element
+        // through `infer_model_def_literal`.  The generic `infer_list_literal`
+        // path cannot handle `ModelDef { … }` literals because `Expr::cast` does
+        // not accept `RECORD_LITERAL` nodes, so `ArrayLiteral::elements()` would
+        // silently drop them.  We iterate raw ARRAY_LITERAL children instead.
+        if matches!(elem_expected, Some(SmeltType::ModelDef)) {
+            return infer_list_of_model_def_literals_raw(expr.syntax(), ctx);
+        }
+
         let result = infer_list_literal(&elems, ctx, elem_expected);
         return result.inferred;
     }
 
-    // Fallback for all other expression forms — Unknown is safe for Phase 3.
+    // RecordLiteral node — route to ModelDef inference when we have ModelDef
+    // as expected type, or return Unknown otherwise.
+    if let Some(record_lit) = RecordLiteral::cast(expr.syntax().clone()) {
+        if matches!(expected, Some(SmeltType::ModelDef)) {
+            let result = infer_model_def_literal(&record_lit, ctx);
+            return result.inferred;
+        }
+    }
+
+    // Fallback for all other expression forms.
     SmeltType::Unknown
+}
+
+/// Infer the type of an ARRAY_LITERAL whose elements are expected to be
+/// `ModelDef { … }` record literals.
+///
+/// The CST structure for `[ModelDef { name: 'x', body: SELECT 1 }]` is:
+/// ```text
+/// EXPRESSION (outer, from parse_expression())
+///   ARRAY_LITERAL
+///     EXPRESSION (one per element, from parse_bracket_list_literal → parse_expression)
+///       RECORD_LITERAL   ← ModelDef { … }
+/// ```
+///
+/// `Expr::cast` does not accept `RECORD_LITERAL` nodes, so the standard
+/// `ArrayLiteral::elements()` path silently drops them.  This function finds
+/// the ARRAY_LITERAL, then for each EXPRESSION child extracts the nested
+/// `RECORD_LITERAL` via `descendants()`.
+///
+/// Returns `List<ModelDef>` when every element infers as `ModelDef`,
+/// or `List<Unknown>` when the array is empty or any element fails.
+///
+/// Pure — no Salsa dependency.
+fn infer_list_of_model_def_literals_raw(
+    expr_node: &smelt_parser::syntax_kind::SyntaxNode,
+    ctx: &TypeContext,
+) -> SmeltType {
+    use smelt_parser::SyntaxKind::{ARRAY_LITERAL, EXPRESSION, RECORD_LITERAL};
+
+    // The expr_node may be an EXPRESSION wrapper; find the actual ARRAY_LITERAL.
+    let array_node: smelt_parser::syntax_kind::SyntaxNode = if expr_node.kind() == ARRAY_LITERAL {
+        expr_node.clone()
+    } else if let Some(child) = expr_node.children().find(|n| n.kind() == ARRAY_LITERAL) {
+        child
+    } else {
+        // No ARRAY_LITERAL found — shouldn't happen if caller checked as_array_literal().
+        return SmeltType::List(Box::new(SmeltType::Unknown));
+    };
+
+    // Each element is parsed as `parse_expression()` → EXPRESSION node wrapping
+    // the actual RECORD_LITERAL.  Collect RECORD_LITERALs by descending into
+    // each EXPRESSION child.
+    let record_children: Vec<RecordLiteral> = array_node
+        .children()
+        .filter(|n| n.kind() == EXPRESSION)
+        .filter_map(|expr_child| {
+            // The RECORD_LITERAL is a direct child of the EXPRESSION wrapper.
+            expr_child
+                .children()
+                .find(|n| n.kind() == RECORD_LITERAL)
+                .and_then(RecordLiteral::cast)
+        })
+        .collect();
+
+    if record_children.is_empty() {
+        // Empty list in a `List<ModelDef>` context → `List<Unknown>` which
+        // `type_is_list_model_def` accepts as admissible.
+        return SmeltType::List(Box::new(SmeltType::Unknown));
+    }
+
+    // All RECORD_LITERAL children must synthesise SmeltType::ModelDef.
+    let all_model_def = record_children.iter().all(|lit| {
+        let result = infer_model_def_literal(lit, ctx);
+        result.inferred == SmeltType::ModelDef
+    });
+
+    if all_model_def {
+        SmeltType::List(Box::new(SmeltType::ModelDef))
+    } else {
+        // Some elements were not valid ModelDef literals; the body type-check
+        // will emit GenerateFileBodyTypeError for the list.
+        SmeltType::List(Box::new(SmeltType::Unknown))
+    }
 }
 
 // ─── Generator-body reflection forbid ────────────────────────────────────────
@@ -701,9 +791,8 @@ mod tests {
     fn infer_generator_file_body_with_list_of_model_def_literals_synthesises_list_model_def() {
         // Type-level contract: `List<ModelDef>` is the admissible body type.
         // End-to-end inference of a `[ModelDef{…}, ModelDef{…}]` body literal
-        // requires the named-record-literal dispatch wiring landed in Phase 4
-        // (`evaluate_generator` routes RECORD_LITERAL with target type
-        // `SmeltType::ModelDef` to `infer_model_def_literal`).
+        // requires the named-record-literal dispatch wiring in `evaluate_generator`
+        // (RECORD_LITERAL with target type `SmeltType::ModelDef` → `infer_model_def_literal`).
         let list_model_def = SmeltType::List(Box::new(SmeltType::ModelDef));
         assert!(
             type_is_list_model_def(&list_model_def),
@@ -715,11 +804,9 @@ mod tests {
 
     #[test]
     fn infer_generator_file_body_with_hof_chain_synthesises_list_model_def() {
-        // Verify that infer_generator_file_body handles a HOF chain correctly
-        // by checking the type contract at the function level.
+        // Verify the structural contract: List<ModelDef> is admissible as a generator body type.
         // The full HOF-chain integration (map over loader results producing ModelDefs)
-        // is exercised by the Salsa integration in Phase 4.
-        // Here we verify the structural contract: List<ModelDef> is admissible.
+        // is exercised by the Salsa-level `evaluate_generator` integration tests.
         let list_model_def = SmeltType::List(Box::new(SmeltType::ModelDef));
         assert!(type_is_list_model_def(&list_model_def));
     }
@@ -898,5 +985,52 @@ mod tests {
         assert!(validate_model_def_materialization("ephemeral", zero).is_some());
         assert!(validate_model_def_materialization("", zero).is_some());
         assert!(validate_model_def_materialization("View", zero).is_some());
+    }
+
+    // ─── Regression: end-to-end inference for List<ModelDef> body ────────────
+
+    /// Verify that `infer_generator_file_body` correctly handles a generator
+    /// body of `[ModelDef { name: 'x', body: SELECT 1 }]` — a list of
+    /// `ModelDef` record literals parsed via `parse_meta_expression_from_offset`.
+    ///
+    /// `Expr::cast` does not accept `RECORD_LITERAL` nodes, so
+    /// `ArrayLiteral::elements()` silently drops them.  The implementation uses
+    /// `syntax.children()` to skip the FILE root and iterates raw SyntaxNode
+    /// children of the ARRAY_LITERAL to find RECORD_LITERAL nodes directly.
+    #[test]
+    fn infer_generator_file_body_list_of_model_def_end_to_end() {
+        let source = "---\ngenerates: models\n---\n[ModelDef { name: 'us_west', body: SELECT 1 }, ModelDef { name: 'eu', body: SELECT 2 }]";
+        let body_offset = source.find('[').expect("must have [");
+
+        let parse = smelt_parser::parse_meta_expression_from_offset(source, body_offset);
+        assert!(
+            parse.errors.is_empty(),
+            "expected no parse errors, got: {:?}",
+            parse.errors
+        );
+        let syntax = parse.syntax();
+        let ctx = generator_ctx();
+
+        // Use direct FILE children — not descendants — because FILE itself
+        // passes Expr::cast (it has expression-like children), which would
+        // cause find_map to return a FILE-wrapping Expr instead of the body EXPRESSION.
+        let body_expr = syntax
+            .children()
+            .find_map(smelt_parser::ast::Expr::cast)
+            .expect("must find Expr");
+
+        let result = infer_generator_file_body(&body_expr, &ctx);
+        assert!(
+            result.sentinels.is_empty(),
+            "expected no sentinels for [ModelDef{{…}}, ModelDef{{…}}] body, got: {:?}",
+            result.sentinels
+        );
+        assert_eq!(
+            result.inferred,
+            smelt_types::signatures::SmeltType::List(Box::new(
+                smelt_types::signatures::SmeltType::ModelDef
+            )),
+            "inferred type must be List<ModelDef>"
+        );
     }
 }

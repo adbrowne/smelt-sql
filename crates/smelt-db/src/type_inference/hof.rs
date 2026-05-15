@@ -399,14 +399,25 @@ pub fn infer_hof_call(
             );
 
             // Synthesise body type.
-            let body_typed = infer_expression_type(&body, &body_ctx);
-            let body_ty = body_typed
-                .map(|tc| {
-                    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
-                        tc.data_type,
-                    ))
-                })
-                .unwrap_or(SmeltType::Unknown);
+            // When the expected output type for a Map is a meta-world type (e.g.
+            // `ModelDef`), use smelt-level expression inference so that a
+            // `ModelDef { … }` record literal in the lambda body is correctly
+            // typed instead of falling through to the SQL expression inferencer.
+            let elem_expected_ty: Option<SmeltType> = match (hof, &expected) {
+                (HofKind::Map, Some(SmeltType::List(inner))) => Some(*inner.clone()),
+                _ => None,
+            };
+            let body_ty = if let Some(ref elem_exp) = elem_expected_ty {
+                super::multi_model::infer_expression_smelt_type(&body, &body_ctx, Some(elem_exp))
+            } else {
+                infer_expression_type(&body, &body_ctx)
+                    .map(|tc| {
+                        SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                            tc.data_type,
+                        ))
+                    })
+                    .unwrap_or(SmeltType::Unknown)
+            };
 
             if hof == HofKind::Filter {
                 // Filter predicate body must be Boolean.

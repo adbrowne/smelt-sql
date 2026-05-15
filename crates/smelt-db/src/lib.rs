@@ -111,15 +111,18 @@ pub use queries::functions::{
 pub use queries::loader::{
     loader_call_diagnostics_for_file, loader_call_diagnostics_for_file_with_content,
     loader_file_parsed, loader_resolved_value, loader_resolved_value_with_overlay,
-    smelt_record_declarations, LoaderCallSiteId, LoaderResolvedValue,
+    parse_smelt_type_from_field_annotation, smelt_record_declarations, LoaderCallSiteId,
+    LoaderResolvedValue,
 };
 pub use queries::parse::{
     model_path_refs, model_refs, model_sources, parse_file, parse_model, PathRefLocation,
 };
 pub use queries::project::{
-    all_models, models_all, models_with_tag, project_active_backends, project_paths, project_seeds,
-    project_sources, project_unstable_schema, smelt_yml_vars_query, sources_all, sources_config,
-    sources_type_errors, sources_with_tag, sources_yaml_error, SourceTypeError, YamlParseError,
+    all_models, emitted_model_smelt_path, emitted_models, evaluate_generator, generator_files,
+    models_all, models_all_with_generators, models_with_tag, project_active_backends,
+    project_paths, project_seeds, project_sources, project_unstable_schema, smelt_yml_vars_query,
+    sources_all, sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
+    EmittedModelDef, EmittedModelsResult, EvaluatedGenerator, SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, available_columns, build_type_context,

@@ -15,7 +15,7 @@ use crate::{
 };
 
 // ============================================================================
-// Loader queries (Phase E1 Phase 5)
+// Loader queries
 // ============================================================================
 
 /// A unique identifier for a loader call site.
@@ -466,7 +466,7 @@ pub fn smelt_record_declarations(
 /// `List<T>`, `Map<K, V>`, named record references, and inline record types.
 ///
 /// Pure — no Salsa dependency, no I/O.
-fn parse_smelt_type_from_field_annotation(
+pub fn parse_smelt_type_from_field_annotation(
     type_text: &str,
     _file_text: &str,
 ) -> smelt_types::signatures::SmeltType {
