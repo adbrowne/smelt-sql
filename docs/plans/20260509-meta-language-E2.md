@@ -117,7 +117,7 @@ These cross-feature spec edits already landed in commits `d9ae889` and `8a3dbbf`
 |-------|----------|--------|------|
 | 1     | done     | 23bf398 | 2026-05-15 |
 | 2     | done     | 43f17f6 | 2026-05-15 |
-| 3     | pending  |        |      |
+| 3     | done     | 60df2b2 | 2026-05-16 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
