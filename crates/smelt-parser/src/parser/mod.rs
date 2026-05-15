@@ -39,6 +39,29 @@ pub fn parse(input: &str) -> Parse {
     parser.finish()
 }
 
+/// Parse a generator file body as a single top-level meta-language expression.
+///
+/// `stripped_text` is the full source file text with frontmatter replaced by
+/// `-- ` comment lines (same byte length as the original), as returned by
+/// [`smelt_parser::strip_frontmatter`]. The body starts at `body_offset`
+/// bytes into `stripped_text`; tokens before that offset are trivia produced
+/// by the comment-replacement and are consumed silently.
+///
+/// Returns a CST rooted at a `FILE` node whose single non-trivia child is the
+/// parsed expression. If the first non-trivia token at or after `body_offset`
+/// is `SELECT`, `WITH`, or `VALUES`, the parser wraps it in a `SELECT_STMT`
+/// and sets a `bare_sql_at_body` flag on the `Parse` result so that callers
+/// can emit `GenerateFileBareSelectForbidden` with the correct span.
+///
+/// Line/column information in the resulting CST nodes is accurate relative to
+/// the full source file because `stripped_text` preserves byte offsets.
+pub fn parse_meta_expression_from_offset(stripped_text: &str, body_offset: usize) -> Parse {
+    let tokens = tokenize(stripped_text);
+    let mut parser = Parser::new(stripped_text, &tokens);
+    parser.parse_generator_body(body_offset);
+    parser.finish()
+}
+
 /// Maximum nesting depth for recursive parse functions.
 /// Prevents stack overflow on adversarial or deeply nested input.
 const MAX_PARSE_DEPTH: u32 = 256;

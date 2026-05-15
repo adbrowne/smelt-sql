@@ -213,8 +213,16 @@ impl<'a> Parser<'a> {
             if self.at(COLON) {
                 self.advance(); // COLON
                 self.skip_trivia();
-                // Parse the value expression.
-                if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                // Parse the value expression. When the field value starts with
+                // a SQL statement keyword (SELECT, WITH, VALUES), parse it as a
+                // SQL statement rather than a meta-language expression. This
+                // allows record fields like `body: SELECT * FROM orders` to
+                // parse without errors inside generator-file record literals.
+                if self.at(SELECT_KW) || self.at(WITH_KW) {
+                    self.parse_select_stmt();
+                } else if self.at(VALUES_KW) {
+                    self.parse_values_clause();
+                } else if !self.at_any(&[COMMA, RBRACE, EOF]) {
                     self.parse_expression();
                 } else {
                     // Missing value — emit an error token for recovery.

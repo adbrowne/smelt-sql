@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use salsa::{Accumulator, Setter};
+use smelt_core::metadata::{extract_file_metadata, FileMetadata, MetadataError, MixedKind};
 use smelt_parser::{self, File as AstFile};
 
 pub mod backends;
@@ -711,6 +712,103 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
         // CSV files have no SQL content — skip all SQL-level checks.
         return;
+    }
+
+    // Generator-file frontmatter diagnostics: bridge MetadataError variants
+    // that arise from `generates:` key validation into standard diagnostics.
+    // These must run before parse errors so that callers see the frontmatter
+    // error rather than a confusing "Expected SELECT statement" parse error.
+    match extract_file_metadata(text) {
+        Err(MetadataError::GeneratesUnknownValue { value, value_span }) => {
+            // Anchor at the YAML value token (1-based line/col → 0-based).
+            let diag_line = value_span.line.saturating_sub(1) as u32;
+            let diag_col = value_span.column.saturating_sub(1) as u32;
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("generates must be `models`; found {}", value),
+                range: Range {
+                    start: Position {
+                        line: diag_line,
+                        column: diag_col,
+                    },
+                    end: Position {
+                        line: diag_line,
+                        column: diag_col + value.len() as u32,
+                    },
+                },
+                code: Some(DiagnosticCode::GeneratesUnknownValue),
+                data: None,
+            })
+            .accumulate(db);
+            // File does not parse as SQL; no further checks make sense.
+            return;
+        }
+        Err(MetadataError::GeneratesMixedWithBareModel { offending, span }) => {
+            // Anchor at the offending key / delimiter (1-based → 0-based).
+            let diag_line = span.line.saturating_sub(1) as u32;
+            let diag_col = span.column.saturating_sub(1) as u32;
+            let key_len = match &offending {
+                MixedKind::NameField => "name:".len() as u32,
+                MixedKind::SectionDelimiter => "--- name:".len() as u32,
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: "generates: models cannot coexist with bare-model identity (name field or section delimiter)".to_string(),
+                range: Range {
+                    start: Position {
+                        line: diag_line,
+                        column: diag_col,
+                    },
+                    end: Position {
+                        line: diag_line,
+                        column: diag_col + key_len,
+                    },
+                },
+                code: Some(DiagnosticCode::GeneratesMixedWithBareModel),
+                data: None,
+            })
+            .accumulate(db);
+            // File cannot be used further; bail.
+            return;
+        }
+        Ok(FileMetadata::Generator { .. }) => {
+            // Check whether the parsed generator body starts with a bare SQL
+            // statement. The parse_file query routes generator files through the
+            // meta-expression parser which produces a SELECT_STMT node when it
+            // encounters SELECT/WITH/VALUES as the first body token.
+            let parse = parse_file(db, file);
+            let syntax = parse.syntax();
+            let has_bare_sql = syntax
+                .descendants()
+                .any(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
+            if has_bare_sql {
+                // Find the SELECT_STMT node to anchor the diagnostic.
+                let select_node = syntax
+                    .descendants()
+                    .find(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
+                let bare_range = select_node
+                    .and_then(|n| n.first_token())
+                    .map(|t| smelt_parser::ast::text_range_to_range(text, t.text_range()))
+                    .unwrap_or(Range {
+                        start: Position { line: 0, column: 0 },
+                        end: Position { line: 0, column: 0 },
+                    });
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape".to_string(),
+                    range: bare_range,
+                    code: Some(DiagnosticCode::GenerateFileBareSelectForbidden),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+            // Generator files are not SQL models; skip the model-validity check
+            // and all SQL-only diagnostics.
+            return;
+        }
+        _ => {
+            // Non-generator file: continue with the standard parse-error pipeline.
+        }
     }
 
     // Parse errors

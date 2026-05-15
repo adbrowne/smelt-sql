@@ -17,7 +17,7 @@ pub mod symbol;
 pub mod syntax_kind;
 
 pub use ast::*;
-pub use parser::{parse, Parse, ParseError};
+pub use parser::{parse, parse_meta_expression_from_offset, Parse, ParseError};
 pub use printer::{FormatContext, FormatMode};
 pub use symbol::is_valid_sql_identifier;
 pub use syntax_kind::SyntaxKind;

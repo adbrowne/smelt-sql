@@ -498,6 +498,62 @@ impl<'a> Parser<'a> {
         self.finish_node(); // SMELT_AS_STRUCT_CALL
     }
 
+    /// Parse a generator file body: skip all leading trivia (the frontmatter's
+    /// comment-replacement lines), then parse a single meta-language expression.
+    ///
+    /// The entire content is wrapped in a `FILE` node so that callers receive
+    /// the same `Parse` type as the regular `parse_file` path. Bare SQL keyword
+    /// forms (`SELECT`, `WITH`, `VALUES`) at the first non-trivia token are
+    /// detected before parsing begins; they are parsed as a best-effort
+    /// `SELECT_STMT` for error recovery and the `bare_sql_at_body` field on the
+    /// returned `Parse` is set so the diagnostic layer can anchor
+    /// `GenerateFileBareSelectForbidden` at the correct span.
+    ///
+    /// `body_offset` is the byte offset into `self.input` where the body
+    /// starts. All tokens before that offset are trivia (comment lines produced
+    /// by frontmatter stripping) and are consumed without emitting errors.
+    pub(super) fn parse_generator_body(&mut self, body_offset: usize) {
+        self.start_node(FILE);
+
+        // Consume all trivia tokens that lie entirely before `body_offset`.
+        // `strip_frontmatter` replaces every frontmatter line with a `-- `
+        // comment of the same byte length, so these are COMMENT tokens.
+        loop {
+            if self.at(EOF) {
+                break;
+            }
+            // If the current token's start offset is at or past the body offset,
+            // stop consuming prefix trivia.
+            if self.offset >= body_offset {
+                break;
+            }
+            self.advance();
+        }
+
+        // Skip any inline trivia (whitespace) after the body offset.
+        self.skip_trivia();
+
+        // Detect bare SQL forms at the body start.  These are not valid as
+        // generator body expressions; parse them for error recovery and let
+        // the caller emit the appropriate diagnostic.
+        if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(VALUES_KW) {
+            // Parse as a SELECT statement for error-recovery purposes.
+            // The caller checks the CST for SELECT_STMT presence to emit the
+            // GenerateFileBareSelectForbidden diagnostic at the correct span.
+            self.parse_select_stmt();
+        } else if !self.at(EOF) {
+            // Normal generator body: a single meta-language expression.
+            self.parse_expression();
+        }
+
+        // Consume any trailing trivia or leftover tokens.
+        while !self.at(EOF) {
+            self.advance();
+        }
+
+        self.finish_node(); // FILE
+    }
+
     /// Sync forward to EOF or the start of the next top-level declaration.
     /// Anything skipped is wrapped in ERROR nodes (one per token).
     pub(super) fn sync_to_top_level(&mut self) {
