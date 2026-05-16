@@ -1931,3 +1931,55 @@ fn per_cohort_union_broken_generator_body_forbids_model_reflection() {
         smelt_db::DiagnosticCode::GeneratorBodyForbidsModelReflection,
     );
 }
+
+// ===== Phase F (meta-language polish) TDD tests =====
+//
+// Layout mirrors prior phases: one clean workspace + sibling broken workspaces.
+//   - `examples/meta_polish/`                                   — happy-path: concat_with, ternary
+//   - `examples/meta_polish_broken_ternary_non_boolean_cond/`  — TernaryConditionNotBoolean
+//   - `examples/meta_polish_broken_ternary_branch_mismatch/`   — TernaryBranchTypeMismatch
+//   - `examples/meta_polish_broken_reducer_arity/`             — ReducerArityMismatch
+//
+// Broken-workspace tests reuse `check_workspace_emits_exactly_one_phase_b_diagnostic`
+// (Phase B CODES already include all Phase F codes: Ternary*, Reducer*, Lambda*).
+
+/// Phase F TDD: `examples/meta_polish/` produces zero diagnostics.
+/// Exercises the `concat_with(sep)` parameterised reducer and the
+/// `if cond then a else b` ternary with a Boolean-literal condition.
+#[test]
+fn meta_polish_clean_workspace() {
+    check_workspace_no_diagnostics("examples/meta_polish");
+}
+
+/// Phase F TDD: `examples/meta_polish_broken_ternary_non_boolean_cond/` produces
+/// exactly one `TernaryConditionNotBoolean` diagnostic.
+#[test]
+fn meta_polish_broken_ternary_non_boolean_cond() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_polish_broken_ternary_non_boolean_cond",
+        "models/ternary_non_boolean_cond.sql",
+        smelt_db::DiagnosticCode::TernaryConditionNotBoolean,
+    );
+}
+
+/// Phase F TDD: `examples/meta_polish_broken_ternary_branch_mismatch/` produces
+/// exactly one `TernaryBranchTypeMismatch` diagnostic.
+#[test]
+fn meta_polish_broken_ternary_branch_mismatch() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_polish_broken_ternary_branch_mismatch",
+        "models/ternary_branch_mismatch.sql",
+        smelt_db::DiagnosticCode::TernaryBranchTypeMismatch,
+    );
+}
+
+/// Phase F TDD: `examples/meta_polish_broken_reducer_arity/` produces
+/// exactly one `ReducerArityMismatch` diagnostic.
+#[test]
+fn meta_polish_broken_reducer_arity() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_polish_broken_reducer_arity",
+        "models/reducer_arity.sql",
+        smelt_db::DiagnosticCode::ReducerArityMismatch,
+    );
+}
