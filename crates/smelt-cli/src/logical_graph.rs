@@ -76,18 +76,25 @@ impl LogicalGraph {
         // which the CLI dependency validator was previously missing.
         let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
+        // Collect unresolved (raw-path) deps alongside each model in a single pass.
+        // Deps are resolved to canonical node-name keys in a second pass once all
+        // models are in `nodes` and the `address_index` is built.
+        struct PendingNode {
+            model: ModelFile,
+            raw_dep_paths: Vec<Vec<String>>, // each element: one ref's path segments
+        }
+
+        let mut pending: Vec<PendingNode> = Vec::with_capacity(models.len());
+
+        // Pass 1: insert all models into `nodes` and build the address index.
+        // `address_index` maps `address_segments.join(".")` → `model.name` so that
+        // directory-qualified refs like `smelt.staging.stg_orders` can be resolved
+        // to the model registered as `"stg_orders"`.
+        let mut address_index: HashMap<String, String> = HashMap::new();
+
         for model in models {
-            // Extract model-to-model deps from Path-form refs.
-            //
-            // Phase 2 (unified-paths): after scan-root stripping, model refs
-            // have the form `smelt.<leaf>` or `smelt.<dir>.<leaf>` — no
-            // "models" prefix. Exclude only known non-model namespaces:
-            //   - "sources" (smelt.sources.schema.table)
-            //   - "functions" (smelt.functions.fn_name(...))
-            //
-            // All other paths are potential model/seed deps; `validate()` will
-            // flag any that don't appear in nodes, sources, or seeds.
-            let deps: Vec<String> = model
+            // Collect raw ref paths (pre-resolution).
+            let raw_dep_paths: Vec<Vec<String>> = model
                 .refs
                 .iter()
                 .filter_map(|r| {
@@ -97,9 +104,22 @@ impl LogicalGraph {
                     if matches!(first, Some("sources") | Some("functions")) {
                         return None;
                     }
-                    path.last().cloned()
+                    // Strip the legacy "models" namespace prefix (Phase 2 unified
+                    // paths eliminated it, but test helpers and some older workspaces
+                    // still use `smelt.models.<leaf>` form).
+                    let effective: Vec<String> = if first == Some("models") {
+                        path[1..].to_vec()
+                    } else {
+                        path.clone()
+                    };
+                    if effective.is_empty() {
+                        None
+                    } else {
+                        Some(effective)
+                    }
                 })
                 .collect();
+
             let metadata = model.metadata.as_ref().map(|b| b.as_ref());
 
             let materialization = config.get_materialization_with_metadata(&model.name, metadata);
@@ -119,16 +139,23 @@ impl LogicalGraph {
                 );
             }
 
+            // Build address index entry: address_segments.join(".") → name.
+            let addr_key = model.address_segments.join(".");
+            if !addr_key.is_empty() && addr_key != model.name {
+                address_index.insert(addr_key, model.name.clone());
+            }
+
             nodes.insert(
                 model.name.clone(),
                 LogicalNode {
                     name: model.name.clone(),
-                    dependencies: deps,
+                    // Placeholder — filled in during pass 2.
+                    dependencies: Vec::new(),
                     materialization,
                     incremental,
                     target,
                     tags,
-                    model_file: model,
+                    model_file: model.clone(),
                     // Hand-authored models have no generator provenance.
                     // Generator-emitted models are populated separately when
                     // the generator pipeline feeds into the logical graph.
@@ -136,6 +163,54 @@ impl LogicalGraph {
                     generator_name: None,
                 },
             );
+
+            pending.push(PendingNode {
+                model,
+                raw_dep_paths,
+            });
+        }
+
+        // Pass 2: resolve raw dep paths to canonical node-name keys.
+        //
+        // Resolution order:
+        //   1. Full dotted path as-is (e.g. "cohorts.us_west") — matches emitted models.
+        //   2. address_index lookup (e.g. "staging.stg_orders" → "stg_orders").
+        //   3. Leaf segment only (e.g. "stg_orders") — legacy and simple workspaces.
+        //
+        // Unresolved deps are kept as their full dotted path so `validate()` can
+        // surface a useful "references undefined model" error.
+        for p in pending {
+            let deps: Vec<String> = p
+                .raw_dep_paths
+                .into_iter()
+                .map(|segs| {
+                    let full = segs.join(".");
+                    // 1. Exact match in nodes (emitted models, or exact-name refs).
+                    if nodes.contains_key(&full) {
+                        return full;
+                    }
+                    // 2. Address index (directory-qualified refs like smelt.staging.stg_orders).
+                    if let Some(resolved) = address_index.get(&full) {
+                        return resolved.clone();
+                    }
+                    // 3. Leaf fallback (simple refs like smelt.stg_orders in old workspaces).
+                    if let Some(leaf) = segs.last() {
+                        if nodes.contains_key(leaf.as_str()) {
+                            return leaf.clone();
+                        }
+                        // Also try address_index by leaf alone.
+                        if let Some(resolved) = address_index.get(leaf.as_str()) {
+                            return resolved.clone();
+                        }
+                    }
+                    // Unresolvable: return full path for a meaningful validate() error.
+                    full
+                })
+                .collect();
+
+            if let Some(node) = nodes.get_mut(&p.model.name) {
+                node.dependencies = deps;
+            }
         }
 
         Ok(Self {

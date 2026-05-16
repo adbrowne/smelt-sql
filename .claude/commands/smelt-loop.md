@@ -13,6 +13,41 @@ Parse `$ARGUMENTS` for these flags (all optional):
 - `--mode <local|pypi>` (default: `local`; `pypi` is currently disabled)
 - `--iterations <N>` (default: `1`)
 
+### Tier overview
+
+| Tier | Surface covered | Union table | Acceptance gate |
+|---|---|---|---|
+| `small` | Basic SQL models, seeds, smelt.ref | — | Row counts in 3 tables |
+| `medium` | + smelt.define typed functions (Expr<T>) | — | Row counts + structural checks |
+| `large` | + generator files (`generates: models`), YAML config loader, per-cohort union | `all_orders` | 9-row union = sum of per-cohort shipped counts |
+
+### Large tier
+
+The `large` tier requires the agent to build a workspace that exercises
+**Phase E2 multi-model production**:
+
+1. A YAML config (`configs/cohorts.yaml`) listing three cohorts keyed by country.
+2. A generator file (`models/cohorts.gen.sql`) with `generates: models` frontmatter
+   that loads the YAML via `smelt.config.load_yaml` and emits one `ModelDef` per
+   cohort via `|> map(fn c => ModelDef {…})`, filtering shipped orders for each country.
+3. A downstream union model (`models/all_orders.sql`) that references the three
+   emitted models (`smelt.cohorts.us`, `smelt.cohorts.uk`, `smelt.cohorts.de`).
+4. An acceptance test (`tests/cohort_count.test.sql`) verifying the union's
+   row count equals the sum of per-cohort shipped order counts.
+
+The acceptance gate in `validate.py` checks:
+- `all_orders` (or `all_cohorts`) exists with 9 rows (3 per country × 3 countries).
+- Per-country row counts match expectations (3 shipped per country).
+- A generator file with `generates: models` frontmatter exists.
+- A YAML config file exists under `configs/`.
+
+The fixture's seed CSV (`seeds/raw_orders.csv`) has 12 orders (4 per country,
+3 shipped + 1 cancelled each). Expected union after filtering shipped:
+- US: 3 shipped rows
+- UK: 3 shipped rows
+- DE: 3 shipped rows
+- Total: 9 rows
+
 If no flags are passed, use the defaults.
 
 ## Per-iteration recipe

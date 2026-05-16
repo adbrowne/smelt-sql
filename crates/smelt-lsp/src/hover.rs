@@ -2093,3 +2093,129 @@ pub fn is_source_ref_param_before_dot(
     }
     None
 }
+
+// ============================================================================
+// Phase E2: multi-model production hover / goto-def pure helpers
+// ============================================================================
+
+/// Render hover text for the `generates: models` YAML frontmatter key/value
+/// pair in a generator file.
+///
+/// Shows the inferred body type (`List<ModelDef>`) and, when the count is
+/// statically resolved from the loader data, the number of emitted models.
+///
+/// Pure — callers supply the resolved emission count (from `evaluate_generator`).
+pub fn hover_text_for_generates_frontmatter(emission_count: Option<usize>) -> String {
+    match emission_count {
+        Some(n) => format!("**`generates: models`**\n\n`List<ModelDef>` · {n} emitted models"),
+        None => "**`generates: models`**\n\n`List<ModelDef>`".to_string(),
+    }
+}
+
+/// Render hover text for the opening `{` of a `ModelDef { … }` literal in a
+/// generator file.
+///
+/// When the `name` field is statically known, the inferred smelt path is shown.
+/// Otherwise, just the type name `ModelDef` is shown.
+///
+/// Pure — callers supply the resolved smelt path (from static name analysis).
+pub fn hover_text_for_model_def_literal_open_brace(smelt_path: Option<&str>) -> String {
+    match smelt_path {
+        Some(path) => format!("`ModelDef` → `{path}`"),
+        None => "`ModelDef`".to_string(),
+    }
+}
+
+/// Render hover text for the value token of the `name` field in a `ModelDef`
+/// literal — shows the inferred emitted smelt path.
+///
+/// Pure — callers supply the resolved smelt path string.
+pub fn hover_text_for_model_def_name_field_value(smelt_path: &str) -> String {
+    format!("Emitted as `smelt.{smelt_path}`")
+}
+
+/// Render hover text for the `body` field value expression in a `ModelDef`
+/// literal — shows `TableExpr` and, when column information is statically
+/// resolvable, the inferred column list.
+///
+/// Pure — callers supply the resolved column names (from schema inference).
+pub fn hover_text_for_model_def_body_field_value(columns: Option<&[String]>) -> String {
+    match columns {
+        Some(cols) if !cols.is_empty() => {
+            let col_list = cols.join(", ");
+            format!("`TableExpr`\n\nColumns: `{col_list}`")
+        }
+        _ => "`TableExpr`".to_string(),
+    }
+}
+
+/// Goto-definition on a generator-emitted model reference (`smelt.<path>` at a
+/// consumer site) resolves to the emitting `ModelDef.name` field's value-token
+/// in the generator file.
+///
+/// Returns `Some(Location)` at `gen_path:name_range`.
+///
+/// Pure — callers supply the pre-resolved generator file path and the name
+/// field's CST text range (already converted to LSP `Range`).
+pub fn goto_def_for_emitted_model_reference(
+    gen_path: &std::path::Path,
+    name_range: Range,
+) -> Option<Location> {
+    let uri = Url::from_file_path(gen_path).ok()?;
+    Some(Location {
+        uri,
+        range: name_range,
+    })
+}
+
+/// Return completion items for the value position of `generates: <cursor>` in
+/// a `.sql` file's YAML frontmatter.
+///
+/// Per spec: the only valid value is `"models"`.
+///
+/// Pure — no context required.
+pub fn completion_for_generates_value() -> Vec<CompletionItem> {
+    vec![CompletionItem {
+        label: "models".to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        documentation: Some(Documentation::String(
+            "Mark this file as a model generator. The file body must be a \
+             meta-language expression of type `List<ModelDef>`."
+                .to_string(),
+        )),
+        ..Default::default()
+    }]
+}
+
+/// Return completion items for a field-key position inside a `ModelDef { … }`
+/// literal, excluding fields that are already present.
+///
+/// Required fields (`name`, `body`) are surfaced first per the spec ordering
+/// rule; the remaining optional fields follow in declaration order.
+///
+/// Pure — callers supply the already-filled field names.
+pub fn completion_for_model_def_field_key(already_filled: &[String]) -> Vec<CompletionItem> {
+    use smelt_types::signatures::MODEL_DEF_FIELDS;
+
+    // Required fields appear first (name, body), then optional fields.
+    // MODEL_DEF_FIELDS is already in spec order: [name, body, materialization, tags, description].
+    MODEL_DEF_FIELDS
+        .iter()
+        .filter(|(name, _)| !already_filled.iter().any(|f| f == *name))
+        .map(|(field_name, ty)| {
+            let detail = format_smelt_type_hover(ty);
+            let is_required = *field_name == "name" || *field_name == "body";
+            CompletionItem {
+                label: (*field_name).to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(detail),
+                sort_text: Some(if is_required {
+                    format!("0_{field_name}")
+                } else {
+                    format!("1_{field_name}")
+                }),
+                ..Default::default()
+            }
+        })
+        .collect()
+}

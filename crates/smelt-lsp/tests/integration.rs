@@ -4455,3 +4455,275 @@ fn test_inline_cte_rejects_multiple_references() {
         "should not inline CTE used more than once"
     );
 }
+
+// =============================================================================
+// Phase E2: multi-model production LSP support tests
+// =============================================================================
+
+/// A deliberately-broken `ModelDef` literal (missing required `name` field)
+/// inside a generator body produces diagnostics whose frame stacks end with a
+/// `<generator>` frame pointing at the generator file's body range.
+///
+/// This test verifies that `evaluate_generator` stamps the `<generator>` frame
+/// onto each diagnostic that surfaces from inside the generator body's HOF chain.
+#[test]
+fn diagnostics_with_frame_stack_carry_generator_outer_frame() {
+    use smelt_db::{evaluate_generator, DiagnosticData};
+
+    // A generator file whose body produces a diagnostic from inside a map() call.
+    // The `ModelDef { body: SELECT 1 }` is missing the required `name` field,
+    // which should produce a RecordFieldMissing diagnostic.  Per Phase 5 / E2,
+    // `evaluate_generator` must stamp the `<generator>` outer frame onto it.
+    let gen_sql = concat!(
+        "---\ngenerates: models\n---\n",
+        "[ModelDef { body: SELECT 1 }]"
+    );
+
+    let mut ws = TestWorkspace::new();
+    // Register the generator file.
+    let gen_path = ws.models_dir.join("broken_gen.gen.sql");
+    std::fs::write(&gen_path, gen_sql).expect("write gen file");
+    ws.db
+        .set_source_file(gen_path.clone(), gen_sql.to_string(), ws.project_root());
+    ws.model_files.push(gen_path.clone());
+    ws.sync_workspace();
+
+    let ws_handle = ws.workspace().expect("workspace must be set");
+    let gen_file = ws
+        .lookup_file(&gen_path)
+        .expect("gen file must be registered");
+
+    let result = evaluate_generator(&ws.db, ws_handle, gen_file);
+
+    // There must be at least one diagnostic from the broken body.
+    assert!(
+        !result.diagnostics.is_empty(),
+        "broken generator must produce diagnostics; got none"
+    );
+
+    // At least one diagnostic must carry a frame stack whose outermost (last)
+    // frame has function == "<generator>".
+    let has_generator_frame = result.diagnostics.iter().any(|d| {
+        if let Some(DiagnosticData::ExpansionFrames(frames)) = &d.data {
+            frames
+                .last()
+                .map(|f| f.function == "<generator>")
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_generator_frame,
+        "at least one diagnostic must carry a <generator> outermost frame; \
+         diagnostics: {:?}",
+        result.diagnostics
+    );
+}
+
+// =============================================================================
+// Phase E2: hover/completion/goto-def helper wiring tests
+//
+// These tests verify the pure helpers from `smelt_lsp::hover` (which are called
+// by the Backend dispatch) using in-memory fixtures that mirror the
+// `examples/per_cohort_union/` workspace.  They do not spin up a live Backend
+// (no async tower-lsp machinery required).
+// =============================================================================
+
+/// The `generates: models` hover helper returns `List<ModelDef>` text.
+/// When emission count is supplied (from `evaluate_generator`), it is shown.
+#[test]
+fn hover_on_generates_value_in_cohorts_gen_returns_helper_text() {
+    use smelt_db::{evaluate_generator, generator_files};
+    use smelt_lsp::hover::hover_text_for_generates_frontmatter;
+
+    let gen_sql = concat!(
+        "---\ngenerates: models\ntags: [cohort]\n---\n",
+        // Simplified body: statically resolvable list of two ModelDefs.
+        "[ModelDef { name: 'alpha', body: SELECT 1 }, \
+          ModelDef { name: 'beta', body: SELECT 2 }]"
+    );
+
+    let mut ws = TestWorkspace::new();
+    let gen_path = ws.models_dir.join("cohorts.gen.sql");
+    std::fs::write(&gen_path, gen_sql).expect("write gen file");
+    ws.db
+        .set_source_file(gen_path.clone(), gen_sql.to_string(), ws.project_root());
+    ws.model_files.push(gen_path.clone());
+    ws.sync_workspace();
+
+    let ws_handle = ws.workspace().expect("workspace must be set");
+    let gen_files = generator_files(&ws.db, ws_handle);
+    assert!(!gen_files.is_empty(), "generator file must be discovered");
+
+    let gen_file = gen_files[0];
+    let result = evaluate_generator(&ws.db, ws_handle, gen_file);
+    let emission_count = result.emissions.len();
+
+    // The fixture has two statically-evaluable ModelDefs.
+    assert_eq!(
+        emission_count, 2,
+        "expected 2 emissions; got {emission_count}"
+    );
+
+    // Verify the hover text includes `List<ModelDef>` and the emission count.
+    let text_with_count = hover_text_for_generates_frontmatter(Some(emission_count));
+    assert!(
+        text_with_count.contains("List<ModelDef>"),
+        "hover text must contain `List<ModelDef>`; got: {text_with_count}"
+    );
+    assert!(
+        text_with_count.contains("2"),
+        "hover text must show emission count 2; got: {text_with_count}"
+    );
+
+    // Verify the no-count variant as well.
+    let text_no_count = hover_text_for_generates_frontmatter(None);
+    assert!(
+        text_no_count.contains("List<ModelDef>"),
+        "no-count hover text must contain `List<ModelDef>`; got: {text_no_count}"
+    );
+    assert!(
+        !text_no_count.contains("emitted"),
+        "no-count hover text must not mention count; got: {text_no_count}"
+    );
+}
+
+/// `completion_for_generates_value` returns exactly one entry labelled `models`.
+#[test]
+fn completion_after_generates_colon_returns_models_only() {
+    use smelt_lsp::hover::completion_for_generates_value;
+
+    let items = completion_for_generates_value();
+    assert_eq!(
+        items.len(),
+        1,
+        "completion for `generates: ` must return exactly 1 item; got {}: {items:?}",
+        items.len()
+    );
+    assert_eq!(
+        items[0].label, "models",
+        "the single completion item must be labelled `models`; got {:?}",
+        items[0].label
+    );
+}
+
+/// `hover_text_for_model_def_literal_open_brace` shows the inferred smelt path
+/// when the name is statically known.
+#[test]
+fn hover_on_model_def_open_brace_returns_emitted_smelt_path() {
+    use smelt_db::{emitted_model_smelt_path, evaluate_generator, generator_files};
+    use smelt_lsp::hover::hover_text_for_model_def_literal_open_brace;
+
+    let gen_sql = concat!(
+        "---\ngenerates: models\n---\n",
+        "[ModelDef { name: 'us_west', body: SELECT 1 }]"
+    );
+
+    let mut ws = TestWorkspace::new();
+    // Place the generator in `models/cohorts.gen.sql` so the stem is `cohorts`.
+    let gen_path = ws.models_dir.join("cohorts.gen.sql");
+    std::fs::write(&gen_path, gen_sql).expect("write gen file");
+    ws.db
+        .set_source_file(gen_path.clone(), gen_sql.to_string(), ws.project_root());
+    ws.model_files.push(gen_path.clone());
+    ws.sync_workspace();
+
+    let ws_handle = ws.workspace().expect("workspace must be set");
+    let gen_files = generator_files(&ws.db, ws_handle);
+    assert!(!gen_files.is_empty(), "generator file must be discovered");
+
+    let gen_file = gen_files[0];
+    let result = evaluate_generator(&ws.db, ws_handle, gen_file);
+    assert_eq!(result.emissions.len(), 1, "expected 1 emission");
+
+    let em = &result.emissions[0];
+    // The project root is the temp dir; scan root is "models".
+    let project_root = ws.project_root();
+    let scan_roots = vec!["models".to_string()];
+    let smelt_path =
+        emitted_model_smelt_path(&em.generator_file, &project_root, &scan_roots, &em.name);
+
+    // The emitted path must be `cohorts.us_west` (stem `cohorts` + name `us_west`).
+    assert_eq!(
+        smelt_path, "cohorts.us_west",
+        "emitted smelt path must be `cohorts.us_west`; got `{smelt_path}`"
+    );
+
+    // The hover text for the opening brace must include the path.
+    let hover = hover_text_for_model_def_literal_open_brace(Some(&smelt_path));
+    assert!(
+        hover.contains("cohorts.us_west"),
+        "open-brace hover must mention the emitted path; got: {hover}"
+    );
+    assert!(
+        hover.contains("ModelDef"),
+        "open-brace hover must mention `ModelDef`; got: {hover}"
+    );
+}
+
+/// `goto_def_for_emitted_model_reference` returns a `Location` in the generator
+/// file at the `name` field's span.  The name_span from `evaluate_generator`
+/// must point to the string literal `'us_west'` in the CST.
+#[test]
+fn goto_def_on_emitted_model_resolves_to_modeldef_name_in_generator_file() {
+    use smelt_db::{evaluate_generator, generator_files};
+    use smelt_lsp::hover::goto_def_for_emitted_model_reference;
+    use tower_lsp::lsp_types::{Position, Range};
+
+    let gen_sql = "---\ngenerates: models\n---\n\
+                   [ModelDef { name: 'us_west', body: SELECT 1 }]";
+
+    let mut ws = TestWorkspace::new();
+    let gen_path = ws.models_dir.join("cohorts.gen.sql");
+    std::fs::write(&gen_path, gen_sql).expect("write gen file");
+    ws.db
+        .set_source_file(gen_path.clone(), gen_sql.to_string(), ws.project_root());
+    ws.model_files.push(gen_path.clone());
+    ws.sync_workspace();
+
+    let ws_handle = ws.workspace().expect("workspace must be set");
+    let gen_files = generator_files(&ws.db, ws_handle);
+    let gen_file = gen_files[0];
+    let result = evaluate_generator(&ws.db, ws_handle, gen_file);
+    assert_eq!(result.emissions.len(), 1, "expected 1 emission");
+
+    let em = &result.emissions[0];
+    // Convert the CST text range to an LSP Range using the generator file's text.
+    let gen_text = std::fs::read_to_string(&em.generator_file).expect("read gen file");
+    let pr = smelt_parser::ast::text_range_to_range(&gen_text, em.name_span);
+    let name_range = Range {
+        start: Position::new(pr.start.line, pr.start.column),
+        end: Position::new(pr.end.line, pr.end.column),
+    };
+
+    let location = goto_def_for_emitted_model_reference(&em.generator_file, name_range);
+    assert!(
+        location.is_some(),
+        "goto_def_for_emitted_model_reference must return Some(Location); got None"
+    );
+    let loc = location.unwrap();
+
+    // The URI must point to the generator file.
+    assert!(
+        loc.uri.path().ends_with("cohorts.gen.sql"),
+        "goto-def location must be in cohorts.gen.sql; got URI: {}",
+        loc.uri
+    );
+
+    // The range must be on line 3 (0-indexed; frontmatter is 3 lines: ---, generates: models, ---).
+    assert_eq!(
+        loc.range.start.line, 3,
+        "goto-def must point to line 3 (the body line); got line {}",
+        loc.range.start.line
+    );
+
+    // The extracted text at name_span must be `'us_west'`.
+    let span_start: usize = em.name_span.start().into();
+    let span_end: usize = em.name_span.end().into();
+    let extracted = &gen_text[span_start..span_end];
+    assert!(
+        extracted.contains("us_west"),
+        "name_span text must contain `us_west`; got: `{extracted}`"
+    );
+}

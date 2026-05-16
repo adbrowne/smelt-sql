@@ -561,6 +561,41 @@ pub fn resolve_ref_path(
                 });
             }
         }
+
+        // Generator-emitted models: check the W3 emission survivors for a path
+        // match. Emitted models are not registered as SourceFile inputs, so they
+        // are not found in the SQL-files walk above. The smelt path of an emitted
+        // model is `<dir_dots>.<file_stem>.<ModelDef.name>` (from
+        // `emitted_model_smelt_path`), and the dot-separated components equal the
+        // `path` Vec we are resolving.
+        let emitted = crate::queries::project::emitted_models(db, workspace);
+        for emitted_model in &emitted.survivors {
+            if !emitted_model.generator_file.starts_with(&project_root) {
+                continue;
+            }
+            let smelt_name = crate::queries::project::emitted_model_smelt_path(
+                &emitted_model.generator_file,
+                &project_root,
+                scan_roots.as_slice(),
+                &emitted_model.name,
+            );
+            let emitted_path: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+            if emitted_path == path {
+                // Return a ResolvedRef pointing at the generator file; the
+                // goto-def handler will navigate to the ModelDef.name span within it.
+                // Look up the generator file's SourceFile handle from workspace files.
+                let gen_file = workspace
+                    .files(db)
+                    .iter()
+                    .copied()
+                    .find(|f| f.path(db) == &emitted_model.generator_file);
+                return Some(ResolvedRef {
+                    kind: RefKind::Model,
+                    source_file: gen_file,
+                    path,
+                });
+            }
+        }
     }
 
     None
@@ -782,13 +817,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // encounters SELECT/WITH/VALUES as the first body token.
             let parse = parse_file(db, file);
             let syntax = parse.syntax();
+            // A bare SELECT is only a problem when it is a *direct* child of the
+            // FILE root — that is, when the generator body itself is a top-level
+            // SELECT/WITH/VALUES statement (the hand-authored model shape).
+            // SELECT_STMT nodes nested inside record-literal field values (e.g.
+            // `ModelDef { body: SELECT * FROM t }`) are valid TableExpr values and
+            // must NOT trigger this diagnostic.
             let has_bare_sql = syntax
-                .descendants()
+                .children()
                 .any(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
             if has_bare_sql {
-                // Find the SELECT_STMT node to anchor the diagnostic.
+                // Find the SELECT_STMT direct child to anchor the diagnostic.
                 let select_node = syntax
-                    .descendants()
+                    .children()
                     .find(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
                 let bare_range = select_node
                     .and_then(|n| n.first_token())
@@ -806,6 +847,36 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 })
                 .accumulate(db);
             }
+
+            // Surface diagnostics from the W2 (evaluate_generator) and W3
+            // (emitted_models) pipeline for this generator file.
+            //
+            // W2 diagnostics include: GenerateFileBodyTypeError,
+            // ModelDefDuplicateName, ModelDefInvalidName,
+            // ModelDefInvalidMaterialization, GeneratorBodyForbidsModelReflection.
+            //
+            // W3 diagnostics include: ModelDefHandAuthoredCollision and
+            // cross-generator collisions anchored at this file.
+            let gen_file_path = file.path(db).to_path_buf();
+            let evaluated = evaluate_generator(db, workspace, file);
+            for diag in &evaluated.diagnostics {
+                DiagnosticAcc(diag.clone()).accumulate(db);
+            }
+            // W3 collision diagnostics: `discarded[i].generator_file` is always
+            // the origin file for `collision_diagnostics[i]` (they are pushed
+            // in lock-step in `emitted_models`). We emit only those where the
+            // discarded entry's generator_file matches the current file.
+            let emitted_result = emitted_models(db, workspace);
+            for (discarded, diag) in emitted_result
+                .discarded
+                .iter()
+                .zip(emitted_result.collision_diagnostics.iter())
+            {
+                if discarded.generator_file == gen_file_path {
+                    DiagnosticAcc(diag.clone()).accumulate(db);
+                }
+            }
+
             // Generator files are not SQL models; skip the model-validity check
             // and all SQL-only diagnostics.
             return;
@@ -973,6 +1044,55 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             for define in ast.defines() {
                 for diag in type_inference::check_define_name_shadowing(&define, text) {
                     DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+        }
+    }
+
+    // Phase E2 — ModelDefOutsideGeneratorFile: scan for ModelDef record literals
+    // in non-generator files. A `ModelDef { name: '…', body: … }` construct is
+    // only valid inside a generator file (generates: models); using it in a
+    // regular SQL model file is an error.
+    {
+        use smelt_parser::ast::RecordLiteral;
+        use smelt_parser::SyntaxKind::{IDENT, RECORD_LITERAL};
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+        let mut ctx = type_inference::TypeContext::new();
+        ctx.is_inside_generator_file = false; // non-generator file
+        for node in syntax.descendants().filter(|n| n.kind() == RECORD_LITERAL) {
+            if let Some(lit) = RecordLiteral::cast(node) {
+                // Only check record literals whose leading token is the identifier
+                // "ModelDef". In the CST, a named record literal `TypeName { … }`
+                // has the type-name IDENT as its first token.
+                let leading_name = lit
+                    .syntax()
+                    .children_with_tokens()
+                    .find_map(|e| {
+                        let tok = e.into_token()?;
+                        if tok.kind() == IDENT {
+                            Some(tok.text().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                if leading_name != "ModelDef" {
+                    continue;
+                }
+                let result = type_inference::infer_model_def_literal(&lit, &ctx);
+                for sentinel in result.sentinels {
+                    if sentinel.code == DiagnosticCode::ModelDefOutsideGeneratorFile {
+                        let range = smelt_parser::ast::text_range_to_range(text, sentinel.span);
+                        DiagnosticAcc(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: sentinel.message,
+                            range,
+                            code: Some(sentinel.code),
+                            data: None,
+                        })
+                        .accumulate(db);
+                    }
                 }
             }
         }

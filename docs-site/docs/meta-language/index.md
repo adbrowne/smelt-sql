@@ -57,4 +57,11 @@ The meta-language also provides iteration, transformation, compile-time configur
 | `smelt.config.load_yaml(path, schema)` | Load a YAML file as a typed meta value | [Config Loaders](config-loaders.md) |
 | `smelt.config.load_json(path, schema)` | Load a JSON file as a typed meta value | [Config Loaders](config-loaders.md) |
 
+The meta-language also provides **multi-model production** — generating an entire family of models from a single compile-time expression:
+
+| Construct | Description | Documentation |
+|-----------|-------------|---------------|
+| `generates: models` | Frontmatter directive marking a file as a generator | [Generator Files](generators.md) |
+| `ModelDef { name, body, … }` | Built-in closed record: declares one emitted model | [Generator Files](generators.md) |
+
 Quick reference for all constructs and diagnostic codes: [Reference](reference.md).

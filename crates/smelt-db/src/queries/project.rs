@@ -18,8 +18,7 @@ use crate::config_vars;
 use crate::queries::loader::{loader_resolved_value, LoaderCallSiteId};
 use crate::queries::parse::{parse_file, parse_model};
 use crate::type_inference::{
-    check_generator_body_reflection_forbid, infer_generator_file_body, validate_model_def_name,
-    TypeContext,
+    check_generator_body_reflection_forbid, infer_generator_file_body, TypeContext,
 };
 use crate::{DiagnosticCode, LoaderFileInput, Model, ProjectInput, SourceFile, Workspace};
 
@@ -822,8 +821,11 @@ fn extract_field_value_with_binding(
                 rowan::NodeOrToken::Node(node) if past_colon => {
                     let span = node.text_range();
                     let raw = node.text().to_string();
-                    // SQL body text — return as-is (no field-access resolution).
-                    return Some((raw.trim().to_string(), span));
+                    // SQL body text: substitute lambda param field-accesses
+                    // (`param.field`) with their SQL-quoted values so that the
+                    // emitted SQL is valid and executable.
+                    let substituted = substitute_field_accesses_in_sql(raw.trim(), record_fields);
+                    return Some((substituted, span));
                 }
                 _ => {}
             }
@@ -860,6 +862,90 @@ fn resolve_field_access_or_literal(
         }
     }
     s.to_string()
+}
+
+/// Substitute `param.field` references inside a SQL body string with their
+/// SQL-quoted values from the lambda binding.
+///
+/// Replacement rules:
+/// - `MetaValue::Text(t)` → `'escaped_text'` (single-quoted, `'` escaped as `''`)
+/// - `MetaValue::Integer(n)` → `n` (bare integer, no quotes)
+/// - Other → debug representation (unlikely in practice)
+///
+/// Only replaces tokens of the form `identifier.identifier` where the right-hand
+/// identifier matches a key in `record_fields`.  The left-hand identifier (the
+/// lambda param name) is not checked — it is ignored so the substitution works
+/// regardless of what the user named their lambda parameter.
+///
+/// Replacement is done via a simple regex-like walk: find each occurrence of
+/// `\w+\.\w+` in the SQL and replace it when the field key is known.
+fn substitute_field_accesses_in_sql(
+    sql: &str,
+    record_fields: &std::collections::BTreeMap<String, crate::loader::MetaValue>,
+) -> String {
+    if record_fields.is_empty() {
+        return sql.to_string();
+    }
+
+    // Walk through the SQL text looking for `word.word` patterns and replace
+    // those where the right-hand word is a known field key.
+    let mut result = String::with_capacity(sql.len() + 32);
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Find the start of a potential `word.word` token.
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            // Scan the identifier.
+            let ident_start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            // Check for a dot followed by another identifier.
+            if i < len && bytes[i] == b'.' {
+                let dot_pos = i;
+                i += 1; // skip dot
+                let field_start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let field_key = &sql[field_start..i];
+                if !field_key.is_empty() {
+                    if let Some(val) = record_fields.get(field_key) {
+                        // Replace `param.field` with the SQL-quoted value.
+                        match val {
+                            crate::loader::MetaValue::Text(t) => {
+                                // Single-quote the text value; escape internal single quotes.
+                                result.push('\'');
+                                result.push_str(&t.replace('\'', "''"));
+                                result.push('\'');
+                            }
+                            crate::loader::MetaValue::Integer(n) => {
+                                result.push_str(&n.to_string());
+                            }
+                            other => {
+                                result.push_str(&format!("{:?}", other));
+                            }
+                        }
+                        continue; // i already past the field name
+                    }
+                }
+                // Not a known field: emit the original `ident.field` unchanged.
+                result.push_str(&sql[ident_start..dot_pos]);
+                result.push('.');
+                result.push_str(field_key);
+            } else {
+                // No dot: just an identifier — emit unchanged.
+                result.push_str(&sql[ident_start..i]);
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    result
 }
 
 /// Compute the workspace-relative smelt path for an emitted model.
@@ -943,6 +1029,7 @@ pub fn evaluate_generator(
     let (metadata, _body_offset) = gen_meta;
     let frontmatter_tags = metadata.tags.clone();
     let frontmatter_incremental = metadata.incremental.clone();
+    let gen_file_path = file.path(db).to_path_buf();
 
     // Parse the file body (already cached by Salsa via `parse_file`).
     let parse = parse_file(db, file);
@@ -967,6 +1054,9 @@ pub fn evaluate_generator(
         }
     };
 
+    // Capture the body CST range for the `<generator>` frame.
+    let body_range = body_expr.syntax().text_range();
+
     // Build a generator TypeContext with `is_inside_generator_file = true`
     // and `workspace_shape_includes_generators = false`.
     let mut ctx = TypeContext::new();
@@ -988,7 +1078,13 @@ pub fn evaluate_generator(
     );
 
     // Emit reflection-forbid diagnostics.
+    // If any reflection-forbid sentinels are present, suppress GenerateFileBodyTypeError
+    // diagnostics since the type error is a consequence of the forbidden call not being
+    // evaluable — reporting both is redundant and confusing.
     let forbid_sentinels = check_generator_body_reflection_forbid(&syntax);
+    if !forbid_sentinels.is_empty() {
+        diagnostics.retain(|d| d.code != Some(crate::DiagnosticCode::GenerateFileBodyTypeError));
+    }
     for sentinel in forbid_sentinels {
         let range = smelt_parser::ast::text_range_to_range(text, sentinel.span);
         diagnostics.push(crate::Diagnostic {
@@ -1023,21 +1119,27 @@ pub fn evaluate_generator(
         }
     }
 
-    // Emit ModelDefInvalidName diagnostics for emissions with bad names
-    // (these would have been dropped by materialise_emitted_model_def for completely invalid
-    // names, but duplicate-emit diagnoses here for names we DID materialise that have issues).
-    // Re-check each surviving emission.
-    for emitted in &emissions {
-        let zero = TextRange::new(0.into(), 0.into());
-        if let Some(sentinel) = validate_model_def_name(&emitted.name, zero) {
-            let range = smelt_parser::ast::text_range_to_range(text, emitted.name_span);
-            diagnostics.push(crate::Diagnostic {
-                severity: crate::DiagnosticSeverity::Error,
-                message: sentinel.message,
-                range,
-                code: Some(sentinel.code),
-                data: None,
-            });
+    // Stamp the `<generator>` frame onto every diagnostic produced during body
+    // evaluation.  Per expansion.md §"FrameInfo shape": the outermost frame
+    // has `function = "<generator>"` and `decl_path = Some(generator_file_path)`.
+    // The frame is appended as outermost (last in the innermost-first vector).
+    // Diagnostics that already carry the frame (e.g. re-surfaced collision
+    // diagnostics) are left unchanged.
+    {
+        use crate::function_body_check::{make_generator_frame, stamp_generator_frame_onto};
+        let gen_frame = make_generator_frame(&gen_file_path, body_range, text);
+        for diag in &mut diagnostics {
+            // Only stamp if not already carrying a <generator> outermost frame.
+            let already_stamped = match &diag.data {
+                Some(crate::DiagnosticData::ExpansionFrames(frames)) => frames
+                    .last()
+                    .map(|f| f.function == "<generator>")
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if !already_stamped {
+                stamp_generator_frame_onto(diag, gen_frame.clone());
+            }
         }
     }
 

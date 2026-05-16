@@ -1663,3 +1663,263 @@ fn meta_config_broken_config_loader_null_coercion() {
         smelt_db::DiagnosticCode::ConfigLoaderNullCoercion,
     );
 }
+
+// ===== Phase E2 (multi-model production) TDD tests =====
+//
+// Layout:
+//   - `examples/per_cohort_union/`                          — happy-path demo
+//   - `examples/staging_from_sources/`                      — sources-driven generator
+//   - `examples/per_cohort_union_broken_<code>/`            — one per diagnostic code
+//
+// Each broken fixture uses the generic E2 helper below, which filters to the
+// ten Phase E2 diagnostic codes.
+
+/// The ten Phase E2 diagnostic codes.
+const PHASE_E2_CODES: &[smelt_db::DiagnosticCode] = &[
+    smelt_db::DiagnosticCode::GeneratesUnknownValue,
+    smelt_db::DiagnosticCode::GeneratesMixedWithBareModel,
+    smelt_db::DiagnosticCode::GenerateFileBareSelectForbidden,
+    smelt_db::DiagnosticCode::GenerateFileBodyTypeError,
+    smelt_db::DiagnosticCode::ModelDefOutsideGeneratorFile,
+    smelt_db::DiagnosticCode::ModelDefInvalidName,
+    smelt_db::DiagnosticCode::ModelDefInvalidMaterialization,
+    smelt_db::DiagnosticCode::ModelDefDuplicateName,
+    smelt_db::DiagnosticCode::ModelDefHandAuthoredCollision,
+    smelt_db::DiagnosticCode::GeneratorBodyForbidsModelReflection,
+];
+
+/// Helper: loads `example_dir`, asserts exactly one Phase E2 diagnostic fires
+/// for the file ending in `expected_file`, and that no other file emits E2 codes.
+fn check_workspace_emits_exactly_one_phase_e2_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_e2: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_e2: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_e2 = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| PHASE_E2_CODES.contains(c))
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_e2(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_e2.push(d.clone());
+            } else {
+                other_e2.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_e2(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_e2.push(d.0.clone());
+            } else {
+                other_e2.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_e2.is_empty(),
+        "expected zero Phase E2 diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_e2.len(),
+        other_e2
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_e2.len(),
+        1,
+        "expected exactly 1 Phase E2 diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_e2.len(),
+        target_e2
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_e2[0].code,
+        Some(expected_code),
+        "expected Phase E2 code {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_e2[0].code,
+        target_e2[0].message
+    );
+}
+
+/// Phase E2 TDD: `examples/per_cohort_union/` produces zero diagnostics.
+#[test]
+fn per_cohort_union_example_has_zero_diagnostics() {
+    check_workspace_no_diagnostics("examples/per_cohort_union");
+}
+
+/// Phase E2 TDD: `examples/staging_from_sources/` produces zero diagnostics.
+#[test]
+fn staging_from_sources_example_has_zero_diagnostics() {
+    check_workspace_no_diagnostics("examples/staging_from_sources");
+}
+
+/// Phase E2 TDD: `GeneratesUnknownValue` — `generates: views` fires.
+#[test]
+fn per_cohort_union_broken_generates_unknown_value() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_generates_unknown_value",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::GeneratesUnknownValue,
+    );
+}
+
+/// Phase E2 TDD: `GeneratesMixedWithBareModel` — `generates: models` combined with `name:`.
+#[test]
+fn per_cohort_union_broken_generates_mixed_with_name_field() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_generates_mixed_with_name_field",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::GeneratesMixedWithBareModel,
+    );
+}
+
+/// Phase E2 TDD: `GeneratesMixedWithBareModel` — `generates: models` combined with section delimiter.
+#[test]
+fn per_cohort_union_broken_generates_mixed_with_section_delimiter() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_generates_mixed_with_section_delimiter",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::GeneratesMixedWithBareModel,
+    );
+}
+
+/// Phase E2 TDD: `GenerateFileBareSelectForbidden` — bare SELECT in generator body.
+#[test]
+fn per_cohort_union_broken_generate_file_bare_select_forbidden() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_generate_file_bare_select_forbidden",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::GenerateFileBareSelectForbidden,
+    );
+}
+
+/// Phase E2 TDD: `GenerateFileBodyTypeError` — body type is not `List<ModelDef>`.
+#[test]
+fn per_cohort_union_broken_generate_file_body_type_error() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_generate_file_body_type_error",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::GenerateFileBodyTypeError,
+    );
+}
+
+/// Phase E2 TDD: `ModelDefOutsideGeneratorFile` — `ModelDef` in a non-generator file.
+#[test]
+fn per_cohort_union_broken_model_def_outside_generator_file() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_model_def_outside_generator_file",
+        "models/broken.sql",
+        smelt_db::DiagnosticCode::ModelDefOutsideGeneratorFile,
+    );
+}
+
+/// Phase E2 TDD: `ModelDefInvalidName` — name with non-path-safe characters.
+#[test]
+fn per_cohort_union_broken_model_def_invalid_name() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_model_def_invalid_name",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::ModelDefInvalidName,
+    );
+}
+
+/// Phase E2 TDD: `ModelDefInvalidMaterialization` — materialization not in closed set.
+#[test]
+fn per_cohort_union_broken_model_def_invalid_materialization() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_model_def_invalid_materialization",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::ModelDefInvalidMaterialization,
+    );
+}
+
+/// Phase E2 TDD: `ModelDefDuplicateName` — two ModelDefs with the same name.
+#[test]
+fn per_cohort_union_broken_model_def_duplicate_name() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_model_def_duplicate_name",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::ModelDefDuplicateName,
+    );
+}
+
+/// Phase E2 TDD: `ModelDefHandAuthoredCollision` — generator emission collides
+/// with a hand-authored model `models/collision/my_model.sql`.
+#[test]
+fn per_cohort_union_broken_model_def_hand_authored_collision() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_model_def_hand_authored_collision",
+        "models/collision.gen.sql",
+        smelt_db::DiagnosticCode::ModelDefHandAuthoredCollision,
+    );
+}
+
+/// Phase E2 TDD: `GeneratorBodyForbidsModelReflection` — `smelt.models.with_tag`
+/// inside a generator body.
+#[test]
+fn per_cohort_union_broken_generator_body_forbids_model_reflection() {
+    check_workspace_emits_exactly_one_phase_e2_diagnostic(
+        "examples/per_cohort_union_broken_generator_body_forbids_model_reflection",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::GeneratorBodyForbidsModelReflection,
+    );
+}

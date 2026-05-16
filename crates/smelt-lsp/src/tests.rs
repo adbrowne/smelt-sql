@@ -2389,3 +2389,229 @@ fn goto_def_on_loaded_record_field_projection_resolves_to_yaml_row() {
         loc.uri
     );
 }
+
+// ── Phase E2: multi-model production hover / completion / goto-def helpers ──
+
+/// Hover on `generates: models` in the frontmatter of a generator file shows
+/// the inferred body type and the count of statically-resolved emitted models.
+///
+/// `hover_text_for_generates_frontmatter` must contain "List<ModelDef>" and
+/// a human-readable emission count when the count is known.
+#[test]
+fn hover_on_generates_frontmatter_shows_body_type_and_emission_count() {
+    let text = hover_text_for_generates_frontmatter(Some(3));
+    assert!(
+        text.contains("List<ModelDef>"),
+        "hover must contain 'List<ModelDef>', got: {text}"
+    );
+    assert!(
+        text.contains("3"),
+        "hover must contain emission count '3', got: {text}"
+    );
+    // When count is unknown, body type must still appear.
+    let text_no_count = hover_text_for_generates_frontmatter(None);
+    assert!(
+        text_no_count.contains("List<ModelDef>"),
+        "hover (no count) must still contain 'List<ModelDef>', got: {text_no_count}"
+    );
+}
+
+/// Hover on the opening `{` of a `ModelDef { … }` literal in a generator file
+/// shows the inferred smelt path when the `name` field is statically known, and
+/// falls back to just `"ModelDef"` when the name is not static.
+///
+/// `hover_text_for_model_def_literal_open_brace` must contain the path when
+/// `smelt_path` is `Some`, and `"ModelDef"` in all cases.
+#[test]
+fn hover_on_model_def_literal_opening_brace_shows_emitted_path() {
+    // Static name: path is known.
+    let text = hover_text_for_model_def_literal_open_brace(Some("cohorts.us_west"));
+    assert!(
+        text.contains("cohorts.us_west"),
+        "hover must contain resolved smelt path 'cohorts.us_west', got: {text}"
+    );
+    assert!(
+        text.contains("ModelDef"),
+        "hover must contain 'ModelDef', got: {text}"
+    );
+    // Non-static name: show type only.
+    let fallback = hover_text_for_model_def_literal_open_brace(None);
+    assert!(
+        fallback.contains("ModelDef"),
+        "fallback hover must contain 'ModelDef', got: {fallback}"
+    );
+    assert!(
+        !fallback.contains("cohorts"),
+        "fallback hover must not contain a path segment, got: {fallback}"
+    );
+}
+
+/// Hover on the value token of `name: 'us_west'` inside a `ModelDef { … }`
+/// literal shows the inferred emitted smelt path.
+///
+/// `hover_text_for_model_def_name_field_value` must contain the path string.
+#[test]
+fn hover_on_model_def_name_field_value_shows_smelt_path() {
+    let text = hover_text_for_model_def_name_field_value("cohorts.us_west");
+    assert!(
+        text.contains("cohorts.us_west"),
+        "hover must contain 'cohorts.us_west', got: {text}"
+    );
+}
+
+/// Hover on the body expression value of `body: SELECT …` inside a `ModelDef`
+/// literal shows `TableExpr` and, when column info is available, the column list.
+///
+/// `hover_text_for_model_def_body_field_value` must contain "TableExpr" and
+/// the column names when provided.
+#[test]
+fn hover_on_model_def_body_field_value_shows_table_expr_and_columns() {
+    let columns = vec![
+        "id".to_string(),
+        "region".to_string(),
+        "revenue".to_string(),
+    ];
+    let text = hover_text_for_model_def_body_field_value(Some(&columns));
+    assert!(
+        text.contains("TableExpr"),
+        "hover must contain 'TableExpr', got: {text}"
+    );
+    assert!(
+        text.contains("id"),
+        "hover must contain column 'id', got: {text}"
+    );
+    assert!(
+        text.contains("region"),
+        "hover must contain column 'region', got: {text}"
+    );
+    // No column info: TableExpr only.
+    let no_cols = hover_text_for_model_def_body_field_value(None);
+    assert!(
+        no_cols.contains("TableExpr"),
+        "hover (no columns) must still contain 'TableExpr', got: {no_cols}"
+    );
+}
+
+/// Completion at `generates: <cursor>` in a `.sql` file's YAML frontmatter
+/// offers exactly `["models"]` — no other values.
+///
+/// `completion_for_generates_value` must return a single entry whose label
+/// is `"models"`.
+#[test]
+fn completion_on_generates_offers_models_only() {
+    let items = completion_for_generates_value();
+    assert_eq!(
+        items.len(),
+        1,
+        "completion must offer exactly one value; got: {items:?}"
+    );
+    assert_eq!(
+        items[0].label, "models",
+        "sole completion item must be 'models'; got: {:?}",
+        items[0].label
+    );
+}
+
+/// Completion at `ModelDef {{ <cursor>` offers the closed five-field set, with
+/// required fields (`name`, `body`) first, and excludes already-filled fields.
+///
+/// `completion_for_model_def_field_key` must:
+/// - Return all five fields when `already_filled` is empty.
+/// - Exclude already-filled fields.
+/// - Place `name` and `body` before optional fields.
+#[test]
+fn completion_on_model_def_field_key_offers_closed_five_field_set() {
+    // All five fields when nothing is filled.
+    let items = completion_for_model_def_field_key(&[]);
+    assert_eq!(
+        items.len(),
+        5,
+        "must offer all five fields when nothing is filled; got: {items:?}"
+    );
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"name"),
+        "must offer 'name' field; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"body"),
+        "must offer 'body' field; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"materialization"),
+        "must offer 'materialization' field; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"tags"),
+        "must offer 'tags' field; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"description"),
+        "must offer 'description' field; got: {labels:?}"
+    );
+    // Required fields (name, body) come first per the spec ordering rule.
+    let name_pos = items.iter().position(|i| i.label == "name").unwrap();
+    let body_pos = items.iter().position(|i| i.label == "body").unwrap();
+    let mat_pos = items
+        .iter()
+        .position(|i| i.label == "materialization")
+        .unwrap();
+    assert!(
+        name_pos < mat_pos,
+        "required 'name' must come before optional 'materialization'"
+    );
+    assert!(
+        body_pos < mat_pos,
+        "required 'body' must come before optional 'materialization'"
+    );
+
+    // Already-filled fields are excluded.
+    let items_partial = completion_for_model_def_field_key(&["name".to_string()]);
+    assert_eq!(
+        items_partial.len(),
+        4,
+        "must offer 4 fields when 'name' is already filled; got: {items_partial:?}"
+    );
+    assert!(
+        !items_partial.iter().any(|i| i.label == "name"),
+        "already-filled 'name' must not appear in completions"
+    );
+}
+
+/// Goto-def on a generator-emitted model reference resolves to the emitting
+/// `ModelDef.name` field's value-token in the generator file.
+///
+/// `goto_def_for_emitted_model_reference` takes the generator file path and
+/// the `name_span` (the CST text range of the `name` field's value) and must
+/// return a `Location` at the span's start/end in the generator file.
+#[test]
+fn goto_def_on_emitted_model_reference_resolves_to_model_def_name_field() {
+    use tower_lsp::lsp_types::Range;
+    let gen_path = std::path::Path::new("/workspace/models/cohorts.gen.sql");
+    // Simulate: name: 'us_west' — the value token 'us_west' sits at line 5, cols 13..20
+    let name_range = Range {
+        start: tower_lsp::lsp_types::Position::new(5, 13),
+        end: tower_lsp::lsp_types::Position::new(5, 20),
+    };
+    let loc = goto_def_for_emitted_model_reference(gen_path, name_range);
+    assert!(
+        loc.is_some(),
+        "goto_def_for_emitted_model_reference must return Some"
+    );
+    let loc = loc.unwrap();
+    assert!(
+        loc.uri.path().ends_with("cohorts.gen.sql"),
+        "location must point at the generator file; got: {}",
+        loc.uri
+    );
+    assert_eq!(
+        loc.range.start.line, 5,
+        "location must be at line 5; got: {}",
+        loc.range.start.line
+    );
+    assert_eq!(
+        loc.range.start.character, 13,
+        "location must start at col 13; got: {}",
+        loc.range.start.character
+    );
+}

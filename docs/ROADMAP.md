@@ -73,6 +73,24 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 ## Recently Completed
 
+### ~~Typed Meta-Language — Phase E2: Multi-Model Production~~ ✅ (May 16, 2026)
+
+Completed Phase E2 of the typed meta-language plan ([plan](plans/20260509-meta-language-E2.md), [spec](specs/meta_language.md)):
+
+- **`generates: models` frontmatter directive** — marks a file as a generator file whose body is a `List<ModelDef>` meta-expression. The `.gen.sql` extension is a recommended convention.
+- **`ModelDef` built-in closed record type** — five fields: `name` (required, `Text`), `body` (required, `TableExpr`), `materialization` (optional, `Text`), `tags` (optional, `List<Text>`), `description` (optional, `Text`). User-constructible only inside generator file bodies.
+- **W1–W4 workspace-shape resolution pipeline** (Salsa-cached): W1 discovers generator files; W2 evaluates each generator's body in isolation; W3 collision-checks and emits survivors/discarded; W4 type-checks the full workspace including emitted models.
+- **Ten diagnostic codes**: `GeneratesUnknownValue`, `GeneratesMixedWithBareModel`, `GenerateFileBareSelectForbidden`, `GenerateFileBodyTypeError`, `ModelDefOutsideGeneratorFile`, `ModelDefInvalidName`, `ModelDefInvalidMaterialization`, `ModelDefDuplicateName`, `ModelDefHandAuthoredCollision`, `GeneratorBodyForbidsModelReflection`.
+- **`<generator>` expansion frame** — `evaluate_generator` stamps the `<generator>` anonymous frame onto every diagnostic from inside the generator body's HOF chain. The frame has `function = "<generator>"`, `decl_path = generator_file_path`, `call_site_range = body expression range`.
+- **Generator-file CLI integration** — `build_logical_graph` and `discover_emitted_model_files` in `smelt-cli` wire emitted models into the logical graph. `register_loader_files_from_disk` in `init_db` auto-registers YAML/JSON/TOML loader files so `smelt.config.load_yaml` calls in generator bodies can evaluate.
+- **LSP pure helpers** — `hover_text_for_generates_frontmatter`, `hover_text_for_model_def_literal_open_brace`, `hover_text_for_model_def_name_field_value`, `hover_text_for_model_def_body_field_value`, `completion_for_generates_value`, `completion_for_model_def_field_key`, `goto_def_for_emitted_model_reference` — all unit-tested. Backend dispatch wiring is Phase G.
+- **`examples/per_cohort_union/`** killer demo — three cohorts from `cohorts.yaml`, union in `all_cohorts_unioned.sql`, zero LSP diagnostics.
+- **`examples/staging_from_sources/`** secondary demo — staging layer generator from source YAML files, zero LSP diagnostics.
+- **Ten broken sub-fixtures** — one per diagnostic code under `examples/broken/meta_language_e2_broken/`.
+- **User docs**: `docs-site/docs/meta-language/generators.md`, index/reflection/reference page additions.
+
+See [plan](plans/20260509-meta-language-E2.md). Next: Phase G (rename, LSP completeness sweep, `/smelt-loop` `large` tier).
+
 ### ~~Smelt Functions — Steps 6–13 (PASSING, planner, struct row vars, review remediation)~~ ✅ (April 24–26, 2026)
 
 Completed the remaining eight steps of the smelt-functions experimentation roadmap (Phases 28–53 of [plan](plans/20260422-smelt-functions.md)):

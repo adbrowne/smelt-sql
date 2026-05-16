@@ -484,12 +484,33 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
-## Planned but not yet implemented
+## Generator-body restriction
 
-The following reflection capabilities are planned but not yet available:
+`smelt.models.*` accessors (`smelt.models.with_tag`, `smelt.models.all`) are **not available inside generator file bodies** (files whose frontmatter declares `generates: models`). Calling them emits `GeneratorBodyForbidsModelReflection`.
 
-- **Record types and config loaders** (`Record<{…}>`, `Map<K,V>`, YAML/JSON/TOML loaders): user-writable record types and structured config loading.
-- **Multi-model production**: one file generates multiple output models.
+**Why.** Workspace shape — which models exist — is determined by evaluating all generators in a single pass. Admitting `smelt.models.*` inside a generator would create a circular dependency between generator emissions and the model-reflection they observe.
+
+**`smelt.sources.*` is allowed** inside generator bodies. Sources are evaluated before any generator, so there is no circularity.
+
+```sql
+---
+generates: models
+---
+-- OK: smelt.sources.with_tag works inside generator bodies.
+smelt.sources.with_tag('raw')
+  |> map(fn s => ModelDef {
+       name: s.name,
+       body: SELECT * FROM smelt.sources.raw.[s.name]
+     })
+
+-- NOT OK: smelt.models.with_tag fires GeneratorBodyForbidsModelReflection.
+-- smelt.models.with_tag('staging') |> map(fn m => ModelDef { … })
+```
+
+For driving a generator from a data file, use `smelt.config.load_yaml` / `load_json` instead. See [Generator Files](generators.md) and [Config Loaders](config-loaders.md).
+
+## Planned but not yet available
+
 - **Additional `ModelRef`/`SourceRef` fields** (`materialization`, `backends`, `description`, …): the field set will expand as concrete use cases are identified.
 
 ## See also

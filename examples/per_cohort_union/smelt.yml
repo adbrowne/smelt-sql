@@ -1,0 +1,14 @@
+name: per_cohort_union
+version: 1
+
+paths:
+  - models
+  - tests
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

@@ -1,8 +1,18 @@
 # Meta-Language Reference
 
-Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, and the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift, wide reflection accessors `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`).
+Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift, wide reflection accessors `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`), and generator files (`<generator>` frame, `generates: models`, `generator_file:` selector, `ModelDef`, `origin`).
 
-For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md), [Records](records.md), [Maps](maps.md), [Config Loaders](config-loaders.md).
+For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md), [Records](records.md), [Maps](maps.md), [Config Loaders](config-loaders.md), [Generator Files](generators.md).
+
+---
+
+## `<generator>` frame
+
+A **generator file** is any `.gen.sql` file whose YAML frontmatter carries `generates: models`. Its body is a meta-language expression of type `List<ModelDef>`; each element is expanded into a standalone model at build time.
+
+The `<generator>` frame is the unit of expansion: one generator file produces zero or more models, each identified by `ModelDef.name`. Generator files may drive model production from config loaders (`smelt.config.load_yaml`) or from workspace source reflection (`smelt.sources.with_tag`, `smelt.sources.all`). Model reflection (`smelt.models.*`) is forbidden inside a generator body.
+
+See [Generator Files](generators.md) for the full specification, the `ModelDef` record type, collision rules, and the `generator_file:` CLI selector.
 
 ---
 
@@ -138,6 +148,40 @@ SELECT map([1, 2, 3], fn c => c * 2)
 **Editor support:** hover on the parameter inside the body shows its bound type; goto-definition resolves to the `fn` binding occurrence.
 
 See [Lambdas](lambdas.md) for full details, scoping rules, and diagnostic codes.
+
+---
+
+## `generates: models` — generator file frontmatter directive
+
+**Kind:** YAML frontmatter key; marks the file as a generator file.
+
+**Syntax:** `generates: models` (the only valid value in v1).
+
+A generator file's body is a meta-language expression of type `List<ModelDef>`. Each emitted `ModelDef` value with `name: 'n'` becomes a model at smelt path `smelt.<dir>.<stem>.<n>`.
+
+**Editor support:** hover on `generates: models` shows `List<ModelDef>` and (when statically resolvable) the number of emitted models; completion at `generates: <cursor>` offers exactly `models`.
+
+See [Generator Files](generators.md) for the full specification.
+
+---
+
+## `generator_file:` — CLI selector for generator-emitted models
+
+**Kind:** CLI / catalog selector key; scopes commands to models emitted by a specific generator file.
+
+**Syntax:**
+```
+generator_file: models/path/to/file.gen.sql
+```
+
+Pass `generator_file:` as a selector to `smelt build`, `smelt explain`, or `smelt test` to target only the models produced by the named generator. The path is workspace-relative and uses `/` as the separator on all platforms.
+
+**Example:**
+```
+smelt build generator_file:models/cohorts.gen.sql
+```
+
+See [Generator Files — CLI and catalog integration](generators.md) for full details and interaction with tag-based selectors.
 
 ---
 
@@ -322,6 +366,39 @@ See [Reflection — Meta-`Text`-as-identifier lift](reflection.md#meta-text-as-i
 
 ---
 
+## `ModelDef` — built-in closed record type for generator files
+
+**Kind:** closed meta-only record type; user-constructible only inside a generator file body (`generates: models`).
+
+**Fields (in declaration order):**
+
+| Field | Type | Required | Default |
+|-------|------|----------|---------|
+| `name` | `Text` | Yes | — |
+| `body` | `TableExpr` | Yes | — |
+| `materialization` | `Text` | No | `"view"` |
+| `tags` | `List<Text>` | No | `[]` |
+| `description` | `Text` | No | `""` |
+
+Constructing a `ModelDef` literal outside a generator file body emits `ModelDefOutsideGeneratorFile`.
+
+**Example:**
+```sql
+---
+generates: models
+---
+[
+  ModelDef { name: 'orders',  body: SELECT * FROM smelt.sources.raw.orders },
+  ModelDef { name: 'users',   body: SELECT * FROM smelt.sources.raw.users }
+]
+```
+
+**Editor support:** hover on the opening `{` of a `ModelDef` literal shows the emitted smelt path (when `name` is statically known); completion at `ModelDef { <cursor>` offers the five fields, required fields first.
+
+See [Generator Files](generators.md) for the full multi-model production surface.
+
+---
+
 ## `ModelRef` — closed meta record type for model reflection
 
 **Kind:** closed meta-only record type; produced by `smelt.models.with_tag` and `smelt.models.all`.
@@ -373,6 +450,16 @@ WHERE reduce([is_admin, is_moderator], or_any)
 ```
 
 See [Reducers — `or_any`](reducers.md#or_any) for full details.
+
+---
+
+## `origin` — model provenance field in CLI and catalog output
+
+**Kind:** metadata field; present in `smelt explain --json` output and in catalog markdown for every model, whether hand-authored or generator-emitted.
+
+For hand-authored models, `origin` carries `{"kind": "cli"}` (when built via the CLI) or `{"kind": "catalog"}` (when queried from the catalog). For generator-emitted models, `origin` additionally records `{"generator_file": "models/path/to/file.gen.sql", "model_def_name": "name"}` so that downstream tools can trace each model back to its producing generator.
+
+See [Generator Files](generators.md) for full details on the `origin` field and how it appears in `smelt explain --json` and catalog output.
 
 ---
 
@@ -1071,6 +1158,66 @@ See [Config Variables — `ConfigVarNullCoercion`](config-vars.md#configvarnullc
 
 ---
 
+### `GenerateFileBareSelectForbidden`
+
+**When:** A generator file (frontmatter `generates: models`) contains a top-level bare `SELECT`, `WITH`, or `VALUES` statement instead of a meta-language expression.
+
+**Message:** `generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape`
+
+**Fix:** replace the bare statement with a meta-expression of type `List<ModelDef>`, or remove `generates: models` from the frontmatter.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GenerateFileBodyTypeError`
+
+**When:** The generator file body evaluates to a type that is not assignable to `List<ModelDef>`.
+
+**Message:** `generator file body must evaluate to List<ModelDef>; found {actual}`
+
+**Fix:** ensure the body expression produces a `List<ModelDef>`.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GeneratesMixedWithBareModel`
+
+**When:** `generates: models` appears in a file that also has a `name:` frontmatter field or Layer-1 section delimiters.
+
+**Message:** `generates: models is mutually exclusive with name: or Layer-1 delimiters`
+
+**Fix:** a file is either a generator (no `name:`, no Layer-1 delimiters) or a bare model — not both.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GeneratesUnknownValue`
+
+**When:** The `generates:` frontmatter key carries a value other than `models`.
+
+**Message:** `generates: expects value 'models'; found '{actual}'`
+
+**Fix:** use `generates: models`, or remove the `generates:` key.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GeneratorBodyForbidsModelReflection`
+
+**When:** A generator file body calls `smelt.models.with_tag` or `smelt.models.all`.
+
+**Message:** `smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references`
+
+**Fix:** drive generation from `smelt.config.load_yaml` / `load_json`, from `smelt.sources.*`, or from literal `smelt.<path>` references to hand-authored models.
+
+See [Generator Files — Generator-body reflection restriction](generators.md#generator-body-reflection-restriction).
+
+---
+
 ### `HofExpectsLambda`
 
 **When:** The second argument to `map` or `filter` is not a lambda.
@@ -1140,6 +1287,66 @@ See [Lambdas — `LambdaInForbiddenPosition`](lambdas.md#lambdainforbiddenpositi
 **Fix:** adjust the body expression to produce the required type.
 
 See [Lambdas — `LambdaResultTypeMismatch`](lambdas.md#lambdaresulttypemismatch).
+
+---
+
+### `ModelDefDuplicateName`
+
+**When:** Two `ModelDef` values in the same generator file share the same `name` field value.
+
+**Message:** `duplicate ModelDef.name '{name}' in this generator file`
+
+**Fix:** give each emitted model a unique `name` value within the file.
+
+See [Generator Files — Name uniqueness and collision rules](generators.md#name-uniqueness-and-collision-rules).
+
+---
+
+### `ModelDefHandAuthoredCollision`
+
+**When:** A generator-emitted model's smelt path collides with a hand-authored model or with another generator's emission.
+
+**Message:** `ModelDef emits '{smelt_path}' which collides with {other_path}`
+
+**Fix:** rename the `ModelDef` to produce a unique smelt path, or remove the conflicting hand-authored model.
+
+See [Generator Files — Name uniqueness and collision rules](generators.md#name-uniqueness-and-collision-rules).
+
+---
+
+### `ModelDefInvalidMaterialization`
+
+**When:** The `materialization` field of a `ModelDef` literal contains a value that is not a known materialization strategy.
+
+**Message:** `invalid ModelDef.materialization '{value}'; expected one of: view, table, incremental, ephemeral`
+
+**Fix:** use one of the four valid values: `'view'`, `'table'`, `'incremental'`, or `'ephemeral'`.
+
+See [Generator Files](generators.md).
+
+---
+
+### `ModelDefInvalidName`
+
+**When:** The `name` field of a `ModelDef` literal contains a value that is not a path-safe identifier (ASCII letters, digits, underscores; must not start with a digit).
+
+**Message:** `ModelDef.name '{value}' is not a valid identifier`
+
+**Fix:** use a name containing only `[a-zA-Z_][a-zA-Z0-9_]*`.
+
+See [Generator Files](generators.md).
+
+---
+
+### `ModelDefOutsideGeneratorFile`
+
+**When:** A `ModelDef { … }` record literal appears outside a generator file body — in a hand-authored model, a `smelt.define` function body, or any other non-generator context.
+
+**Message:** `ModelDef literals are only valid inside a \`generates: models\` file body`
+
+**Fix:** move the `ModelDef` literal into a generator file (frontmatter `generates: models`).
+
+See [Generator Files](generators.md).
 
 ---
 
