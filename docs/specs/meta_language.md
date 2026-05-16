@@ -1297,7 +1297,7 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
   - `docs/plans/20260509-meta-language-D.md`
   - `docs/plans/20260509-meta-language-E1.md`
   - `docs/plans/20260509-meta-language-E2.md` — Phase E2 plan covering multi-model production
-  - `docs/plans/20260509-meta-language-F.md` (forthcoming) — Phase F polish: parameterised reducers, multi-arg lambdas, meta-world ternary
+  - `docs/plans/20260509-meta-language-F.md` — Phase F polish: parameterised reducers, multi-arg lambdas, meta-world ternary
 - **Related specs**:
   - `docs/specs/functions.md` — `smelt.define`, fragment sorts, named arguments (parser disambiguation surface)
   - `docs/specs/types.md` — `DataType` vocabulary, fragment-sort grammar, strict-by-default doctrine
