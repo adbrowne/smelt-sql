@@ -340,3 +340,203 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 }
+
+// ============================================================================
+// Phase 3 (Phase F): Production-path (Salsa) integration tests
+// ============================================================================
+//
+// These tests call `db.file_diagnostics()` via the `TestDb` wrapper to verify
+// that the pure ternary / reducer / lambda check functions are properly wired
+// into the production diagnostics pipeline.
+//
+// RED BEFORE WIRING, GREEN AFTER.
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{test_harness::TestDb, DiagnosticCode};
+    use std::path::PathBuf;
+
+    /// Build a single-file workspace with the given SQL body.
+    fn setup(sql: &str) -> (TestDb, PathBuf) {
+        let mut db = TestDb::default();
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+        (db, path)
+    }
+
+    // ── Ternary condition not boolean ─────────────────────────────────────────
+
+    /// `SELECT if 42 then a else b FROM t` — integer condition — must produce
+    /// exactly one `TernaryConditionNotBoolean` diagnostic via `file_diagnostics`.
+    #[test]
+    fn file_diagnostics_emits_ternary_condition_not_boolean() {
+        let (mut db, path) = setup("SELECT if 42 then a else b FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TernaryConditionNotBoolean))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT if 42 then a else b FROM t must produce exactly 1 \
+             TernaryConditionNotBoolean; got: {:?}",
+            diags
+        );
+    }
+
+    // ── Ternary branch type mismatch ──────────────────────────────────────────
+
+    /// `SELECT if cond then 1 else 'x' FROM t` — incompatible branch types —
+    /// must produce exactly one `TernaryBranchTypeMismatch` diagnostic.
+    #[test]
+    fn file_diagnostics_emits_ternary_branch_type_mismatch() {
+        let (mut db, path) = setup("SELECT if cond then 1 else 'x' FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TernaryBranchTypeMismatch))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT if cond then 1 else 'x' FROM t must produce exactly 1 \
+             TernaryBranchTypeMismatch; got: {:?}",
+            diags
+        );
+    }
+
+    // ── Ternary dangling then ─────────────────────────────────────────────────
+
+    /// `SELECT then x FROM t` — bare `then` outside any `if ... then` form —
+    /// must produce exactly one `TernaryDanglingThen` diagnostic.
+    #[test]
+    fn file_diagnostics_emits_ternary_dangling_then() {
+        let (mut db, path) = setup("SELECT then x FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TernaryDanglingThen))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT then x FROM t must produce exactly 1 TernaryDanglingThen; \
+             got: {:?}",
+            diags
+        );
+    }
+
+    // ── Ternary dangling else ─────────────────────────────────────────────────
+
+    /// `SELECT if c then x FROM t` — ternary with no `else` branch —
+    /// must produce exactly one `TernaryDanglingElse` diagnostic.
+    #[test]
+    fn file_diagnostics_emits_ternary_dangling_else() {
+        let (mut db, path) = setup("SELECT if c then x FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TernaryDanglingElse))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT if c then x FROM t must produce exactly 1 TernaryDanglingElse; \
+             got: {:?}",
+            diags
+        );
+    }
+
+    // ── Parameterised reducer arity mismatch ──────────────────────────────────
+
+    /// `SELECT reduce(xs, concat_with()) FROM t` — `concat_with` missing its
+    /// required `sep` argument — must produce exactly one `ReducerArityMismatch`
+    /// diagnostic via `file_diagnostics`.
+    #[test]
+    fn file_diagnostics_emits_reducer_call_diagnostics() {
+        let (mut db, path) = setup("SELECT reduce(xs, concat_with()) FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::ReducerArityMismatch))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT reduce(xs, concat_with()) FROM t must produce exactly 1 \
+             ReducerArityMismatch; got: {:?}",
+            diags
+        );
+    }
+
+    // ── Lambda arity mismatch (multi-arg in HOF position) ─────────────────────
+
+    /// `SELECT map(xs, fn (a, b) => a + b) FROM t` — 2-arg lambda where map
+    /// expects arity 1 — must produce exactly one `LambdaArityMismatch`.
+    #[test]
+    fn file_diagnostics_emits_lambda_arity_mismatch() {
+        let (mut db, path) = setup("SELECT map(xs, fn (a, b) => a + b) FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::LambdaArityMismatch))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT map(xs, fn (a, b) => a + b) FROM t must produce exactly 1 \
+             LambdaArityMismatch; got: {:?}",
+            diags
+        );
+    }
+
+    // ── Lambda duplicate parameter ─────────────────────────────────────────────
+
+    /// `SELECT map(xs, fn (a, a) => a) FROM t` — duplicate parameter `a` —
+    /// must produce exactly one `LambdaDuplicateParameter` diagnostic.
+    #[test]
+    fn file_diagnostics_emits_lambda_duplicate_parameter() {
+        let (mut db, path) = setup("SELECT map(xs, fn (a, a) => a) FROM t");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::LambdaDuplicateParameter))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT map(xs, fn (a, a) => a) FROM t must produce exactly 1 \
+             LambdaDuplicateParameter; got: {:?}",
+            diags
+        );
+    }
+
+    // ── TernaryKeywordShadowed (smelt.define named `if`) ──────────────────────
+
+    /// `smelt.define if(x: Boolean) -> Boolean = x` — declares a function named
+    /// `if`, which is a reserved ternary keyword — must produce exactly one
+    /// `TernaryKeywordShadowed` diagnostic via `file_diagnostics`.
+    #[test]
+    fn file_diagnostics_emits_ternary_keyword_shadowed() {
+        let (mut db, path) = setup("smelt.define if(x: Boolean) -> Boolean = x");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TernaryKeywordShadowed))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "smelt.define if(...) must produce exactly 1 TernaryKeywordShadowed; \
+             got: {:?}",
+            diags
+        );
+    }
+}

@@ -101,3 +101,8 @@ pub use multi_model::{
     validate_model_def_materialization, validate_model_def_name, GeneratorBodyInferResult,
     ModelDefLiteralInferResult, MultiModelSentinel,
 };
+
+pub use ternary::{
+    check_dangling_ternary_keywords, check_ternary_expr_diagnostics, infer_ternary_type,
+    ShortCircuitHint, TernaryResult, TernarySentinel,
+};

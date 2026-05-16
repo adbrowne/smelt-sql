@@ -285,6 +285,207 @@ fn compute_ternary_lub(then_ty: &SmeltType, else_ty: &SmeltType) -> LubResult {
     }
 }
 
+/// Walk the raw file syntax node and detect bare `THEN_KW` tokens that appear
+/// outside any `TERNARY_EXPR` or SQL `WHEN_CLAUSE` — these are `TernaryDanglingThen`.
+///
+/// This function must walk the FULL file (not just the `SelectStmt`) because the
+/// parser's error recovery may eject `THEN_KW` tokens to the top-level FILE node
+/// when they appear in an unexpected expression position.
+///
+/// Pure function — no Salsa dependency. `text` is the raw source for span
+/// conversion; pass `""` in unit tests where exact position is not under test.
+pub fn check_dangling_ternary_keywords(
+    file_syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::{TERNARY_EXPR, THEN_KW, WHEN_CLAUSE};
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    // Walk all tokens in the full file to find dangling THEN_KW.
+    for elem in file_syntax.descendants_with_tokens() {
+        let token = match elem.into_token() {
+            Some(t) => t,
+            None => continue,
+        };
+        if token.kind() != THEN_KW {
+            continue;
+        }
+        // Check that no ancestor is a TERNARY_EXPR or WHEN_CLAUSE.
+        let has_ternary_or_when_ancestor = token
+            .parent_ancestors()
+            .any(|a| matches!(a.kind(), TERNARY_EXPR | WHEN_CLAUSE));
+        if !has_ternary_or_when_ancestor {
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: crate::meta_hof_diagnostic_message(
+                    crate::DiagnosticCode::TernaryDanglingThen,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                range: to_range(token.text_range()),
+                code: Some(crate::DiagnosticCode::TernaryDanglingThen),
+                data: None,
+            });
+        }
+    }
+
+    diags
+}
+
+/// Walk a `SelectStmt` (or any syntax subtree) and emit Phase F ternary diagnostics:
+///
+/// - `TernaryConditionNotBoolean`: condition is not Boolean or Unknown.
+/// - `TernaryBranchTypeMismatch`: then/else branches have incompatible types.
+/// - `TernaryDanglingElse`: a `TERNARY_EXPR` node with no else branch.
+///
+/// Note: `TernaryDanglingThen` (bare `then` keyword outside a ternary expression) is
+/// detected by [`check_dangling_ternary_keywords`] which walks the full file syntax.
+/// This function only walks the `SelectStmt` subtree and cannot reach FILE-level tokens
+/// that the parser may have ejected during error recovery.
+///
+/// Pure function — no Salsa dependency. `text` is the raw source for span
+/// conversion; pass `""` in unit tests where exact position is not under test.
+pub fn check_ternary_expr_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::TERNARY_EXPR;
+    use smelt_types::format_smelt_type_hover;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    let root = select_stmt.syntax();
+
+    // ── Walk TERNARY_EXPR nodes ───────────────────────────────────────────────
+    for node in root.descendants() {
+        if node.kind() == TERNARY_EXPR {
+            let ternary = TernaryExpr::cast(node.clone()).unwrap();
+
+            // Check for dangling else (TERNARY_EXPR with no else-branch expression).
+            if ternary.else_branch().is_none() {
+                // Only emit if the then-branch exists (otherwise the expression is
+                // severely malformed — let parse errors handle it).
+                if ternary.then_branch().is_some() {
+                    // Anchor at the TERNARY_EXPR node span.
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::TernaryDanglingElse,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: to_range(node.text_range()),
+                        code: Some(crate::DiagnosticCode::TernaryDanglingElse),
+                        data: None,
+                    });
+                }
+                // Skip full inference — some children are missing.
+                continue;
+            }
+
+            // Full ternary — run type inference and convert sentinels to diagnostics.
+            let result = infer_ternary_type(&ternary, ctx);
+            for sentinel in &result.sentinels {
+                match sentinel {
+                    TernarySentinel::ConditionNotBoolean { found } => {
+                        // Anchor at the condition expression span.
+                        let cond_range = ternary
+                            .condition()
+                            .map(|e| to_range(e.text_range()))
+                            .unwrap_or_else(|| to_range(node.text_range()));
+                        let found_str = format_smelt_type_hover(found);
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_hof_diagnostic_message(
+                                crate::DiagnosticCode::TernaryConditionNotBoolean,
+                                None,
+                                None,
+                                None,
+                                Some(&found_str),
+                                None,
+                                None,
+                                None,
+                            ),
+                            range: cond_range,
+                            code: Some(crate::DiagnosticCode::TernaryConditionNotBoolean),
+                            data: None,
+                        });
+                    }
+                    TernarySentinel::BranchTypeMismatch {
+                        then_type,
+                        else_type,
+                    } => {
+                        // Anchor at the `else` keyword (the spec says "anchored at
+                        // the `else` keyword's range").
+                        let else_kw_range = {
+                            use smelt_parser::SyntaxKind::ELSE_KW;
+                            node.children_with_tokens()
+                                .filter_map(|e| e.into_token())
+                                .find(|t| t.kind() == ELSE_KW)
+                                .map(|t| to_range(t.text_range()))
+                                .unwrap_or_else(|| to_range(node.text_range()))
+                        };
+                        let then_str = format_smelt_type_hover(then_type);
+                        let else_str = format_smelt_type_hover(else_type);
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_hof_diagnostic_message(
+                                crate::DiagnosticCode::TernaryBranchTypeMismatch,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(&then_str),
+                                Some(&else_str),
+                            ),
+                            range: else_kw_range,
+                            code: Some(crate::DiagnosticCode::TernaryBranchTypeMismatch),
+                            data: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
 // ─── Unit tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -316,6 +517,34 @@ mod tests {
 
         let ctx = TypeContext::new();
         infer_ternary_type(&ternary, &ctx)
+    }
+
+    /// Debug: check what nodes appear for `SELECT then x FROM t`.
+    #[test]
+    #[ignore = "diagnostic debug helper"]
+    fn debug_dangling_then_cst() {
+        use smelt_parser::ast::File;
+        use smelt_parser::SyntaxKind::{TERNARY_EXPR, THEN_KW, WHEN_CLAUSE};
+        let sql = "SELECT then x FROM t";
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root.clone()).expect("FILE");
+        let select_stmt = file.select_stmt();
+        eprintln!("select_stmt present: {}", select_stmt.is_some());
+        // Walk all tokens in the root to find THEN_KW
+        for elem in root.descendants_with_tokens() {
+            if let Some(token) = elem.into_token() {
+                if token.kind() == THEN_KW {
+                    eprintln!("THEN_KW found at {:?}", token.text_range());
+                    for anc in token.parent_ancestors() {
+                        eprintln!("  ancestor: {:?}", anc.kind());
+                        if matches!(anc.kind(), TERNARY_EXPR | WHEN_CLAUSE) {
+                            eprintln!("  -> IS ternary/when ancestor!");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Phase 2 emits `ShortCircuitHint::ElseReached` for a `FALSE` condition.

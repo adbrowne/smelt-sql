@@ -1360,11 +1360,28 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             //   LambdaDuplicateParameter, LambdaResultTypeMismatch, HofExpectsLambda,
             //   HofExpectsReducer, PipeRhsNotCall, PipeInDataPosition,
             //   ReducerInputTypeMismatch, ReducerEmptyNoIdentity.
+            // Also covers Phase F REDUCER_CALL nodes (parameterised reducers):
+            //   ReducerArityMismatch, ReducerArgTypeMismatch, ReducerArgNotCompileTime,
+            //   ReducerNamedArgument.
             // Uses an empty TypeContext (consistent with spread/window checks above).
             let hof_diags =
                 type_inference::check_hof_position_diagnostics(&select_stmt, &kind_ctx, text);
             for diag in hof_diags {
                 DiagnosticAcc(diag).accumulate(db);
+            }
+
+            // Phase F (meta-language) — Ternary expression diagnostics.
+            //
+            // Walks every TERNARY_EXPR descendant and bare THEN_KW tokens.
+            // Covers: TernaryConditionNotBoolean, TernaryBranchTypeMismatch,
+            //   TernaryDanglingElse, TernaryDanglingThen.
+            // Uses an empty TypeContext (consistent with HOF checks above).
+            {
+                let ternary_diags =
+                    type_inference::check_ternary_expr_diagnostics(&select_stmt, &kind_ctx, text);
+                for diag in ternary_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
             }
 
             // Phase C (meta-language) — smelt.columns_of diagnostic wiring.
@@ -1569,6 +1586,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         }
                     }
                 }
+            }
+        }
+
+        // Phase F (meta-language) — File-level dangling THEN_KW detection.
+        //
+        // The parser's error recovery may eject a bare `then` keyword to the
+        // top-level FILE node when it appears in an unexpected expression
+        // position (e.g. `SELECT then x FROM t`).  `check_ternary_expr_diagnostics`
+        // walks only the SelectStmt subtree and cannot reach FILE-level tokens.
+        // This block walks the FULL file syntax so dangling THEN_KW tokens are
+        // always caught, regardless of where error recovery placed them.
+        //
+        // Emits: TernaryDanglingThen.
+        {
+            let file_syntax = ast.syntax().clone();
+            for diag in type_inference::check_dangling_ternary_keywords(&file_syntax, text) {
+                DiagnosticAcc(diag).accumulate(db);
             }
         }
     }

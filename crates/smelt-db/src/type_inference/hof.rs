@@ -2314,6 +2314,135 @@ pub fn check_hof_position_diagnostics(
                         }
                         let second_arg = &args[1];
 
+                        // Check for a parameterised REDUCER_CALL node (e.g. `concat_with(' OR ')`).
+                        // These must be handled BEFORE the bare-identifier reducer check.
+                        let reducer_call_node = second_arg
+                            .syntax()
+                            .descendants()
+                            .find(|n| n.kind() == smelt_parser::SyntaxKind::REDUCER_CALL)
+                            .or_else(|| {
+                                if second_arg.syntax().kind()
+                                    == smelt_parser::SyntaxKind::REDUCER_CALL
+                                {
+                                    Some(second_arg.syntax().clone())
+                                } else {
+                                    None
+                                }
+                            });
+
+                        if let Some(reducer_node) = reducer_call_node {
+                            if let Some(reducer_call) =
+                                smelt_parser::ast::ReducerCall::cast(reducer_node.clone())
+                            {
+                                let reducer_name = reducer_call.name().unwrap_or_default();
+                                // Run parameterised reducer inference.
+                                let result = infer_parameterised_reducer_call(&reducer_call, ctx);
+                                let rc_range = to_range(reducer_node.text_range());
+                                if let Some(sentinel) = result.sentinel {
+                                    match sentinel {
+                                        ParameterisedReducerSentinel::ArityMismatch {
+                                            reducer,
+                                            expected,
+                                            actual,
+                                        } => {
+                                            diags.push(crate::Diagnostic {
+                                                severity: crate::DiagnosticSeverity::Error,
+                                                message: crate::meta_hof_diagnostic_message(
+                                                    crate::DiagnosticCode::ReducerArityMismatch,
+                                                    None,
+                                                    None,
+                                                    Some(&expected.to_string()),
+                                                    Some(&actual.to_string()),
+                                                    Some(&reducer),
+                                                    None,
+                                                    None,
+                                                ),
+                                                range: rc_range,
+                                                code: Some(
+                                                    crate::DiagnosticCode::ReducerArityMismatch,
+                                                ),
+                                                data: None,
+                                            });
+                                        }
+                                        ParameterisedReducerSentinel::NamedArgument => {
+                                            diags.push(crate::Diagnostic {
+                                                severity: crate::DiagnosticSeverity::Error,
+                                                message: crate::meta_hof_diagnostic_message(
+                                                    crate::DiagnosticCode::ReducerNamedArgument,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    Some(&reducer_name),
+                                                    None,
+                                                    None,
+                                                ),
+                                                range: rc_range,
+                                                code: Some(
+                                                    crate::DiagnosticCode::ReducerNamedArgument,
+                                                ),
+                                                data: None,
+                                            });
+                                        }
+                                        ParameterisedReducerSentinel::ArgTypeMismatch {
+                                            reducer,
+                                            param,
+                                            expected,
+                                            found,
+                                        } => {
+                                            let exp_str = format_smelt_type_hover(&expected);
+                                            let found_str = format_smelt_type_hover(&found);
+                                            diags.push(crate::Diagnostic {
+                                                severity: crate::DiagnosticSeverity::Error,
+                                                message: crate::meta_hof_diagnostic_message(
+                                                    crate::DiagnosticCode::ReducerArgTypeMismatch,
+                                                    None,
+                                                    None,
+                                                    Some(&exp_str),
+                                                    None,
+                                                    Some(&reducer),
+                                                    Some(&param),
+                                                    Some(&found_str),
+                                                ),
+                                                range: rc_range,
+                                                code: Some(
+                                                    crate::DiagnosticCode::ReducerArgTypeMismatch,
+                                                ),
+                                                data: None,
+                                            });
+                                        }
+                                        ParameterisedReducerSentinel::ArgNotCompileTime {
+                                            reducer,
+                                            param,
+                                            found,
+                                        } => {
+                                            let found_str = format_smelt_type_hover(&found);
+                                            diags.push(crate::Diagnostic {
+                                                severity: crate::DiagnosticSeverity::Error,
+                                                message: crate::meta_hof_diagnostic_message(
+                                                    crate::DiagnosticCode::ReducerArgNotCompileTime,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    Some(&reducer),
+                                                    Some(&param),
+                                                    Some(&found_str),
+                                                ),
+                                                range: rc_range,
+                                                code: Some(
+                                                    crate::DiagnosticCode::ReducerArgNotCompileTime,
+                                                ),
+                                                data: None,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            // Skip the bare-identifier reducer check below.
+                            continue;
+                        }
+
                         // Second arg must be a bare reducer identifier.
                         let arg_text = second_arg.text().trim().to_string();
                         let is_reducer = arg_text.chars().all(|c| c.is_alphanumeric() || c == '_')
