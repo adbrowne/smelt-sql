@@ -408,10 +408,12 @@ fn meta_lists_broken_spread_forbidden() {
 // The broken-workspace tests use `check_workspace_emits_exactly_one_phase_b_diagnostic` which
 // asserts exactly one Phase B code fires in the named file.
 
-/// The Phase B diagnostic codes. Used to filter diagnostics in the broken-workspace helper.
+/// The Phase B / F diagnostic codes. Used to filter diagnostics in the broken-workspace helper.
 const PHASE_B_CODES: &[smelt_db::DiagnosticCode] = &[
     smelt_db::DiagnosticCode::LambdaInForbiddenPosition,
-    smelt_db::DiagnosticCode::LambdaArityNotSupported,
+    smelt_db::DiagnosticCode::LambdaArityMismatch,
+    smelt_db::DiagnosticCode::LambdaZeroParameters,
+    smelt_db::DiagnosticCode::LambdaDuplicateParameter,
     smelt_db::DiagnosticCode::LambdaResultTypeMismatch,
     smelt_db::DiagnosticCode::HofExpectsLambda,
     smelt_db::DiagnosticCode::HofExpectsReducer,
@@ -421,6 +423,16 @@ const PHASE_B_CODES: &[smelt_db::DiagnosticCode] = &[
     smelt_db::DiagnosticCode::PipeInDataPosition,
     smelt_db::DiagnosticCode::ReducerInputTypeMismatch,
     smelt_db::DiagnosticCode::ReducerEmptyNoIdentity,
+    smelt_db::DiagnosticCode::ReducerArityMismatch,
+    smelt_db::DiagnosticCode::ReducerArgTypeMismatch,
+    smelt_db::DiagnosticCode::ReducerArgNotCompileTime,
+    smelt_db::DiagnosticCode::ReducerNamedArgument,
+    smelt_db::DiagnosticCode::TernaryConditionNotBoolean,
+    smelt_db::DiagnosticCode::TernaryBranchTypeMismatch,
+    smelt_db::DiagnosticCode::TernaryKeywordShadowed,
+    smelt_db::DiagnosticCode::TernaryInDataPosition,
+    smelt_db::DiagnosticCode::TernaryDanglingThen,
+    smelt_db::DiagnosticCode::TernaryDanglingElse,
     smelt_db::DiagnosticCode::ConfigVarNotFound,
     smelt_db::DiagnosticCode::ConfigVarNameNotLiteral,
     smelt_db::DiagnosticCode::ConfigVarNullCoercion,
@@ -556,19 +568,15 @@ fn meta_hofs_broken_lambda_in_forbidden_position() {
     );
 }
 
-/// Phase B TDD: `examples/meta_hofs_broken_lambda_arity_not_supported/` produces exactly
-/// one `LambdaArityNotSupported` diagnostic.
-///
-/// The parser does not produce a multi-arg LAMBDA CST node in Phase B; instead the
-/// diagnostic fires via a text shape check on the HOF's second argument
-/// (`type_inference.rs::check_hof_position_diagnostics`). Phase F will replace the
-/// heuristic with structural detection on a real LAMBDA CST node.
+/// Phase F TDD: `examples/meta_hofs_broken_lambda_arity_not_supported/` produces exactly
+/// one `LambdaArityMismatch` diagnostic (Phase F replaces the old LambdaArityNotSupported
+/// code with the arity-aware code now that multi-arg lambdas parse as proper CST nodes).
 #[test]
 fn meta_hofs_broken_lambda_arity_not_supported() {
     check_workspace_emits_exactly_one_phase_b_diagnostic(
         "examples/meta_hofs_broken_lambda_arity_not_supported",
         "models/lambda_arity_not_supported.sql",
-        smelt_db::DiagnosticCode::LambdaArityNotSupported,
+        smelt_db::DiagnosticCode::LambdaArityMismatch,
     );
 }
 

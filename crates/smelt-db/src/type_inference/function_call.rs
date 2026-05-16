@@ -99,7 +99,7 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // scalar DataType equivalent in Phase A.
         Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
-        // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid return type.
+        // `Lambda<params, U>` (Phase B/F meta-language) — meta-only; not a valid return type.
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,

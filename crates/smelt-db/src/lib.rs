@@ -1356,10 +1356,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // Phase B (meta-language) Phase 3: HOF + lambda + pipe diagnostics.
             //
             // Walks every LAMBDA, FUNCTION_CALL (HOF), and PIPE_EXPR descendant.
-            // Covers: LambdaInForbiddenPosition, LambdaArityNotSupported,
-            //   LambdaResultTypeMismatch, HofExpectsLambda, HofExpectsReducer,
-            //   PipeRhsNotCall, PipeInDataPosition, ReducerInputTypeMismatch,
-            //   ReducerEmptyNoIdentity.
+            // Covers: LambdaInForbiddenPosition, LambdaArityMismatch, LambdaZeroParameters,
+            //   LambdaDuplicateParameter, LambdaResultTypeMismatch, HofExpectsLambda,
+            //   HofExpectsReducer, PipeRhsNotCall, PipeInDataPosition,
+            //   ReducerInputTypeMismatch, ReducerEmptyNoIdentity.
             // Uses an empty TypeContext (consistent with spread/window checks above).
             let hof_diags =
                 type_inference::check_hof_position_diagnostics(&select_stmt, &kind_ctx, text);

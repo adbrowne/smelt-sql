@@ -54,13 +54,18 @@ impl SmeltDefine {
         &self.0
     }
 
-    /// The declared function name (text of the single IDENT inside DEFINE_NAME).
+    /// The declared function name (text of the name token inside DEFINE_NAME).
+    ///
+    /// Accepts both `IDENT` tokens (normal names) and the ternary keyword tokens
+    /// (`IF_KW`, `THEN_KW`, `ELSE_KW`) — the latter are wrapped in `DEFINE_NAME` by
+    /// the parser for error-recovery purposes so that `check_define_name_shadowing`
+    /// can emit `TernaryKeywordShadowed` rather than a cryptic parse error.
     pub fn name(&self) -> Option<String> {
         let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
         name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)
+            .find(|t| matches!(t.kind(), IDENT | IF_KW | THEN_KW | ELSE_KW))
             .map(|t| t.text().to_string())
     }
 
@@ -70,7 +75,7 @@ impl SmeltDefine {
         let ident = name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)?;
+            .find(|t| matches!(t.kind(), IDENT | IF_KW | THEN_KW | ELSE_KW))?;
         Some(ident.text_range())
     }
 

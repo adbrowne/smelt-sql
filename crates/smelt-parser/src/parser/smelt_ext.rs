@@ -592,9 +592,12 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.advance(); // IDENT "define"
 
-        // DEFINE_NAME: wrap the next identifier.
+        // DEFINE_NAME: wrap the next identifier (or a reserved keyword used as a name).
+        // We also accept `IF_KW`, `THEN_KW`, and `ELSE_KW` here so that the semantic
+        // checker (`check_define_name_shadowing`) can detect and report the keyword as
+        // shadowed rather than producing a cryptic parse error.
         self.skip_trivia();
-        if self.at(IDENT) {
+        if self.at(IDENT) || self.at(IF_KW) || self.at(THEN_KW) || self.at(ELSE_KW) {
             self.start_node(DEFINE_NAME);
             self.advance();
             self.finish_node();

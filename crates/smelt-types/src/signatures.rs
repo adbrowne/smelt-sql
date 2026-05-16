@@ -163,16 +163,20 @@ pub enum SmeltType {
     /// meta-language). `T` is itself a [`SmeltType`] (enabling `List<List<T>>`
     /// nesting). No `List<T>` value reaches the database engine.
     List(Box<SmeltType>),
-    /// `Lambda<T, U>` — a meta-language lambda value (Phase B).
+    /// `Lambda<(S_1, …, S_k), U>` — a meta-language lambda value (Phase B/F).
     ///
     /// Constructed only at HOF positional-argument positions (e.g. the
     /// second argument of `map`, `filter`). **Meta-only** — not user-writable
-    /// as a `smelt.define` parameter sort or return type. No `Lambda<T, U>`
+    /// as a `smelt.define` parameter sort or return type. No `Lambda<…>`
     /// value reaches the database engine.
     ///
-    /// Lambda is **invariant**: `is_subtype_of(Lambda<S1, T1>, Lambda<S2, T2>)`
-    /// is `true` only when `S1 = S2` and `T1 = T2` (byte-equal).
-    Lambda(Box<SmeltType>, Box<SmeltType>),
+    /// Lambda is **invariant**: `is_subtype_of(Lambda<S1…Sk, T>, Lambda<S1'…Sk', T'>)`
+    /// is `true` only when `k = k'`, each `S_i = S_i'`, and `T = T'` (byte-equal).
+    ///
+    /// The `Vec<SmeltType>` carries the parameter types in declaration order.
+    /// For a single-parameter lambda (`fn x => body`) the vec has exactly one
+    /// element. Zero-element vecs indicate an invalid lambda (`LambdaZeroParameters`).
+    Lambda(Vec<SmeltType>, Box<SmeltType>),
     /// Compiler's "already told you about this" type for list elements (Phase A).
     ///
     /// `Unknown` is produced when a list literal's element types cannot be
@@ -346,7 +350,9 @@ impl PartialEq for SmeltType {
         match (self, other) {
             (SmeltType::Expr(a), SmeltType::Expr(b)) => a == b,
             (SmeltType::List(a), SmeltType::List(b)) => a == b,
-            (SmeltType::Lambda(a1, a2), SmeltType::Lambda(b1, b2)) => a1 == b1 && a2 == b2,
+            (SmeltType::Lambda(a_params, a_ret), SmeltType::Lambda(b_params, b_ret)) => {
+                a_params == b_params && a_ret == b_ret
+            }
             (SmeltType::Unknown, SmeltType::Unknown) => true,
             (SmeltType::TableExpr(a), SmeltType::TableExpr(b)) => a == b,
             (
@@ -412,7 +418,8 @@ pub fn is_subtype_of(sub: &SmeltType, sup: &SmeltType) -> bool {
         (a, b) if a == b => true,
         // List covariance: List<S> <: List<T> iff S <: T.
         (SmeltType::List(s_inner), SmeltType::List(t_inner)) => is_subtype_of(s_inner, t_inner),
-        // Lambda invariance: Lambda<S1, T1> <: Lambda<S2, T2> only when S1 = S2 and T1 = T2.
+        // Lambda invariance: Lambda<S_1…S_k, T> <: Lambda<S_1'…S_k', T'> only when
+        // k = k', each S_i = S_i', and T = T'.
         // The reflexivity arm above already handles the equal case (`a == b`), so
         // any non-equal Lambda pair falls through to the `_ => false` arm.
         // We add this arm for documentation clarity; it is unreachable in practice
@@ -496,7 +503,18 @@ impl std::fmt::Display for SmeltType {
                 TypeConstraint::Any => write!(f, "Expr<Any>"),
             },
             SmeltType::List(inner) => write!(f, "List<{inner}>"),
-            SmeltType::Lambda(t, u) => write!(f, "Lambda<{t}, {u}>"),
+            SmeltType::Lambda(params, ret) => {
+                if params.len() == 1 {
+                    write!(f, "Lambda<{}, {}>", params[0], ret)
+                } else {
+                    let params_str = params
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(f, "Lambda<({params_str}), {ret}>")
+                }
+            }
             SmeltType::Unknown => write!(f, "Unknown"),
             SmeltType::TableExpr(_) => write!(f, "TableExpr"),
             SmeltType::SelectItems { kind, .. } => match kind {
@@ -994,7 +1012,13 @@ fn find_forbidden_type_name(ty: &SmeltType) -> Option<String> {
         SmeltType::ColumnRef => Some("ColumnRef".to_string()),
         SmeltType::ModelRef => Some("ModelRef".to_string()),
         SmeltType::SourceRef => Some("SourceRef".to_string()),
-        SmeltType::Lambda(_, _) => Some("Lambda".to_string()),
+        SmeltType::Lambda(params, _) => {
+            // Also check parameter types for forbidden type references.
+            params
+                .iter()
+                .find_map(find_forbidden_type_name)
+                .or(Some("Lambda".to_string()))
+        }
         SmeltType::List(inner) => find_forbidden_type_name(inner),
         SmeltType::Record { fields, .. } => fields.values().find_map(find_forbidden_type_name),
         SmeltType::Map { key, value } => {
@@ -1464,7 +1488,7 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
                 inner: u_raw.to_string(),
                 span_text: text.to_string(),
             })?;
-            Ok(SmeltType::Lambda(Box::new(t), Box::new(u)))
+            Ok(SmeltType::Lambda(vec![t], Box::new(u)))
         }
         "TableExpr" | "AggExpr" | "WindowExpr" | "OrderSpec" => {
             Err(SmeltTypeParseError::UnsupportedSort {
@@ -4307,11 +4331,23 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
     match ty {
         SmeltType::Expr(tc) => format!("Expr<{}>", format_type_constraint_hover(tc)),
         SmeltType::List(inner) => format!("List<{}>", format_smelt_type_hover(inner)),
-        SmeltType::Lambda(param_ty, body_ty) => format!(
-            "Lambda<{}, {}>",
-            format_smelt_type_hover(param_ty),
-            format_smelt_type_hover(body_ty)
-        ),
+        SmeltType::Lambda(params, body_ty) => {
+            let body_str = format_smelt_type_hover(body_ty);
+            if params.len() == 1 {
+                format!(
+                    "Lambda<{}, {}>",
+                    format_smelt_type_hover(&params[0]),
+                    body_str
+                )
+            } else {
+                let params_str = params
+                    .iter()
+                    .map(format_smelt_type_hover)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Lambda<({params_str}), {body_str}>")
+            }
+        }
         SmeltType::TableExpr(None) => "TableExpr".to_string(),
         SmeltType::TableExpr(Some(req)) => {
             let mut s = String::from("TableExpr<{");
@@ -5644,7 +5680,7 @@ mod tests {
     #[test]
     fn lambda_type_round_trip() {
         let ty = SmeltType::Lambda(
-            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))],
             Box::new(SmeltType::Expr(TypeConstraint::Concrete(
                 DataType::Varchar { max_length: None },
             ))),
@@ -5661,11 +5697,11 @@ mod tests {
     #[test]
     fn lambda_type_invariant() {
         let lambda_int_text = SmeltType::Lambda(
-            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))],
             Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
         );
         let lambda_numeric_text = SmeltType::Lambda(
-            Box::new(SmeltType::Expr(TypeConstraint::Numeric)),
+            vec![SmeltType::Expr(TypeConstraint::Numeric)],
             Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
         );
         // Lambda is invariant — Integer does NOT widen to Numeric for subtyping.
@@ -5683,7 +5719,7 @@ mod tests {
     #[test]
     fn lambda_type_equality_only_when_exact() {
         let lambda = SmeltType::Lambda(
-            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))],
             Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
         );
         assert!(
@@ -5691,12 +5727,79 @@ mod tests {
             "Lambda must be a subtype of itself (reflexivity)"
         );
         let lambda2 = SmeltType::Lambda(
-            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))],
             Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))),
         );
         assert!(
             !is_subtype_of(&lambda, &lambda2),
             "Lambda with different body type must NOT be a subtype"
+        );
+    }
+
+    // === Phase F (meta-language) TDD tests: multi-arg Lambda ===
+
+    /// Multi-arg lambda has distinct equality/arity from single-arg lambda.
+    #[test]
+    fn lambda_vec_arity() {
+        let lambda_2arg = SmeltType::Lambda(
+            vec![
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+            ],
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        let lambda_1arg = SmeltType::Lambda(
+            vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))],
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        // Different arities must NOT be equal.
+        assert_ne!(
+            lambda_2arg, lambda_1arg,
+            "Lambda with 2 params must differ from Lambda with 1 param"
+        );
+        // Subtype must not hold either direction.
+        assert!(
+            !is_subtype_of(&lambda_2arg, &lambda_1arg),
+            "Lambda<(Integer, Integer), Text> must NOT be a subtype of Lambda<Integer, Text>"
+        );
+        assert!(
+            !is_subtype_of(&lambda_1arg, &lambda_2arg),
+            "Lambda<Integer, Text> must NOT be a subtype of Lambda<(Integer, Integer), Text>"
+        );
+    }
+
+    /// Multi-arg lambda Display renders with tuple syntax; single-arg renders without.
+    #[test]
+    fn lambda_vec_display() {
+        let lambda_2arg = SmeltType::Lambda(
+            vec![
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+            ],
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        let lambda_1arg = SmeltType::Lambda(
+            vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))],
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        let display_2 = format!("{}", lambda_2arg);
+        let display_1 = format!("{}", lambda_1arg);
+        // Multi-arg uses tuple syntax.
+        assert!(
+            display_2.contains("(") && display_2.contains(")"),
+            "Multi-arg lambda must render with tuple parens, got: {}",
+            display_2
+        );
+        assert!(
+            display_2.starts_with("Lambda<("),
+            "Multi-arg lambda must render as Lambda<(...)>, got: {}",
+            display_2
+        );
+        // Single-arg omits parens.
+        assert!(
+            display_1.starts_with("Lambda<Expr"),
+            "Single-arg lambda must render without tuple parens, got: {}",
+            display_1
         );
     }
 
@@ -6474,7 +6577,7 @@ mod tests {
         );
 
         // Lambda is also forbidden.
-        let lambda_ty = SmeltType::Lambda(Box::new(expr_text()), Box::new(expr_text()));
+        let lambda_ty = SmeltType::Lambda(vec![expr_text()], Box::new(expr_text()));
         let decl_lambda = make_decl("Cohort", vec![("fn_field", lambda_ty)]);
         let (_, sentinels4) = build_record_registry(&[decl_lambda]);
         assert_eq!(

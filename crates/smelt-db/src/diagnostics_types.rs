@@ -225,12 +225,23 @@ pub enum DiagnosticCode {
     /// "lambda is only valid as an argument to a higher-order function".
     /// Introduced in Phase 3 of the meta-language plan (Phase B).
     LambdaInForbiddenPosition,
-    /// Emitted when a lambda with more than one parameter (`fn (a, b) => body`)
-    /// is used in Phase B. Multi-arg lambdas are reserved for Phase F.
-    /// Message: "multi-argument lambdas are not supported in v1; use a single parameter".
-    /// Anchored at the lambda parameter list span.
-    /// Introduced in Phase 3 of the meta-language plan (Phase B).
-    LambdaArityNotSupported,
+    /// Emitted when a lambda passed to a HOF has a different arity from what
+    /// the HOF expects. For `map`/`filter` arity-1 is required; `reduce` takes
+    /// a reducer (not a lambda). Mismatch → `LambdaArityMismatch`.
+    /// Message: "{hof} expects a lambda of arity {expected}; found arity {actual}".
+    /// Anchored at the lambda span.
+    /// Introduced in Phase F of the meta-language plan.
+    LambdaArityMismatch,
+    /// Emitted when a lambda has zero parameters (`fn () => body`).
+    /// Message: "lambda must declare at least one parameter".
+    /// Anchored at the lambda parameter list span (or the `fn` keyword).
+    /// Introduced in Phase F of the meta-language plan.
+    LambdaZeroParameters,
+    /// Emitted when a lambda parameter list contains the same name twice.
+    /// Message: "parameter `{name}` already appears in this lambda's parameter list".
+    /// Anchored at the second occurrence's IDENT span.
+    /// Introduced in Phase F of the meta-language plan.
+    LambdaDuplicateParameter,
     /// Emitted when the lambda body's synthesised type is incompatible with
     /// the HOF's required result shape (e.g. `filter` requires `Boolean`).
     /// Message: "{hof} requires lambda result {expected}; found {actual}".
@@ -279,6 +290,64 @@ pub enum DiagnosticCode {
     /// Anchored at the `reduce` call span.
     /// Introduced in Phase 3 of the meta-language plan (Phase B).
     ReducerEmptyNoIdentity,
+    /// Emitted when a parameterised reducer call has the wrong number of
+    /// positional arguments.
+    /// Message: "reducer {r} expects {expected} argument(s); found {actual}".
+    /// Anchored at the `REDUCER_CALL` node span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerArityMismatch,
+    /// Emitted when a parameterised reducer argument has the wrong type.
+    /// Message: "reducer {r}'s argument `{param}` expects {expected}; found {actual}".
+    /// Anchored at the offending argument expression span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerArgTypeMismatch,
+    /// Emitted when a parameterised reducer argument is a runtime expression
+    /// rather than a compile-time value.
+    /// Message: "reducer {r}'s argument `{param}` must be a compile-time value; found {actual}".
+    /// Anchored at the offending argument expression span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerArgNotCompileTime,
+    /// Emitted when a parameterised reducer call uses named arguments.
+    /// Message: "reducer {r} takes positional arguments only".
+    /// Anchored at the named argument span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerNamedArgument,
+    /// Emitted when the ternary condition expression is not Boolean.
+    /// Message: "ternary condition expects Boolean; found {actual}".
+    /// Anchored at the condition expression span.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryConditionNotBoolean,
+    /// Emitted when the then-branch and else-branch of a ternary have
+    /// incompatible types that cannot be unified.
+    /// Message: "ternary branches have incompatible types: {then_type} vs {else_type}".
+    /// Anchored at the `else` keyword span.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryBranchTypeMismatch,
+    /// Emitted when a `smelt.define`, `smelt.record`, or lambda parameter is
+    /// declared with a name that is a reserved ternary keyword.
+    /// Message: "{name} is a reserved meta-language keyword".
+    /// Anchored at the offending name token.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryKeywordShadowed,
+    /// Emitted when a ternary expression appears in a Data-World (SQL) splice
+    /// position. `if-then-else` is meta-only; SQL has `CASE WHEN`.
+    /// Message: "if-then-else is meta-only; use SQL CASE WHEN in this position".
+    /// Anchored at the `if` keyword span.
+    ///
+    /// Note: pure-inference may not have enough parent-context to detect this.
+    /// Phase 3 (`check_file_diagnostics`) wires the splice-context check.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryInDataPosition,
+    /// Emitted when a `then` keyword appears outside of an `if ... then ...` form.
+    /// Message: "unexpected `then` keyword outside of `if ... then ...` form".
+    /// Anchored at the `then` token.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryDanglingThen,
+    /// Emitted when an `else` keyword appears outside of a `... then ... else` form.
+    /// Message: "unexpected `else` keyword outside of `... then ... else` form".
+    /// Anchored at the `else` token.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryDanglingElse,
     /// Emitted when `smelt.config.var(<name>)` is called and `<name>` is not
     /// present in `smelt.yml` `vars:`. Message:
     /// "compile-time variable {name} not declared in smelt.yml vars".
@@ -622,23 +691,27 @@ pub fn meta_list_diagnostic_message(
     }
 }
 
-/// Render the diagnostic message for Phase B (meta-language) HOF, lambda, pipe,
-/// reducer, and `smelt.config.var` diagnostic codes.
+/// Render the diagnostic message for Phase B / Phase F (meta-language) HOF, lambda,
+/// pipe, reducer, ternary, and `smelt.config.var` diagnostic codes.
 ///
 /// Parameters:
-/// - `code`: one of the fourteen Phase B `DiagnosticCode` variants.
-/// - `hof`: HOF name for `LambdaResultTypeMismatch`, `HofExpectsLambda` (e.g. `"map"`).
-/// - `name`: function/reducer/variable name for `HofNameShadowed`, `ReducerNameShadowed`,
-///   `ConfigVarNotFound`, `ConfigVarNullCoercion`.
-/// - `expected`: expected type string for `LambdaResultTypeMismatch`.
-/// - `actual`: actual type string for `LambdaResultTypeMismatch`, `HofExpectsLambda`,
-///   `HofExpectsReducer`.
-/// - `reducer`: reducer name for `ReducerInputTypeMismatch`, `ReducerEmptyNoIdentity`.
-/// - `t_in`: expected input element type string for `ReducerInputTypeMismatch`.
-/// - `t_actual`: actual input element type string for `ReducerInputTypeMismatch`.
+/// - `code`: one of the Phase B/F `DiagnosticCode` variants.
+/// - `hof`: HOF name for `LambdaResultTypeMismatch`, `HofExpectsLambda`,
+///   `LambdaArityMismatch` (e.g. `"map"`).
+/// - `name`: function/reducer/variable/keyword name for `HofNameShadowed`,
+///   `ReducerNameShadowed`, `ConfigVarNotFound`, `ConfigVarNullCoercion`,
+///   `TernaryKeywordShadowed`, `LambdaDuplicateParameter`.
+/// - `expected`: expected type or arity string.
+/// - `actual`: actual type or arity string.
+/// - `reducer`: reducer name for `ReducerInputTypeMismatch`, `ReducerEmptyNoIdentity`,
+///   `ReducerArityMismatch`, `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`,
+///   `ReducerNamedArgument`.
+/// - `t_in`: expected input element type string for `ReducerInputTypeMismatch`; or
+///   parameter name for `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`.
+/// - `t_actual`: actual input element type string for `ReducerInputTypeMismatch`,
+///   or actual type for `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`.
 ///
-/// Returns the exact message string specified in `meta_language.md` §"Diagnostic
-/// codes (new in Phase B)".
+/// Returns the exact message string specified in `meta_language.md` §"Diagnostic codes".
 #[allow(clippy::too_many_arguments)]
 pub fn meta_hof_diagnostic_message(
     code: DiagnosticCode,
@@ -654,8 +727,24 @@ pub fn meta_hof_diagnostic_message(
         DiagnosticCode::LambdaInForbiddenPosition => {
             "lambda is only valid as an argument to a higher-order function".to_string()
         }
-        DiagnosticCode::LambdaArityNotSupported => {
-            "multi-argument lambdas are not supported in v1; use a single parameter".to_string()
+        DiagnosticCode::LambdaArityMismatch => {
+            let h = hof.unwrap_or("HOF");
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!(
+                "{} expects a lambda of arity {}; found arity {}",
+                h, exp, act
+            )
+        }
+        DiagnosticCode::LambdaZeroParameters => {
+            "lambda must declare at least one parameter".to_string()
+        }
+        DiagnosticCode::LambdaDuplicateParameter => {
+            let n = name.unwrap_or("?");
+            format!(
+                "parameter `{}` already appears in this lambda's parameter list",
+                n
+            )
         }
         DiagnosticCode::LambdaResultTypeMismatch => {
             let h = hof.unwrap_or("HOF");
@@ -696,6 +785,61 @@ pub fn meta_hof_diagnostic_message(
             let r = reducer.unwrap_or("?");
             format!("reducer {} has no identity for an empty list", r)
         }
+        DiagnosticCode::ReducerArityMismatch => {
+            let r = reducer.unwrap_or("?");
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!("reducer {} expects {} argument(s); found {}", r, exp, act)
+        }
+        DiagnosticCode::ReducerArgTypeMismatch => {
+            let r = reducer.unwrap_or("?");
+            let param = t_in.unwrap_or("?");
+            let exp = expected.unwrap_or("?");
+            let act = t_actual.unwrap_or("?");
+            format!(
+                "reducer {}'s argument `{}` expects {}; found {}",
+                r, param, exp, act
+            )
+        }
+        DiagnosticCode::ReducerArgNotCompileTime => {
+            let r = reducer.unwrap_or("?");
+            let param = t_in.unwrap_or("?");
+            let act = t_actual.unwrap_or("?");
+            format!(
+                "reducer {}'s argument `{}` must be a compile-time value; found {}",
+                r, param, act
+            )
+        }
+        DiagnosticCode::ReducerNamedArgument => {
+            let r = reducer.unwrap_or("?");
+            format!("reducer {} takes positional arguments only", r)
+        }
+        DiagnosticCode::TernaryConditionNotBoolean => {
+            let act = actual.unwrap_or("?");
+            format!("ternary condition expects Boolean; found {}", act)
+        }
+        DiagnosticCode::TernaryBranchTypeMismatch => {
+            // t_in = then_type, t_actual = else_type
+            let then_ty = t_in.unwrap_or("?");
+            let else_ty = t_actual.unwrap_or("?");
+            format!(
+                "ternary branches have incompatible types: {} vs {}",
+                then_ty, else_ty
+            )
+        }
+        DiagnosticCode::TernaryKeywordShadowed => {
+            let n = name.unwrap_or("?");
+            format!("{} is a reserved meta-language keyword", n)
+        }
+        DiagnosticCode::TernaryInDataPosition => {
+            "if-then-else is meta-only; use SQL CASE WHEN in this position".to_string()
+        }
+        DiagnosticCode::TernaryDanglingThen => {
+            "unexpected `then` keyword outside of `if ... then ...` form".to_string()
+        }
+        DiagnosticCode::TernaryDanglingElse => {
+            "unexpected `else` keyword outside of `... then ... else` form".to_string()
+        }
         DiagnosticCode::ConfigVarNotFound => {
             let n = name.unwrap_or("?");
             format!("compile-time variable {} not declared in smelt.yml vars", n)
@@ -710,7 +854,7 @@ pub fn meta_hof_diagnostic_message(
                 n
             )
         }
-        _ => panic!("meta_hof_diagnostic_message called with non-Phase-B code"),
+        _ => panic!("meta_hof_diagnostic_message called with non-Phase-B/F code"),
     }
 }
 

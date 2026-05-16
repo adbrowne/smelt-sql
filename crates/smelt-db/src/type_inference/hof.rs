@@ -232,6 +232,281 @@ pub fn lookup_reducer(name: &str) -> Option<&'static ReducerSpec> {
     REDUCER_REGISTRY.iter().find(|r| r.name == name)
 }
 
+// ─── Phase F: Parameterised reducer registry ─────────────────────────────────
+
+/// Spec for a single parameter of a parameterised reducer.
+pub struct ParameterisedReducerParam {
+    /// The parameter name (e.g. `"sep"` for `concat_with`).
+    pub name: &'static str,
+    /// A function returning the required type for this parameter.
+    pub ty: fn() -> SmeltType,
+}
+
+/// Spec for a parameterised reducer (Phase F).
+///
+/// Parameterised reducers are called as `IDENT(args...)` in the second-argument
+/// position of a `reduce(xs, ...)` call. The arguments must be compile-time
+/// resolvable (literals, `smelt.config.var(...)` results).
+pub struct ParameterisedReducerSpec {
+    /// The reducer's source name (e.g. `"concat_with"`).
+    pub name: &'static str,
+    /// The required parameters in positional order.
+    pub params: &'static [ParameterisedReducerParam],
+    /// The input element type constraint.
+    pub input_constraint: ReducerInputConstraint,
+    /// The output type of the reducer.
+    pub output_type: fn() -> SmeltType,
+    /// Empty-list identity (same semantics as `ReducerSpec::empty_identity`).
+    pub empty_identity: EmptyIdentity,
+}
+
+fn text_smelt_type() -> SmeltType {
+    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+        DataType::Text,
+    ))
+}
+
+/// The closed parameterised reducer registry (Phase F v1).
+///
+/// Only `concat_with` is registered. Adding entries requires a spec edit
+/// and a single-line addition here.
+pub static PARAMETERISED_REDUCER_REGISTRY: &[ParameterisedReducerSpec] =
+    &[ParameterisedReducerSpec {
+        name: "concat_with",
+        params: &[ParameterisedReducerParam {
+            name: "sep",
+            ty: text_smelt_type,
+        }],
+        input_constraint: ReducerInputConstraint::Text,
+        output_type: text_smelt_type,
+        empty_identity: EmptyIdentity::Text, // identity is '' (empty string)
+    }];
+
+/// Look up a parameterised reducer by name.
+///
+/// Returns `None` for unknown names. Pure — no Salsa dependency.
+pub fn lookup_parameterised_reducer(name: &str) -> Option<&'static ParameterisedReducerSpec> {
+    PARAMETERISED_REDUCER_REGISTRY
+        .iter()
+        .find(|r| r.name == name)
+}
+
+/// Pending diagnostic sentinel from `infer_parameterised_reducer_call`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParameterisedReducerSentinel {
+    /// Wrong number of positional arguments.
+    ArityMismatch {
+        reducer: String,
+        expected: usize,
+        actual: usize,
+    },
+    /// An argument is a named argument (e.g. `sep => ' OR '`).
+    NamedArgument,
+    /// An argument's type does not match the expected parameter type.
+    ArgTypeMismatch {
+        reducer: String,
+        param: String,
+        expected: SmeltType,
+        found: SmeltType,
+    },
+    /// An argument is not a compile-time resolvable value.
+    ArgNotCompileTime {
+        reducer: String,
+        param: String,
+        found: SmeltType,
+    },
+}
+
+/// Result of `infer_parameterised_reducer_call`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterisedReducerResult {
+    /// The inferred output type of the reducer (or `Unknown` on error).
+    pub output_type: SmeltType,
+    /// Optional diagnostic sentinel. `None` on the happy path.
+    pub sentinel: Option<ParameterisedReducerSentinel>,
+}
+
+/// Infer the type of a `REDUCER_CALL` CST node (Phase F).
+///
+/// Called from the second-argument position of a `reduce(xs, REDUCER_CALL)` call.
+/// Validates:
+/// - The reducer name is in `PARAMETERISED_REDUCER_REGISTRY`; else returns an error
+///   sentinel (caller translates to `HofExpectsReducer`).
+/// - Positional argument count matches the registry entry.
+/// - No named arguments (e.g. `sep => ' OR '`).
+/// - Each argument synthesises a compile-time-resolvable type matching the
+///   declared parameter type.
+///
+/// Pure function — no Salsa dependency.
+pub fn infer_parameterised_reducer_call(
+    call: &smelt_parser::ast::ReducerCall,
+    ctx: &TypeContext,
+) -> ParameterisedReducerResult {
+    // 1. Look up reducer name.
+    let name = call.name().unwrap_or_default();
+    let Some(spec) = lookup_parameterised_reducer(&name) else {
+        // Unknown reducer name — caller emits HofExpectsReducer.
+        return ParameterisedReducerResult {
+            output_type: SmeltType::Unknown,
+            sentinel: None, // caller handles unknown name
+        };
+    };
+
+    // 2. Extract arguments from the ARG_LIST child node.
+    let arg_list_node = call.args();
+    let arg_exprs: Vec<smelt_parser::ast::Expr> = if let Some(arg_list) = arg_list_node {
+        use smelt_parser::SyntaxKind::{EXPRESSION, NAMED_PARAM};
+        // Check for named arguments first (named params look like `name => value`).
+        let has_named = arg_list.children().any(|n| n.kind() == NAMED_PARAM);
+        if has_named {
+            return ParameterisedReducerResult {
+                output_type: SmeltType::Unknown,
+                sentinel: Some(ParameterisedReducerSentinel::NamedArgument),
+            };
+        }
+        // Collect EXPRESSION children as positional args.
+        arg_list
+            .children()
+            .filter(|n| n.kind() == EXPRESSION)
+            .filter_map(smelt_parser::ast::Expr::cast)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // 3. Arity check.
+    let expected_arity = spec.params.len();
+    let actual_arity = arg_exprs.len();
+    if actual_arity != expected_arity {
+        return ParameterisedReducerResult {
+            output_type: SmeltType::Unknown,
+            sentinel: Some(ParameterisedReducerSentinel::ArityMismatch {
+                reducer: name.clone(),
+                expected: expected_arity,
+                actual: actual_arity,
+            }),
+        };
+    }
+
+    // 4. Validate each argument.
+    for (i, (param, arg_expr)) in spec.params.iter().zip(arg_exprs.iter()).enumerate() {
+        // 4a. Check compile-time resolvability.
+        let is_compile_time = is_compile_time_reducer_arg(arg_expr, ctx);
+
+        // Synthesise the argument type.
+        let arg_ty = synthesise_arg_smelt_type(arg_expr, ctx);
+
+        if !is_compile_time {
+            return ParameterisedReducerResult {
+                output_type: SmeltType::Unknown,
+                sentinel: Some(ParameterisedReducerSentinel::ArgNotCompileTime {
+                    reducer: name.clone(),
+                    param: param.name.to_string(),
+                    found: arg_ty,
+                }),
+            };
+        }
+
+        // 4b. Check type compatibility.
+        let expected_ty = (param.ty)();
+        if !arg_type_matches(&arg_ty, &expected_ty) {
+            return ParameterisedReducerResult {
+                output_type: SmeltType::Unknown,
+                sentinel: Some(ParameterisedReducerSentinel::ArgTypeMismatch {
+                    reducer: name.clone(),
+                    param: param.name.to_string(),
+                    expected: expected_ty,
+                    found: arg_ty,
+                }),
+            };
+        }
+
+        let _ = i; // suppress unused warning
+    }
+
+    // 5. Return output type.
+    ParameterisedReducerResult {
+        output_type: (spec.output_type)(),
+        sentinel: None,
+    }
+}
+
+/// Determine whether an expression is compile-time resolvable (Phase F).
+///
+/// Compile-time resolvable means:
+/// - A string/number/boolean literal.
+/// - A `smelt.config.var(...)` call (always returns compile-time Text).
+///
+/// Runtime expressions (function calls like `UPPER('x')`, column references,
+/// etc.) are NOT compile-time.
+///
+/// Pure function — no Salsa dependency.
+fn is_compile_time_reducer_arg(expr: &smelt_parser::ast::Expr, _ctx: &TypeContext) -> bool {
+    let text = expr.text().trim().to_string();
+
+    // String literal: starts and ends with quote.
+    if (text.starts_with('\'') && text.ends_with('\''))
+        || (text.starts_with('"') && text.ends_with('"'))
+    {
+        return true;
+    }
+
+    // Numeric literal: all digits (possibly with decimal point, minus sign, etc.)
+    if text
+        .trim_start_matches('-')
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.')
+        && !text.is_empty()
+    {
+        return true;
+    }
+
+    // Boolean literals.
+    let text_lc = text.to_lowercase();
+    if text_lc == "true" || text_lc == "false" {
+        return true;
+    }
+
+    // smelt.config.var(...) — always compile-time.
+    if text.to_lowercase().contains("smelt.config.var") {
+        return true;
+    }
+
+    false
+}
+
+/// Synthesise the SmeltType for an expression in reducer argument position.
+fn synthesise_arg_smelt_type(expr: &smelt_parser::ast::Expr, ctx: &TypeContext) -> SmeltType {
+    use smelt_types::signatures::TypeConstraint;
+    match infer_expression_type(expr, ctx) {
+        Some(tc) => SmeltType::Expr(TypeConstraint::Concrete(tc.data_type)),
+        None => SmeltType::Unknown,
+    }
+}
+
+/// Check whether an actual argument type matches the declared parameter type.
+fn arg_type_matches(actual: &SmeltType, expected: &SmeltType) -> bool {
+    use smelt_types::signatures::TypeConstraint;
+    use smelt_types::DataType;
+
+    match (actual, expected) {
+        // Exact match.
+        (a, e) if a == e => true,
+        // Text variants: Text, Varchar, Char all satisfy Expr<Text>.
+        (
+            SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text | DataType::Varchar { .. } | DataType::Char { .. },
+            )),
+            SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text | DataType::Varchar { .. } | DataType::Char { .. },
+            )),
+        ) => true,
+        // Unknown actual: don't reject (already an error).
+        (SmeltType::Unknown, _) => true,
+        _ => false,
+    }
+}
+
 /// Infer the output [`SmeltType`] for a `reduce(xs, reducer_name)` call
 /// where `xs` infers to `List<elem_ty>` (Phase B).
 ///
@@ -1587,6 +1862,9 @@ pub fn check_define_name_shadowing(
     use smelt_parser::ast::text_range_to_range;
 
     const HOF_NAMES: &[&str] = &["map", "filter", "reduce"];
+    /// Reserved ternary keywords — must not be used as smelt.define, smelt.record,
+    /// or lambda-parameter names.
+    const TERNARY_KEYWORDS: &[&str] = &["if", "then", "else"];
 
     let mut diags = Vec::new();
     let Some(name) = define.name() else {
@@ -1648,6 +1926,23 @@ pub fn check_define_name_shadowing(
             code: Some(crate::DiagnosticCode::ReducerNameShadowed),
             data: None,
         });
+    } else if TERNARY_KEYWORDS.contains(&name_lc.as_str()) {
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: crate::meta_hof_diagnostic_message(
+                crate::DiagnosticCode::TernaryKeywordShadowed,
+                Some(&name),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            range,
+            code: Some(crate::DiagnosticCode::TernaryKeywordShadowed),
+            data: None,
+        });
     }
 
     diags
@@ -1657,8 +1952,9 @@ pub fn check_define_name_shadowing(
 ///
 /// - `LambdaInForbiddenPosition`: a `LAMBDA` CST node whose parent is not a
 ///   HOF positional argument.
-/// - `LambdaArityNotSupported`: a `LAMBDA` whose parameter list contains more
-///   than one identifier.
+/// - `LambdaArityMismatch`: a `LAMBDA` in map/filter position with arity != 1.
+/// - `LambdaZeroParameters`: a `LAMBDA` with no parameters.
+/// - `LambdaDuplicateParameter`: a `LAMBDA` with duplicate parameter names.
 /// - `LambdaResultTypeMismatch`: `filter` predicate body not `Boolean`.
 /// - `HofExpectsLambda`: second arg to `map`/`filter` is not a `LAMBDA`.
 /// - `HofExpectsReducer`: second arg to `reduce` is not a registered reducer.
@@ -1720,14 +2016,15 @@ pub fn check_hof_position_diagnostics(
                 let lambda = smelt_parser::ast::Lambda::cast(node.clone()).unwrap();
                 let lambda_range = to_range(node.text_range());
 
-                // Arity check: does the LAMBDA have a multi-arg parameter list?
-                let has_multi_arg = lambda.is_multi_arg();
+                // Arity check: does the LAMBDA have zero parameters?
+                let param_count = lambda.lambda_params().len();
+                let has_zero_params = param_count == 0;
 
-                if has_multi_arg {
+                if has_zero_params {
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_hof_diagnostic_message(
-                            crate::DiagnosticCode::LambdaArityNotSupported,
+                            crate::DiagnosticCode::LambdaZeroParameters,
                             None,
                             None,
                             None,
@@ -1737,21 +2034,48 @@ pub fn check_hof_position_diagnostics(
                             None,
                         ),
                         range: lambda_range,
-                        code: Some(crate::DiagnosticCode::LambdaArityNotSupported),
+                        code: Some(crate::DiagnosticCode::LambdaZeroParameters),
                         data: None,
                     });
                     // Still check for forbidden position below.
                 }
 
+                // Duplicate parameter check.
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    for lp in lambda.lambda_params() {
+                        if let Some(pname) = lp.name() {
+                            if !seen.insert(pname.clone()) {
+                                let dup_range = to_range(lp.syntax().text_range());
+                                diags.push(crate::Diagnostic {
+                                    severity: crate::DiagnosticSeverity::Error,
+                                    message: crate::meta_hof_diagnostic_message(
+                                        crate::DiagnosticCode::LambdaDuplicateParameter,
+                                        None,
+                                        Some(&pname),
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    ),
+                                    range: dup_range,
+                                    code: Some(crate::DiagnosticCode::LambdaDuplicateParameter),
+                                    data: None,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Position check: is this LAMBDA inside a HOF positional argument?
-                // A lambda is valid only when it is inside an EXPRESSION that is a
-                // direct child of an ARG_LIST that belongs to a known HOF FUNCTION_CALL.
+                // Also detect which HOF to check arity expectations.
                 //
                 // Parent chain: LAMBDA → EXPRESSION → ARG_LIST → FUNCTION_CALL
                 // We walk up through EXPRESSION and ARG_LIST wrappers.
-                let in_valid_hof_position = {
+                let hof_context: Option<HofKind> = {
                     let mut parent_opt = node.parent();
-                    let mut valid = false;
+                    let mut found_hof: Option<HofKind> = None;
 
                     // Walk up through EXPRESSION / ARG_LIST wrappers.
                     while let Some(p) = parent_opt {
@@ -1761,9 +2085,7 @@ pub fn check_hof_position_diagnostics(
                                 let call =
                                     smelt_parser::ast::FunctionCall::cast(p.clone()).unwrap();
                                 let name = call_name_lc(&call);
-                                if HofKind::from_name(&name).is_some() {
-                                    valid = true;
-                                }
+                                found_hof = HofKind::from_name(&name);
                                 break;
                             }
                             smelt_parser::SyntaxKind::EXPRESSION
@@ -1774,10 +2096,10 @@ pub fn check_hof_position_diagnostics(
                             _ => break,
                         }
                     }
-                    valid
+                    found_hof
                 };
 
-                if !in_valid_hof_position {
+                if hof_context.is_none() {
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_hof_diagnostic_message(
@@ -1794,6 +2116,39 @@ pub fn check_hof_position_diagnostics(
                         code: Some(crate::DiagnosticCode::LambdaInForbiddenPosition),
                         data: None,
                     });
+                } else if let Some(hof_kind) = hof_context {
+                    // Check arity expectations: map/filter require arity 1.
+                    // (reduce takes a reducer, not a lambda, so lambdas in reduce
+                    // position will emit HofExpectsReducer from the FUNCTION_CALL walk.)
+                    let required_arity: Option<usize> = match hof_kind {
+                        HofKind::Map | HofKind::Filter => Some(1),
+                        HofKind::Reduce => None, // reduce doesn't use lambdas
+                    };
+                    if let Some(req) = required_arity {
+                        if param_count != req && !has_zero_params {
+                            let hof_name = match hof_kind {
+                                HofKind::Map => "map",
+                                HofKind::Filter => "filter",
+                                HofKind::Reduce => "reduce",
+                            };
+                            diags.push(crate::Diagnostic {
+                                severity: crate::DiagnosticSeverity::Error,
+                                message: crate::meta_hof_diagnostic_message(
+                                    crate::DiagnosticCode::LambdaArityMismatch,
+                                    Some(hof_name),
+                                    None,
+                                    Some(&req.to_string()),
+                                    Some(&param_count.to_string()),
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                range: lambda_range,
+                                code: Some(crate::DiagnosticCode::LambdaArityMismatch),
+                                data: None,
+                            });
+                        }
+                    }
                 }
             }
 
@@ -1837,7 +2192,11 @@ pub fn check_hof_position_diagnostics(
                         }
                         let second_arg = &args[1];
 
-                        // Check if second arg contains a LAMBDA node (including multi-arg).
+                        // Check if second arg contains any LAMBDA node.
+                        // Phase F: multi-arg lambdas now parse as proper LAMBDA CST nodes,
+                        // so `has_any_lambda` includes both single-arg and multi-arg lambdas.
+                        // Arity mismatch (multi-arg in map/filter) is detected by the LAMBDA
+                        // node walk above and emits LambdaArityMismatch there.
                         let has_any_lambda = second_arg
                             .syntax()
                             .descendants()
@@ -1847,40 +2206,7 @@ pub fn check_hof_position_diagnostics(
                         // Check if second arg contains a valid single-arg LAMBDA.
                         let has_valid_lambda = extract_lambda_from_expr(second_arg).is_some();
 
-                        // Check if second arg is a multi-arg lambda written as `fn (a, b) => …`.
-                        // The parser does NOT produce a LAMBDA node for `fn LPAREN …`, instead
-                        // it falls through to parsing `fn` as an IDENT and `(a, b)` as an arg
-                        // list (a function call to a function named "fn"). We detect this by
-                        // checking if the second arg text starts with "fn " followed by "(".
-                        let arg_text_trimmed = second_arg.text().trim().to_string();
-                        let is_multi_arg_lambda_text = {
-                            let t = arg_text_trimmed.as_str();
-                            // Strip leading "fn " and check for "("
-                            t.starts_with("fn(")
-                                || t.starts_with("fn (")
-                                || (t.starts_with("fn")
-                                    && t.get(2..3).is_some_and(|c| c == "(" || c == " "))
-                        };
-
-                        if is_multi_arg_lambda_text && !has_any_lambda {
-                            // Multi-arg lambda written as `fn (a, b) => …` — emit LambdaArityNotSupported.
-                            diags.push(crate::Diagnostic {
-                                severity: crate::DiagnosticSeverity::Error,
-                                message: crate::meta_hof_diagnostic_message(
-                                    crate::DiagnosticCode::LambdaArityNotSupported,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                ),
-                                range: to_range(second_arg.text_range()),
-                                code: Some(crate::DiagnosticCode::LambdaArityNotSupported),
-                                data: None,
-                            });
-                        } else if !has_any_lambda {
+                        if !has_any_lambda {
                             // HofExpectsLambda — not a lambda at all.
                             let actual = infer_expression_type(second_arg, ctx)
                                 .map(|tc| {
@@ -1979,7 +2305,7 @@ pub fn check_hof_position_diagnostics(
                             }
                         }
                         // If has_any_lambda but !has_valid_lambda: it's a multi-arg lambda.
-                        // The LAMBDA node walk above will emit LambdaArityNotSupported.
+                        // The LAMBDA node walk above will emit LambdaArityMismatch.
                     }
 
                     HofKind::Reduce => {

@@ -537,7 +537,7 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // runtime DataType equivalent in Phase A.
         Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
-        // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid parameter sort.
+        // `Lambda<params, U>` (Phase B/F meta-language) — meta-only; not a valid parameter sort.
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,

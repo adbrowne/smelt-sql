@@ -37,11 +37,14 @@ use crate::type_inference::hof::{
     check_define_name_shadowing, check_forbidden_position_spreads, check_hof_position_diagnostics,
     check_select_list_spreads, disambiguate_list_literal, expand_spread_into_position,
     infer_hof_call, infer_hof_call_from_function_call,
-    infer_hof_call_from_function_call_with_expected, infer_list_literal, infer_pipe_expr,
-    infer_reduce_call, list_literal_sentinels_to_diagnostics, lookup_reducer, EmptyIdentity,
-    HofInferResult, HofInferSentinel, HofKind, HofSecondArg, ListDisambiguation, ListInferSentinel,
-    ListLiteralInferResult, OriginTag, ReducerInputConstraint, ReducerOutputSort, ReducerSpec,
-    SelectListSpreadResult, SplicePosition, SynthesizedReason, REDUCER_REGISTRY,
+    infer_hof_call_from_function_call_with_expected, infer_list_literal,
+    infer_parameterised_reducer_call, infer_pipe_expr, infer_reduce_call,
+    list_literal_sentinels_to_diagnostics, lookup_parameterised_reducer, lookup_reducer,
+    EmptyIdentity, HofInferResult, HofInferSentinel, HofKind, HofSecondArg, ListDisambiguation,
+    ListInferSentinel, ListLiteralInferResult, OriginTag, ParameterisedReducerResult,
+    ParameterisedReducerSentinel, ReducerInputConstraint, ReducerOutputSort, ReducerSpec,
+    SelectListSpreadResult, SplicePosition, SynthesizedReason, PARAMETERISED_REDUCER_REGISTRY,
+    REDUCER_REGISTRY,
 };
 #[allow(unused_imports)]
 use crate::type_inference::literal::{
@@ -2126,7 +2129,8 @@ fn lambda_outside_hof_position_emits_diagnostic() {
     );
 }
 
-/// `map(xs, fn (a, b) => a)` — multi-arg lambda — emits `LambdaArityNotSupported`.
+/// `map(xs, fn (a, b) => a)` — multi-arg lambda in map — emits `LambdaArityMismatch`
+/// (map expects arity 1).
 #[test]
 fn multi_arg_lambda_emits_arity_diagnostic() {
     // map call with multi-arg lambda (two params)
@@ -2134,11 +2138,14 @@ fn multi_arg_lambda_emits_arity_diagnostic() {
     let select = parse_select_stmt(sql);
     let ctx = TypeContext::new();
     let diags = check_hof_position_diagnostics(&select, &ctx, "");
+    // After Phase F the multi-arg lambda parses as a LAMBDA node with two params.
+    // The LAMBDA node walk emits LambdaArityMismatch (map expects arity 1).
+    let has_arity_error = diags
+        .iter()
+        .any(|d| d.code == Some(crate::DiagnosticCode::LambdaArityMismatch));
     assert!(
-        diags
-            .iter()
-            .any(|d| d.code == Some(crate::DiagnosticCode::LambdaArityNotSupported)),
-        "map with multi-arg lambda must emit LambdaArityNotSupported, got: {:?}",
+        has_arity_error,
+        "map with multi-arg lambda must emit LambdaArityMismatch, got: {:?}",
         diags
     );
 }
@@ -4230,7 +4237,7 @@ fn record_field_type_forbidden_for_reflection_witnesses() {
         name: "BadLambda".to_string(),
         fields: vec![(
             "f".to_string(),
-            SmeltType::Lambda(Box::new(SmeltType::Unknown), Box::new(SmeltType::Unknown)),
+            SmeltType::Lambda(vec![SmeltType::Unknown], Box::new(SmeltType::Unknown)),
             zero_range,
         )],
         name_span: zero_range,
@@ -5304,4 +5311,562 @@ fn load_yaml_synthesises_schema_type_on_happy_path() {
             other
         ),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase F (meta-language) TDD tests — multi-arg lambdas, parameterised reducers,
+// ternary expression type inference.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Helper: parse a smelt SQL string and return all HOF position diagnostics.
+fn hof_diags_for(sql: &str) -> Vec<crate::Diagnostic> {
+    let select = parse_select_stmt(sql);
+    let ctx = TypeContext::new();
+    check_hof_position_diagnostics(&select, &ctx, "")
+}
+
+// ── Lambda arity / zero / duplicate checks ──────────────────────────────────
+
+/// `map(xs, fn (a, b) => a + b)` over `List<Integer>` emits `LambdaArityMismatch`
+/// ("map expects a lambda of arity 1; found arity 2").
+#[test]
+fn map_rejects_multi_arg_lambda() {
+    let diags = hof_diags_for("SELECT map([1, 2, 3], fn (a, b) => a + b) FROM t");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::LambdaArityMismatch)),
+        "map with 2-arg lambda must emit LambdaArityMismatch; got: {:?}",
+        diags
+    );
+    // Check message contains "map" and arities.
+    let msg = diags
+        .iter()
+        .find(|d| d.code == Some(crate::DiagnosticCode::LambdaArityMismatch))
+        .unwrap()
+        .message
+        .clone();
+    assert!(
+        msg.contains("map") && msg.contains("1") && msg.contains("2"),
+        "LambdaArityMismatch message must mention hof, expected, and actual arities; got: {}",
+        msg
+    );
+}
+
+/// `filter(xs, fn (a, b) => a > b)` emits `LambdaArityMismatch`
+/// ("filter expects a lambda of arity 1; found arity 2").
+#[test]
+fn filter_rejects_multi_arg_lambda() {
+    let diags = hof_diags_for("SELECT filter([1, 2, 3], fn (a, b) => a > b) FROM t");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::LambdaArityMismatch)),
+        "filter with 2-arg lambda must emit LambdaArityMismatch; got: {:?}",
+        diags
+    );
+    let msg = diags
+        .iter()
+        .find(|d| d.code == Some(crate::DiagnosticCode::LambdaArityMismatch))
+        .unwrap()
+        .message
+        .clone();
+    assert!(
+        msg.contains("filter"),
+        "LambdaArityMismatch message must mention 'filter'; got: {}",
+        msg
+    );
+}
+
+/// `map(xs, fn () => 1)` emits `LambdaZeroParameters`.
+#[test]
+fn lambda_zero_params_diagnostic() {
+    let diags = hof_diags_for("SELECT map([1, 2, 3], fn () => 1) FROM t");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::LambdaZeroParameters)),
+        "lambda with zero params must emit LambdaZeroParameters; got: {:?}",
+        diags
+    );
+}
+
+/// `fn (a, a) => a` in a HOF position emits `LambdaDuplicateParameter` at the second `a`.
+#[test]
+fn lambda_duplicate_parameter_diagnostic() {
+    let diags = hof_diags_for("SELECT map([1, 2, 3], fn (a, a) => a) FROM t");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::LambdaDuplicateParameter)),
+        "lambda with duplicate parameter must emit LambdaDuplicateParameter; got: {:?}",
+        diags
+    );
+    let msg = diags
+        .iter()
+        .find(|d| d.code == Some(crate::DiagnosticCode::LambdaDuplicateParameter))
+        .unwrap()
+        .message
+        .clone();
+    assert!(
+        msg.contains('`') && msg.contains("a"),
+        "LambdaDuplicateParameter message must name the duplicate param; got: {}",
+        msg
+    );
+}
+
+// ── Parameterised reducer tests ─────────────────────────────────────────────
+
+/// Helpers to parse and run infer_parameterised_reducer on the second arg of
+/// `reduce(xs, concat_with(...))`.
+fn run_infer_parameterised_reducer(
+    reducer_name: &str,
+    args_sql: &[&str],
+) -> crate::type_inference::hof::ParameterisedReducerResult {
+    use crate::type_inference::hof::infer_parameterised_reducer_call;
+    use smelt_parser::ast::File;
+
+    // Build `reduce([' '], concat_with(...))` where args are the reducer args.
+    let args_joined = args_sql.join(", ");
+    let sql = format!(
+        "SELECT reduce([' '], {}({})) FROM t",
+        reducer_name, args_joined
+    );
+    let parse = smelt_parser::parse(&sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("FILE");
+    let select = file.select_stmt().expect("SelectStmt");
+
+    // Find the REDUCER_CALL node.
+    use smelt_parser::SyntaxKind::REDUCER_CALL;
+    let reducer_call_node = select
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == REDUCER_CALL)
+        .expect("REDUCER_CALL node");
+    let reducer_call =
+        smelt_parser::ast::ReducerCall::cast(reducer_call_node).expect("ReducerCall cast");
+
+    let ctx = TypeContext::new();
+    infer_parameterised_reducer_call(&reducer_call, &ctx)
+}
+
+/// `reduce(xs: List<Expr<Text>>, concat_with(' OR '))` synthesises `Expr<Text>`.
+#[test]
+fn reducer_call_concat_with_text_separator() {
+    let result = run_infer_parameterised_reducer("concat_with", &["' OR '"]);
+    assert!(
+        result.sentinel.is_none(),
+        "concat_with(' OR ') must succeed without sentinel; got: {:?}",
+        result.sentinel
+    );
+    assert!(
+        matches!(
+            result.output_type,
+            SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                DataType::Text | DataType::Varchar { .. }
+            ))
+        ),
+        "concat_with(' OR ') must synthesise Expr<Text>; got: {:?}",
+        result.output_type
+    );
+}
+
+/// `reduce(xs, concat_with())` emits `ReducerArityMismatch`.
+#[test]
+fn reducer_call_concat_with_arity_mismatch() {
+    let result = run_infer_parameterised_reducer("concat_with", &[]);
+    assert!(
+        matches!(
+            result.sentinel,
+            Some(crate::type_inference::hof::ParameterisedReducerSentinel::ArityMismatch { .. })
+        ),
+        "concat_with() must emit ArityMismatch; got: {:?}",
+        result.sentinel
+    );
+}
+
+/// `reduce(xs, concat_with(' OR ', ' AND '))` emits `ReducerArityMismatch`.
+#[test]
+fn reducer_call_concat_with_too_many_args() {
+    let result = run_infer_parameterised_reducer("concat_with", &["' OR '", "' AND '"]);
+    assert!(
+        matches!(
+            result.sentinel,
+            Some(crate::type_inference::hof::ParameterisedReducerSentinel::ArityMismatch { .. })
+        ),
+        "concat_with(' OR ', ' AND ') must emit ArityMismatch; got: {:?}",
+        result.sentinel
+    );
+}
+
+/// `reduce(xs, concat_with(42))` emits `ReducerArgTypeMismatch`.
+#[test]
+fn reducer_call_concat_with_wrong_arg_type() {
+    let result = run_infer_parameterised_reducer("concat_with", &["42"]);
+    assert!(
+        matches!(
+            result.sentinel,
+            Some(crate::type_inference::hof::ParameterisedReducerSentinel::ArgTypeMismatch { .. })
+        ),
+        "concat_with(42) must emit ArgTypeMismatch; got: {:?}",
+        result.sentinel
+    );
+}
+
+/// `reduce(xs, concat_with(sep => ' OR '))` emits `ReducerNamedArgument`.
+#[test]
+fn reducer_call_concat_with_named_arg_rejected() {
+    let result = run_infer_parameterised_reducer("concat_with", &["sep => ' OR '"]);
+    assert!(
+        matches!(
+            result.sentinel,
+            Some(crate::type_inference::hof::ParameterisedReducerSentinel::NamedArgument)
+        ),
+        "concat_with(sep => ' OR ') must emit NamedArgument; got: {:?}",
+        result.sentinel
+    );
+}
+
+/// `reduce(xs, concat_with(UPPER('|')))` emits `ReducerArgNotCompileTime`.
+#[test]
+fn reducer_call_concat_with_runtime_arg_rejected() {
+    let result = run_infer_parameterised_reducer("concat_with", &["UPPER('|')"]);
+    assert!(
+        matches!(
+            result.sentinel,
+            Some(
+                crate::type_inference::hof::ParameterisedReducerSentinel::ArgNotCompileTime { .. }
+            )
+        ),
+        "concat_with(UPPER('|')) must emit ArgNotCompileTime; got: {:?}",
+        result.sentinel
+    );
+}
+
+/// `reduce(xs, concat_with(smelt.config.var('sep')))` is accepted (compile-time Text).
+#[test]
+fn reducer_call_concat_with_config_var_arg_accepted() {
+    let result = run_infer_parameterised_reducer("concat_with", &["smelt.config.var('sep')"]);
+    // config.var returns compile-time Text — should be accepted.
+    assert!(
+        result.sentinel.is_none()
+            || !matches!(
+                result.sentinel,
+                Some(
+                    crate::type_inference::hof::ParameterisedReducerSentinel::ArgNotCompileTime { .. }
+                )
+            ),
+        "concat_with(smelt.config.var('sep')) must be accepted as compile-time; got: {:?}",
+        result.sentinel
+    );
+}
+
+// ── Ternary type inference tests ─────────────────────────────────────────────
+
+/// Helper: infer the ternary type from a SQL SELECT containing a ternary meta-expression.
+/// Returns the full [`TernaryResult`] (type, sentinels, short-circuit hint).
+fn run_infer_ternary(
+    cond_sql: &str,
+    then_sql: &str,
+    else_sql: &str,
+) -> crate::type_inference::ternary::TernaryResult {
+    use crate::type_inference::ternary::infer_ternary_type;
+    use smelt_parser::ast::File;
+    use smelt_parser::SyntaxKind::TERNARY_EXPR;
+
+    let sql = format!(
+        "SELECT if {} then {} else {} FROM t",
+        cond_sql, then_sql, else_sql
+    );
+    let parse = smelt_parser::parse(&sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("FILE");
+    let select = file.select_stmt().expect("SelectStmt");
+
+    let ternary_node = select
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TERNARY_EXPR)
+        .expect("TERNARY_EXPR node");
+    let ternary = smelt_parser::ast::TernaryExpr::cast(ternary_node).expect("TernaryExpr");
+
+    let ctx = TypeContext::new();
+    infer_ternary_type(&ternary, &ctx)
+}
+
+/// `if TRUE then 1 else 2` synthesises `Integer` (SmallInt or Integer from literals).
+#[test]
+fn ternary_basic_boolean_cond() {
+    let result = run_infer_ternary("TRUE", "1", "2");
+    assert!(
+        result.sentinels.is_empty(),
+        "if TRUE then 1 else 2 must have no sentinels; got: {:?}",
+        result.sentinels
+    );
+    assert!(
+        matches!(
+            result.ty,
+            SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                DataType::Integer | DataType::SmallInt | DataType::BigInt
+            ))
+        ),
+        "if TRUE then 1 else 2 must synthesise an integer type; got: {:?}",
+        result.ty
+    );
+}
+
+/// `if cond then 1 else 1.5` synthesises a numeric type (LUB of Integer and Double/Decimal).
+#[test]
+fn ternary_lub_branches() {
+    let result = run_infer_ternary("TRUE", "1", "1.5");
+    // There should be no type-mismatch sentinels (int and float unify numerically).
+    let has_branch_mismatch = result.sentinels.iter().any(|s| {
+        matches!(
+            s,
+            crate::type_inference::ternary::TernarySentinel::BranchTypeMismatch { .. }
+        )
+    });
+    assert!(
+        !has_branch_mismatch,
+        "if cond then 1 else 1.5 must not emit BranchTypeMismatch (numeric promotion); got: {:?}",
+        result.sentinels
+    );
+    assert!(
+        matches!(result.ty, SmeltType::Expr(_)),
+        "if cond then 1 else 1.5 must synthesise Expr<Numeric>; got: {:?}",
+        result.ty
+    );
+}
+
+/// `if 42 then a else b` emits `TernaryConditionNotBoolean`.
+#[test]
+fn ternary_non_boolean_cond() {
+    let result = run_infer_ternary("42", "1", "2");
+    assert!(
+        result.sentinels.iter().any(|s| matches!(
+            s,
+            crate::type_inference::ternary::TernarySentinel::ConditionNotBoolean { .. }
+        )),
+        "if 42 then 1 else 2 must emit ConditionNotBoolean; got: {:?}",
+        result.sentinels
+    );
+    assert!(
+        matches!(result.ty, SmeltType::Unknown),
+        "non-Boolean cond must synthesise Unknown; got: {:?}",
+        result.ty
+    );
+}
+
+/// `if cond then 1 else 'hello'` emits `TernaryBranchTypeMismatch`.
+#[test]
+fn ternary_branch_type_mismatch() {
+    let result = run_infer_ternary("TRUE", "1", "'hello'");
+    assert!(
+        result.sentinels.iter().any(|s| matches!(
+            s,
+            crate::type_inference::ternary::TernarySentinel::BranchTypeMismatch { .. }
+        )),
+        "if cond then 1 else 'hello' must emit BranchTypeMismatch; got: {:?}",
+        result.sentinels
+    );
+}
+
+/// Both branches are type-checked even when condition is a literal FALSE.
+/// `if FALSE then 42 else 'unreachable'` has incompatible branch types (Integer vs Text)
+/// so BranchTypeMismatch emits even though the condition is always FALSE.
+///
+/// This demonstrates that Phase 2 `infer_ternary_type` checks BOTH branches
+/// for type compatibility regardless of the condition value — it does not
+/// short-circuit inference even when the condition is a constant.
+#[test]
+fn ternary_both_branches_typecheck_even_when_one_unreached() {
+    // Condition is FALSE (constant), then-branch is an integer, else-branch is a string.
+    // The types are incompatible → BranchTypeMismatch should still fire.
+    let result = run_infer_ternary("FALSE", "42", "'unreachable'");
+    assert!(
+        result.sentinels.iter().any(|s| matches!(
+            s,
+            crate::type_inference::ternary::TernarySentinel::BranchTypeMismatch { .. }
+        )),
+        "even with FALSE cond, incompatible branch types must emit BranchTypeMismatch; got: {:?}",
+        result.sentinels
+    );
+}
+
+/// `if <Unknown-typed-cond> then a else b` propagates `Unknown` through the ternary.
+///
+/// When the condition synthesises to `Unknown` (e.g. a bare unresolved identifier
+/// whose type cannot be determined at compile time), the ternary:
+///   1. Does NOT emit `TernaryConditionNotBoolean` — Unknown is treated as
+///      "type suppressed, don't double-report" per the gradual-typing spec rule 4.
+///   2. Returns `Unknown` as the result type (both branches still type-checked,
+///      but with an Unknown condition there is no concrete value to select from).
+///   3. Emits `short_circuit = None` — no branch is known statically reachable.
+///
+/// This test uses a bare unresolved identifier `__unresolved__` as the condition.
+/// `TypeContext::new()` has no columns seeded, so the identifier resolves to
+/// `None` from `infer_expression_type`, which maps to `SmeltType::Unknown` in
+/// the condition step of `infer_ternary_type`.
+#[test]
+fn ternary_unknown_cond_propagates() {
+    // Bare unresolved identifier → infer_expression_type returns None → Unknown.
+    let result = run_infer_ternary("__unresolved__", "1", "2");
+
+    // Rule 4 (gradual typing): Unknown condition must NOT emit ConditionNotBoolean.
+    let has_cond_error = result.sentinels.iter().any(|s| {
+        matches!(
+            s,
+            crate::type_inference::ternary::TernarySentinel::ConditionNotBoolean { .. }
+        )
+    });
+    assert!(
+        !has_cond_error,
+        "Unknown condition must NOT emit ConditionNotBoolean (gradual typing suppression); got sentinels: {:?}",
+        result.sentinels
+    );
+
+    // The ternary result type propagates the branches' LUB when cond is Unknown.
+    // Branches are integer literals → result is an integer type (not Unknown).
+    // (Unknown condition does not poison the result type — only an Unknown branch does.)
+    assert!(
+        matches!(
+            result.ty,
+            SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                DataType::Integer | DataType::SmallInt | DataType::BigInt
+            ))
+        ),
+        "Unknown cond with compatible branches should synthesise an integer LUB; got: {:?}",
+        result.ty
+    );
+
+    // No short-circuit hint: the runtime condition value is unknown.
+    assert_eq!(
+        result.short_circuit, None,
+        "Unknown condition must produce no short-circuit hint; got: {:?}",
+        result.short_circuit
+    );
+}
+
+/// Right-associative chaining: `if c1 then a else if c2 then b else c` has result
+/// type that is the LUB of all three branches.
+#[test]
+fn ternary_nested_right_associative() {
+    // Parse the right-associative ternary from a full SQL string.
+    use crate::type_inference::ternary::infer_ternary_type;
+    use smelt_parser::ast::File;
+    use smelt_parser::SyntaxKind::TERNARY_EXPR;
+
+    let sql = "SELECT if TRUE then 1 else if FALSE then 2 else 3 FROM t";
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("FILE");
+    let select = file.select_stmt().expect("SelectStmt");
+
+    // Get the outermost TERNARY_EXPR (first one encountered in DFS).
+    let ternary_node = select
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TERNARY_EXPR)
+        .expect("TERNARY_EXPR node");
+    let ternary = smelt_parser::ast::TernaryExpr::cast(ternary_node).expect("TernaryExpr");
+
+    let ctx = TypeContext::new();
+    let result = infer_ternary_type(&ternary, &ctx);
+
+    // All three branch values are integers → result must be an integer type.
+    assert!(
+        result.sentinels.iter().all(|s| !matches!(
+            s,
+            crate::type_inference::ternary::TernarySentinel::BranchTypeMismatch { .. }
+        )),
+        "right-assoc ternary with all-integer branches must not mismatch; got: {:?}",
+        result.sentinels
+    );
+    assert!(
+        matches!(result.ty, SmeltType::Expr(_)),
+        "right-assoc ternary result must be Expr<T>; got: {:?}",
+        result.ty
+    );
+}
+
+// ── Ternary keyword-shadowing check ─────────────────────────────────────────
+
+/// `smelt.define if(x: Boolean) -> Boolean = x` emits `TernaryKeywordShadowed`
+/// at the `if` token of the declaration.
+///
+/// This guards against user-defined functions that shadow ternary keywords
+/// (`if`, `then`, `else`), which would make the meta-language ambiguous.
+#[test]
+fn ternary_keyword_shadowed_smelt_define() {
+    use smelt_parser::ast::SmeltDefine;
+    let sql = "smelt.define if(x: Boolean) -> Boolean = x\n";
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
+    let define: SmeltDefine = file.defines().next().expect("one smelt.define");
+    let diags = check_define_name_shadowing(&define, "");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::TernaryKeywordShadowed)),
+        "smelt.define named 'if' must emit TernaryKeywordShadowed, got: {:?}",
+        diags
+    );
+}
+
+// ── Reducer call position restriction ────────────────────────────────────────
+
+/// `concat_with(' OR ')` at any non-`reduce`-second-arg position is treated
+/// as an unknown function call (not as a parameterised reducer).
+///
+/// The parser only emits `REDUCER_CALL` nodes inside `reduce`'s second
+/// argument position. Outside that context, `concat_with(...)` is parsed as a
+/// `FUNCTION_CALL` for an unregistered function, and `infer_expression_type`
+/// returns `None` (Unknown type — the generic "unresolved function" behaviour).
+/// No reducer-specific sentinel is emitted; the `UnknownIdentifier` diagnostic
+/// surfaces in Phase 3 / `function_body_check` context.
+#[test]
+fn reducer_call_only_at_reduce_second_arg() {
+    use smelt_parser::SyntaxKind::FUNCTION_CALL;
+    // Parse `concat_with(' OR ')` as a standalone SELECT column.
+    let sql = "SELECT concat_with(' OR ') FROM t";
+    let select = parse_select_stmt(sql);
+
+    // Find the FUNCTION_CALL node for `concat_with`.
+    let call_node = select
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == FUNCTION_CALL)
+        .expect("FUNCTION_CALL node for concat_with");
+    let call_expr = smelt_parser::ast::Expr::cast(call_node).expect("Expr from FUNCTION_CALL");
+
+    // `infer_expression_type` must return None for an unregistered function.
+    let ctx = TypeContext::new();
+    let result = infer_expression_type(&call_expr, &ctx);
+    assert!(
+        result.is_none(),
+        "concat_with as a standalone call must not resolve (unknown function); got: {:?}",
+        result
+    );
+
+    // `check_hof_position_diagnostics` must not emit any reducer-specific diagnostics —
+    // the HOF walker skips FUNCTION_CALL nodes whose name is not map/filter/reduce.
+    let hof_diags = hof_diags_for(sql);
+    let has_reducer_diag = hof_diags.iter().any(|d| {
+        matches!(
+            d.code,
+            Some(
+                crate::DiagnosticCode::ReducerArityMismatch
+                    | crate::DiagnosticCode::ReducerArgTypeMismatch
+                    | crate::DiagnosticCode::ReducerArgNotCompileTime
+                    | crate::DiagnosticCode::ReducerNamedArgument
+                    | crate::DiagnosticCode::ReducerInputTypeMismatch
+            )
+        )
+    });
+    assert!(
+        !has_reducer_diag,
+        "concat_with outside reduce must not produce reducer-specific HOF diagnostics; got: {:?}",
+        hof_diags
+    );
 }
