@@ -1,7 +1,7 @@
 ---
 feature: lsp
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-16
 owners: [andrew]
 ---
 
@@ -105,6 +105,20 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `ModelRefFieldUnknown` — field name in a `ModelRef` field projection is not in the closed set `{path, name, tags, columns}`
 - `SourceRefFieldUnknown` — field name in a `SourceRef` field projection is not in the closed set `{path, name, tags, columns}`
 
+**Generator files (`generates: models`):**
+- `GeneratesUnknownValue` — `generates:` value other than `models`
+- `GeneratesMixedWithBareModel` — `generates: models` combined with a `name:` field or Layer-1 delimiters
+- `GenerateFileBareSelectForbidden` — generator file body contains a top-level bare `SELECT` / `WITH` / `VALUES`
+- `GenerateFileBodyTypeError` — generator file body does not synthesise `List<ModelDef>`
+- `ModelDefOutsideGeneratorFile` — `ModelDef { … }` literal in a non-generator-file context
+- `ModelDefInvalidName` — `ModelDef.name` is empty or contains non-path-safe characters
+- `ModelDefInvalidMaterialization` — `ModelDef.materialization` is not in `{'view', 'table', 'incremental'}`
+- `ModelDefDuplicateName` — two `ModelDef` values in the same generator emit with the same `name`
+- `ModelDefHandAuthoredCollision` — generator-emitted path collides with a hand-authored model or another generator's emission
+- `GeneratorBodyForbidsModelReflection` — a generator's body invokes `smelt.models.with_tag` or `smelt.models.all`
+
+Diagnostics surfacing from inside a generator body's HOF chain carry a **`<generator>` frame** as the outermost frame in the diagnostic's frame stack. The frame has `function = "<generator>"`, `fn_id = None`, `call_site_range` = the generator file's body range, and an optional `model_origin` = the offending `ModelDef.name` value-expression range. This frame stacks atop any HOF anonymous frames and loader `map_origin` / `model_origin` / `source_origin` provenance per the `expansion.md` anonymous-frame contract.
+
 **Other:**
 - `UnstableSchemaRequired` — `provenance:` used without `unstable_schema: true`
 - `AsStructUnsupportedBackend` — `smelt.as_struct()` called on unsupported backend
@@ -134,6 +148,7 @@ Go-to-Definition resolves the following identifier types:
 | `smelt.models.*` / `smelt.sources.*` accessor call path | Reference page (URL hint, graceful no-op when client lacks support) |
 | `ModelRef` value at a `FROM`-clause or reducer splice site; field projection `m.path` / `m.name` | The model's source `.sql` file; graceful no-op when the concrete model cannot be determined without expansion context |
 | `SourceRef` value at a `FROM`-clause or reducer splice site; field projection `s.path` / `s.name` | The source `.yml` file; graceful no-op when the concrete source cannot be determined without expansion context |
+| `smelt.<path>` reference to a generator-emitted model (a model whose path was produced by a `generates: models` generator file) | The generator file's emitting `ModelDef` literal — specifically, the `ModelDef.name` field's value-expression token whose evaluation produced the emitted name |
 
 Go-to-Definition on a `smelt.<path>` reference in a SQL model navigates to the file at that path. For Python-derived models, it navigates to the `.py` file at the line of the `@model` decorator for that function.
 
@@ -171,6 +186,11 @@ Hover is supported on:
 | `SourceRef`-typed lambda parameter (bound by a HOF over a `smelt.sources.*` list) | `SourceRef` plus the closed field list with each field's type (`path: Text`, `name: Text`, `tags: List<Text>`, `columns: List<ColumnRef>`) |
 | Field projection `m.path` / `m.name` / `m.tags` / `m.columns` (on `ModelRef`) | The field's declared type |
 | Field projection `s.path` / `s.name` / `s.tags` / `s.columns` (on `SourceRef`) | The field's declared type |
+| `generates: models` frontmatter key or value | The inferred body type (`List<ModelDef>`) and, when statically resolvable, the count of emitted models |
+| `ModelDef { … }` record literal (opening brace or `ModelDef` keyword) | The inferred emitted-model smelt path when the `name` field's value is statically known; otherwise `ModelDef` |
+| `ModelDef.name` field-value expression | The resulting emitted smelt path derived from the field's value |
+| `ModelDef.body` field-value expression | The body's synthesised `TableExpr` type and the inferred column list when resolvable |
+| Any other `ModelDef` field-value token (`materialization`, `tags`, `description`) | The field's declared type from `MODEL_DEF_FIELDS` |
 
 Hover content includes type annotations and row requirements from the type inference system where available.
 

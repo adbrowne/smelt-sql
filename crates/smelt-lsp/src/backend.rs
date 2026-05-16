@@ -53,6 +53,7 @@ use crate::hover::{
     hover_text_for_model_def_body_field_value,
     hover_text_for_model_def_literal_open_brace,
     hover_text_for_model_def_name_field_value,
+    hover_text_for_model_def_optional_field_value,
     hover_text_for_model_ref_field,
     hover_text_for_models_all,
     hover_text_for_models_with_tag_call,
@@ -3696,13 +3697,27 @@ impl LanguageServer for Backend {
                                                     smelt_db::project_paths(&db, p).as_ref().clone()
                                                 })
                                                 .unwrap_or_else(|| vec!["models".to_string()]);
-                                            // Find a survivor whose generator_file
-                                            // matches this file and whose name_span
-                                            // contains the open brace (approximate).
+                                            // Find the survivor whose generator_file
+                                            // matches this file AND whose name_span
+                                            // falls within the RECORD_LITERAL node
+                                            // that contains the cursor's open brace.
+                                            // This disambiguates multiple ModelDef
+                                            // literals in the same generator file.
+                                            let rec_start_u: u32 = node.text_range().start().into();
+                                            let rec_end_u: u32 = node.text_range().end().into();
                                             survivors
                                                 .survivors
                                                 .iter()
-                                                .find(|em| em.generator_file == effective_path)
+                                                .find(|em| {
+                                                    if em.generator_file != effective_path {
+                                                        return false;
+                                                    }
+                                                    // name_span must be contained within
+                                                    // this record literal's range.
+                                                    let ns: u32 = em.name_span.start().into();
+                                                    let ne: u32 = em.name_span.end().into();
+                                                    ns >= rec_start_u && ne <= rec_end_u
+                                                })
                                                 .map(|em| {
                                                     smelt_db::emitted_model_smelt_path(
                                                         &em.generator_file,
@@ -3798,6 +3813,23 @@ impl LanguageServer for Backend {
                                             if key_text == "body" {
                                                 let value =
                                                     hover_text_for_model_def_body_field_value(None);
+                                                return Ok(Some(Hover {
+                                                    contents: HoverContents::Markup(
+                                                        MarkupContent {
+                                                            kind: MarkupKind::Markdown,
+                                                            value,
+                                                        },
+                                                    ),
+                                                    range: None,
+                                                }));
+                                            }
+                                            // (e) cursor on optional field value:
+                                            // `materialization`, `tags`, or `description`.
+                                            if let Some(value) =
+                                                hover_text_for_model_def_optional_field_value(
+                                                    key_text,
+                                                )
+                                            {
                                                 return Ok(Some(Hover {
                                                     contents: HoverContents::Markup(
                                                         MarkupContent {

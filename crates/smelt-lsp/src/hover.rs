@@ -44,12 +44,24 @@ pub fn render_expansion_frames(
     };
     let mut related: Vec<DiagnosticRelatedInformation> = Vec::new();
     for frame in frames.iter().rev() {
-        // Anonymous HOF frames (fn_id is None) have an empty `param` and
-        // `bound_type`; rendering them with the named-frame template produces
-        // awkward text like `"`, `` was bound to "`.  Use a shorter form that
-        // names only the HOF (matching the spec for anonymous expansion frames).
-        let is_anonymous = frame.fn_id.is_none();
-        let trailer = if is_anonymous {
+        // `<generator>` frames are generator-body frames (not user-defined
+        // functions and not HOF lambdas).  They carry `function = "<generator>"`
+        // and `decl_path = Some(generator_file_path)`.  Render them with a
+        // distinct form that names the source file rather than a "call" site.
+        let is_generator_body = frame.function == "<generator>";
+        // Anonymous HOF frames (fn_id is None, but not a generator frame) have
+        // an empty `param` and `bound_type`; rendering them with the
+        // named-frame template produces awkward text like `"`, `` was bound
+        // to "`.  Use a shorter form that names only the HOF.
+        let is_anonymous = !is_generator_body && frame.fn_id.is_none();
+        let trailer = if is_generator_body {
+            let path_label = frame
+                .decl_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("<generator>");
+            format!("\nin generator body of `{path_label}`")
+        } else if is_anonymous {
             format!("\nin expansion of `{}` call", frame.function)
         } else {
             format!(
@@ -60,7 +72,10 @@ pub fn render_expansion_frames(
         message.push_str(&trailer);
         if let (Some(path), Some(range)) = (&frame.decl_path, frame.decl_range.as_ref()) {
             if let Ok(uri) = Url::from_file_path(path) {
-                let related_msg = if is_anonymous {
+                let related_msg = if is_generator_body {
+                    let path_label = path.to_str().unwrap_or("<generator>");
+                    format!("in generator body of `{path_label}`")
+                } else if is_anonymous {
                     format!("in expansion of `{}` call", frame.function)
                 } else {
                     format!(
@@ -2146,6 +2161,28 @@ pub fn hover_text_for_model_def_body_field_value(columns: Option<&[String]>) -> 
             format!("`TableExpr`\n\nColumns: `{col_list}`")
         }
         _ => "`TableExpr`".to_string(),
+    }
+}
+
+/// Render hover text for the value token of an optional field (`materialization`,
+/// `tags`, or `description`) in a `ModelDef` literal — shows the field's
+/// declared type from `MODEL_DEF_FIELDS`.
+///
+/// Returns `Some(text)` for the three optional fields (`materialization`,
+/// `tags`, `description`) and `None` for any other field name.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_model_def_optional_field_value(field_name: &str) -> Option<String> {
+    use smelt_types::signatures::model_def_field;
+    let field_ty = model_def_field(field_name)?;
+    // Only serve the three optional fields here; `name` and `body` have their
+    // own dedicated renderers.
+    match field_name {
+        "materialization" | "tags" | "description" => {
+            let ty_str = smelt_types::format_smelt_type_hover(field_ty);
+            Some(format!("`{field_name}: {ty_str}` (ModelDef field)"))
+        }
+        _ => None,
     }
 }
 
