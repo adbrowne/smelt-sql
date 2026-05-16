@@ -25,7 +25,7 @@ use crate::{DiagnosticCode, LoaderFileInput, Model, ProjectInput, SourceFile, Wo
 
 pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
-use smelt_core::{SeedInfo, SourceInfo, SourcesConfig};
+use smelt_core::{IncrementalConfig, SeedInfo, SourceInfo, SourcesConfig};
 
 /// YAML parse error with location information
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +285,15 @@ pub struct EmittedModelDef {
     pub tags: Vec<String>,
     /// `ModelDef.description` field value, defaulting to `""`.
     pub description: String,
+    /// Inherited `incremental:` block from the generator file's frontmatter,
+    /// when `materialization == "incremental"`.  `None` for non-incremental
+    /// emissions or when the generator's frontmatter has no `incremental:` block.
+    ///
+    /// Per `incremental_models.md` §"Generator-emitted incremental models":
+    /// the file-wide `incremental:` frontmatter is shared by all incremental
+    /// emissions from that generator; per-`ModelDef` overrides are not supported
+    /// in v1.
+    pub incremental_config: Option<IncrementalConfig>,
 }
 
 /// The result of evaluating a single generator file.
@@ -374,10 +383,15 @@ fn extract_modeldef_field_text(
 /// Returns `None` when the `name` field is absent or invalid (the caller should
 /// have already run `infer_model_def_literal` to diagnose those cases; this
 /// function is a best-effort extractor for the happy path).
+///
+/// `frontmatter_incremental` is the generator file's file-wide `incremental:`
+/// block (if any). When `ModelDef.materialization == "incremental"` the emitted
+/// model inherits this config; for non-incremental emissions it is ignored.
 fn materialise_emitted_model_def(
     generator_file: &Path,
     literal: &RecordLiteral,
     frontmatter_tags: &[String],
+    frontmatter_incremental: Option<&IncrementalConfig>,
 ) -> Option<EmittedModelDef> {
     let (name, name_span) = extract_modeldef_field_text(literal, "name")?;
     if name.is_empty() {
@@ -468,6 +482,15 @@ fn materialise_emitted_model_def(
         .map(|(v, _)| v)
         .unwrap_or_default();
 
+    // Inherit the `incremental:` block only when materialization == "incremental".
+    // Per `incremental_models.md` §"Generator-emitted incremental models", non-incremental
+    // emissions silently ignore the generator's frontmatter `incremental:` block.
+    let incremental_config = if materialization == "incremental" {
+        frontmatter_incremental.cloned()
+    } else {
+        None
+    };
+
     Some(EmittedModelDef {
         generator_file: generator_file.to_path_buf(),
         name,
@@ -477,6 +500,7 @@ fn materialise_emitted_model_def(
         materialization,
         tags,
         description,
+        incremental_config,
     })
 }
 
@@ -496,6 +520,7 @@ fn evaluate_body_emissions(
     generator_file: &Path,
     body_expr: &Expr,
     frontmatter_tags: &[String],
+    frontmatter_incremental: Option<&IncrementalConfig>,
     loader_values: &[(String, crate::loader::MetaValue)],
     ctx: &TypeContext,
 ) -> (Vec<EmittedModelDef>, Vec<crate::Diagnostic>) {
@@ -560,9 +585,12 @@ fn evaluate_body_emissions(
                             data: None,
                         });
                     }
-                    if let Some(emitted) =
-                        materialise_emitted_model_def(generator_file, &record_lit, frontmatter_tags)
-                    {
+                    if let Some(emitted) = materialise_emitted_model_def(
+                        generator_file,
+                        &record_lit,
+                        frontmatter_tags,
+                        frontmatter_incremental,
+                    ) {
                         emissions.push(emitted);
                     }
                 }
@@ -616,6 +644,7 @@ fn evaluate_body_emissions(
                                         &body,
                                         record_val,
                                         frontmatter_tags,
+                                        frontmatter_incremental,
                                     ) {
                                         emissions.push(emitted);
                                     }
@@ -687,6 +716,7 @@ fn materialise_modeldef_from_lambda_body(
     body: &Expr,
     record_val: &crate::loader::MetaValue,
     frontmatter_tags: &[String],
+    frontmatter_incremental: Option<&IncrementalConfig>,
 ) -> Option<EmittedModelDef> {
     let record_fields = match record_val {
         crate::loader::MetaValue::Record(fields) => fields,
@@ -739,6 +769,13 @@ fn materialise_modeldef_from_lambda_body(
         }
     }
 
+    // Inherit the `incremental:` block only when materialization == "incremental".
+    let incremental_config = if materialization == "incremental" {
+        frontmatter_incremental.cloned()
+    } else {
+        None
+    };
+
     Some(EmittedModelDef {
         generator_file: generator_file.to_path_buf(),
         name,
@@ -748,6 +785,7 @@ fn materialise_modeldef_from_lambda_body(
         materialization,
         tags,
         description,
+        incremental_config,
     })
 }
 
@@ -904,6 +942,7 @@ pub fn evaluate_generator(
     };
     let (metadata, _body_offset) = gen_meta;
     let frontmatter_tags = metadata.tags.clone();
+    let frontmatter_incremental = metadata.incremental.clone();
 
     // Parse the file body (already cached by Salsa via `parse_file`).
     let parse = parse_file(db, file);
@@ -943,6 +982,7 @@ pub fn evaluate_generator(
         file.path(db),
         &body_expr,
         &frontmatter_tags,
+        frontmatter_incremental.as_ref(),
         &loader_values,
         &ctx,
     );
@@ -2146,6 +2186,225 @@ mod tests {
             result_v1.emissions.len(),
             result_v2.emissions.len(),
             "emissions count must change when the YAML changes"
+        );
+    }
+
+    // ─── Test Phase 5 (E2): generator_file: selector resolution ─────────────
+
+    /// A workspace with `models/cohorts.gen.sql` emitting two models (`us_west`,
+    /// `eu`); `resolve_generator_file_selector` matches both surviving emissions.
+    #[test]
+    fn generator_file_selector_matches_all_emissions() {
+        use smelt_core::selector::{parse_selector, SelectionMethod};
+
+        let gen = "---\ngenerates: models\n---\n[ModelDef { name: 'us_west', body: SELECT 1 }, ModelDef { name: 'eu', body: SELECT 2 }]";
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", gen)]);
+
+        let result = emitted_models(&db, workspace);
+        assert_eq!(result.survivors.len(), 2);
+
+        // The generator_file: selector should be resolved against the survivors list.
+        let selector =
+            parse_selector("generator_file:models/cohorts.gen.sql").expect("parse selector");
+        let path = match &selector.method {
+            SelectionMethod::GeneratorFile { path } => path.clone(),
+            _ => panic!("expected GeneratorFile"),
+        };
+
+        // Resolve: filter survivors by generator_file path (workspace-relative).
+        let matched: Vec<_> = result
+            .survivors
+            .iter()
+            .filter(|e| {
+                // Compare the workspace-relative path.
+                let gen_path = e.generator_file.to_string_lossy();
+                gen_path.ends_with(path.to_str().unwrap_or(""))
+                    || gen_path.ends_with(
+                        path.to_string_lossy()
+                            .replace('/', std::path::MAIN_SEPARATOR_STR)
+                            .as_str(),
+                    )
+            })
+            .collect();
+
+        assert_eq!(
+            matched.len(),
+            2,
+            "both us_west and eu must be matched by generator_file: selector"
+        );
+    }
+
+    /// A selector pointing at a hand-authored `.sql` file returns an empty
+    /// match set (no error, no panic).
+    #[test]
+    fn generator_file_selector_against_non_generator_path_matches_nothing() {
+        use smelt_core::selector::{parse_selector, SelectionMethod};
+
+        let hand = "SELECT 1 AS id";
+        let gen = "---\ngenerates: models\n---\n[ModelDef { name: 'em', body: SELECT 2 }]";
+
+        let (db, _root, workspace) =
+            db_with_files(&[("models/hand.sql", hand), ("models/cohorts.gen.sql", gen)]);
+
+        let result = emitted_models(&db, workspace);
+
+        // Selector pointing at the hand-authored file — not a generator file.
+        let selector = parse_selector("generator_file:models/hand.sql").expect("parse selector");
+        let path = match &selector.method {
+            SelectionMethod::GeneratorFile { path } => path.clone(),
+            _ => panic!("expected GeneratorFile"),
+        };
+
+        let matched: Vec<_> = result
+            .survivors
+            .iter()
+            .filter(|e| {
+                let gen_path = e.generator_file.to_string_lossy();
+                gen_path.ends_with(path.to_str().unwrap_or(""))
+            })
+            .collect();
+
+        assert_eq!(
+            matched.len(),
+            0,
+            "selector against non-generator path must match nothing; got: {:?}",
+            matched.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A collision loser is NOT in `survivors` and is therefore excluded from
+    /// `generator_file:` selector matches (collision losers are in `discarded`).
+    #[test]
+    fn generator_file_selector_excludes_collision_losers() {
+        use smelt_core::selector::{parse_selector, SelectionMethod};
+
+        // Hand-authored model: cohorts/us_west.sql → smelt path cohorts.us_west
+        let hand = "SELECT 1 AS id";
+        // Generator at cohorts.gen.sql emits 'us_west' → collision → dropped.
+        let gen = "---\ngenerates: models\n---\n[ModelDef { name: 'us_west', body: SELECT 2 }, ModelDef { name: 'eu', body: SELECT 3 }]";
+
+        let (db, _root, workspace) = db_with_files(&[
+            ("models/cohorts/us_west.sql", hand),
+            ("models/cohorts.gen.sql", gen),
+        ]);
+
+        let result = emitted_models(&db, workspace);
+
+        // Only 'eu' must survive; 'us_west' is a collision loser.
+        let selector =
+            parse_selector("generator_file:models/cohorts.gen.sql").expect("parse selector");
+        let path = match &selector.method {
+            SelectionMethod::GeneratorFile { path } => path.clone(),
+            _ => panic!("expected GeneratorFile"),
+        };
+
+        let matched: Vec<_> = result
+            .survivors
+            .iter()
+            .filter(|e| {
+                let gen_path = e.generator_file.to_string_lossy();
+                gen_path.ends_with(path.to_str().unwrap_or(""))
+            })
+            .collect();
+
+        // Only 'eu' should match — 'us_west' is a collision loser, not in survivors.
+        assert_eq!(
+            matched.len(),
+            1,
+            "collision loser must be excluded from generator_file: selector; got: {:?}",
+            matched.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            matched[0].name, "eu",
+            "survivor must be 'eu', not the collision loser 'us_west'"
+        );
+    }
+
+    // ─── Test Phase 5 (E2): incremental frontmatter inheritance ─────────────
+
+    /// A generator file whose frontmatter declares `incremental:` and emits a
+    /// `ModelDef { materialization: 'incremental' }` — the resulting emission
+    /// carries `materialization == "incremental"` and its `incremental_config()`
+    /// reflects the generator file's frontmatter block.
+    #[test]
+    fn emitted_incremental_model_inherits_frontmatter_incremental_block() {
+        // Generator file with incremental frontmatter.
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "incremental:\n",
+            "  event_time_column: dt\n",
+            "  partition_column: dt\n",
+            "  granularity: day\n",
+            "---\n",
+            "[ModelDef { name: 'us_west', body: SELECT * FROM orders, materialization: 'incremental' }]"
+        );
+
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+
+        let gen_files = generator_files(&db, workspace);
+        assert_eq!(gen_files.len(), 1);
+
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(result.emissions.len(), 1);
+
+        let emission = &result.emissions[0];
+        assert_eq!(
+            emission.materialization, "incremental",
+            "emitted model must have materialization=incremental"
+        );
+        // The emission should carry the inherited incremental config.
+        let inc = emission.incremental_config.as_ref().expect(
+            "emitted incremental model must carry the inherited incremental_config from frontmatter"
+        );
+        assert_eq!(
+            inc.partition_column, "dt",
+            "inherited partition_column must be 'dt'"
+        );
+        assert_eq!(
+            inc.event_time_column, "dt",
+            "inherited event_time_column must be 'dt'"
+        );
+    }
+
+    /// A generator file with an `incremental:` frontmatter block that emits a
+    /// `ModelDef { materialization: 'view' }` — the emitted model is a view
+    /// and must NOT inherit the incremental config (it is silently ignored).
+    #[test]
+    fn emitted_non_incremental_model_does_not_inherit_incremental_block() {
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "incremental:\n",
+            "  event_time_column: dt\n",
+            "  partition_column: dt\n",
+            "  granularity: day\n",
+            "---\n",
+            "[ModelDef { name: 'us_west', body: SELECT 1 }]"
+        );
+
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+
+        let gen_files = generator_files(&db, workspace);
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+
+        assert_eq!(result.emissions.len(), 1);
+        let emission = &result.emissions[0];
+        // Default materialization is "view".
+        assert_eq!(
+            emission.materialization, "view",
+            "emitted model without explicit materialization must be 'view'"
+        );
+        // View emissions must not inherit the incremental block.
+        assert!(
+            emission.incremental_config.is_none(),
+            "non-incremental emitted model must not carry incremental_config; got: {:?}",
+            emission.incremental_config
         );
     }
 }

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use smelt_core::ModelOriginKind;
 use smelt_db::ColumnSource;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,6 +39,11 @@ pub struct CatalogModel {
     pub downstream: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental: Option<CatalogIncremental>,
+    /// For generator-emitted models: provenance identifying the generator file
+    /// and the `ModelDef.name` that produced this model. Omitted for hand-authored
+    /// models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ModelOriginKind>,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,6 +235,15 @@ pub fn build_catalog(
             .as_ref()
             .and_then(|m| m.owner.clone());
 
+        // Build origin for generator-emitted models.
+        let origin = match (&node.generator_file, &node.generator_name) {
+            (Some(gf), Some(gn)) => Some(ModelOriginKind::Generated {
+                generator_file: gf.clone(),
+                generator_name: gn.clone(),
+            }),
+            _ => None,
+        };
+
         models.insert(
             node.name.clone(),
             CatalogModel {
@@ -242,6 +257,7 @@ pub fn build_catalog(
                 upstream,
                 downstream,
                 incremental,
+                origin,
             },
         );
     }

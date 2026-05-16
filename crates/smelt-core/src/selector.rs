@@ -6,8 +6,11 @@
 //! - `+tag:revenue` — select matching models + upstream dependencies
 //! - `tag:revenue+` — select matching models + downstream dependents
 //! - `+tag:revenue+` — select matching models + both directions
+//! - `generator_file:models/cohorts.gen.sql` — select all emitted models from
+//!   the given generator file (excluding collision losers)
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// A parsed selector that identifies which models to include.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +27,15 @@ pub enum SelectionMethod {
     ModelName(String),
     /// Select models by tag
     Tag(String),
+    /// Select all emitted models from a generator file (by workspace-relative
+    /// path). Excludes collision losers — only surviving emitted models are
+    /// matched. A path pointing at a hand-authored `.sql` file or a missing
+    /// file returns an empty match set (no error).
+    GeneratorFile {
+        /// Workspace-relative path of the generator `.sql` file, e.g.
+        /// `PathBuf::from("models/cohorts.gen.sql")`.
+        path: PathBuf,
+    },
 }
 
 impl SelectionMethod {
@@ -32,6 +44,7 @@ impl SelectionMethod {
         match self {
             SelectionMethod::ModelName(name) => Some(name),
             SelectionMethod::Tag(_) => None,
+            SelectionMethod::GeneratorFile { .. } => None,
         }
     }
 }
@@ -44,6 +57,9 @@ impl fmt::Display for Selector {
         match &self.method {
             SelectionMethod::ModelName(name) => write!(f, "{}", name)?,
             SelectionMethod::Tag(tag) => write!(f, "tag:{}", tag)?,
+            SelectionMethod::GeneratorFile { path } => {
+                write!(f, "generator_file:{}", path.display())?;
+            }
         }
         if self.include_downstream {
             write!(f, "+")?;
@@ -96,6 +112,13 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
             return Err(SelectorParseError::EmptyTag);
         }
         SelectionMethod::Tag(tag.to_string())
+    } else if let Some(path_str) = rest.strip_prefix("generator_file:") {
+        if path_str.is_empty() {
+            return Err(SelectorParseError::EmptyPath);
+        }
+        SelectionMethod::GeneratorFile {
+            path: PathBuf::from(path_str),
+        }
     } else {
         SelectionMethod::ModelName(rest.to_string())
     };
@@ -112,6 +135,8 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
 pub enum SelectorParseError {
     Empty,
     EmptyTag,
+    /// `generator_file:` prefix with no path component.
+    EmptyPath,
     InvalidCharacter(char),
 }
 
@@ -121,6 +146,9 @@ impl fmt::Display for SelectorParseError {
             SelectorParseError::Empty => write!(f, "Selector cannot be empty"),
             SelectorParseError::EmptyTag => {
                 write!(f, "Tag name cannot be empty in 'tag:' selector")
+            }
+            SelectorParseError::EmptyPath => {
+                write!(f, "Path cannot be empty in 'generator_file:' selector")
             }
             SelectorParseError::InvalidCharacter(c) => {
                 write!(f, "Invalid character '{}' in selector", c)
@@ -249,5 +277,43 @@ mod tests {
             parse_selector("daily_revenue").unwrap().to_string(),
             "daily_revenue"
         );
+    }
+
+    // ── Phase 5 (E2): generator_file: selector tests ─────────────────────────
+
+    /// `generator_file:models/cohorts.gen.sql` parses to
+    /// `SelectionMethod::GeneratorFile { path: "models/cohorts.gen.sql" }`
+    /// with both upstream/downstream false.
+    #[test]
+    fn generator_file_selector_parses_workspace_relative_path() {
+        use std::path::PathBuf;
+
+        let s = parse_selector("generator_file:models/cohorts.gen.sql").unwrap();
+        match &s.method {
+            SelectionMethod::GeneratorFile { path } => {
+                assert_eq!(path, &PathBuf::from("models/cohorts.gen.sql"));
+            }
+            other => panic!("expected GeneratorFile selector, got {:?}", other),
+        }
+        assert!(!s.include_upstream);
+        assert!(!s.include_downstream);
+
+        // With both modifiers.
+        let s2 = parse_selector("+generator_file:models/foo.gen.sql+").unwrap();
+        match &s2.method {
+            SelectionMethod::GeneratorFile { path } => {
+                assert_eq!(path, &PathBuf::from("models/foo.gen.sql"));
+            }
+            other => panic!("expected GeneratorFile selector, got {:?}", other),
+        }
+        assert!(s2.include_upstream);
+        assert!(s2.include_downstream);
+    }
+
+    /// `generator_file:` (empty path) returns `SelectorParseError::EmptyPath`.
+    #[test]
+    fn generator_file_selector_with_empty_path_emits_parse_error() {
+        let result = parse_selector("generator_file:");
+        assert_eq!(result, Err(SelectorParseError::EmptyPath));
     }
 }

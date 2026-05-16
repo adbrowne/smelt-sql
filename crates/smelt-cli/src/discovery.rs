@@ -4,6 +4,7 @@ pub use smelt_core::RefInfo;
 use smelt_core::{
     extract_file_metadata, FileMetadata, Materialization, ModelId, ModelMetadata, TestConfig,
 };
+use smelt_db::EmittedModelDef;
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -86,6 +87,83 @@ impl ModelFile {
             self.name.clone()
         } else {
             self.address_segments.join("_")
+        }
+    }
+
+    /// Construct a virtual `ModelFile` from an `EmittedModelDef` survivor.
+    ///
+    /// The `smelt_name` parameter is the pre-computed smelt-path for this
+    /// emitted model (e.g. `"cohorts.us_west"`), obtained from
+    /// `smelt_db::emitted_model_smelt_path`.  The emitted model's SQL body
+    /// is used as the model content and is parsed for refs.
+    ///
+    /// The resulting `ModelFile` has a virtual `path` derived from the
+    /// generator file path (since emitted models have no physical SQL file of
+    /// their own).  Its `metadata` carries the materialization and tags from
+    /// the `EmittedModelDef`.
+    pub fn from_emitted_def(emitted: &EmittedModelDef, smelt_name: String) -> Self {
+        // Parse the body text for ref extraction.
+        let content = emitted.body_text.clone();
+        let parse = smelt_parser::parse(&content);
+        let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+            extract_refs(&file)
+        } else {
+            Vec::new()
+        };
+
+        // Build minimal metadata from emitted fields.
+        // Note: "incremental" is not a Materialization variant — it's a Table
+        // with an IncrementalConfig attached.
+        let materialization = match emitted.materialization.as_str() {
+            "table" | "incremental" => Some(Materialization::Table),
+            _ => Some(Materialization::View),
+        };
+        let metadata = Box::new(ModelMetadata {
+            name: Some(smelt_name.clone()),
+            generates: None,
+            materialization,
+            incremental: emitted.incremental_config.clone(),
+            target: None,
+            tags: emitted.tags.clone(),
+            owner: None,
+            description: if emitted.description.is_empty() {
+                None
+            } else {
+                Some(emitted.description.clone())
+            },
+            columns: std::collections::HashMap::new(),
+            backend_hints: std::collections::HashMap::new(),
+            test: None,
+            schema_evolution: None,
+            format: None,
+        });
+
+        // Virtual path: generator_file path with the model name appended as
+        // a virtual component so the Salsa key is unique per emission.
+        let virtual_path = emitted.generator_file.with_file_name(format!(
+            "{}::{}",
+            emitted
+                .generator_file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("gen"),
+            smelt_name
+        ));
+        let model_id = ModelId::multi_model(emitted.generator_file.clone(), smelt_name.clone());
+
+        // Address segments: smelt_name split by '.'
+        let address_segments: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+
+        Self {
+            name: smelt_name,
+            path: virtual_path,
+            content,
+            refs,
+            parse_errors: parse.errors,
+            metadata: Some(metadata),
+            kind: ModelKind::Sql,
+            model_id,
+            address_segments,
         }
     }
 }

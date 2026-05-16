@@ -15,6 +15,13 @@ pub struct LogicalNode {
     pub incremental: Option<IncrementalConfig>,
     pub target: String,
     pub tags: Vec<String>,
+    /// For generator-emitted models: the workspace-relative path (with `/`
+    /// separators) of the generator `.sql` file that produced this model.
+    /// `None` for hand-authored models.
+    pub generator_file: Option<String>,
+    /// For generator-emitted models: the `ModelDef.name` value that produced
+    /// this emitted model. `None` for hand-authored models.
+    pub generator_name: Option<String>,
 }
 
 /// Describes a dependency edge that crosses backend boundaries.
@@ -122,6 +129,11 @@ impl LogicalGraph {
                     target,
                     tags,
                     model_file: model,
+                    // Hand-authored models have no generator provenance.
+                    // Generator-emitted models are populated separately when
+                    // the generator pipeline feeds into the logical graph.
+                    generator_file: None,
+                    generator_name: None,
                 },
             );
         }
@@ -131,6 +143,25 @@ impl LogicalGraph {
             sources: source_set,
             seeds: seed_set,
         })
+    }
+
+    /// Annotate nodes whose names appear in `origins` with generator provenance.
+    ///
+    /// `origins` maps the model's smelt-path name (e.g. `"cohorts.us_west"`) to
+    /// `(generator_file_rel_path, generator_def_name)`.  Any node name not in
+    /// the map is left unchanged (its `generator_file`/`generator_name` remain
+    /// `None`).  This is called after `build()` when the emitted-models Salsa
+    /// pipeline has determined which survivors exist.
+    pub fn annotate_emitted_models(
+        &mut self,
+        origins: &std::collections::HashMap<String, (String, String)>,
+    ) {
+        for (name, (gen_file, gen_name)) in origins {
+            if let Some(node) = self.nodes.get_mut(name) {
+                node.generator_file = Some(gen_file.clone());
+                node.generator_name = Some(gen_name.clone());
+            }
+        }
     }
 
     // -- Validation ----------------------------------------------------------
@@ -315,6 +346,22 @@ impl LogicalGraph {
                     .filter(|node| node.tags.contains(tag))
                     .map(|node| node.name.clone())
                     .collect(),
+                // `GeneratorFile` selection requires the emitted-models pipeline.
+                // At the LogicalGraph level we match nodes whose `origin` field
+                // records the given generator path.
+                SelectionMethod::GeneratorFile { path } => {
+                    let path_str = path.to_string_lossy();
+                    self.nodes
+                        .values()
+                        .filter(|node| {
+                            node.generator_file
+                                .as_deref()
+                                .map(|gf| gf == path_str.as_ref())
+                                .unwrap_or(false)
+                        })
+                        .map(|node| node.name.clone())
+                        .collect()
+                }
             };
 
             for model_name in &direct_matches {

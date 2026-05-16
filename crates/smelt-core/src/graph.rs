@@ -317,6 +317,11 @@ impl DependencyGraph {
                     })
                     .map(|(name, _)| name.clone())
                     .collect(),
+                // `GeneratorFile` selection requires the emitted-models pipeline
+                // (smelt-db layer). At the DependencyGraph level we return an
+                // empty match set — callers that need generator-file selection
+                // must use the smelt-db `resolve_generator_file_selector` helper.
+                SelectionMethod::GeneratorFile { .. } => vec![],
             };
 
             for model_name in &direct_matches {
