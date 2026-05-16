@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-05-09
+last_reviewed: 2026-05-16
 owners: [andrew]
 ---
 
@@ -56,12 +56,25 @@ Parameter and return positions accept fragment sorts:
 | Open struct value | `Expr<Struct<{f: T, …}>>` | `Expr<Struct<{ts: Timestamp, ..r}>>` |
 | Meta list | `List<T>` | `List<Expr<Numeric>>`, `List<TableExpr>`, `List<List<Text>>` |
 | Lambda | `Lambda<T, U>` | `Lambda<Expr<Integer>, Expr<Boolean>>` |
+| Model definition | `ModelDef` | (generator-file bodies only — see below) |
 
 `T` is one of: a concrete `DataType`, a `TypeConstraint` (`Numeric`, `Ordered`, `Any`), or — in built-ins / `smelt.extern` only — a generic parameter (`<T: Constraint>`). Row-tail markers on `TableExpr<{…}>` and `Struct<{…}>`: omitted (closed), `..` (anonymous tail accepted), `..r` (named tail bound).
 
 `List<T>` is a meta-only sort: it never appears as a `DataType` in a runtime column, and `Array<U>` is its Data-World counterpart. The element type `T` may be any other fragment sort (including a nested `List<U>`) or another meta-only type (`ColumnRef`, `ModelRef`, record types). `List<T>` is **covariant** in `T` — if `S <: T` under the fragment-sort subtyping rules below, then `List<S> <: List<T>`. The runtime witness is `SmeltType::List(Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full surface and semantics for list literals and spread live in `meta_language.md` §"Lists and spread".
 
 `Lambda<T, U>` is a meta-only sort representing a compile-time function value with input sort `T` and output sort `U`. It is **invariant** in both `T` and `U`: `Lambda<S1, T1> <: Lambda<S2, T2>` holds only when `S1 = S2` AND `T1 = T2`. `Lambda<T, U>` values are produced by `fn param => body` syntax and consumed by higher-order functions (`map`, `filter`, `reduce`). The runtime witness is `SmeltType::Lambda(Box<SmeltType>, Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full surface and semantics for HOFs and lambdas live in `meta_language.md` §"Lambdas and higher-order functions". `Lambda<T, U>` is meta-only — it is not user-writable as a `smelt.define` parameter sort or return type, and is constructed only at HOF positional argument positions; the `LambdaInForbiddenPosition` diagnostic enforces this.
+
+`ModelDef` is a **meta-only closed record type** representing a pending model emission inside a generator file. It is analogous to `ColumnRef`, `ModelRef`, and `SourceRef` — a reflection-witness record — but unlike those three, `ModelDef` is **user-constructible** via a record literal. Its closed field set is fixed as:
+
+| Field | Type | Required | Default |
+|---|---|---|---|
+| `name` | `Text` | yes | — |
+| `body` | `TableExpr` | yes | — |
+| `materialization` | `Text` | no | `'view'` |
+| `tags` | `List<Text>` | no | `[]` |
+| `description` | `Text` | no | `''` |
+
+The runtime witness is `SmeltType::ModelDef`; the closed field set lives alongside `COLUMN_REF_FIELDS` / `MODEL_REF_FIELDS` / `SOURCE_REF_FIELDS` in `crates/smelt-types/src/signatures.rs` as `MODEL_DEF_FIELDS`. `ModelDef` is intentionally distinguishable from a structurally-equal `Struct<{…}>` — the type identity carries the restriction that construction is only valid inside a generator-file body (a file with `generates: models` frontmatter); a `ModelDef` literal anywhere else emits `ModelDefOutsideGeneratorFile`. `List<ModelDef>` is the required return type of a generator-file body. `ModelDef` values never reach the database engine; they are consumed entirely at meta-evaluation time. Full semantics live in `meta_language.md` §"Multi-model production".
 
 `Kind` ∈ `{Scalar, Agg, Window}`. `ctx` is the name of a sibling parameter whose schema scopes the items.
 
@@ -240,7 +253,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - Function call inference is **local**: row-variable unification, generic binding, and constraint discharge all happen at the call site without cross-module constraint solving.
 - `Numeric ⊂ Ordered` is structural — callers do not need to restate constraints.
 - Adding a type to `Ordered` is non-breaking; removing one is breaking.
-- Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain rules; no further branching is permitted without a spec edit.
+- Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record lifting rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain subtyping rules; no further branching is permitted without a spec edit. `ModelDef` participates in no subtyping rule — it is neither a subtype nor a supertype of any other sort.
 - One canonical built-in registry (per `signatures.rs::BuiltinRegistry`); per-dialect registries are out of scope. Backend availability is a per-function `backends:` property, not a registry split.
 - **Out of scope for v1**: nullability in parameter types; `Decimal(p,s)` precision arithmetic; multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`.
 
@@ -285,7 +298,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
 - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
-- `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; this spec only registers the vocabulary entry, the meta-language spec owns the rules.
+- `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; `ModelDef` field rules, generator-file body semantics, and construction restrictions; this spec registers the type vocabulary entries, the meta-language spec owns the rules.
 
 ### Backend divergence appendix
 
