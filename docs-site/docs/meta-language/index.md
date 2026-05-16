@@ -35,16 +35,19 @@ The meta-language provides three constructs that exercise the meta/data boundary
 | `...xs` | Spread operator — splices a `List<T>` into a comma-separated position | [Lists & Spread](lists.md) |
 | `List<T>` | Meta-only type: finite, ordered, immutable | [Lists & Spread](lists.md) |
 
-The meta-language also provides iteration, transformation, compile-time configuration, schema reflection, structured data types, and file-based configuration loading:
+The meta-language also provides iteration, transformation, compile-time branching, compile-time configuration, schema reflection, structured data types, and file-based configuration loading:
 
 | Construct | Description | Documentation |
 |-----------|-------------|---------------|
 | `fn x => body` | Lambda expression — inline single-argument function | [Lambdas](lambdas.md) |
+| `fn (a, b) => body` | Multi-parameter lambda (arity ≥ 2; parenthesised) | [Lambdas](lambdas.md) |
 | `map` | Apply a lambda to every element of a list | [Higher-Order Functions](hofs.md) |
 | `filter` | Keep list elements matching a predicate | [Higher-Order Functions](hofs.md) |
 | `reduce` | Fold a list into a single SQL fragment using a reducer | [Higher-Order Functions](hofs.md) |
 | `\|>` | Pipe operator — left-to-right HOF chaining | [Pipe Operator](pipes.md) |
-| `and_all`, `comma_sep`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat` | Contextual reducers | [Reducers](reducers.md) |
+| `and_all`, `comma_sep`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat` | Bare contextual reducers | [Reducers](reducers.md) |
+| `concat_with(sep)` | Parameterised text-join reducer with a compile-time separator | [Reducers](reducers.md) |
+| `if cond then a else b` | Meta-world ternary — compile-time Boolean branching with short-circuit evaluation | [Ternary](ternary.md) |
 | `smelt.config.var('name')` | Compile-time variable lookup from `smelt.yml` | [Config Variables](config-vars.md) |
 | `smelt.columns_of(t)` | Compile-time column list of a `TableExpr` → `List<ColumnRef>` | [Reflection](reflection.md) |
 | `ColumnRef` | Closed meta record type: `name`, `type`, `is_numeric` fields | [Reflection](reflection.md) |
