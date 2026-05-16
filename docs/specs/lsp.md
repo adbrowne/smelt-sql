@@ -222,6 +222,7 @@ Rename is supported on:
 | CTE name | CTE definition and all references within the same file |
 | `smelt.<path>` | All `smelt.<path>` references to that entity across the workspace; the source file itself is **not** renamed |
 | Column name | Column in local file, upstream model files (via source tracing), downstream model files (via dependency graph), and the relevant per-entity source `.yml` (for source-table columns) |
+| Lambda parameter | The parameter binder and every reference to it inside the lambda's body. Scope is the single lambda; inner lambdas that shadow the parameter are not touched. The new name must be a valid SQL identifier, must not collide with a meta-namespace keyword (`if`, `then`, `else`, `fn`, `let`), and must not shadow an outer binder already referenced inside the lambda body |
 
 `prepare_rename` is supported — editors can preview the rename range before committing.
 
@@ -262,6 +263,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 ## Known Divergences / Open Questions
 
 - **Rename does not rename the file.** Renaming a model via LSP updates all references but not the source file. This is a known gap — after a rename, the model name reverts to the file stem on next discovery unless the file is also renamed.
+- **Record-field rename is not supported.** Record types are structural and anonymous; renaming a field would have to propagate through every record-literal constructor, every projection, and every loader `schema` argument that uses the type. Prepare-rename on a record field name responds with not-supported. Tracked as a v2 enhancement.
 - **Python LSP support is partial.** Go-to-definition from SQL to Python `@model` functions works. Diagnostics for type errors *inside* the Python-generated SQL are attributed to the virtual SQL location, not the Python source line.
 - **Source `.yml` files are not watched.** Changes to a per-entity source YAML require reopening the workspace or making a model file change to trigger re-analysis. The server does not watch source `.yml` files independently.
 - **`smelt.yml` changes require server restart.** Project configuration changes (new model paths, target changes) are not detected dynamically; the LSP server must be restarted.
