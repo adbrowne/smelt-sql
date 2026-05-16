@@ -11,3 +11,6 @@ targets:
     schema: main
 
 default_materialization: view
+
+vars:
+  env: dev

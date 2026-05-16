@@ -15,13 +15,13 @@ if COND then THEN_EXPR else ELSE_EXPR
 - `THEN_EXPR` and `ELSE_EXPR` are arbitrary meta-evaluable expressions whose types must unify under the least-upper-bound (LUB) rules.
 - The ternary's synthesised type is the LUB of the two branch types.
 
-**Example — select a SQL expression based on a compile-time flag:**
+**Example — select a SQL expression based on a compile-time variable:**
 
 ```sql
--- examples/meta_polish/models/ternary_literal_cond.sql
--- if true then 'strict' else 'permissive' resolves at compile time.
--- The engine sees only: SELECT 'strict'
-SELECT if true then 'strict' else 'permissive'
+-- examples/meta_polish/models/ternary_env_branch.sql
+-- smelt.config.var('env') resolves at compile time from smelt.yml vars.
+-- With env: dev, the engine sees only: SELECT 'permissive'
+SELECT if smelt.config.var('env') = 'prod' then 'strict' else 'permissive'
 ```
 
 ## Where ternary is allowed

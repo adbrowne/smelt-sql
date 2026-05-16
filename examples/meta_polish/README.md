@@ -7,10 +7,12 @@ meta-language:
   compile-time separator string. `reduce(['alpha', 'beta', 'gamma'], concat_with(' OR '))`
   folds left with the separator, producing a single Text expression.
 
-- **Ternary `if … then … else …`** — compile-time branching. The condition must
-  synthesise to `Boolean`; the two branches must unify under LUB. Short-circuit
-  evaluation means the statically-unreached branch is type-checked but not
-  evaluated.
+- **Ternary `if … then … else …`** — compile-time branching driven by
+  `smelt.config.var('env')` from the workspace `vars:` block. The condition
+  must synthesise to `Boolean`; the two branches must unify under LUB.
+  Short-circuit evaluation means the statically-unreached branch is type-checked
+  but not evaluated. Flip `vars.env` between `dev` and `prod` to change the
+  emitted SQL without editing the model.
 
 The multi-argument lambda surface (`fn (a, b) => …`) is part of the meta-language,
 but no v1 higher-order function accepts a multi-arg lambda — placing one at an
@@ -24,7 +26,7 @@ to consume one cleanly.
 | File | Surface exercised |
 |---|---|
 | `models/concat_with_separator.sql` | `concat_with(' OR ')` parameterised reducer |
-| `models/ternary_literal_cond.sql` | `if true then … else …` ternary |
+| `models/ternary_env_branch.sql` | `if smelt.config.var('env') = 'prod' then … else …` ternary |
 
 ## Broken sibling workspaces
 
