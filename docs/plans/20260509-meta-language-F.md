@@ -97,7 +97,7 @@ This plan drives the implementation, the worked example, user docs, and skill up
 | 4     | done     | bbcde26 | 2026-05-17 |
 | 5     | done     | b37d519 | 2026-05-17 |
 | 6     | done     | d7a4fb8 | 2026-05-17 |
-| 7     | pending  |         |            |
+| 7     | done     | e1f62df0 | 2026-05-17 |
 
 ---
 
@@ -538,6 +538,20 @@ keeps the skill body lean and avoids introducing a new structural section
 under just one entry. If a future audit wants a discoverable index of the
 reference docs, add a "Reference notes" section listing all of them at once
 rather than retrofitting per-phase one-liners.
+
+**Phase 7 expert review:** type-expert closed at R3 (R3 finding was a
+doc-comment precision nit on the both-branches-Unknown corner case, addressed
+via a generalised comment in `e1f62df0` without an R4 dispatch — user-authorised
+override of the strict stop-the-line bound; behaviour unchanged), lsp-expert
+clean (R2), examples-curator clean (R2), docs-reviewer clean (R2).
+
+Round-by-round commits:
+- `006e2664` — type-expert R1: nested-ternary "Unknown hole" fix (`infer_branch_type`).
+- `1da2526f` — lsp-expert R1: `concat_with($sep)` snippet, ternary keyword + multi-arg lambda `(` hover dispatch, regression tests.
+- `2317d86c` — type-expert R2: doc-comment corrected (Unknown-propagation mechanism).
+- `d32dda9c` — examples-curator R1: rename to `ternary_env_branch.sql`, switch to `smelt.config.var('env')`, add `vars.env: dev`.
+- `2b4e1ae2` — docs-reviewer R1: drop "(forthcoming)" label on Phase F plan reference.
+- `e1f62df0` — type-expert R3: generalise doc-comment to cover both-branches-Unknown.
 
 ---
 
