@@ -1,10 +1,11 @@
-//! Meta-language (Phase B+) grammar — lambdas.
+//! Meta-language (Phase B+, Phase F) grammar — lambdas, ternary, reducer calls.
 //!
-//! Covers the `fn IDENT => EXPR` reserved-keyword lambda introduced in
-//! Phase B and the legacy single/multi-param `x -> EXPR` / `(x, y) -> EXPR`
-//! lambdas. Lookahead helpers (`is_lambda_single_param`, `is_thin_arrow_at`,
-//! `is_lambda_multi_param`) live alongside the productions they gate
-//! (`parse_fn_lambda`, `parse_lambda_expr`).
+//! Covers:
+//!   - `fn IDENT => EXPR` reserved-keyword lambda (Phase B)
+//!   - `fn ( IDENT, ... ) => EXPR` parenthesised multi-arg lambda (Phase F)
+//!   - `if COND then THEN else ELSE` meta-world ternary (Phase F)
+//!   - Parameterised reducer call at second-arg of `reduce` (Phase F)
+//!   - Legacy single/multi-param `x -> EXPR` / `(x, y) -> EXPR` lambdas
 
 use crate::SyntaxKind::*;
 
@@ -114,20 +115,17 @@ impl<'a> super::Parser<'a> {
         // Must be -> (MINUS GT)
         self.is_thin_arrow_at(lookahead)
     }
-    /// Parse a Phase B meta-language lambda: `fn IDENT => EXPR` (single-arg only).
-    ///
-    /// Multi-arg lambdas (`fn (IDENT, ...) => EXPR`) are reserved for Phase F;
-    /// `is_fn_lambda_start()` does not route LPAREN cases here in Phase B.
+    /// Parse a Phase B/F meta-language lambda: `fn IDENT => EXPR` or `fn ( IDENT, ... ) => EXPR`.
     ///
     /// Produces a `LAMBDA` node whose children are:
     ///   - `FN_KW` token (the reserved `fn` keyword)
-    ///   - `LAMBDA_PARAM_LIST` — a single IDENT for the parameter
+    ///   - `LAMBDA_PARAM_LIST` — contains one or more `LAMBDA_PARAM` children, each wrapping
+    ///     a single IDENT. For zero-param `fn () => body`, the LAMBDA_PARAM_LIST is empty
+    ///     (downstream emits `LambdaZeroParameters`).
     ///   - `ARROW` token (`=>`)
     ///   - `EXPRESSION` — the lambda body
     ///
-    /// The caller must have verified `self.is_fn_lambda_start()` before calling
-    /// this.  `fn` is a **reserved** keyword (FN_KW); any SQL using `fn` as a
-    /// column, table, or alias name must now quote it.
+    /// The caller must have verified `self.is_fn_lambda_start()` before calling this.
     pub(super) fn parse_fn_lambda(&mut self) {
         self.start_node(LAMBDA);
 
@@ -137,18 +135,27 @@ impl<'a> super::Parser<'a> {
 
         // Parse the parameter list.
         if self.at(LPAREN) {
-            // Multi-arg lambda: `fn (a, b) => body` — Phase 3 rejects, parser accepts.
+            // Parenthesised form: `fn (a, b) => body` (Phase F).
+            // Also handles single-arg `fn (x) => body` and zero-arg `fn () => body`.
             self.start_node(LAMBDA_PARAM_LIST);
             self.advance(); // LPAREN
             self.skip_trivia();
             loop {
+                // Trailing comma: if we see RPAREN, break.
+                if self.at(RPAREN) || self.at(EOF) {
+                    break;
+                }
                 if self.at(IDENT) {
+                    // Wrap each parameter in a LAMBDA_PARAM node.
+                    self.start_node(LAMBDA_PARAM);
                     self.advance(); // parameter IDENT
+                    self.finish_node(); // LAMBDA_PARAM
                     self.skip_trivia();
                 }
                 if self.at(COMMA) {
                     self.advance(); // ,
                     self.skip_trivia();
+                    // Allow trailing comma: loop continues and RPAREN check at top will break.
                 } else {
                     break;
                 }
@@ -160,9 +167,12 @@ impl<'a> super::Parser<'a> {
             }
             self.finish_node(); // LAMBDA_PARAM_LIST
         } else if self.at(IDENT) {
-            // Single-arg lambda: `fn IDENT => body`.
+            // Single-arg bare form: `fn IDENT => body`.
+            // Wrap the parameter in a LAMBDA_PARAM node for consistency with multi-arg form.
             self.start_node(LAMBDA_PARAM_LIST);
+            self.start_node(LAMBDA_PARAM);
             self.advance(); // IDENT
+            self.finish_node(); // LAMBDA_PARAM
             self.finish_node(); // LAMBDA_PARAM_LIST
         } else {
             self.error("Expected identifier or '(' after 'fn' in lambda expression".to_string());
@@ -179,7 +189,7 @@ impl<'a> super::Parser<'a> {
             self.error("Expected '=>' in lambda expression after parameter".to_string());
         }
 
-        // Parse the body expression.
+        // Parse the body expression (using parse_expression which includes ternary).
         self.skip_trivia();
         self.parse_expression();
 

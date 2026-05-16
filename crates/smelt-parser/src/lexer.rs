@@ -484,6 +484,10 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         // previously used `fn` as a column, table, or alias name must now quote it
         // (e.g. `"fn"` or backtick-quoted `\`fn\``).
         "FN" => FN_KW,
+        // Phase F (meta-language): `if` is a reserved keyword for the meta-world ternary.
+        // `then` and `else` were already reserved as SQL CASE keywords; they keep that meaning
+        // inside CASE expressions and gain ternary meaning outside CASE contexts.
+        "IF" => IF_KW,
         _ => IDENT,
     }
 }

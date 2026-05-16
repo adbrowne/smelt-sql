@@ -88,16 +88,16 @@ This plan drives the implementation, the worked example, user docs, and skill up
 
 ## Progress tracking
 
-| Phase | Status   | Commit | Date |
-|-------|----------|--------|------|
-| 0     | pending  |        |      |
-| 1     | pending  |        |      |
-| 2     | pending  |        |      |
-| 3     | pending  |        |      |
-| 4     | pending  |        |      |
-| 5     | pending  |        |      |
-| 6     | pending  |        |      |
-| 7     | pending  |        |      |
+| Phase | Status   | Commit  | Date       |
+|-------|----------|---------|------------|
+| 0     | done     | 8b25f70 | 2026-05-16 |
+| 1     | done     | e4080eb | 2026-05-16 |
+| 2     | pending  |         |            |
+| 3     | pending  |         |            |
+| 4     | pending  |         |            |
+| 5     | pending  |         |            |
+| 6     | pending  |         |            |
+| 7     | pending  |         |            |
 
 ---
 

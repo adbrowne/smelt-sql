@@ -76,6 +76,9 @@ pub enum SyntaxKind {
     FILTER_KW,
     // Phase B (meta-language): `fn` reserved keyword
     FN_KW,
+    // Phase F (meta-language): `if` reserved keyword for meta-world ternary
+    // (`then` and `else` already exist as THEN_KW / ELSE_KW — SQL CASE keywords)
+    IF_KW,
     // SQL data type/constructor keywords
     ARRAY_KW,
     VALUES_KW,
@@ -259,10 +262,19 @@ pub enum SyntaxKind {
     PIPE_ARROW, // `|>` — meta-language pipe operator
 
     // Phase B (meta-language): lambda and pipe CST nodes
-    // LAMBDA: `fn IDENT => EXPR` or `fn (IDENT, ...) => EXPR` (multi-arg reserved for Phase F)
-    // PIPE_EXPR: `EXPR |> CALL(args...)` — left-associative, lowest meta-language precedence
+    // LAMBDA: `fn IDENT => EXPR` or `fn (IDENT, ...) => EXPR`
+    // PIPE_EXPR: `EXPR |> CALL(args...)` — left-associative, lower precedence than ternary
     LAMBDA,
     PIPE_EXPR,
+    // Phase F (meta-language): single parameter node inside LAMBDA_PARAM_LIST.
+    // Each IDENT in the lambda parameter list is wrapped in a LAMBDA_PARAM node.
+    LAMBDA_PARAM,
+    // Phase F (meta-language): meta-world ternary `if COND then THEN else ELSE`.
+    // TERNARY_EXPR holds three EXPRESSION children: condition, then_branch, else_branch.
+    TERNARY_EXPR,
+    // Phase F (meta-language): parameterised reducer call in the second-argument position
+    // of `reduce`. Shape: IDENT ARG_LIST. Only emitted in reduce's second-arg context.
+    REDUCER_CALL,
 
     // Phase 13: structured TypeRef children for TableExpr / AggExpr /
     // WindowExpr / SelectItems parameter sorts. These are emitted as
@@ -380,6 +392,7 @@ impl SyntaxKind {
                 | REPEATABLE_KW
                 | FILTER_KW
                 | FN_KW
+                | IF_KW
                 | ARRAY_KW
                 | VALUES_KW
                 | STRUCT_KW

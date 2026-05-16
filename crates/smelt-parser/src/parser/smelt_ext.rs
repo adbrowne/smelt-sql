@@ -1155,9 +1155,8 @@ impl<'a> Parser<'a> {
             self.parse_expression();
             self.finish_node();
         } else if self.is_fn_lambda_start() {
-            // Phase B meta-language lambda: `fn IDENT => body` (single-arg only).
-            // Multi-arg (`fn (a, b) => body`) is deferred to Phase F and is not
-            // routed here by is_fn_lambda_start() in Phase B.
+            // Phase B/F meta-language lambda: `fn IDENT => body` (single-arg)
+            // or `fn (IDENT, ...) => body` (multi-arg, Phase F).
             // Wrap in EXPRESSION so the argument tree structure is consistent.
             self.start_node(EXPRESSION);
             self.parse_fn_lambda();

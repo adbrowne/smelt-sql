@@ -25,13 +25,104 @@ impl<'a> super::Parser<'a> {
             return;
         }
         self.depth += 1;
-        // Phase B (meta-language): pipe `|>` is the lowest-precedence
-        // meta-language operator.  `parse_pipe_expr` wraps `parse_or_expr`
-        // and folds left-associative `|>` chains when present.
-        self.parse_pipe_expr();
+        // Phase F (meta-language): ternary `if COND then THEN else ELSE` is the
+        // lowest-precedence meta-language construct — lower than `|>`.
+        // The full expression entry point is `parse_expression_inner` which handles
+        // both the pure-pipe case and the pipe-then-ternary case.
+        self.parse_expression_inner();
         self.depth -= 1;
 
         self.finish_node();
+    }
+
+    /// Inner entry point for expressions. Handles the precedence hierarchy:
+    ///   ternary (lowest) > pipe > or > and > comparison > concat > ... > primary (highest)
+    ///
+    /// When the first token is `if`, the whole expression is a TERNARY_EXPR.
+    /// In all other cases this is a pass-through to `parse_pipe_expr`.
+    ///
+    /// The ternary syntax is `if COND then THEN else ELSE`. Inside the COND slot,
+    /// pipe expressions parse with their normal (higher) precedence, so
+    /// `if xs |> f() then a else b` correctly makes `xs |> f()` the COND.
+    pub(super) fn parse_expression_inner(&mut self) {
+        let checkpoint = self.builder.checkpoint();
+
+        if self.at(IF_KW) {
+            // Ternary expression: `if COND then THEN else ELSE`.
+            self.parse_ternary_from_if(checkpoint);
+        } else {
+            // Non-ternary expression — pass through to pipe.
+            self.parse_pipe_expr();
+        }
+    }
+
+    /// Parse a full ternary expression starting at the `if` keyword.
+    ///
+    /// The `checkpoint` must be taken *before* any tokens of this ternary are consumed
+    /// (i.e. before the `if` token). This allows the TERNARY_EXPR node to span from
+    /// the `if` through the `else` branch.
+    ///
+    /// When called for a nested ternary (right-associative `else if`), the caller
+    /// passes a fresh checkpoint taken at the `if` position.
+    fn parse_ternary_from_if(&mut self, checkpoint: rowan::Checkpoint) {
+        self.start_node_at(checkpoint, TERNARY_EXPR);
+        self.advance(); // IF_KW
+        self.skip_trivia();
+
+        // COND slot — wrapped in EXPRESSION.
+        self.start_node(EXPRESSION);
+        self.depth += 1;
+        if self.is_fn_lambda_start() {
+            self.parse_fn_lambda();
+        } else {
+            self.parse_pipe_expr();
+        }
+        self.depth -= 1;
+        self.finish_node(); // EXPRESSION (COND)
+
+        // `then` keyword.
+        self.skip_trivia();
+        if self.at(THEN_KW) {
+            self.advance();
+        } else {
+            self.error("Expected 'then' in ternary expression".to_string());
+        }
+
+        // THEN_EXPR slot — wrapped in EXPRESSION.
+        self.skip_trivia();
+        self.start_node(EXPRESSION);
+        self.depth += 1;
+        if self.is_fn_lambda_start() {
+            self.parse_fn_lambda();
+        } else {
+            self.parse_pipe_expr();
+        }
+        self.depth -= 1;
+        self.finish_node(); // EXPRESSION (THEN_EXPR)
+
+        // `else` keyword + ELSE_EXPR.
+        self.skip_trivia();
+        if self.at(ELSE_KW) {
+            self.advance();
+            self.skip_trivia();
+            // ELSE_EXPR slot — wrapped in EXPRESSION for uniform structure.
+            // Right-associative: if the else branch starts with `if`, it recurses.
+            self.start_node(EXPRESSION);
+            self.depth += 1;
+            if self.at(IF_KW) {
+                // Right-associative nested ternary.
+                self.parse_ternary_from_if(self.builder.checkpoint());
+            } else if self.is_fn_lambda_start() {
+                self.parse_fn_lambda();
+            } else {
+                self.parse_pipe_expr();
+            }
+            self.depth -= 1;
+            self.finish_node(); // EXPRESSION (ELSE_EXPR)
+        }
+        // Missing else → TernaryDanglingElse diagnostic (Phase 3).
+
+        self.finish_node(); // TERNARY_EXPR
     }
 
     /// Parse a pipe expression: `EXPR |> EXPR |> ...` (left-associative, lowest
@@ -498,21 +589,36 @@ impl<'a> super::Parser<'a> {
         } else if self.at(IDENT) {
             // Could be column reference, qualified name, or function call
             let checkpoint = self.builder.checkpoint();
+            // Peek at the identifier text before consuming, so we can detect `reduce`.
+            let ident_text = self.current_text().to_string();
             self.advance(); // consume first IDENT
             self.skip_trivia();
 
             if self.at(LPAREN) {
-                // Simple function call: func()
-                self.start_node_at(checkpoint, FUNCTION_CALL);
-                self.parse_arg_list();
-                self.parse_within_group_if_present();
-                self.parse_filter_clause_if_present();
-                self.finish_node();
+                // Special case: `reduce(xs, reducer)` — the second argument gets
+                // REDUCER_CALL treatment when it is an `IDENT (` call form.
+                if ident_text == "reduce" {
+                    self.start_node_at(checkpoint, FUNCTION_CALL);
+                    self.parse_reduce_arg_list();
+                    self.finish_node();
+                    // Check for OVER clause (window function on reduce — rare but valid structurally)
+                    self.skip_trivia();
+                    if self.at(OVER_KW) {
+                        self.parse_window_spec();
+                    }
+                } else {
+                    // Simple function call: func()
+                    self.start_node_at(checkpoint, FUNCTION_CALL);
+                    self.parse_arg_list();
+                    self.parse_within_group_if_present();
+                    self.parse_filter_clause_if_present();
+                    self.finish_node();
 
-                // Check for OVER clause (window function)
-                self.skip_trivia();
-                if self.at(OVER_KW) {
-                    self.parse_window_spec();
+                    // Check for OVER clause (window function)
+                    self.skip_trivia();
+                    if self.at(OVER_KW) {
+                        self.parse_window_spec();
+                    }
                 }
             } else if self.at(DOT) {
                 // Could be table.column, namespace.func(), or map.method()
@@ -1076,6 +1182,79 @@ impl<'a> super::Parser<'a> {
         self.finish_node();
     }
 
+    /// Parse the argument list of a `reduce(collection, reducer)` call.
+    ///
+    /// This is a specialised version of `parse_arg_list` that gives the SECOND argument
+    /// (the reducer) special treatment: if the second argument is an `IDENT (` call form
+    /// (e.g. `concat_with(' OR ')`), it is wrapped in a `REDUCER_CALL` node instead of
+    /// a generic `FUNCTION_CALL`. A bare identifier (e.g. `and_all`) is parsed as a
+    /// normal expression (no `REDUCER_CALL` node).
+    ///
+    /// For all other argument positions (first argument, extra arguments beyond two),
+    /// this falls back to `parse_argument()`.
+    pub(super) fn parse_reduce_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        if !self.at(RPAREN) {
+            // First argument: the collection — parse normally.
+            self.parse_argument();
+            self.skip_trivia();
+
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+
+                // Second argument: the reducer.
+                // Detect `IDENT (` — parameterised reducer call.
+                if self.at(IDENT) && self.is_ident_followed_by_lparen() {
+                    // Parameterised reducer: `concat_with(' OR ')`, `join_with(', ')`, etc.
+                    self.start_node(REDUCER_CALL);
+                    self.advance(); // IDENT (reducer name)
+                    self.skip_trivia();
+                    self.parse_arg_list(); // the reducer's own argument list
+                    self.finish_node(); // REDUCER_CALL
+                } else {
+                    // Bare reducer: `and_all`, `or_all`, etc. — parse as a normal expression.
+                    self.parse_argument();
+                }
+
+                self.skip_trivia();
+                // Any remaining arguments beyond the second.
+                while self.at(COMMA) {
+                    self.advance();
+                    self.skip_trivia();
+                    if self.at(RPAREN) {
+                        break;
+                    }
+                    self.parse_argument();
+                    self.skip_trivia();
+                }
+            }
+        }
+
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Check if the current IDENT is immediately followed by `(` (with optional trivia).
+    fn is_ident_followed_by_lparen(&self) -> bool {
+        debug_assert!(
+            self.at(IDENT),
+            "is_ident_followed_by_lparen requires current == IDENT"
+        );
+        let mut la = 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        matches!(self.tokens.get(self.pos + la).map(|t| t.kind), Some(LPAREN))
+    }
+
     /// Parse optional WITHIN GROUP clause for ordered-set aggregate functions
     /// WITHIN GROUP (ORDER BY expr)
     pub(super) fn parse_within_group_if_present(&mut self) {
@@ -1135,41 +1314,90 @@ impl<'a> super::Parser<'a> {
     }
 
     /// Check if the current token is the reserved keyword `fn` (FN_KW) AND is
-    /// followed by a valid single-arg lambda parameter (Phase B: IDENT only).
+    /// followed by a valid lambda parameter form.
     ///
-    /// This lookahead avoids mis-treating `fn(args)` as a lambda start:
-    ///   - `fn x => body`     → true  (single-arg: FN_KW → IDENT "x")
-    ///   - `fn(args)`         → false (FN_KW → LPAREN is a function call)
-    ///   - `fn (a, b) => body` → false (multi-arg: deferred to Phase F)
+    /// Accepted forms (Phase F):
+    ///   - `fn IDENT => body`        — single-arg bare form
+    ///   - `fn ( IDENT ... ) => body` — parenthesised single- or multi-arg form
     ///
-    /// Phase B supports only `fn IDENT => EXPR`. Multi-arg lambdas
-    /// (`fn (a, b) => body`) are reserved for Phase F. The LPAREN branch is
-    /// intentionally excluded so that `fn(x, y)` — where `fn` is used as a
-    /// SQL function name — parses as a regular function call rather than a
-    /// (broken) lambda.
+    /// Rejected forms:
+    ///   - `fn(args)` — FN_KW immediately followed by LPAREN with NO space and no ARROW
+    ///     is a regular function call (e.g. `fn(x, y)` where `fn` is a SQL function name).
+    ///
+    /// Disambiguation for `fn (`:
+    ///   - `fn (a, b) => body` — parenthesised lambda start: FN_KW followed by
+    ///     `( IDENT ... ) =>`.  We do a lookahead to find `=>` (ARROW) after the `)`.
+    ///   - `fn(x, y)` — function call: FN_KW immediately followed by LPAREN (no space)
+    ///     or the paren-group does not end with `=>`.
+    ///
+    /// In practice: `fn LPAREN` is a lambda start only when the parenthesised list
+    /// closes with `)` followed (with optional trivia) by `=>` (ARROW).
     pub(super) fn is_fn_lambda_start(&self) -> bool {
         if !self.at(FN_KW) {
             return false;
         }
         // Skip the FN_KW token and any trivia to see what follows.
-        let mut lookahead = 1;
-        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+        let mut la = 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
             if t.kind.is_trivia() {
-                lookahead += 1;
+                la += 1;
             } else {
                 break;
             }
         }
-        match self.tokens.get(self.pos + lookahead).map(|t| t.kind) {
-            // `fn <IDENT>` — single-arg lambda: `fn x => body`.
-            // Phase B only supports single-arg lambdas (`fn IDENT => EXPR`).
-            // Multi-arg lambdas (`fn (a, b) => body`) are deferred to Phase F.
-            // `fn(args)` where `fn` is used as a function name must parse as a
-            // regular function call, not as a lambda — so LPAREN is excluded here.
+        match self.tokens.get(self.pos + la).map(|t| t.kind) {
+            // `fn <IDENT>` — single-arg bare lambda: `fn x => body`.
             Some(IDENT) => true,
-            // Anything else (e.g. LPAREN, FROM_KW, COMMA, EOF) is NOT a lambda.
+            // `fn ( ... ) => body` — parenthesised lambda form (Phase F).
+            // Disambiguate from `fn(args)` function call by scanning for `)` then `=>`.
+            Some(LPAREN) => self.is_fn_paren_lambda_start(la),
+            // Anything else is NOT a lambda.
             _ => false,
         }
+    }
+
+    /// Lookahead: given that we are at `fn` and position `lparen_la` points to `(`,
+    /// determine whether this is a parenthesised lambda `fn ( ... ) => body` vs a
+    /// function call `fn(...)`.
+    ///
+    /// Returns `true` if and only if the LPAREN group is followed by `=>` (ARROW),
+    /// i.e. the form is `fn ( IDENT* ) =>`.
+    fn is_fn_paren_lambda_start(&self, lparen_la: usize) -> bool {
+        // Scan forward past the LPAREN, skipping any IDENT and COMMA tokens,
+        // to find the matching RPAREN and then check for ARROW.
+        let mut la = lparen_la + 1; // skip LPAREN
+        let mut depth = 1usize;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            match t.kind {
+                k if k.is_trivia() => {
+                    la += 1;
+                }
+                LPAREN => {
+                    depth += 1;
+                    la += 1;
+                }
+                RPAREN => {
+                    depth -= 1;
+                    la += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {
+                    la += 1;
+                }
+            }
+        }
+        // Skip trivia after RPAREN.
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        // Must be `=>` (ARROW) for this to be a lambda.
+        matches!(self.tokens.get(self.pos + la).map(|t| t.kind), Some(ARROW))
     }
 
     /// Check if the current IDENT starts a generic type expression like

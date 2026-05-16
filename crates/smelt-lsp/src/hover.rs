@@ -465,9 +465,19 @@ pub fn hof_call_name(call: &smelt_parser::ast::FunctionCall) -> Option<String> {
 /// Return the text range (in the source file) of the binding occurrence of
 /// lambda parameter `param_name` in the given lambda node.
 ///
-/// The binding occurrence is the IDENT token inside the `LAMBDA_PARAM_LIST`
-/// that bears the parameter name. This is used by goto-definition to jump
+/// The binding occurrence is the IDENT token inside the matching `LAMBDA_PARAM`
+/// child node of `LAMBDA_PARAM_LIST`. This is used by goto-definition to jump
 /// from a use of the parameter in the body to its binding site.
+///
+/// Phase F CST shape:
+/// ```text
+/// LAMBDA_PARAM_LIST
+///   LAMBDA_PARAM
+///     IDENT   (the parameter name)
+///   LAMBDA_PARAM
+///     IDENT
+///   ...
+/// ```
 ///
 /// Returns `None` when the parameter is not found (e.g., partial parse).
 pub fn lambda_param_binder_range(
@@ -476,14 +486,21 @@ pub fn lambda_param_binder_range(
 ) -> Option<smelt_parser::TextRange> {
     use smelt_parser::SyntaxKind;
     let param_list = lambda.param_list()?;
-    for child in param_list.syntax().children_with_tokens() {
-        // `children_with_tokens` yields `rowan::NodeOrToken` items — match on Token variant.
-        if child
-            .as_token()
-            .map(|t| t.kind() == SyntaxKind::IDENT && t.text() == param_name)
-            == Some(true)
-        {
-            return child.as_token().map(|t| t.text_range());
+    // Iterate LAMBDA_PARAM child nodes; each wraps an IDENT token.
+    for param_node in param_list.syntax().children() {
+        if param_node.kind() != SyntaxKind::LAMBDA_PARAM {
+            continue;
+        }
+        // Find the IDENT token inside this LAMBDA_PARAM node (skip if malformed).
+        let Some(ident_token) = param_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == SyntaxKind::IDENT)
+        else {
+            continue;
+        };
+        if ident_token.text() == param_name {
+            return Some(ident_token.text_range());
         }
     }
     None
