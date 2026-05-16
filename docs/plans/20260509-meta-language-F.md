@@ -95,7 +95,7 @@ This plan drives the implementation, the worked example, user docs, and skill up
 | 2     | done     | 2942a70 | 2026-05-16 |
 | 3     | done     | 58fdd2d | 2026-05-16 |
 | 4     | done     | bbcde26 | 2026-05-17 |
-| 5     | done     |         | 2026-05-17 |
+| 5     | done     | b37d519 | 2026-05-17 |
 | 6     | pending  |         |            |
 | 7     | pending  |         |            |
 
