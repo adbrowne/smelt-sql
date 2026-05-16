@@ -517,6 +517,7 @@ fn materialise_emitted_model_def(
 /// diagnostics (e.g. body type error from generator-body inference).
 fn evaluate_body_emissions(
     generator_file: &Path,
+    file_text: &str,
     body_expr: &Expr,
     frontmatter_tags: &[String],
     frontmatter_incremental: Option<&IncrementalConfig>,
@@ -529,12 +530,7 @@ fn evaluate_body_emissions(
     // Run body type-check first.
     let body_result = infer_generator_file_body(body_expr, ctx);
     for sentinel in body_result.sentinels {
-        let range = smelt_parser::ast::text_range_to_range(
-            // We need the file text for accurate line/col but don't have it here.
-            // Use a zero-range placeholder; the Salsa caller has the file text.
-            "",
-            sentinel.span,
-        );
+        let range = smelt_parser::ast::text_range_to_range(file_text, sentinel.span);
         diagnostics.push(crate::Diagnostic {
             severity: crate::DiagnosticSeverity::Error,
             message: sentinel.message,
@@ -575,7 +571,8 @@ fn evaluate_body_emissions(
                     let elem_result =
                         crate::type_inference::infer_model_def_literal(&record_lit, ctx);
                     for sentinel in elem_result.sentinels {
-                        let range = smelt_parser::ast::text_range_to_range("", sentinel.span);
+                        let range =
+                            smelt_parser::ast::text_range_to_range(file_text, sentinel.span);
                         diagnostics.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: sentinel.message,
@@ -1070,6 +1067,7 @@ pub fn evaluate_generator(
     // Run the body evaluation.
     let (raw_emissions, mut diagnostics) = evaluate_body_emissions(
         file.path(db),
+        text,
         &body_expr,
         &frontmatter_tags,
         frontmatter_incremental.as_ref(),
@@ -1818,6 +1816,44 @@ mod tests {
         assert!(
             !result.diagnostics.is_empty(),
             "expected diagnostics for invalid ModelDef, got none"
+        );
+    }
+
+    // Regression: per-element ModelDef-literal diagnostics produced inside
+    // `evaluate_body_emissions` must carry an accurate (non-zero) range. Earlier
+    // the function did not receive the file text and used `""` for range
+    // conversion, producing `{start: (0,0), end: (0,0)}` for every such
+    // diagnostic.  Body type-check sentinels are subject to the same bug.
+    #[test]
+    fn evaluate_generator_diagnostic_ranges_are_non_zero() {
+        // `'us.west'` triggers ModelDefInvalidName; the diagnostic anchors on
+        // the offending name literal in the body (post-frontmatter offset).
+        let generator =
+            "---\ngenerates: models\n---\n[ModelDef { name: 'us.west', body: SELECT 1 }]";
+
+        let (db, _root, workspace) = db_with_files(&[("models/bad.gen.sql", generator)]);
+
+        let gen_files = generator_files(&db, workspace);
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+
+        let invalid_name_diag = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(crate::DiagnosticCode::ModelDefInvalidName))
+            .expect("expected ModelDefInvalidName diagnostic");
+        // Range must point into the body (line >= 3 since the frontmatter
+        // occupies lines 1–3).  A zero range (start.line == 0 && end.line == 0)
+        // means the file-text plumbing into evaluate_body_emissions broke.
+        let r = &invalid_name_diag.range;
+        assert!(
+            r.start.line > 0 || r.start.column > 0 || r.end.line > 0 || r.end.column > 0,
+            "expected non-zero range for ModelDefInvalidName, got {:?}",
+            r
+        );
+        assert!(
+            r.start.line >= 3,
+            "expected range to point into post-frontmatter body (line >= 3), got line {}",
+            r.start.line
         );
     }
 
