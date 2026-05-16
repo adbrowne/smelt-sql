@@ -97,7 +97,7 @@ This is the **terminal phase**. After Phase 6's acceptance gate, the meta-plan Â
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 0     | done     | cae2fd65 | 2026-05-17 |
+| 0     | done     | 5ef1a6dd | 2026-05-17 |
 | 1     | pending  |        |      |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
