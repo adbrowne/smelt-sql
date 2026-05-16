@@ -189,14 +189,18 @@ fn infer_branch_type(expr: &smelt_parser::ast::Expr, ctx: &TypeContext) -> Smelt
     if let Some(nested) = extract_nested_ternary(expr) {
         let nested_result = infer_ternary_type(&nested, ctx);
         // If the nested ternary has errors (e.g. its own BranchTypeMismatch),
-        // its result type is Unknown. That Unknown DOES hit the
-        // Unknown-propagation arm of `compute_ternary_lub` (see lines 291–293):
-        // the LUB returns the other branch's concrete type and produces no
-        // outer `BranchTypeMismatch`. This is intentional — if the inner
-        // ternary is ill-typed, the inner's own walk of
-        // `check_ternary_expr_diagnostics` emits the inner diagnostic; the
-        // outer ternary should not independently flag a mismatch caused by
-        // the inner's error, so Unknown-propagation is the correct behaviour.
+        // its result type is Unknown, and the outer LUB silently absorbs it:
+        //  - One branch Unknown, the other concrete: the Unknown-propagation
+        //    arm of `compute_ternary_lub` (lines 291–293) returns the
+        //    concrete branch's type.
+        //  - Both branches Unknown (e.g. both nested ternaries are
+        //    ill-typed): the identical-type fast path returns `Unknown`
+        //    without entering the propagation arm.
+        // In both shapes the outer ternary emits no `BranchTypeMismatch`.
+        // This is intentional — when the inner ternary is ill-typed, the
+        // inner's own walk of `check_ternary_expr_diagnostics` emits the
+        // inner diagnostic; the outer ternary should not independently flag
+        // a mismatch caused by the inner's error.
         return nested_result.ty;
     }
 
