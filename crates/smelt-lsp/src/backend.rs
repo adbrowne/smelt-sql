@@ -3676,68 +3676,81 @@ impl LanguageServer for Backend {
                                     continue;
                                 }
 
-                                // (b) Is the cursor on the opening brace?
+                                // (b) Is the cursor on the `ModelDef` IDENT keyword
+                                // or the opening brace?  Both positions serve the
+                                // same hover content per the spec.
                                 let open_brace_tok = node
                                     .children_with_tokens()
                                     .filter_map(|e| e.into_token())
                                     .find(|t| t.kind() == SyntaxKind::LBRACE);
-                                if let Some(brace) = &open_brace_tok {
-                                    let bs: usize = brace.text_range().start().into();
-                                    let be: usize = brace.text_range().end().into();
-                                    if cursor_offset >= bs && cursor_offset <= be {
-                                        // Resolve emitted smelt path from Salsa survivors.
-                                        let ws = Workspace::try_get(&db);
-                                        let smelt_path: Option<String> = ws.and_then(|w| {
-                                            let survivors = smelt_db::emitted_models(&db, w);
-                                            let project_root =
-                                                file_project_root(&db, &effective_path);
-                                            let project = lookup_project(&db, &project_root);
-                                            let scan_roots = project
-                                                .map(|p| {
-                                                    smelt_db::project_paths(&db, p).as_ref().clone()
-                                                })
-                                                .unwrap_or_else(|| vec!["models".to_string()]);
-                                            // Find the survivor whose generator_file
-                                            // matches this file AND whose name_span
-                                            // falls within the RECORD_LITERAL node
-                                            // that contains the cursor's open brace.
-                                            // This disambiguates multiple ModelDef
-                                            // literals in the same generator file.
-                                            let rec_start_u: u32 = node.text_range().start().into();
-                                            let rec_end_u: u32 = node.text_range().end().into();
-                                            survivors
-                                                .survivors
-                                                .iter()
-                                                .find(|em| {
-                                                    if em.generator_file != effective_path {
-                                                        return false;
-                                                    }
-                                                    // name_span must be contained within
-                                                    // this record literal's range.
-                                                    let ns: u32 = em.name_span.start().into();
-                                                    let ne: u32 = em.name_span.end().into();
-                                                    ns >= rec_start_u && ne <= rec_end_u
-                                                })
-                                                .map(|em| {
-                                                    smelt_db::emitted_model_smelt_path(
-                                                        &em.generator_file,
-                                                        &project_root,
-                                                        &scan_roots,
-                                                        &em.name,
-                                                    )
-                                                })
-                                        });
-                                        let value = hover_text_for_model_def_literal_open_brace(
-                                            smelt_path.as_deref(),
-                                        );
-                                        return Ok(Some(Hover {
-                                            contents: HoverContents::Markup(MarkupContent {
-                                                kind: MarkupKind::Markdown,
-                                                value,
-                                            }),
-                                            range: None,
-                                        }));
-                                    }
+                                let on_keyword = first_tok
+                                    .as_ref()
+                                    .map(|t| {
+                                        let s: usize = t.text_range().start().into();
+                                        let e: usize = t.text_range().end().into();
+                                        cursor_offset >= s && cursor_offset <= e
+                                    })
+                                    .unwrap_or(false);
+                                let on_brace = open_brace_tok
+                                    .as_ref()
+                                    .map(|t| {
+                                        let s: usize = t.text_range().start().into();
+                                        let e: usize = t.text_range().end().into();
+                                        cursor_offset >= s && cursor_offset <= e
+                                    })
+                                    .unwrap_or(false);
+                                if on_keyword || on_brace {
+                                    // Resolve emitted smelt path from Salsa survivors.
+                                    let ws = Workspace::try_get(&db);
+                                    let smelt_path: Option<String> = ws.and_then(|w| {
+                                        let survivors = smelt_db::emitted_models(&db, w);
+                                        let project_root = file_project_root(&db, &effective_path);
+                                        let project = lookup_project(&db, &project_root);
+                                        let scan_roots = project
+                                            .map(|p| {
+                                                smelt_db::project_paths(&db, p).as_ref().clone()
+                                            })
+                                            .unwrap_or_else(|| vec!["models".to_string()]);
+                                        // Find the survivor whose generator_file
+                                        // matches this file AND whose name_span
+                                        // falls within the RECORD_LITERAL node
+                                        // that contains the cursor's open brace.
+                                        // This disambiguates multiple ModelDef
+                                        // literals in the same generator file.
+                                        let rec_start_u: u32 = node.text_range().start().into();
+                                        let rec_end_u: u32 = node.text_range().end().into();
+                                        survivors
+                                            .survivors
+                                            .iter()
+                                            .find(|em| {
+                                                if em.generator_file != effective_path {
+                                                    return false;
+                                                }
+                                                // name_span must be contained within
+                                                // this record literal's range.
+                                                let ns: u32 = em.name_span.start().into();
+                                                let ne: u32 = em.name_span.end().into();
+                                                ns >= rec_start_u && ne <= rec_end_u
+                                            })
+                                            .map(|em| {
+                                                smelt_db::emitted_model_smelt_path(
+                                                    &em.generator_file,
+                                                    &project_root,
+                                                    &scan_roots,
+                                                    &em.name,
+                                                )
+                                            })
+                                    });
+                                    let value = hover_text_for_model_def_literal_open_brace(
+                                        smelt_path.as_deref(),
+                                    );
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value,
+                                        }),
+                                        range: None,
+                                    }));
                                 }
 
                                 // Walk field entries of the RecordLiteral.
