@@ -862,18 +862,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             for diag in &evaluated.diagnostics {
                 DiagnosticAcc(diag.clone()).accumulate(db);
             }
-            // W3 collision diagnostics: `discarded[i].generator_file` is always
-            // the origin file for `collision_diagnostics[i]` (they are pushed
-            // in lock-step in `emitted_models`). We emit only those where the
-            // discarded entry's generator_file matches the current file.
+            // W3 collision diagnostics: each `DiscardedEmission` pairs the
+            // dropped emission with its collision diagnostic in a single
+            // struct, so there is no risk of the two drifting out of step
+            // (`DiscardedEmission` in `crates/smelt-db/src/queries/project.rs`).
+            // We emit only those where the discarded emission's
+            // `generator_file` matches the current file.
             let emitted_result = emitted_models(db, workspace);
-            for (discarded, diag) in emitted_result
-                .discarded
-                .iter()
-                .zip(emitted_result.collision_diagnostics.iter())
-            {
-                if discarded.generator_file == gen_file_path {
-                    DiagnosticAcc(diag.clone()).accumulate(db);
+            for item in emitted_result.discarded.iter() {
+                if item.emission.generator_file == gen_file_path {
+                    DiagnosticAcc(item.diagnostic.clone()).accumulate(db);
                 }
             }
 

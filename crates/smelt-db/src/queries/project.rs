@@ -318,11 +318,28 @@ pub struct EmittedModelsResult {
     /// modeldef_name)` byte-lexicographically — the deterministic ordering spec
     /// Semantics rule 10 requires.
     pub survivors: Vec<EmittedModelDef>,
-    /// Emitted models that were dropped due to collision.
-    pub discarded: Vec<EmittedModelDef>,
-    /// Cross-file and hand-authored-wins collision diagnostics.  Each is anchored
-    /// at the offending `ModelDef.name` field value expression.
-    pub collision_diagnostics: Vec<crate::Diagnostic>,
+    /// Emitted models that were dropped due to collision, each paired with the
+    /// collision diagnostic anchored at the offending `ModelDef.name` field
+    /// value expression.  Pairing is encoded in the type to prevent the two
+    /// from drifting out of step.
+    pub discarded: Vec<DiscardedEmission>,
+}
+
+/// A single emitted `ModelDef` that was dropped during W3 collision detection,
+/// paired with the collision diagnostic anchored at its offending `name` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardedEmission {
+    pub emission: EmittedModelDef,
+    pub diagnostic: crate::Diagnostic,
+}
+
+impl EmittedModelsResult {
+    /// Iterate over the collision diagnostics in lock-step with their discarded
+    /// emissions — convenience accessor that preserves the pre-refactor
+    /// `collision_diagnostics` consumer shape.
+    pub fn collision_diagnostics(&self) -> impl Iterator<Item = &crate::Diagnostic> {
+        self.discarded.iter().map(|d| &d.diagnostic)
+    }
 }
 
 /// W1: Discover generator files in the workspace.
@@ -1075,6 +1092,33 @@ pub fn evaluate_generator(
         &ctx,
     );
 
+    // Stamp the `<generator>` frame onto body-evaluation diagnostics.  Per
+    // expansion.md §"`<generator>` frame for multi-model production", every
+    // diagnostic that surfaces from evaluating the generator body (including
+    // record-literal validation, HOF type-checking, loader resolution) carries
+    // the `<generator>` frame as the outermost frame, with any inner HOF
+    // anonymous frames preserved at innermost positions.  We stamp here —
+    // BEFORE the post-hoc structural checks (reflection-forbid, duplicate-name)
+    // append their diagnostics — so that those structural diagnostics, which
+    // did not arise from an expansion, remain frameless per invariant 4.
+    {
+        use crate::function_body_check::{make_generator_frame, stamp_generator_frame_onto};
+        let gen_frame = make_generator_frame(&gen_file_path, body_range, text);
+        for diag in &mut diagnostics {
+            // Skip if already carrying a <generator> outermost frame.
+            let already_stamped = match &diag.data {
+                Some(crate::DiagnosticData::ExpansionFrames(frames)) => frames
+                    .last()
+                    .map(|f| f.function == "<generator>")
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if !already_stamped {
+                stamp_generator_frame_onto(diag, gen_frame.clone());
+            }
+        }
+    }
+
     // Emit reflection-forbid diagnostics.
     // If any reflection-forbid sentinels are present, suppress GenerateFileBodyTypeError
     // diagnostics since the type error is a consequence of the forbidden call not being
@@ -1085,6 +1129,8 @@ pub fn evaluate_generator(
     }
     for sentinel in forbid_sentinels {
         let range = smelt_parser::ast::text_range_to_range(text, sentinel.span);
+        // Structural file check — did not arise from an expansion; no frame
+        // stack per expansion.md invariant 4.
         diagnostics.push(crate::Diagnostic {
             severity: crate::DiagnosticSeverity::Error,
             message: sentinel.message,
@@ -1100,6 +1146,7 @@ pub fn evaluate_generator(
     for emitted in raw_emissions {
         if seen_names.contains_key(&emitted.name) {
             // Duplicate — emit diagnostic at the name span, drop this emission.
+            // Structural file check — no frame stack per expansion.md invariant 4.
             let range = smelt_parser::ast::text_range_to_range(text, emitted.name_span);
             diagnostics.push(crate::Diagnostic {
                 severity: crate::DiagnosticSeverity::Error,
@@ -1114,30 +1161,6 @@ pub fn evaluate_generator(
         } else {
             seen_names.insert(emitted.name.clone(), ());
             emissions.push(emitted);
-        }
-    }
-
-    // Stamp the `<generator>` frame onto every diagnostic produced during body
-    // evaluation.  Per expansion.md §"FrameInfo shape": the outermost frame
-    // has `function = "<generator>"` and `decl_path = Some(generator_file_path)`.
-    // The frame is appended as outermost (last in the innermost-first vector).
-    // Diagnostics that already carry the frame (e.g. re-surfaced collision
-    // diagnostics) are left unchanged.
-    {
-        use crate::function_body_check::{make_generator_frame, stamp_generator_frame_onto};
-        let gen_frame = make_generator_frame(&gen_file_path, body_range, text);
-        for diag in &mut diagnostics {
-            // Only stamp if not already carrying a <generator> outermost frame.
-            let already_stamped = match &diag.data {
-                Some(crate::DiagnosticData::ExpansionFrames(frames)) => frames
-                    .last()
-                    .map(|f| f.function == "<generator>")
-                    .unwrap_or(false),
-                _ => false,
-            };
-            if !already_stamped {
-                stamp_generator_frame_onto(diag, gen_frame.clone());
-            }
         }
     }
 
@@ -1346,8 +1369,7 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
     };
 
     let mut survivors: Vec<EmittedModelDef> = Vec::new();
-    let mut discarded: Vec<EmittedModelDef> = Vec::new();
-    let mut collision_diagnostics: Vec<crate::Diagnostic> = Vec::new();
+    let mut discarded: Vec<DiscardedEmission> = Vec::new();
 
     // Track seen smelt paths across all generators.
     let mut seen_smelt_paths: HashMap<String, PathBuf> = HashMap::new();
@@ -1391,7 +1413,7 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
                     .cloned()
                     .unwrap_or_default();
                 let range = smelt_parser::ast::text_range_to_range(file_text, emitted.name_span);
-                collision_diagnostics.push(crate::Diagnostic {
+                let diagnostic = crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message: format!(
                         "ModelDef emits `{}` which collides with {}",
@@ -1400,15 +1422,18 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
                     range,
                     code: Some(DiagnosticCode::ModelDefHandAuthoredCollision),
                     data: None,
+                };
+                discarded.push(DiscardedEmission {
+                    emission: emitted.clone(),
+                    diagnostic,
                 });
-                discarded.push(emitted.clone());
                 continue;
             }
 
             // Check cross-generator collision.
             if let Some(prior_gen_path) = seen_smelt_paths.get(&smelt_path) {
                 let range = smelt_parser::ast::text_range_to_range(file_text, emitted.name_span);
-                collision_diagnostics.push(crate::Diagnostic {
+                let diagnostic = crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message: format!(
                         "ModelDef emits `{}` which collides with {}",
@@ -1418,8 +1443,11 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
                     range,
                     code: Some(DiagnosticCode::ModelDefHandAuthoredCollision),
                     data: None,
+                };
+                discarded.push(DiscardedEmission {
+                    emission: emitted.clone(),
+                    diagnostic,
                 });
-                discarded.push(emitted.clone());
                 continue;
             }
 
@@ -1438,7 +1466,6 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
     Arc::new(EmittedModelsResult {
         survivors,
         discarded,
-        collision_diagnostics,
     })
 }
 
@@ -1874,10 +1901,7 @@ mod tests {
             "expected 4 emitted models, got: {:?}",
             result.survivors.iter().map(|e| &e.name).collect::<Vec<_>>()
         );
-        assert!(
-            result.collision_diagnostics.is_empty(),
-            "unexpected collisions"
-        );
+        assert!(result.discarded.is_empty(), "unexpected collisions");
     }
 
     // ─── Test 5: emitted_models computes smelt path correctly ─────────────────
@@ -1972,13 +1996,12 @@ mod tests {
         );
         // A collision diagnostic should be emitted.
         let has_collision = result
-            .collision_diagnostics
-            .iter()
+            .collision_diagnostics()
             .any(|d| d.code == Some(crate::DiagnosticCode::ModelDefHandAuthoredCollision));
         assert!(
             has_collision,
             "expected ModelDefHandAuthoredCollision diagnostic, got: {:?}",
-            result.collision_diagnostics
+            result.discarded
         );
     }
 
@@ -2021,7 +2044,7 @@ mod tests {
         );
         // There should be a collision diagnostic.
         assert!(
-            !result.collision_diagnostics.is_empty(),
+            !result.discarded.is_empty(),
             "expected collision diagnostic"
         );
     }
