@@ -96,7 +96,7 @@ This plan drives the implementation, the worked example, user docs, and skill up
 | 3     | done     | 58fdd2d | 2026-05-16 |
 | 4     | done     | bbcde26 | 2026-05-17 |
 | 5     | done     | b37d519 | 2026-05-17 |
-| 6     | pending  |         |            |
+| 6     | done     | _pending commit_ | 2026-05-17 |
 | 7     | pending  |         |            |
 
 ---
@@ -526,6 +526,18 @@ dedicated `meta_polish_broken_lambda_arity_mismatch/` workspace was not added to
 Phase 4 scope tight — `meta_hofs_broken_lambda_arity_not_supported/` already covers
 that diagnostic end-to-end (tests are green). If the examples-curator wants a fixture
 that is named after the polish workspace family, add it in Phase 5 or a follow-on.
+
+**Phase 6 — SKILL.md one-line index entry not added.** The plan called for a
+"one-line addition under the references section" in
+`.claude/skills/smelt-app-builder/SKILL.md` pointing at the new
+`references/20260516-meta-polish.md`. The skill has no "references section";
+prior phases A, B, C, D, E1, and E2 each added their reference doc without
+modifying SKILL.md, and their reviewer-subagent passes (including the
+docs-reviewer) did not flag the omission. Matching that six-phase precedent
+keeps the skill body lean and avoids introducing a new structural section
+under just one entry. If a future audit wants a discoverable index of the
+reference docs, add a "Reference notes" section listing all of them at once
+rather than retrofitting per-phase one-liners.
 
 ---
 
