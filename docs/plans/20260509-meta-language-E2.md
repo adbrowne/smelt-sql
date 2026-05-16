@@ -120,7 +120,7 @@ These cross-feature spec edits already landed in commits `d9ae889` and `8a3dbbf`
 | 3     | done     | 60df2b2 | 2026-05-16 |
 | 4     | done     | f6e9698 | 2026-05-16 |
 | 5     | done     | 694df12 | 2026-05-16 |
-| 6     | done     |        | 2026-05-16 |
+| 6     | done     | bb03463 | 2026-05-16 |
 | 7     | pending  |        |      |
 
 ---
