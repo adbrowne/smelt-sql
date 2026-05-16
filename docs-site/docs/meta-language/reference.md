@@ -1318,9 +1318,9 @@ See [Generator Files — Name uniqueness and collision rules](generators.md#name
 
 **When:** The `materialization` field of a `ModelDef` literal contains a value that is not a known materialization strategy.
 
-**Message:** `invalid ModelDef.materialization '{value}'; expected one of: view, table, incremental, ephemeral`
+**Message:** `invalid ModelDef.materialization '{value}'; expected one of: view, table, incremental`
 
-**Fix:** use one of the four valid values: `'view'`, `'table'`, `'incremental'`, or `'ephemeral'`.
+**Fix:** use one of the three valid values: `'view'`, `'table'`, or `'incremental'`.
 
 See [Generator Files](generators.md).
 
