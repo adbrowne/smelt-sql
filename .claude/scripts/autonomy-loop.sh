@@ -48,6 +48,16 @@ SENTINEL_PHASE="<<PHASE_COMPLETE>>"
 SENTINEL_DONE="<<ALL_DONE>>"
 SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 
+# Prompt sent to each iteration. Anchors the agent on the plan files and the
+# sentinel emission contract — the wrapper greps the final .result for exactly
+# one sentinel and pauses without one. Override with $PROMPT.
+PROMPT="${PROMPT:-Resume the typed-meta-programming autonomy loop with fresh context.
+
+1. Read /home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md (meta-plan) and docs/plans/20260509-meta-language-overall.md (in-repo plan).
+2. Find the next \`pending\` row in the Progress tracking table. Execute that phase via /smelt:implement, commit, and push.
+
+CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_DONE}, or ${SENTINEL_PAUSE}, per meta-plan §\"Sentinel emission contract\". The wrapper script greps the final .result field for these; without one the loop pauses and you stall progress. If you emit ${SENTINEL_PAUSE}, put a one-line reason on the line above.}"
+
 cd "${REPO_ROOT}"
 
 echo "===== Autonomy loop starting ====="
@@ -79,14 +89,13 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # --model:                         orchestrator on opus per meta-plan
   # --output-format json:            single-envelope result with .usage + .total_cost_usd,
   #                                  so we can record per-iteration spend below.
-  #                                  Sentinels still grep-able from the raw text.
-  # Prompt is "continue" — Claude reads plan files to discover Phase X.
+  #                                  Sentinel grepped from .result via jq below.
   claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --no-session-persistence \
     --model "${MODEL}" \
     --output-format json \
-    "continue" 2>&1 | tee "${log}"
+    "${PROMPT}" 2>&1 | tee "${log}"
   rc="${PIPESTATUS[0]}"
 
   # Capture per-iteration token usage to .claude/usage-log.jsonl. The json
@@ -123,21 +132,33 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     break
   fi
 
-  # Inspect the log for sentinels (last write wins; check exact precedence).
-  if grep -qF "${SENTINEL_DONE}" "${log}"; then
-    echo "===== ${SENTINEL_DONE} detected — loop complete ====="
+  # Sentinels must appear in the agent's final user-facing message (.result),
+  # not anywhere in the streamed log. Plan files document the sentinel strings,
+  # so reading them produces tool_use_result payloads that contain the literals
+  # verbatim — grepping the whole log false-positives. Extract just .result.
+  final_result="$(jq -r 'select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
+
+  if [ -z "${final_result}" ]; then
+    echo "===== Could not extract final .result from log — pausing loop ====="
+    echo "(Expected a JSON envelope with .type == \"result\". Check the log: ${log})"
+    exit_reason="no_result_envelope"
+    break
+  fi
+
+  if printf '%s' "${final_result}" | grep -qF "${SENTINEL_DONE}"; then
+    echo "===== ${SENTINEL_DONE} detected in final result — loop complete ====="
     exit_reason="all_done"
     break
-  elif grep -qF "${SENTINEL_PAUSE}" "${log}"; then
-    echo "===== ${SENTINEL_PAUSE} detected — surface to user ====="
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_PAUSE}"; then
+    echo "===== ${SENTINEL_PAUSE} detected in final result — surface to user ====="
     exit_reason="paused"
     break
-  elif grep -qF "${SENTINEL_PHASE}" "${log}"; then
-    echo "===== ${SENTINEL_PHASE} detected — starting next iteration ====="
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_PHASE}"; then
+    echo "===== ${SENTINEL_PHASE} detected in final result — starting next iteration ====="
     continue
   else
-    echo "===== No sentinel detected — pausing loop ====="
-    echo "(This is unexpected. Check the log: ${log})"
+    echo "===== No sentinel in final result — pausing loop ====="
+    echo "(The agent's final message did not contain a sentinel. Check the log: ${log})"
     exit_reason="no_sentinel"
     break
   fi
