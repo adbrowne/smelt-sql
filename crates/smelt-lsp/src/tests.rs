@@ -2615,3 +2615,132 @@ fn goto_def_on_emitted_model_reference_resolves_to_model_def_name_field() {
         loc.range.start.character
     );
 }
+
+// ── Phase F wiring regression tests ─────────────────────────────────────────
+//
+// These tests verify that the dispatch helper `hover_text_for_hof_meta_language`
+// is wired to the Phase F ternary and multi-arg lambda hover helpers.
+// They call `dispatch_hover` which is the same code path that `Backend::hover`
+// uses.  A failure here means the wiring block is missing from the dispatch
+// function.
+
+/// Hovering on the `if` keyword of `if cond then 1 else 2` returns non-empty
+/// hover text via the `hover_text_for_hof_meta_language` dispatch.
+///
+/// This verifies Finding 2: the `TERNARY_EXPR` / `IF_KW` dispatch block is wired.
+#[test]
+fn dispatch_hover_on_if_keyword_returns_ternary_hover() {
+    let sql = "SELECT if cond then 1 else 2 FROM t";
+    // Cursor on the `i` of `if` (position 7 in the string above).
+    let cursor = sql.find("if").expect("`if` must appear in sql");
+    let result = dispatch_hover(sql, cursor);
+    assert!(
+        result.is_some(),
+        "hover on `if` keyword must return Some via dispatch; got None. \
+         Ensure hover_text_for_hof_meta_language handles TERNARY_EXPR / IF_KW."
+    );
+    let text = result.unwrap();
+    assert!(
+        text.contains("->") || text.contains("if"),
+        "hover on `if` must mention the ternary signature; got: {text:?}"
+    );
+}
+
+/// Hovering on the `then` keyword returns the then-branch type via dispatch.
+///
+/// This verifies Finding 2: the `THEN_KW` dispatch is wired.
+#[test]
+fn dispatch_hover_on_then_keyword_returns_then_branch_hover() {
+    let sql = "SELECT if cond then 1 else 2 FROM t";
+    let cursor = sql.find("then").expect("`then` must appear in sql");
+    let result = dispatch_hover(sql, cursor);
+    assert!(
+        result.is_some(),
+        "hover on `then` keyword must return Some via dispatch; got None. \
+         Ensure hover_text_for_hof_meta_language handles THEN_KW."
+    );
+}
+
+/// Hovering on the `else` keyword returns the else-branch type via dispatch.
+///
+/// This verifies Finding 2: the `ELSE_KW` dispatch is wired.
+#[test]
+fn dispatch_hover_on_else_keyword_returns_else_branch_hover() {
+    let sql = "SELECT if cond then 1 else 2 FROM t";
+    let cursor = sql.find("else").expect("`else` must appear in sql");
+    let result = dispatch_hover(sql, cursor);
+    assert!(
+        result.is_some(),
+        "hover on `else` keyword must return Some via dispatch; got None. \
+         Ensure hover_text_for_hof_meta_language handles ELSE_KW."
+    );
+}
+
+/// Hovering on the `(` of a multi-arg lambda `fn (a, b) => a + b` returns
+/// the Lambda signature via dispatch.
+///
+/// This verifies Finding 2: the multi-arg lambda `(` dispatch is wired.
+#[test]
+fn dispatch_hover_on_multi_arg_lambda_open_paren_returns_lambda_hover() {
+    let sql = "SELECT map(xs, fn (a, b) => a + b) FROM t";
+    // Cursor on the `(` after `fn ` — find position after `fn `.
+    let fn_pos = sql.find("fn (").expect("`fn (` must appear in sql");
+    let cursor = fn_pos + 3; // position of `(`
+    let result = dispatch_hover(sql, cursor);
+    assert!(
+        result.is_some(),
+        "hover on `(` of multi-arg lambda must return Some via dispatch; got None. \
+         Ensure hover_text_for_hof_meta_language handles multi-arg LAMBDA open paren."
+    );
+    let text = result.unwrap();
+    assert!(
+        text.contains("Lambda"),
+        "hover on multi-arg lambda `(` must mention Lambda; got: {text:?}"
+    );
+}
+
+/// At `reduce(xs, <cursor>)`, `completion_items_for_reduce_second_arg_with_snippets`
+/// returns `concat_with` as a snippet item (not just a bare label), verifying
+/// that Finding 1's fix produces the right output.
+///
+/// This is a direct caller-contract test: if the backend calls
+/// `completion_items_for_reduce_second_arg_with_snippets` instead of
+/// `reducer_completions_for_element_type`, clients will see snippets.
+#[test]
+fn completion_reduce_second_arg_snippet_function_returns_concat_with_snippet() {
+    let items = completion_items_for_reduce_second_arg_with_snippets(None);
+    let concat = items
+        .iter()
+        .find(|i| i.label == "concat_with")
+        .expect("concat_with must be in completion list");
+    let snippet = concat.insert_text.as_deref().unwrap_or("");
+    assert!(
+        snippet.contains("sep") && snippet.contains("${"),
+        "concat_with must be a snippet with a `sep` placeholder; got: {snippet:?}"
+    );
+    use tower_lsp::lsp_types::InsertTextFormat;
+    assert_eq!(
+        concat.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "concat_with completion must have SNIPPET insert text format"
+    );
+}
+
+/// `completion_item_for_if_snippet` returns an `if` keyword item whose snippet
+/// expands to `if … then … else …`, verifying Finding 3's helper is correct.
+#[test]
+fn completion_if_snippet_function_returns_correct_snippet() {
+    let item = completion_item_for_if_snippet();
+    assert_eq!(item.label, "if", "if snippet must have label `if`");
+    let snippet = item.insert_text.as_deref().unwrap_or("");
+    assert!(
+        snippet.contains("cond") && snippet.contains("then") && snippet.contains("else"),
+        "if snippet must expand to if…then…else with named placeholders; got: {snippet:?}"
+    );
+    use tower_lsp::lsp_types::InsertTextFormat;
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "if completion must have SNIPPET insert text format"
+    );
+}

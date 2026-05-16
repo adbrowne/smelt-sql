@@ -41,6 +41,8 @@ use crate::hover::{
     // Phase E2 goto-def + completion helpers
     completion_for_generates_value,
     completion_for_model_def_field_key,
+    completion_item_for_if_snippet,
+    completion_items_for_reduce_second_arg_with_snippets,
     find_smelt_fn_call_at_cursor,
     find_var_line_in_smelt_yml,
     goto_def_for_emitted_model_reference,
@@ -69,7 +71,6 @@ use crate::hover::{
     model_ref_field_completions,
     passing_body_aggregate_labels,
     passing_body_completion_columns,
-    reducer_completions_for_element_type,
     render_expansion_frames,
     source_ref_field_completions,
     wide_reflection_accessor_completions,
@@ -4068,16 +4069,9 @@ impl LanguageServer for Backend {
                                         None
                                     }
                                 });
-                                let names = reducer_completions_for_element_type(list_ty.as_ref());
-                                let items: Vec<CompletionItem> = names
-                                    .into_iter()
-                                    .map(|name| CompletionItem {
-                                        label: name.clone(),
-                                        kind: Some(CompletionItemKind::FUNCTION),
-                                        detail: Some(format!("reducer: {}", name)),
-                                        ..Default::default()
-                                    })
-                                    .collect();
+                                let items = completion_items_for_reduce_second_arg_with_snippets(
+                                    list_ty.as_ref(),
+                                );
                                 if !items.is_empty() {
                                     return Ok(Some(CompletionResponse::Array(items)));
                                 }
@@ -4279,19 +4273,20 @@ impl LanguageServer for Backend {
                                 });
                             if arrow_pos.map(|p| cursor_offset >= p).unwrap_or(false) {
                                 let params = lambda_params_for_completion(&lambda);
-                                if !params.is_empty() {
-                                    // Build param completions — they will be prepended
-                                    // to the standard column completions below.
-                                    let param_items: Vec<CompletionItem> = params
-                                        .iter()
-                                        .map(|p| CompletionItem {
-                                            label: p.clone(),
-                                            kind: Some(CompletionItemKind::VARIABLE),
-                                            detail: Some("lambda parameter".to_string()),
-                                            sort_text: Some(format!("0_{p}")), // sort first
-                                            ..Default::default()
-                                        })
-                                        .collect();
+                                // Build param completions — they will be prepended
+                                // to the standard column completions below.
+                                // Phase F: also prepend the `if` snippet since a lambda
+                                // body is a meta-expression context where ternary is valid.
+                                let mut param_items: Vec<CompletionItem> =
+                                    vec![completion_item_for_if_snippet()];
+                                param_items.extend(params.iter().map(|p| CompletionItem {
+                                    label: p.clone(),
+                                    kind: Some(CompletionItemKind::VARIABLE),
+                                    detail: Some("lambda parameter".to_string()),
+                                    sort_text: Some(format!("0_{p}")), // sort first
+                                    ..Default::default()
+                                }));
+                                if !param_items.is_empty() {
                                     // Return the param completions immediately so they
                                     // appear first in the list.
                                     return Ok(Some(CompletionResponse::Array(param_items)));
@@ -4299,6 +4294,25 @@ impl LanguageServer for Backend {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Phase F: `if` snippet fallback for generator-file body context.
+        // If none of the earlier meta-language blocks claimed the cursor (reduce
+        // second-arg, ModelDef field-key, lambda body, etc.), and the cursor is
+        // in the body of a Generator file, offer `if … then … else …` as the
+        // sole completion item.  Generator bodies are meta-expression contexts
+        // where ternary is valid.
+        {
+            let raw = text.as_str();
+            if let Ok(smelt_core::metadata::FileMetadata::Generator { body_offset, .. }) =
+                smelt_core::metadata::extract_file_metadata(raw)
+            {
+                if cursor_offset >= body_offset {
+                    return Ok(Some(CompletionResponse::Array(vec![
+                        completion_item_for_if_snippet(),
+                    ])));
                 }
             }
         }

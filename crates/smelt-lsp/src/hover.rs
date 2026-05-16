@@ -1220,6 +1220,115 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
+    // ── Phase F: Ternary keyword hover (if / then / else) ─────────────────────
+    // Must run BEFORE the HOF result-type block so that `if cond then a else b`
+    // inside a HOF argument does not fall through to the generic HOF hover.
+    {
+        // Find the tightest TERNARY_EXPR node that contains the cursor.
+        let ternary_node = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::TERNARY_EXPR)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            });
+
+        if let Some(tn) = ternary_node {
+            if let Some(ternary) = smelt_parser::ast::TernaryExpr::cast(tn.clone()) {
+                // Determine which keyword token (if any) the cursor sits on.
+                let kw_token = tn
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| {
+                        let s: usize = t.text_range().start().into();
+                        let e: usize = t.text_range().end().into();
+                        cursor_offset >= s
+                            && cursor_offset <= e
+                            && matches!(
+                                t.kind(),
+                                SyntaxKind::IF_KW | SyntaxKind::THEN_KW | SyntaxKind::ELSE_KW
+                            )
+                    });
+
+                if let Some(kw) = kw_token {
+                    let ctx = smelt_db::TypeContext::new();
+                    match kw.kind() {
+                        SyntaxKind::IF_KW => {
+                            return Some(hover_text_for_ternary_if_keyword(&ternary, &ctx));
+                        }
+                        SyntaxKind::THEN_KW => {
+                            return Some(hover_text_for_ternary_then_keyword(&ternary, &ctx));
+                        }
+                        SyntaxKind::ELSE_KW => {
+                            return Some(hover_text_for_ternary_else_keyword(&ternary, &ctx));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Phase F: Multi-arg lambda `(` hover ───────────────────────────────────
+    // Cursor on the opening `(` of a multi-arg lambda parameter list
+    // (`fn (a, b) => …`) — shows the full Lambda signature.
+    // Must run BEFORE the HOF result-type block so the paren does not fall
+    // through to the generic HOF hover.
+    {
+        use smelt_parser::SyntaxKind::LPAREN;
+        // Find LAMBDA nodes that span the cursor and have >1 parameter (multi-arg).
+        let multi_arg_lambda_node = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            })
+            .and_then(smelt_parser::ast::Lambda::cast)
+            .filter(|lambda| lambda.params().len() > 1);
+
+        if let Some(lambda) = multi_arg_lambda_node {
+            // Check if the cursor is precisely on the `(` token of the param list.
+            // LPAREN is a token inside the LAMBDA_PARAM_LIST child, not a direct
+            // child of LAMBDA — so descend via `param_list()`.
+            let on_open_paren = lambda
+                .param_list()
+                .map(|pl| {
+                    pl.syntax()
+                        .children_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .any(|t| {
+                            if t.kind() != LPAREN {
+                                return false;
+                            }
+                            let s: usize = t.text_range().start().into();
+                            let e: usize = t.text_range().end().into();
+                            cursor_offset >= s && cursor_offset <= e
+                        })
+                })
+                .unwrap_or(false);
+
+            if on_open_paren {
+                let ctx = smelt_db::TypeContext::new();
+                return Some(hover_text_for_multi_arg_lambda_signature(&lambda, &ctx));
+            }
+        }
+    }
+
     // ── 5. HOF result type (map / filter / reduce) ─────────────────────────
     {
         let hof_call = file
