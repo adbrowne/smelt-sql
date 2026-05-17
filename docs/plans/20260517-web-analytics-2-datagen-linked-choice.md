@@ -87,8 +87,8 @@ The web-analytics example (overall plan: [`docs/plans/20260517-web-analytics-exa
 | 2 | done | `def93feb` | 2026-05-18 |
 | 3 | done | `dfa9e587` | 2026-05-18 |
 | 4 | done | `1ef5a4bc` | 2026-05-18 |
-| 5 | done | *(this commit)* | 2026-05-18 |
-| 6 | pending | | |
+| 5 | done | `f04db92f` | 2026-05-18 |
+| 6 | done | `8fd0955c` | 2026-05-18 |
 
 ---
 
@@ -371,6 +371,14 @@ After acceptance gate: flip the overall-plan status row for Phase 2 in `docs/pla
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+Phase 6 expert review (2026-05-18): **datagen-expert clean (R2)**, **docs-reviewer clean (R2)**. No stop-the-line fired.
+
+Round 1:
+- **datagen-expert** (2 findings): (1) `sample_pools` used `(rng.next_u64() as usize) % pool.len().max(1)` — modulo bias on non-power-of-two pool sizes. Addressed in `6adbf055` by switching to `rand::distributions::Uniform::new(0, len).sample(rng)`. (2) `pool_size: 0` was not rejected at parse time and would slip through to a row-time panic when any `linked_choice` column tried to look up an entry. Addressed in `6adbf055` by adding `deserialize_nonzero_pool_size` mirroring the existing `deserialize_nonzero_emit` pattern, plus regression test `linked_pool_rejects_zero_pool_size`.
+- **docs-reviewer** (2 findings): (1) `docs-site/docs/guide/datagen.md` nullability bullet contradicted the spec — said "in any shape" where the spec says "first shape." Addressed in `8fd0955c` by aligning the user-doc bullet to match the spec. (2) The optional per-pool `seed:` key was used in the spec example but had no entry in the user docs' "Rules to know" section. Addressed in `8fd0955c` by adding a bullet explaining the optional `seed:` key, the deterministic-offset fallback, and the seed isolation property.
+
+Round 2: both experts returned "no material findings".
 
 ---
 
