@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
 #
-# Autonomy loop for the typed-meta-programming implementation.
+# Autonomy loop for the active multi-session plan.
 #
 # Each iteration runs `claude -p "continue"` headlessly with a fresh
 # context. Claude reads the meta-plan and the in-repo phase status
-# table, finds the next pending phase, executes it (spec increment +
-# /smelt:plan + /smelt:implement + expert reviews + /smelt:validate +
-# commit + push), and emits a sentinel string in its final output.
-# The wrapper greps for the sentinel and decides what to do next.
+# table, finds the next pending phase, executes it (spec increment if
+# applicable + /smelt:plan + /smelt:implement + expert reviews +
+# verification gate + commit + push), and emits a sentinel string in
+# its final output. The wrapper greps for the sentinel and decides
+# what to do next.
+#
+# The orchestration logic in this script is plan-agnostic. The active
+# plan is selected by the fresh-context discovery rules in
+# `.claude/active-plan`.
+#
+# Currently active:
+#   in-repo plan: docs/plans/20260517-web-analytics-example.md
+#   meta-plan:    ~/.claude/plans/i-would-like-to-stitch-eventstream.md
+#
+# When swapping plans, update .claude/active-plan, the two comment
+# lines above, and the LOG_DIR below.
 #
 # Sentinels (Claude must emit one and only one of these per iteration):
 #
 #   <<PHASE_COMPLETE>>     — phase committed and pushed cleanly. Loop
 #                            again with fresh context for the next phase.
-#   <<ALL_DONE>>           — all phases (A–G) done, verification green.
+#   <<ALL_DONE>>           — all phases done, verification green.
 #                            Exit the loop with success.
 #   <<PAUSE_FOR_HUMAN>>    — any stop-the-line condition fired
-#                            (see meta-plan §7). Exit the loop and
-#                            surface to the user.
+#                            (see meta-plan stop-the-line section).
+#                            Exit the loop and surface to the user.
 #
 # Usage:
 #   bash .claude/scripts/autonomy-loop.sh                # default: 25 iterations max
@@ -27,8 +39,8 @@
 # Stop the loop manually: Ctrl-C. The current Claude iteration will
 # finish naturally; the next iteration will not start.
 #
-# Logs: ${HOME}/.claude/logs/meta-language-loop/iter-<ts>-<n>.log
-#       ${HOME}/.claude/logs/meta-language-loop/iter-<ts>-<n>.memory.log
+# Logs: ${HOME}/.claude/logs/web-analytics-loop/iter-<ts>-<n>.log
+#       ${HOME}/.claude/logs/web-analytics-loop/iter-<ts>-<n>.memory.log
 # Each iteration's full stdout+stderr is captured for post-hoc review,
 # alongside a periodic memory snapshot (free, top RSS processes, parent
 # cgroup memory.current / memory.peak) so the next systemd-oomd kill has
@@ -40,7 +52,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-LOG_DIR="${HOME}/.claude/logs/meta-language-loop"
+LOG_DIR="${HOME}/.claude/logs/web-analytics-loop"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
@@ -56,10 +68,12 @@ SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 # Prompt sent to each iteration. Anchors the agent on the plan files and the
 # sentinel emission contract — the wrapper greps the final .result for exactly
 # one sentinel and pauses without one. Override with $PROMPT.
-PROMPT="${PROMPT:-Resume the typed-meta-programming autonomy loop with fresh context.
+PROMPT="${PROMPT:-Resume the active autonomy loop with fresh context.
 
-1. Read /home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md (meta-plan) and docs/plans/20260509-meta-language-overall.md (in-repo plan).
-2. Find the next \`pending\` row in the Progress tracking table. Execute that phase via /smelt:implement, commit, and push.
+1. Read .claude/active-plan to find the in-repo plan and meta-plan paths for the currently active multi-session plan.
+2. Read the meta-plan (across-session source of truth: sentinel emission contract, expert dispatch, stop-the-line conditions).
+3. Read the in-repo plan (committed phase status table).
+4. Find the next \`pending\` row in the status table. Execute that phase end-to-end: generate the per-phase plan via /smelt:plan if it does not exist yet, then /smelt:implement, expert review loop, verification gate, update the status table row, commit, push.
 
 CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_DONE}, or ${SENTINEL_PAUSE}, per meta-plan §\"Sentinel emission contract\". The wrapper script greps the final .result field for these; without one the loop pauses and you stall progress. If you emit ${SENTINEL_PAUSE}, put a one-line reason on the line above.}"
 

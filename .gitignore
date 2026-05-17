@@ -5,6 +5,7 @@ target/
 !.claude/commands/
 !.claude/skills/
 !.claude/scripts/
+!.claude/active-plan
 /.vscode/
 datagen.duckdb
 output/

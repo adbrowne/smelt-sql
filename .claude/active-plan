@@ -1,0 +1,17 @@
+# Active multi-session plan pointer
+#
+# This file is read by the autonomy loop's iteration prompt (see
+# .claude/scripts/autonomy-loop.sh) and by a fresh-context Claude that
+# typed `continue` after `/clear`. Both paths must work.
+#
+# When the active plan changes:
+#   1. Update the two paths below.
+#   2. Update the corresponding comment + LOG_DIR in
+#      .claude/scripts/autonomy-loop.sh.
+#   3. Commit both changes together.
+#
+# When all phases are `done`: leave this file in place but expect the
+# loop to emit <<ALL_DONE>> on its next iteration and exit cleanly.
+
+in_repo_plan: docs/plans/20260517-web-analytics-example.md
+meta_plan: /home/andrew/.claude/plans/i-would-like-to-stitch-eventstream.md
