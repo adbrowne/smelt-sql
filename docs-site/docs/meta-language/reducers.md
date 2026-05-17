@@ -1,6 +1,6 @@
 # Reducers
 
-The meta-language provides **contextual reducers** — a closed set of seven identifiers that can be passed as the second argument to `reduce`. Each reducer folds a `List<T>` into a single SQL fragment of a declared output sort.
+The meta-language provides **contextual reducers** — a closed set of seven identifiers that can be passed as the second argument to `reduce`. Each reducer folds a [`List<T>`](lists.md) into a single SQL fragment of a declared output sort. Reducers complement the [pipe operator `|>`](pipes.md): a HOF chain that produces a list often ends with `|> reduce(…, reducer_name)`.
 
 Reducers are compile-time constructs. The database engine sees the already-folded SQL fragment, never the `reduce(...)` call itself.
 
@@ -187,11 +187,140 @@ FROM reduce(
 
 ---
 
+## Parameterised reducers
+
+A **parameterised reducer** accepts one or more compile-time arguments and produces a reducer usable as the second argument to `reduce`. The call shape is `reducer_name(arg_1, …, arg_n)`; arguments are positional.
+
+```sql
+reduce(xs, reducer_name(arg_1, …, arg_n))
+```
+
+The parameterised reducer call must appear directly as the second argument to `reduce`. Using it anywhere else — as a list element, as a named-argument value, or standalone — is not supported.
+
+<a id="concat_with"></a>
+### `concat_with(sep)`
+
+Folds a list of text expressions with a compile-time separator string.
+
+| Property | Value |
+|----------|-------|
+| Parameter | `sep: Text` — compile-time separator string |
+| Input | `List<Expr<Text>>` |
+| Output | `Expr<Text>` |
+| Empty-list identity | `''` (empty string, independent of `sep`) |
+| Fold formula | `e1 \|\| sep \|\| e2 \|\| sep \|\| … \|\| sep \|\| eN` |
+
+**Example:**
+
+```sql
+-- examples/meta_polish/models/concat_with_separator.sql
+-- reduce(['alpha', 'beta', 'gamma'], concat_with(' OR '))
+-- → 'alpha' || ' OR ' || 'beta' || ' OR ' || 'gamma'
+SELECT reduce(['alpha', 'beta', 'gamma'], concat_with(' OR '))
+```
+
+The separator argument must be a **compile-time-resolvable** meta value — a string literal or a `smelt.config.var(...)` result. A runtime expression (an `Expr<Text>` from a SQL column reference) emits `ReducerArgNotCompileTime`.
+
+**Typical use — join a list of filter terms with a separator:**
+
+```sql
+-- Build an OR-separated string from a list of region names
+SELECT reduce(
+    map(['us-east', 'us-west', 'eu-west'], fn r => r),
+    concat_with(', ')
+)
+-- Engine sees: SELECT 'us-east' || ', ' || 'us-west' || ', ' || 'eu-west'
+```
+
+!!! note
+    The empty-list identity for `concat_with(sep)` is always `''` (empty string), regardless of the separator value. An empty list produces the empty string, not an error.
+
+### Parameterised reducer diagnostic codes
+
+---
+
+<a id="reduceraritymismatch"></a>
+!!! warning "ReducerArityMismatch"
+    **When it fires:** A parameterised reducer call has the wrong number of positional arguments.
+
+    **Message:** `reducer {r} expects {expected} argument(s); found {actual}`
+
+    **Fires at:** the reducer call expression.
+
+    **Example:**
+    ```sql
+    -- concat_with requires exactly one argument (sep)
+    -- ← ReducerArityMismatch: reducer concat_with expects 1 argument(s); found 0
+    SELECT reduce(['a', 'b'], concat_with())
+    ```
+
+    **What to fix:** Provide the correct number of arguments. `concat_with` requires exactly one `Text` separator.
+
+---
+
+<a id="reducerargtypemismatch"></a>
+!!! warning "ReducerArgTypeMismatch"
+    **When it fires:** A parameterised reducer argument's type is not assignable to the declared parameter type.
+
+    **Message:** `reducer {r}'s argument '{param}' expects {expected}; found {actual}`
+
+    **Fires at:** the offending argument expression.
+
+    **Example:**
+    ```sql
+    -- concat_with expects Text; found INTEGER
+    -- ← ReducerArgTypeMismatch: reducer concat_with's argument 'sep' expects Text; found INTEGER
+    SELECT reduce(['a', 'b'], concat_with(42))
+    ```
+
+    **What to fix:** Pass a value of the correct type. For `concat_with`, the separator must be a `Text` value (a string literal or a `smelt.config.var(...)` result).
+
+---
+
+<a id="reducerargnotcompiletime"></a>
+!!! warning "ReducerArgNotCompileTime"
+    **When it fires:** A parameterised reducer argument is not a compile-time-resolvable meta value — for example, it is a runtime `Expr<Text>` SQL column reference.
+
+    **Message:** `reducer {r}'s argument '{param}' must be a compile-time value; found {actual}`
+
+    **Fires at:** the offending argument expression.
+
+    **Example:**
+    ```sql
+    -- sep_col is a runtime SQL column, not a compile-time Text
+    -- ← ReducerArgNotCompileTime
+    SELECT reduce(labels, concat_with(sep_col))
+    FROM smelt.sources.raw.config
+    ```
+
+    **What to fix:** Replace the runtime argument with a compile-time value: a string literal (`' OR '`), a `smelt.config.var('sep')` result, or a meta value from a `smelt.define` parameter.
+
+---
+
+<a id="reducernamedargument"></a>
+!!! warning "ReducerNamedArgument"
+    **When it fires:** A parameterised reducer is called with a named argument instead of a positional one.
+
+    **Message:** `reducer {r} takes positional arguments only`
+
+    **Fires at:** the named argument expression.
+
+    **Example:**
+    ```sql
+    -- Named arguments are not supported for reducers
+    -- ← ReducerNamedArgument: reducer concat_with takes positional arguments only
+    SELECT reduce(['a', 'b'], concat_with(sep => ', '))
+    ```
+
+    **What to fix:** Use positional argument syntax: `concat_with(', ')`.
+
+---
+
 ## Reserved names
 
-All seven reducer names are **reserved** at the meta-namespace level. A `smelt.define` function declared with a reducer name emits `ReducerNameShadowed`. Reserved names also cannot be used as `smelt.define` parameter names.
+All seven bare reducer names and the parameterised reducer name `concat_with` are **reserved** at the meta-namespace level. A `smelt.define` function declared with a reducer name emits `ReducerNameShadowed`. Reserved names also cannot be used as `smelt.define` parameter names.
 
-Reserved names: `comma_sep`, `and_all`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat`.
+Reserved names: `comma_sep`, `and_all`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat`, `concat_with`.
 
 ## Diagnostic codes
 

@@ -1,0 +1,15 @@
+description: Raw orders from the production database
+tags: [raw]
+columns:
+  - name: id
+    type: INTEGER
+    description: Order identifier
+  - name: user_id
+    type: INTEGER
+    description: Placing user
+  - name: amount
+    type: DOUBLE
+    description: Order amount in local currency
+  - name: created_at
+    type: TIMESTAMP
+    description: When the order was placed

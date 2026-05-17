@@ -326,7 +326,7 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct IncrementalConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
-    build_explain_output, build_physical_explain, discover_python_models, find_project_root,
-    Config, LogicalGraph, ModelDiscovery, PhysicalGraphBuilder, SourcesConfig,
+    build_explain_output, build_physical_explain, discover_emitted_model_files,
+    discover_python_models, find_project_root, init_db, Config, LogicalGraph, ModelDiscovery,
+    ModelFile, PhysicalGraphBuilder, SourcesConfig,
 };
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
 use std::collections::HashMap;
@@ -21,9 +22,27 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
     let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let mut models = discovery
+    let sql_models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
+
+    // Build Salsa DB from all raw SQL files (including generator files) so
+    // the emitted-models pipeline can run via `smelt_db::emitted_models()`.
+    let db = init_db(&project_dir, &sql_models);
+
+    // Discover generator-emitted models and their provenance.
+    let (emitted_model_files, origins) =
+        discover_emitted_model_files(&db, &project_dir, &config.paths);
+
+    // Build the model list:
+    //   - Exclude generator files (.gen.sql) from the hand-authored set so they
+    //     don't appear as both a generator and a regular model.
+    //   - Include the emitted virtual ModelFile entries produced above.
+    let mut models: Vec<ModelFile> = sql_models
+        .into_iter()
+        .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
+        .collect();
+    models.extend(emitted_model_files);
 
     // Filter out test models — they shouldn't appear in explain output
     models.retain(|m| !m.is_test());
@@ -51,8 +70,11 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target)
+    let mut graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target)
         .with_context(|| "Failed to build logical graph")?;
+
+    // Annotate generator-emitted nodes with their provenance.
+    graph.annotate_emitted_models(&origins);
 
     graph
         .validate()

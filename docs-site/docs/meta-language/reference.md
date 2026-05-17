@@ -1,8 +1,18 @@
 # Meta-Language Reference
 
-Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, and the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift, wide reflection accessors `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`).
+Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, the ternary expression, `smelt.config.var`, the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift, wide reflection accessors `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`), and generator files (`<generator>` frame, `generates: models`, `generator_file:` selector, `ModelDef`, `origin`).
 
-For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md), [Records](records.md), [Maps](maps.md), [Config Loaders](config-loaders.md).
+For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Ternary](ternary.md), [Config Variables](config-vars.md), [Reflection](reflection.md), [Records](records.md), [Maps](maps.md), [Config Loaders](config-loaders.md), [Generator Files](generators.md).
+
+---
+
+## `<generator>` frame
+
+A **generator file** is any `.gen.sql` file whose YAML frontmatter carries `generates: models`. Its body is a meta-language expression of type `List<ModelDef>`; each element is expanded into a standalone model at build time.
+
+The `<generator>` frame is the unit of expansion: one generator file produces zero or more models, each identified by `ModelDef.name`. Generator files may drive model production from config loaders (`smelt.config.load_yaml`) or from workspace source reflection (`smelt.sources.with_tag`, `smelt.sources.all`). Model reflection (`smelt.models.*`) is forbidden inside a generator body.
+
+See [Generator Files](generators.md) for the full specification, the `ModelDef` record type, collision rules, and the `generator_file:` CLI selector.
 
 ---
 
@@ -97,6 +107,30 @@ See [Reducers — `concat`](reducers.md#concat) for full details.
 
 ---
 
+## `concat_with(sep)` — parameterised text-join reducer
+
+**Kind:** parameterised contextual reducer (closed registry); use as the second argument to `reduce`.
+
+**Signature:**
+```
+reduce(xs: List<Expr<Text>>, concat_with(sep: Text)) -> Expr<Text>
+```
+
+**Parameter:** `sep` — a compile-time `Text` separator (string literal or `smelt.config.var(...)` result).
+
+**Empty-list identity:** `''` (independent of `sep`)
+
+**Example:**
+```sql
+-- reduce(['alpha', 'beta', 'gamma'], concat_with(' OR '))
+-- → 'alpha' || ' OR ' || 'beta' || ' OR ' || 'gamma'
+SELECT reduce(['alpha', 'beta', 'gamma'], concat_with(' OR '))
+```
+
+See [Reducers — `concat_with`](reducers.md#concat_with) for full details.
+
+---
+
 ## `filter` — HOF: keep list elements matching a predicate
 
 **Kind:** built-in higher-order function; reserved name.
@@ -124,20 +158,98 @@ See [Higher-Order Functions — `filter`](hofs.md#filter) for full details and d
 
 **Syntax:**
 ```
-fn IDENT => EXPR
+fn IDENT => EXPR                          -- single-parameter form
+fn ( IDENT_1 , IDENT_2 , … ) => EXPR     -- multi-parameter form (k ≥ 1)
 ```
 
 Only valid as a positional argument to a HOF (`map`, `filter`). A lambda cannot be assigned to a name, stored in a list, or passed as a named argument.
 
-**Example:**
+The single-parameter form and the parenthesised single-parameter form `fn (x) => body` are equivalent. The multi-parameter form `fn (a, b) => body` declares a lambda of arity ≥ 2; the parameter list is parenthesised. All parameters within one lambda must have distinct names.
+
+**Example — single parameter:**
 ```sql
 -- fn c => c * 2 doubles each element of the list
 SELECT map([1, 2, 3], fn c => c * 2)
 ```
 
-**Editor support:** hover on the parameter inside the body shows its bound type; goto-definition resolves to the `fn` binding occurrence.
+**Example — parenthesised single parameter:**
+```sql
+-- fn (c) => c * 2 is equivalent to fn c => c * 2
+SELECT map([1, 2, 3], fn (c) => c * 2)
+```
+
+**Editor support:** hover on a parameter inside the body shows its bound type; goto-definition resolves to the parameter's binding occurrence in the `fn` head; completion inside the body offers the bound parameters first.
 
 See [Lambdas](lambdas.md) for full details, scoping rules, and diagnostic codes.
+
+---
+
+## `generates: models` — generator file frontmatter directive
+
+**Kind:** YAML frontmatter key; marks the file as a generator file.
+
+**Syntax:** `generates: models` (the only valid value in v1).
+
+A generator file's body is a meta-language expression of type `List<ModelDef>`. Each emitted `ModelDef` value with `name: 'n'` becomes a model at smelt path `smelt.<dir>.<stem>.<n>`.
+
+**Editor support:** hover on `generates: models` shows `List<ModelDef>` and (when statically resolvable) the number of emitted models; completion at `generates: <cursor>` offers exactly `models`.
+
+See [Generator Files](generators.md) for the full specification.
+
+---
+
+## `generator_file:` — CLI selector for generator-emitted models
+
+**Kind:** CLI / catalog selector key; scopes commands to models emitted by a specific generator file.
+
+**Syntax:**
+```
+generator_file: models/path/to/file.gen.sql
+```
+
+Pass `generator_file:` as a selector to `smelt build`, `smelt explain`, or `smelt test` to target only the models produced by the named generator. The path is workspace-relative and uses `/` as the separator on all platforms.
+
+**Example:**
+```
+smelt build generator_file:models/cohorts.gen.sql
+```
+
+See [Generator Files — CLI and catalog integration](generators.md) for full details and interaction with tag-based selectors.
+
+---
+
+## `if … then … else …` — meta-world ternary expression
+
+**Kind:** meta-world compile-time expression; not a statement.
+
+**Syntax:**
+```
+if COND then THEN_EXPR else ELSE_EXPR
+```
+
+**Pseudo-signature:** `(Boolean, T, T) -> T` — `COND` must be `Boolean`; `THEN_EXPR` and `ELSE_EXPR` must unify under LUB; the ternary's type is the LUB.
+
+**Keywords:** `if`, `then`, `else` are reserved at the meta-namespace level.
+
+**Precedence:** lower than `|>` (pipe). **Associativity:** right-associative chaining — `else if c then x else y` nests as `else (if c then x else y)`.
+
+**Short-circuit:** exactly one of `THEN_EXPR` / `ELSE_EXPR` is evaluated at compile time. Evaluation-time diagnostics (`MapGetMissingKey`, `ConfigVarNotFound`) on the unreached branch are suppressed; type-checking diagnostics still fire on both branches.
+
+**Example:**
+```sql
+-- Resolves to 'strict' at compile time; engine sees: SELECT 'strict'
+SELECT if true then 'strict' else 'permissive'
+```
+
+**Defaulting pattern:**
+```sql
+-- Guard a map.get with m.has to avoid MapGetMissingKey on the false branch
+SELECT if m.has('env') then m.get('env') else 'production'
+```
+
+**Editor support:** hover on `if` shows the full ternary signature with resolved types; hover on `then`/`else` shows the corresponding branch's type; completion offers `if` as a snippet.
+
+See [Ternary](ternary.md) for full details, precedence rules, and diagnostic codes.
 
 ---
 
@@ -184,47 +296,6 @@ SELECT ...[1, 2, 3] FROM smelt.sources.raw.users
 ```
 
 See [Lists & Spread — The `List<T>` type](lists.md#the-listt-type) for the covariance rule and subtyping details.
-
----
-
-## `map` — HOF: apply a lambda to every element
-
-**Kind:** built-in higher-order function; reserved name.
-
-**Signature:**
-```
-map(xs: List<T>, f: Lambda<T, U>) -> List<U>
-```
-
-**Example:**
-```sql
--- Double every element
-SELECT map([1, 2, 3], fn c => c * 2)
-```
-
-**Editor support:** hover shows `List<U>` with `U` from the lambda body's inferred type.
-
-See [Higher-Order Functions — `map`](hofs.md#map) for full details and diagnostic codes.
-
----
-
-## `Map<K, V>` — meta map type
-
-**Kind:** meta-only type; never appears in data-world SQL.
-
-**Definition:** a finite, immutable key-value collection. In v1 `K` must be `Text`; `V` is any meta-language type. Invariant in both `K` and `V`. Produced exclusively by the config-loader family.
-
-**Iteration order:** byte-lexicographic ascending by key for `entries()`, `keys()`, and `values()`.
-
-**No literal syntax in v1** — maps originate from `smelt.config.load_yaml` / `smelt.config.load_json` with a `Map<Text, S>` schema.
-
-**Example:**
-```sql
--- Load a YAML mapping and iterate over entries
-SELECT smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>)
-```
-
-See [Maps](maps.md) for the full API, missing-key behaviour, and diagnostic codes.
 
 ---
 
@@ -303,6 +374,47 @@ See [Maps — Map API](maps.md#map-api) for full details.
 
 ---
 
+## `map` — HOF: apply a lambda to every element
+
+**Kind:** built-in higher-order function; reserved name.
+
+**Signature:**
+```
+map(xs: List<T>, f: Lambda<T, U>) -> List<U>
+```
+
+**Example:**
+```sql
+-- Double every element
+SELECT map([1, 2, 3], fn c => c * 2)
+```
+
+**Editor support:** hover shows `List<U>` with `U` from the lambda body's inferred type.
+
+See [Higher-Order Functions — `map`](hofs.md#map) for full details and diagnostic codes.
+
+---
+
+## `Map<K, V>` — meta map type
+
+**Kind:** meta-only type; never appears in data-world SQL.
+
+**Definition:** a finite, immutable key-value collection. In v1 `K` must be `Text`; `V` is any meta-language type. Invariant in both `K` and `V`. Produced exclusively by the config-loader family.
+
+**Iteration order:** byte-lexicographic ascending by key for `entries()`, `keys()`, and `values()`.
+
+**No literal syntax in v1** — maps originate from `smelt.config.load_yaml` / `smelt.config.load_json` with a `Map<Text, S>` schema.
+
+**Example:**
+```sql
+-- Load a YAML mapping and iterate over entries
+SELECT smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>)
+```
+
+See [Maps](maps.md) for the full API, missing-key behaviour, and diagnostic codes.
+
+---
+
 ## Meta-`Text`-as-identifier lift positions {#meta-text-as-identifier-lift-positions}
 
 When a meta-`Text` value is spliced into a position where the SQL grammar expects an unquoted **identifier**, smelt lifts that value to the identifier. The lift applies in exactly four positions:
@@ -319,6 +431,39 @@ In all other positions a meta-`Text` retains its string-value meaning. The lifte
 The lift applies **only to compile-time meta-`Text` values**, not to runtime `Expr<Text>` values.
 
 See [Reflection — Meta-`Text`-as-identifier lift](reflection.md#meta-text-as-identifier-lift) for full details and examples.
+
+---
+
+## `ModelDef` — built-in closed record type for generator files
+
+**Kind:** closed meta-only record type; user-constructible only inside a generator file body (`generates: models`).
+
+**Fields (in declaration order):**
+
+| Field | Type | Required | Default |
+|-------|------|----------|---------|
+| `name` | `Text` | Yes | — |
+| `body` | `TableExpr` | Yes | — |
+| `materialization` | `Text` | No | `"view"` |
+| `tags` | `List<Text>` | No | `[]` |
+| `description` | `Text` | No | `""` |
+
+Constructing a `ModelDef` literal outside a generator file body emits `ModelDefOutsideGeneratorFile`.
+
+**Example:**
+```sql
+---
+generates: models
+---
+[
+  ModelDef { name: 'orders',  body: SELECT * FROM smelt.sources.raw.orders },
+  ModelDef { name: 'users',   body: SELECT * FROM smelt.sources.raw.users }
+]
+```
+
+**Editor support:** hover on the opening `{` of a `ModelDef` literal shows the emitted smelt path (when `name` is statically known); completion at `ModelDef { <cursor>` offers the five fields, required fields first.
+
+See [Generator Files](generators.md) for the full multi-model production surface.
 
 ---
 
@@ -373,6 +518,16 @@ WHERE reduce([is_admin, is_moderator], or_any)
 ```
 
 See [Reducers — `or_any`](reducers.md#or_any) for full details.
+
+---
+
+## `origin` — model provenance field in CLI and catalog output
+
+**Kind:** metadata field; present in `smelt explain --json` output and in catalog markdown for every model, whether hand-authored or generator-emitted.
+
+For hand-authored models, `origin` carries `{"kind": "cli"}` (when built via the CLI) or `{"kind": "catalog"}` (when queried from the catalog). For generator-emitted models, `origin` additionally records `{"generator_file": "models/path/to/file.gen.sql", "model_def_name": "name"}` so that downstream tools can trace each model back to its producing generator.
+
+See [Generator Files](generators.md) for full details on the `origin` field and how it appears in `smelt explain --json` and catalog output.
 
 ---
 
@@ -704,8 +859,6 @@ See [Reducers — `union_all`](reducers.md#union_all) for full details.
 where `expr` evaluates to a `List<T>`.
 
 **Valid positions:** SELECT lists.
-
-**Planned but not yet supported:** GROUP BY, ORDER BY, positional function arguments, IN-lists, VALUES rows, inside other list literals.
 
 **Forbidden positions:** WHERE clauses, FROM clauses without an explicit reducer, boolean-composition contexts (`AND`/`OR`), named-argument positions (`name => value`). Each forbidden use emits `MetaSpreadInForbiddenPosition`.
 
@@ -1043,7 +1196,7 @@ See [Config Loaders — `ConfigLoaderUnknownField`](config-loaders.md#configload
 
 **Message:** `smelt.config.var name must be a string literal`
 
-**Fix:** use a string literal: `smelt.config.var('my_var')`. Dynamic name resolution is planned but not yet implemented.
+**Fix:** use a string literal: `smelt.config.var('my_var')`.
 
 See [Config Variables — `ConfigVarNameNotLiteral`](config-vars.md#configvarnamenotliteral).
 
@@ -1070,6 +1223,66 @@ See [Config Variables — `ConfigVarNotFound`](config-vars.md#configvarnotfound)
 **Fix:** replace the null YAML value with an explicit default string.
 
 See [Config Variables — `ConfigVarNullCoercion`](config-vars.md#configvarnullcoercion-warning).
+
+---
+
+### `GenerateFileBareSelectForbidden`
+
+**When:** A generator file (frontmatter `generates: models`) contains a top-level bare `SELECT`, `WITH`, or `VALUES` statement instead of a meta-language expression.
+
+**Message:** `generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape`
+
+**Fix:** replace the bare statement with a meta-expression of type `List<ModelDef>`, or remove `generates: models` from the frontmatter.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GenerateFileBodyTypeError`
+
+**When:** The generator file body evaluates to a type that is not assignable to `List<ModelDef>`.
+
+**Message:** `generator file body must evaluate to List<ModelDef>; found {actual}`
+
+**Fix:** ensure the body expression produces a `List<ModelDef>`.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GeneratesMixedWithBareModel`
+
+**When:** `generates: models` appears in a file that also has a `name:` frontmatter field or Layer-1 section delimiters.
+
+**Message:** `generates: models is mutually exclusive with name: or Layer-1 delimiters`
+
+**Fix:** a file is either a generator (no `name:`, no Layer-1 delimiters) or a bare model — not both.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GeneratesUnknownValue`
+
+**When:** The `generates:` frontmatter key carries a value other than `models`.
+
+**Message:** `generates: expects value 'models'; found '{actual}'`
+
+**Fix:** use `generates: models`, or remove the `generates:` key.
+
+See [Generator Files](generators.md).
+
+---
+
+### `GeneratorBodyForbidsModelReflection`
+
+**When:** A generator file body calls `smelt.models.with_tag` or `smelt.models.all`.
+
+**Message:** `smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references`
+
+**Fix:** drive generation from `smelt.config.load_yaml` / `load_json`, from `smelt.sources.*`, or from literal `smelt.<path>` references to hand-authored models.
+
+See [Generator Files — Generator-body reflection restriction](generators.md#generator-body-reflection-restriction).
 
 ---
 
@@ -1109,15 +1322,27 @@ See [Higher-Order Functions — `HofNameShadowed`](hofs.md#hofnameshadowed).
 
 ---
 
-### `LambdaArityNotSupported`
+### `LambdaArityMismatch`
 
-**When:** A lambda with more than one parameter is written: `fn (a, b) => body`.
+**When:** The lambda's parameter count does not match the arity required by the surrounding HOF. `map` and `filter` require arity 1; a multi-arg lambda passed to either emits this diagnostic.
 
-**Message:** `multi-argument lambdas are not supported in v1; use a single parameter`
+**Message:** `{hof} expects a lambda of arity {expected}; found arity {actual}`
 
-**Fix:** rewrite to use a single parameter. Multi-argument lambdas are planned but not yet implemented.
+**Fix:** match the lambda's parameter count to what the HOF requires. For `map`/`filter`, use a single-parameter lambda.
 
-See [Lambdas — `LambdaArityNotSupported`](lambdas.md#lambdaaritynotsupported).
+See [Lambdas — `LambdaArityMismatch`](lambdas.md#lambdaaritymismatch).
+
+---
+
+### `LambdaDuplicateParameter`
+
+**When:** The same parameter name appears more than once in a single lambda's parameter list.
+
+**Message:** `parameter '{name}' already appears in this lambda's parameter list`
+
+**Fix:** give each parameter a distinct name.
+
+See [Lambdas — `LambdaDuplicateParameter`](lambdas.md#lambdaduplicateparameter).
 
 ---
 
@@ -1142,6 +1367,78 @@ See [Lambdas — `LambdaInForbiddenPosition`](lambdas.md#lambdainforbiddenpositi
 **Fix:** adjust the body expression to produce the required type.
 
 See [Lambdas — `LambdaResultTypeMismatch`](lambdas.md#lambdaresulttypemismatch).
+
+---
+
+### `LambdaZeroParameters`
+
+**When:** A lambda's parameter list is empty: `fn () => body`.
+
+**Message:** `lambda must declare at least one parameter`
+
+**Fix:** add at least one parameter; if the body does not use it, name it `_` by convention.
+
+See [Lambdas — `LambdaZeroParameters`](lambdas.md#lambdazeroparameters).
+
+---
+
+### `ModelDefDuplicateName`
+
+**When:** Two `ModelDef` values in the same generator file share the same `name` field value.
+
+**Message:** `duplicate ModelDef.name '{name}' in this generator file`
+
+**Fix:** give each emitted model a unique `name` value within the file.
+
+See [Generator Files — Name uniqueness and collision rules](generators.md#name-uniqueness-and-collision-rules).
+
+---
+
+### `ModelDefHandAuthoredCollision`
+
+**When:** A generator-emitted model's smelt path collides with a hand-authored model or with another generator's emission.
+
+**Message:** `ModelDef emits '{smelt_path}' which collides with {other_path}`
+
+**Fix:** rename the `ModelDef` to produce a unique smelt path, or remove the conflicting hand-authored model.
+
+See [Generator Files — Name uniqueness and collision rules](generators.md#name-uniqueness-and-collision-rules).
+
+---
+
+### `ModelDefInvalidMaterialization`
+
+**When:** The `materialization` field of a `ModelDef` literal contains a value that is not a known materialization strategy.
+
+**Message:** `invalid ModelDef.materialization '{value}'; expected one of: view, table, incremental`
+
+**Fix:** use one of the three valid values: `'view'`, `'table'`, or `'incremental'`.
+
+See [Generator Files](generators.md).
+
+---
+
+### `ModelDefInvalidName`
+
+**When:** The `name` field of a `ModelDef` literal contains a value that is not a path-safe identifier (ASCII letters, digits, underscores; must not start with a digit).
+
+**Message:** `ModelDef.name '{value}' is not a valid identifier`
+
+**Fix:** use a name containing only `[a-zA-Z_][a-zA-Z0-9_]*`.
+
+See [Generator Files](generators.md).
+
+---
+
+### `ModelDefOutsideGeneratorFile`
+
+**When:** A `ModelDef { … }` record literal appears outside a generator file body — in a hand-authored model, a `smelt.define` function body, or any other non-generator context.
+
+**Message:** `ModelDef literals are only valid inside a \`generates: models\` file body`
+
+**Fix:** move the `ModelDef` literal into a generator file (frontmatter `generates: models`).
+
+See [Generator Files](generators.md).
 
 ---
 
@@ -1282,10 +1579,7 @@ FROM smelt.sources.raw.users
 WHERE id = 1 AND ...preds  -- MetaSpreadInForbiddenPosition
 ```
 
-**Fix:** move the spread to a SELECT list. For WHERE-clause predicate lists, use the `and_all` reducer. For IN-list membership, use `WHERE id IN (...vs)` (planned but not yet implemented).
-
-!!! note
-    Forbidden positions other than WHERE may currently emit parse errors rather than this diagnostic. The full set of friendly diagnostics for forbidden positions is planned but not yet wired everywhere.
+**Fix:** move the spread to a SELECT list. For WHERE-clause predicate lists, use the `and_all` reducer.
 
 ---
 
@@ -1475,6 +1769,54 @@ See [Reducers — `ReducerInputTypeMismatch`](reducers.md#reducerinputtypemismat
 
 ---
 
+### `ReducerArgNotCompileTime`
+
+**When:** A parameterised reducer argument is not a compile-time-resolvable meta value.
+
+**Message:** `reducer {r}'s argument '{param}' must be a compile-time value; found {actual}`
+
+**Fix:** replace the runtime argument with a compile-time value — a string literal or a `smelt.config.var(...)` result.
+
+See [Reducers — `ReducerArgNotCompileTime`](reducers.md#reducerargnotcompiletime).
+
+---
+
+### `ReducerArgTypeMismatch`
+
+**When:** A parameterised reducer argument's type is not assignable to the declared parameter type.
+
+**Message:** `reducer {r}'s argument '{param}' expects {expected}; found {actual}`
+
+**Fix:** pass a value of the declared parameter type. For `concat_with`, the separator must be `Text`.
+
+See [Reducers — `ReducerArgTypeMismatch`](reducers.md#reducerargtypemismatch).
+
+---
+
+### `ReducerArityMismatch`
+
+**When:** A parameterised reducer call has the wrong number of positional arguments.
+
+**Message:** `reducer {r} expects {expected} argument(s); found {actual}`
+
+**Fix:** provide the correct number of arguments. `concat_with` requires exactly one.
+
+See [Reducers — `ReducerArityMismatch`](reducers.md#reduceraritymismatch).
+
+---
+
+### `ReducerNamedArgument`
+
+**When:** A parameterised reducer is called with a named argument (`sep => ', '`) instead of a positional one.
+
+**Message:** `reducer {r} takes positional arguments only`
+
+**Fix:** use positional syntax: `concat_with(', ')`.
+
+See [Reducers — `ReducerNamedArgument`](reducers.md#reducernamedargument).
+
+---
+
 ### `ReducerNameShadowed`
 
 **When:** A `smelt.define` function is declared with a name that matches one of the seven reserved reducer names.
@@ -1496,6 +1838,78 @@ See [Reducers — `ReducerNameShadowed`](reducers.md#reducernameshadowed).
 **Fix:** choose a distinct name for the second declaration, or consolidate both into one.
 
 See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `TernaryBranchTypeMismatch`
+
+**When:** The `THEN_EXPR` and `ELSE_EXPR` branches synthesise to types that do not unify under LUB.
+
+**Message:** `ternary branches have incompatible types: {then_type} vs {else_type}`
+
+**Fix:** ensure both branches produce values of compatible types. Numeric types are promoted automatically; incompatible sorts (e.g. `INTEGER` vs `TEXT`) require restructuring the logic.
+
+See [Ternary — `TernaryBranchTypeMismatch`](ternary.md#ternarybranchtypemismatch).
+
+---
+
+### `TernaryConditionNotBoolean`
+
+**When:** The `COND` expression in `if COND then … else …` synthesises to a type that is not assignable to `Boolean`.
+
+**Message:** `ternary condition expects Boolean; found {actual}`
+
+**Fix:** use a Boolean expression as the condition — a comparison, `m.has(k)`, or a `Boolean`-typed `smelt.config.var` result. The meta-language has no Boolean coercion.
+
+See [Ternary — `TernaryConditionNotBoolean`](ternary.md#ternaryconditionnotboolean).
+
+---
+
+### `TernaryDanglingElse`
+
+**When:** An `else` keyword appears outside any in-progress ternary's `THEN_EXPR` slot — with no preceding `if … then`, or after the ternary has already consumed its `else` clause.
+
+**Message:** `unexpected 'else' keyword outside of '... then ... else' form`
+
+**Fix:** remove the extra `else` clause, or restructure the ternary chain.
+
+See [Ternary — `TernaryDanglingElse`](ternary.md#ternarydanglingelse).
+
+---
+
+### `TernaryDanglingThen`
+
+**When:** A `then` keyword appears outside any in-progress ternary's `COND` slot — for example with no preceding `if`, or after the `then` slot has already been consumed.
+
+**Message:** `unexpected 'then' keyword outside of 'if ... then ...' form`
+
+**Fix:** add the missing `if COND` prefix, or remove the stray `then`.
+
+See [Ternary — `TernaryDanglingThen`](ternary.md#ternarydanglingthen).
+
+---
+
+### `TernaryInDataPosition`
+
+**When:** An `if … then … else …` ternary expression appears in a Data-World grammar position that does not admit meta evaluation.
+
+**Message:** `if-then-else is meta-only; use SQL CASE WHEN in this position`
+
+**Fix:** replace the ternary with a SQL `CASE WHEN … THEN … ELSE … END` expression in the data position.
+
+See [Ternary — `TernaryInDataPosition`](ternary.md#ternaryindataposition).
+
+---
+
+### `TernaryKeywordShadowed`
+
+**When:** A `smelt.define` function, `smelt.record` declaration, or lambda parameter is declared with the name `if`, `then`, or `else`.
+
+**Message:** `{name} is a reserved meta-language keyword`
+
+**Fix:** choose a different name. The three keywords are reserved at the meta-namespace level.
+
+See [Ternary — `TernaryKeywordShadowed`](ternary.md#ternarykeywordshadowed).
 
 ---
 

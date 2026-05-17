@@ -12,14 +12,27 @@ mod backend;
 mod column_resolution;
 mod completion;
 mod db_helpers;
-mod hover;
+pub mod hover;
 mod python_scan;
+pub mod rename_lambda;
 
 // Re-exports for the binary and integration tests.
 pub use backend::Backend;
 pub use completion::{determine_completion_context, CompletionContext};
 pub use hover::{
-    passing_body_aggregate_labels, passing_body_completion_columns, render_expansion_frames,
+    // Phase E2 — re-exported for integration tests that verify the helper text
+    // produced by the Backend hover/completion/goto-def dispatch.
+    completion_for_generates_value,
+    completion_for_model_def_field_key,
+    goto_def_for_emitted_model_reference,
+    hover_text_for_generates_frontmatter,
+    hover_text_for_model_def_body_field_value,
+    hover_text_for_model_def_literal_open_brace,
+    hover_text_for_model_def_name_field_value,
+    hover_text_for_model_def_optional_field_value,
+    passing_body_aggregate_labels,
+    passing_body_completion_columns,
+    render_expansion_frames,
 };
 
 // In-crate re-exports so the unit-test module (`#[cfg(test)] mod tests;`)

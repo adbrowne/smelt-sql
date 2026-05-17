@@ -1,0 +1,12 @@
+description: Raw user records from the production database
+tags: [raw]
+columns:
+  - name: id
+    type: INTEGER
+    description: User identifier
+  - name: email
+    type: VARCHAR
+    description: User email address
+  - name: created_at
+    type: TIMESTAMP
+    description: Account creation timestamp

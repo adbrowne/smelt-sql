@@ -1,6 +1,6 @@
 # Maps
 
-The meta-language provides **`Map<K, V>`** — a compile-time key-value collection produced by the config-loader family when the declared schema is a mapping type. Maps are meta-only: no `Map<K, V>` value ever reaches the database engine.
+The meta-language provides **`Map<K, V>`** — a compile-time key-value collection produced by the [config-loader family](config-loaders.md) when the declared schema is a mapping type. Maps are meta-only: no `Map<K, V>` value ever reaches the database engine. To iterate over a map's entries, call `m.entries()` to obtain a [`List<{key: K, value: V}>`](lists.md) and then apply [HOFs](hofs.md). Use a [ternary](ternary.md) with `m.has(k)` to safely guard key lookups that might be absent.
 
 ## The `Map<K, V>` type
 

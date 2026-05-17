@@ -68,15 +68,17 @@ nav:
   - Meta-Language:
     - Overview: meta-language/index.md
     - Lists & Spread: meta-language/lists.md
-    - Lambdas: meta-language/lambdas.md
     - Higher-Order Functions: meta-language/hofs.md
+    - Lambdas: meta-language/lambdas.md
     - Pipe Operator: meta-language/pipes.md
     - Reducers: meta-language/reducers.md
-    - Config Variables: meta-language/config-vars.md
-    - Reflection: meta-language/reflection.md
+    - Ternary: meta-language/ternary.md
     - Records: meta-language/records.md
     - Maps: meta-language/maps.md
+    - Reflection: meta-language/reflection.md
     - Config Loaders: meta-language/config-loaders.md
+    - Config Variables: meta-language/config-vars.md
+    - Generator Files: meta-language/generators.md
     - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md

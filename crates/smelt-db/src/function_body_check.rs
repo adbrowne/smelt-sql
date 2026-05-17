@@ -333,6 +333,77 @@ pub fn walk_hof_lambda_body_with_wide_reflection_frame(
         .collect()
 }
 
+/// Phase 5 (meta-language-E2): construct the outermost `<generator>` expansion
+/// frame for a generator file per `expansion.md` §"`FrameInfo` shape".
+///
+/// Fields:
+/// - `function` = `"<generator>"` (angle-bracketed, anonymous form)
+/// - `fn_id` = `None` (no user-declared function identity)
+/// - `decl_path` = `Some(generator_file_path)` — the generator `.sql` file
+/// - `decl_range` = `None` (no single declaration site in the body)
+/// - `call_site_range` = the range of the file's body expression, converted via
+///   `offset_to_position` using the supplied `file_text`; `None` when the text
+///   slice cannot be converted (e.g. range outside the text bounds).
+/// - `param` = `""` (anonymous, no binding parameter)
+///
+/// This function is pure — no Salsa dependency.
+pub fn make_generator_frame(
+    generator_file_path: &std::path::Path,
+    body_range: TextRange,
+    file_text: &str,
+) -> FrameInfo {
+    // Convert the body TextRange to a smelt Range (line/column) using the file
+    // text. `offset_to_position` is always defined (no Out-of-Bounds; it
+    // clamps to the end of the text). We only emit None when the text is empty
+    // (no range context to attach).
+    let call_site_range = if file_text.is_empty() {
+        None
+    } else {
+        let start_offset: usize = body_range.start().into();
+        let end_offset: usize = body_range.end().into();
+        let start = offset_to_position(file_text, start_offset);
+        let end = offset_to_position(file_text, end_offset);
+        Some(crate::Range { start, end })
+    };
+
+    FrameInfo {
+        function: "<generator>".to_string(),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: Some(generator_file_path.to_path_buf()),
+        decl_range: None,
+        call_site_range,
+        fn_id: None,
+        element_index: None,
+        column_origin: None,
+        model_origin: None,
+        source_origin: None,
+    }
+}
+
+/// Phase 5 (meta-language-E2): append a `<generator>` frame onto an existing
+/// diagnostic's frame stack as the outermost (last) entry.
+///
+/// Per `expansion.md` §"Frame-stack invariants", frames are innermost-first →
+/// outermost-last. The `<generator>` frame is always outermost because the
+/// generator file is the entry point for the entire expansion chain.
+///
+/// If the diagnostic does not already carry `ExpansionFrames` data, a new
+/// single-element frame stack is created. This function mutates `diag` in place.
+///
+/// Pure function — no Salsa dependency.
+pub fn stamp_generator_frame_onto(diag: &mut Diagnostic, gen_frame: FrameInfo) {
+    let frames = match diag.data.take() {
+        Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+            // Append the generator frame as outermost (last in innermost-first order).
+            existing.push(gen_frame);
+            existing
+        }
+        _ => vec![gen_frame],
+    };
+    diag.data = Some(DiagnosticData::ExpansionFrames(frames));
+}
+
 fn check_function_body_inner(
     sig: &FunctionSig,
     body: &Expr,
@@ -466,7 +537,7 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // runtime DataType equivalent in Phase A.
         Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
-        // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid parameter sort.
+        // `Lambda<params, U>` (Phase B/F meta-language) — meta-only; not a valid parameter sort.
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
@@ -475,6 +546,8 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
         // Inference wiring lands in Phase 3/5.
         Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown,
+        // `ModelDef` — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
@@ -4029,6 +4102,180 @@ mod tests {
             result[2].path.contains("z_last"),
             "third must be z_last; got {}",
             result[2].path
+        );
+    }
+
+    // ── Phase 5 (E2): <generator> frame tests ─────────────────────────────────
+
+    /// Primary contract: `make_generator_frame` with non-empty `file_text` produces
+    /// `call_site_range = Some(<converted line/col range>)`.
+    ///
+    /// The spec requires `call_site_range = <range of the file's body expression>`
+    /// (expansion.md §"FrameInfo shape"). This test uses file_text long enough to
+    /// cover the byte range 30..50, verifies call_site_range is Some (not None),
+    /// and checks that all other fields match the spec contract.
+    ///
+    /// Test 1 from the plan TDD spec.
+    #[test]
+    fn generator_frame_stamps_at_generator_body_range() {
+        use smelt_parser::ast::Position;
+        use std::path::Path;
+
+        let generator_path = Path::new("models/cohorts.gen.sql");
+        // file_text: at least 50 bytes so the range 30..50 is fully within bounds.
+        // Use a realistic-looking generator file body fragment.
+        // Bytes 0-29: frontmatter/whitespace (30 chars), bytes 30-49: body start.
+        let file_text = "---\ngenerates: models\n---\n\n\n[ModelDef { name: 'us_west'";
+        assert!(
+            file_text.len() >= 50,
+            "file_text must be ≥50 bytes for the range 30..50; got {} bytes",
+            file_text.len()
+        );
+
+        // body_range covers bytes 30..50, which lands inside the file_text above.
+        let body_range = rowan::TextRange::new(30.into(), 50.into());
+
+        let frame = make_generator_frame(generator_path, body_range, file_text);
+
+        // Primary assertions: all spec-required fields.
+        assert_eq!(
+            frame.function, "<generator>",
+            "function field must be <generator>"
+        );
+        assert!(frame.fn_id.is_none(), "fn_id must be None (anonymous)");
+        assert_eq!(
+            frame.decl_path.as_deref(),
+            Some(Path::new("models/cohorts.gen.sql")),
+            "decl_path must be the generator file path"
+        );
+        assert!(frame.decl_range.is_none(), "decl_range must be None");
+        assert_eq!(frame.param, "", "param must be empty string");
+
+        // call_site_range must be Some when file_text is non-empty.
+        let range = frame
+            .call_site_range
+            .expect("call_site_range must be Some when file_text is non-empty");
+
+        // The byte offset 30 in file_text is after "---\ngenerates: models\n---\n\n\n"
+        // (4+19+4+1+1 = 29 bytes → offset 29 ends after the second '\n').
+        // Compute expected positions by counting newlines up to offsets 30 and 50.
+        let expected_start = smelt_parser::offset_to_position(file_text, 30);
+        let expected_end = smelt_parser::offset_to_position(file_text, 50);
+
+        assert_eq!(
+            range.start,
+            Position {
+                line: expected_start.line,
+                column: expected_start.column
+            },
+            "call_site_range.start must match byte offset 30 in file_text"
+        );
+        assert_eq!(
+            range.end,
+            Position {
+                line: expected_end.line,
+                column: expected_end.column
+            },
+            "call_site_range.end must match byte offset 50 in file_text"
+        );
+    }
+
+    /// Degenerate case: `make_generator_frame` with empty `file_text` produces
+    /// `call_site_range = None` (no byte-to-line context available).
+    ///
+    /// Kept as a companion to ensure the empty-text edge-case remains covered.
+    #[test]
+    fn generator_frame_with_empty_text_yields_none_call_site_range() {
+        use std::path::Path;
+
+        let generator_path = Path::new("models/cohorts.gen.sql");
+        let body_range = rowan::TextRange::new(30.into(), 80.into());
+
+        let frame = make_generator_frame(generator_path, body_range, "");
+
+        assert_eq!(
+            frame.function, "<generator>",
+            "function field must be <generator>"
+        );
+        assert!(frame.fn_id.is_none(), "fn_id must be None");
+        assert_eq!(
+            frame.decl_path.as_deref(),
+            Some(Path::new("models/cohorts.gen.sql")),
+            "decl_path must be the generator file path"
+        );
+        assert!(frame.decl_range.is_none(), "decl_range must be None");
+        assert_eq!(frame.param, "", "param must be empty string");
+        assert_eq!(
+            frame.call_site_range, None,
+            "call_site_range must be None when file_text is empty"
+        );
+    }
+
+    /// A diagnostic from inside a HOF chain inside a generator body carries the
+    /// `<generator>` frame at `frames.last()` (outermost) and the HOF anonymous
+    /// frame at `frames[0]` (innermost). The ordering is innermost-first per spec.
+    ///
+    /// This test uses `stamp_generator_frame` to push the `<generator>` frame
+    /// onto an already-frame-stamped diagnostic (simulating inner HOF frame
+    /// already present) and verifies the resulting frame order.
+    #[test]
+    fn generator_frame_outermost_with_hof_inner_frames() {
+        use std::path::Path;
+
+        // Build a diagnostic that already carries an inner `<map>` HOF frame.
+        let hof_frame = FrameInfo {
+            function: "<map>".to_string(),
+            param: String::new(),
+            bound_type: String::new(),
+            decl_path: None,
+            decl_range: None,
+            call_site_range: None,
+            fn_id: None,
+            element_index: None,
+            column_origin: None,
+            model_origin: None,
+            source_origin: None,
+        };
+        let mut inner_diag = Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: "RecordFieldUnknown: c.bogus".to_string(),
+            range: crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 5 },
+            },
+            code: None,
+            data: Some(DiagnosticData::ExpansionFrames(vec![hof_frame.clone()])),
+        };
+
+        // Now stamp the <generator> frame as outermost (appended = last in
+        // innermost-first ordering).
+        let gen_path = Path::new("models/cohorts.gen.sql");
+        let body_range = rowan::TextRange::new(0.into(), 10.into());
+        let gen_frame = make_generator_frame(gen_path, body_range, "");
+        stamp_generator_frame_onto(&mut inner_diag, gen_frame);
+
+        let frames = match &inner_diag.data {
+            Some(DiagnosticData::ExpansionFrames(f)) => f,
+            other => panic!("expected ExpansionFrames, got: {:?}", other),
+        };
+        assert_eq!(frames.len(), 2, "must have exactly 2 frames");
+        // frames[0] = innermost = HOF <map>
+        assert_eq!(
+            frames[0].function, "<map>",
+            "frames[0] must be the inner HOF frame"
+        );
+        // frames[1] = outermost = <generator>
+        assert_eq!(
+            frames[1].function, "<generator>",
+            "frames.last() must be <generator>"
+        );
+        assert!(
+            frames[1].fn_id.is_none(),
+            "<generator> frame fn_id must be None"
+        );
+        assert_eq!(
+            frames[1].decl_path.as_deref(),
+            Some(Path::new("models/cohorts.gen.sql"))
         );
     }
 }

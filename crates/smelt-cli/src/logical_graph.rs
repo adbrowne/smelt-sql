@@ -15,6 +15,13 @@ pub struct LogicalNode {
     pub incremental: Option<IncrementalConfig>,
     pub target: String,
     pub tags: Vec<String>,
+    /// For generator-emitted models: the workspace-relative path (with `/`
+    /// separators) of the generator `.sql` file that produced this model.
+    /// `None` for hand-authored models.
+    pub generator_file: Option<String>,
+    /// For generator-emitted models: the `ModelDef.name` value that produced
+    /// this emitted model. `None` for hand-authored models.
+    pub generator_name: Option<String>,
 }
 
 /// Describes a dependency edge that crosses backend boundaries.
@@ -69,18 +76,25 @@ impl LogicalGraph {
         // which the CLI dependency validator was previously missing.
         let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
+        // Collect unresolved (raw-path) deps alongside each model in a single pass.
+        // Deps are resolved to canonical node-name keys in a second pass once all
+        // models are in `nodes` and the `address_index` is built.
+        struct PendingNode {
+            model: ModelFile,
+            raw_dep_paths: Vec<Vec<String>>, // each element: one ref's path segments
+        }
+
+        let mut pending: Vec<PendingNode> = Vec::with_capacity(models.len());
+
+        // Pass 1: insert all models into `nodes` and build the address index.
+        // `address_index` maps `address_segments.join(".")` → `model.name` so that
+        // directory-qualified refs like `smelt.staging.stg_orders` can be resolved
+        // to the model registered as `"stg_orders"`.
+        let mut address_index: HashMap<String, String> = HashMap::new();
+
         for model in models {
-            // Extract model-to-model deps from Path-form refs.
-            //
-            // Phase 2 (unified-paths): after scan-root stripping, model refs
-            // have the form `smelt.<leaf>` or `smelt.<dir>.<leaf>` — no
-            // "models" prefix. Exclude only known non-model namespaces:
-            //   - "sources" (smelt.sources.schema.table)
-            //   - "functions" (smelt.functions.fn_name(...))
-            //
-            // All other paths are potential model/seed deps; `validate()` will
-            // flag any that don't appear in nodes, sources, or seeds.
-            let deps: Vec<String> = model
+            // Collect raw ref paths (pre-resolution).
+            let raw_dep_paths: Vec<Vec<String>> = model
                 .refs
                 .iter()
                 .filter_map(|r| {
@@ -90,9 +104,22 @@ impl LogicalGraph {
                     if matches!(first, Some("sources") | Some("functions")) {
                         return None;
                     }
-                    path.last().cloned()
+                    // Strip the legacy "models" namespace prefix (Phase 2 unified
+                    // paths eliminated it, but test helpers and some older workspaces
+                    // still use `smelt.models.<leaf>` form).
+                    let effective: Vec<String> = if first == Some("models") {
+                        path[1..].to_vec()
+                    } else {
+                        path.clone()
+                    };
+                    if effective.is_empty() {
+                        None
+                    } else {
+                        Some(effective)
+                    }
                 })
                 .collect();
+
             let metadata = model.metadata.as_ref().map(|b| b.as_ref());
 
             let materialization = config.get_materialization_with_metadata(&model.name, metadata);
@@ -112,18 +139,78 @@ impl LogicalGraph {
                 );
             }
 
+            // Build address index entry: address_segments.join(".") → name.
+            let addr_key = model.address_segments.join(".");
+            if !addr_key.is_empty() && addr_key != model.name {
+                address_index.insert(addr_key, model.name.clone());
+            }
+
             nodes.insert(
                 model.name.clone(),
                 LogicalNode {
                     name: model.name.clone(),
-                    dependencies: deps,
+                    // Placeholder — filled in during pass 2.
+                    dependencies: Vec::new(),
                     materialization,
                     incremental,
                     target,
                     tags,
-                    model_file: model,
+                    model_file: model.clone(),
+                    // Hand-authored models have no generator provenance.
+                    // Generator-emitted models are populated separately when
+                    // the generator pipeline feeds into the logical graph.
+                    generator_file: None,
+                    generator_name: None,
                 },
             );
+
+            pending.push(PendingNode {
+                model,
+                raw_dep_paths,
+            });
+        }
+
+        // Pass 2: resolve raw dep paths to canonical node-name keys.
+        //
+        // Resolution order:
+        //   1. Full dotted path as-is (e.g. "cohorts.us_west") — matches emitted models.
+        //   2. address_index lookup (e.g. "staging.stg_orders" → "stg_orders").
+        //   3. Leaf segment only (e.g. "stg_orders") — legacy and simple workspaces.
+        //
+        // Unresolved deps are kept as their full dotted path so `validate()` can
+        // surface a useful "references undefined model" error.
+        for p in pending {
+            let deps: Vec<String> = p
+                .raw_dep_paths
+                .into_iter()
+                .map(|segs| {
+                    let full = segs.join(".");
+                    // 1. Exact match in nodes (emitted models, or exact-name refs).
+                    if nodes.contains_key(&full) {
+                        return full;
+                    }
+                    // 2. Address index (directory-qualified refs like smelt.staging.stg_orders).
+                    if let Some(resolved) = address_index.get(&full) {
+                        return resolved.clone();
+                    }
+                    // 3. Leaf fallback (simple refs like smelt.stg_orders in old workspaces).
+                    if let Some(leaf) = segs.last() {
+                        if nodes.contains_key(leaf.as_str()) {
+                            return leaf.clone();
+                        }
+                        // Also try address_index by leaf alone.
+                        if let Some(resolved) = address_index.get(leaf.as_str()) {
+                            return resolved.clone();
+                        }
+                    }
+                    // Unresolvable: return full path for a meaningful validate() error.
+                    full
+                })
+                .collect();
+
+            if let Some(node) = nodes.get_mut(&p.model.name) {
+                node.dependencies = deps;
+            }
         }
 
         Ok(Self {
@@ -131,6 +218,25 @@ impl LogicalGraph {
             sources: source_set,
             seeds: seed_set,
         })
+    }
+
+    /// Annotate nodes whose names appear in `origins` with generator provenance.
+    ///
+    /// `origins` maps the model's smelt-path name (e.g. `"cohorts.us_west"`) to
+    /// `(generator_file_rel_path, generator_def_name)`.  Any node name not in
+    /// the map is left unchanged (its `generator_file`/`generator_name` remain
+    /// `None`).  This is called after `build()` when the emitted-models Salsa
+    /// pipeline has determined which survivors exist.
+    pub fn annotate_emitted_models(
+        &mut self,
+        origins: &std::collections::HashMap<String, (String, String)>,
+    ) {
+        for (name, (gen_file, gen_name)) in origins {
+            if let Some(node) = self.nodes.get_mut(name) {
+                node.generator_file = Some(gen_file.clone());
+                node.generator_name = Some(gen_name.clone());
+            }
+        }
     }
 
     // -- Validation ----------------------------------------------------------
@@ -315,6 +421,22 @@ impl LogicalGraph {
                     .filter(|node| node.tags.contains(tag))
                     .map(|node| node.name.clone())
                     .collect(),
+                // `GeneratorFile` selection requires the emitted-models pipeline.
+                // At the LogicalGraph level we match nodes whose `origin` field
+                // records the given generator path.
+                SelectionMethod::GeneratorFile { path } => {
+                    let path_str = path.to_string_lossy();
+                    self.nodes
+                        .values()
+                        .filter(|node| {
+                            node.generator_file
+                                .as_deref()
+                                .map(|gf| gf == path_str.as_ref())
+                                .unwrap_or(false)
+                        })
+                        .map(|node| node.name.clone())
+                        .collect()
+                }
             };
 
             for model_name in &direct_matches {

@@ -28,7 +28,11 @@
 # finish naturally; the next iteration will not start.
 #
 # Logs: ${HOME}/.claude/logs/meta-language-loop/iter-<ts>-<n>.log
-# Each iteration's full stdout+stderr is captured for post-hoc review.
+#       ${HOME}/.claude/logs/meta-language-loop/iter-<ts>-<n>.memory.log
+# Each iteration's full stdout+stderr is captured for post-hoc review,
+# alongside a periodic memory snapshot (free, top RSS processes, parent
+# cgroup memory.current / memory.peak) so the next systemd-oomd kill has
+# evidence to chew on.
 
 set -uo pipefail
 
@@ -43,12 +47,63 @@ mkdir -p "${LOG_DIR}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-25}"
 PERMISSION_MODE="${PERMISSION_MODE:-bypassPermissions}"
 MODEL="${MODEL:-opus}"
+SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-10}"
 
 SENTINEL_PHASE="<<PHASE_COMPLETE>>"
 SENTINEL_DONE="<<ALL_DONE>>"
 SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 
+# Prompt sent to each iteration. Anchors the agent on the plan files and the
+# sentinel emission contract — the wrapper greps the final .result for exactly
+# one sentinel and pauses without one. Override with $PROMPT.
+PROMPT="${PROMPT:-Resume the typed-meta-programming autonomy loop with fresh context.
+
+1. Read /home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md (meta-plan) and docs/plans/20260509-meta-language-overall.md (in-repo plan).
+2. Find the next \`pending\` row in the Progress tracking table. Execute that phase via /smelt:implement, commit, and push.
+
+CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_DONE}, or ${SENTINEL_PAUSE}, per meta-plan §\"Sentinel emission contract\". The wrapper script greps the final .result field for these; without one the loop pauses and you stall progress. If you emit ${SENTINEL_PAUSE}, put a one-line reason on the line above.}"
+
 cd "${REPO_ROOT}"
+
+# Find our cgroup (the tmux-spawn scope, when launched from tmux). systemd-oomd
+# kills a whole scope when it fires, so memory.current / memory.peak on this
+# path is the number to watch. Best-effort — empty if /proc/self/cgroup is
+# unreadable or we're not in a cgroup v2 hierarchy, in which case the sampler
+# falls back to system-wide stats only.
+SELF_CGROUP=""
+if [ -r /proc/self/cgroup ]; then
+    SELF_CGROUP="$(awk -F: '$1=="0"{print $3; exit}' /proc/self/cgroup 2>/dev/null || true)"
+fi
+
+# Background memory sampler. Writes a timestamped snapshot of system memory,
+# top RSS processes, and the parent cgroup's memory counters every
+# ${SAMPLE_INTERVAL}s. Without this we have no evidence whether rustc, cargo,
+# claude, or something else was the heaviest tenant when oomd next pulls the
+# trigger.
+sample_memory() {
+    local out="$1"
+    while true; do
+        {
+            echo "===== $(date -Is) ====="
+            echo "--- free -m ---"
+            free -m
+            echo
+            echo "--- top 20 processes by RSS (kB) ---"
+            ps -eo rss=,pid=,user=,comm=,args= --sort=-rss 2>/dev/null | head -20
+            if [ -n "${SELF_CGROUP}" ] && [ -d "/sys/fs/cgroup${SELF_CGROUP}" ]; then
+                echo
+                echo "--- cgroup ${SELF_CGROUP} ---"
+                for f in memory.current memory.peak memory.swap.current pids.current; do
+                    if [ -r "/sys/fs/cgroup${SELF_CGROUP}/${f}" ]; then
+                        printf '  %-22s %s\n' "${f}" "$(cat "/sys/fs/cgroup${SELF_CGROUP}/${f}")"
+                    fi
+                done
+            fi
+            echo
+        } >> "${out}" 2>&1
+        sleep "${SAMPLE_INTERVAL}"
+    done
+}
 
 echo "===== Autonomy loop starting ====="
 echo "Repo:            ${REPO_ROOT}"
@@ -56,22 +111,41 @@ echo "Logs:            ${LOG_DIR}"
 echo "Max iterations:  ${MAX_ITERATIONS}"
 echo "Permission mode: ${PERMISSION_MODE}"
 echo "Model:           ${MODEL}"
+echo "Sample interval: ${SAMPLE_INTERVAL}s"
 echo "Sentinels:       ${SENTINEL_PHASE} | ${SENTINEL_DONE} | ${SENTINEL_PAUSE}"
+echo "Cgroup watched:  ${SELF_CGROUP:-<unknown — sampler will skip cgroup stats>}"
 echo
 
 iteration=0
 exit_reason="unknown"
+sampler_pid=""
 
-trap 'echo; echo "===== Interrupted by user ====="; exit 130' INT TERM
+trap 'echo; echo "===== Interrupted by user ====="; [ -n "${sampler_pid}" ] && kill "${sampler_pid}" 2>/dev/null; exit 130' INT TERM
 
 while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   iteration=$((iteration + 1))
   ts="$(date +%Y%m%dT%H%M%S)"
   log="${LOG_DIR}/iter-${ts}-$(printf '%02d' "${iteration}").log"
+  memlog="${LOG_DIR}/iter-${ts}-$(printf '%02d' "${iteration}").memory.log"
 
   echo "===== Iteration ${iteration} of ${MAX_ITERATIONS} | ${ts} ====="
-  echo "Log: ${log}"
+  echo "Log:        ${log}"
+  echo "Memory log: ${memlog}"
   echo
+
+  # Reset the cgroup peak counter (cgroup v2 ≥ 6.5) so memory.peak in this
+  # iter's samples reflects only this iteration, not the high-water mark
+  # carried over from prior iterations. Silently no-ops on older kernels.
+  if [ -n "${SELF_CGROUP}" ] && [ -w "/sys/fs/cgroup${SELF_CGROUP}/memory.peak" ]; then
+      echo 0 > "/sys/fs/cgroup${SELF_CGROUP}/memory.peak" 2>/dev/null || true
+  fi
+
+  # Start the sampler before claude so we capture the baseline + ramp. It
+  # runs in the same cgroup as the wrapper; if oomd kills the cgroup the
+  # sampler dies too, but every snapshot up to that moment is already on
+  # disk and survives.
+  sample_memory "${memlog}" &
+  sampler_pid=$!
 
   # --print:                         headless, single response, exit
   # --permission-mode:               unattended; bypass by default (autonomy loop)
@@ -79,15 +153,19 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # --model:                         orchestrator on opus per meta-plan
   # --output-format json:            single-envelope result with .usage + .total_cost_usd,
   #                                  so we can record per-iteration spend below.
-  #                                  Sentinels still grep-able from the raw text.
-  # Prompt is "continue" — Claude reads plan files to discover Phase X.
+  #                                  Sentinel grepped from .result via jq below.
   claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --no-session-persistence \
     --model "${MODEL}" \
     --output-format json \
-    "continue" 2>&1 | tee "${log}"
+    "${PROMPT}" 2>&1 | tee "${log}"
   rc="${PIPESTATUS[0]}"
+
+  # Always stop the sampler before any break/continue below.
+  kill "${sampler_pid}" 2>/dev/null || true
+  wait "${sampler_pid}" 2>/dev/null || true
+  sampler_pid=""
 
   # Capture per-iteration token usage to .claude/usage-log.jsonl. The json
   # envelope from `claude --output-format json` includes .usage and
@@ -123,21 +201,33 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     break
   fi
 
-  # Inspect the log for sentinels (last write wins; check exact precedence).
-  if grep -qF "${SENTINEL_DONE}" "${log}"; then
-    echo "===== ${SENTINEL_DONE} detected — loop complete ====="
+  # Sentinels must appear in the agent's final user-facing message (.result),
+  # not anywhere in the streamed log. Plan files document the sentinel strings,
+  # so reading them produces tool_use_result payloads that contain the literals
+  # verbatim — grepping the whole log false-positives. Extract just .result.
+  final_result="$(jq -r 'select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
+
+  if [ -z "${final_result}" ]; then
+    echo "===== Could not extract final .result from log — pausing loop ====="
+    echo "(Expected a JSON envelope with .type == \"result\". Check the log: ${log})"
+    exit_reason="no_result_envelope"
+    break
+  fi
+
+  if printf '%s' "${final_result}" | grep -qF "${SENTINEL_DONE}"; then
+    echo "===== ${SENTINEL_DONE} detected in final result — loop complete ====="
     exit_reason="all_done"
     break
-  elif grep -qF "${SENTINEL_PAUSE}" "${log}"; then
-    echo "===== ${SENTINEL_PAUSE} detected — surface to user ====="
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_PAUSE}"; then
+    echo "===== ${SENTINEL_PAUSE} detected in final result — surface to user ====="
     exit_reason="paused"
     break
-  elif grep -qF "${SENTINEL_PHASE}" "${log}"; then
-    echo "===== ${SENTINEL_PHASE} detected — starting next iteration ====="
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_PHASE}"; then
+    echo "===== ${SENTINEL_PHASE} detected in final result — starting next iteration ====="
     continue
   else
-    echo "===== No sentinel detected — pausing loop ====="
-    echo "(This is unexpected. Check the log: ${log})"
+    echo "===== No sentinel in final result — pausing loop ====="
+    echo "(The agent's final message did not contain a sentinel. Check the log: ${log})"
     exit_reason="no_sentinel"
     break
   fi

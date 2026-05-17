@@ -1,6 +1,6 @@
 # Config Variables
 
-The meta-language provides **`smelt.config.var`** — a compile-time variable lookup that reads values from the `vars:` block of your workspace's `smelt.yml`. The workspace is known at compile time, and `smelt.config.var` makes that knowledge available as a `Text` value inside your models.
+The meta-language provides **`smelt.config.var`** — a compile-time variable lookup that reads values from the `vars:` block of your workspace's `smelt.yml`. The workspace is known at compile time, and `smelt.config.var` makes that knowledge available as a `Text` value inside your models. For structured multi-value configuration, see [Config Loaders](config-loaders.md). To branch on a variable's value at compile time, use the [ternary](ternary.md) expression: `if smelt.config.var('env') = 'prod' then … else …`.
 
 ## Syntax
 

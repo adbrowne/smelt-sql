@@ -31,6 +31,8 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 
 **Mid-phase commit rule.** Never carry mid-phase state across a session reset. If a phase's commits don't all land together, treat the phase as not-done and re-run `/smelt:implement` from scratch on the same plan.
 
+**Subagent model rule.** The outer orchestrator runs on `opus` (autonomy loop default). Every delegated subagent — implementer, reviewer, every expert in the per-phase reviewer table (`parser-expert`, `type-expert`, `lsp-expert`, `docs-reviewer`, etc.), and any nested implementer dispatched to address findings — MUST be spawned with `model: "sonnet"` on the Agent tool. **Do not omit the `model` parameter** — without it, the subagent inherits `opus` from the parent, which silently burns the budget and was the failure mode of an earlier session. The single exception is when the per-phase plan header explicitly says otherwise. This mirrors the directive in `.claude/commands/smelt/implement.md` (lines 34, 51) and the per-phase reviewer tables (e.g. `20260509-meta-language-E1.md` rows pinned to `sonnet`).
+
 ## Phase status
 
 | # | Phase | Status | Plan path | Date | Commit |
@@ -40,10 +42,10 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 | B | HOFs, lambdas, pipe `\|>`, contextual reducers, `smelt.config.var` | done | `docs/plans/20260509-meta-language-B.md` | 2026-05-10 | 7380a94 |
 | C | Reflection narrow: `smelt.columns_of`, `ColumnRef` | done | `docs/plans/20260509-meta-language-C.md` | 2026-05-12 | 4a4c3e2 |
 | D | Reflection wide: `smelt.models.*`, `smelt.sources.*` | done | `docs/plans/20260509-meta-language-D.md` | 2026-05-13 | e6d9437 |
-| E1 | Records, `Map<K,V>`, YAML/JSON loaders | pending | `docs/plans/20260509-meta-language-E1.md` | — | — |
-| E2 | Multi-model production: `generates: models` frontmatter, `ModelDef` | pending | `docs/plans/20260509-meta-language-E2.md` | — | — |
-| F | Polish: parameterised reducers, multi-arg lambdas, ternary | pending | `docs/plans/20260509-meta-language-F.md` | — | — |
-| G | LSP completeness sweep, docs-site rewrite, `/smelt-loop` tier-3 | pending | `docs/plans/20260509-meta-language-G.md` | — | — |
+| E1 | Records, `Map<K,V>`, YAML/JSON loaders | done | `docs/plans/20260509-meta-language-E1.md` | 2026-05-14 | b9df522 |
+| E2 | Multi-model production: `generates: models` frontmatter, `ModelDef` | done | `docs/plans/20260509-meta-language-E2.md` | 2026-05-16 | e2aa122 |
+| F | Polish: parameterised reducers, multi-arg lambdas, ternary | done | `docs/plans/20260509-meta-language-F.md` | 2026-05-17 | e1f62df0 |
+| G | LSP completeness sweep, docs-site rewrite, `/smelt-loop` tier-3 | done | `docs/plans/20260509-meta-language-G.md` | 2026-05-17 | a77de490 |
 
 ## In scope
 

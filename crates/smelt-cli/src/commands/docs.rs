@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
 use smelt_cli::{
-    discover_python_models, find_project_root, parse_selector, Config, LogicalGraph,
-    ModelDiscovery, SourcesConfig,
+    discover_emitted_model_files, discover_python_models, find_project_root, init_db,
+    parse_selector, Config, LogicalGraph, ModelDiscovery, ModelFile, SourcesConfig,
 };
 
 use crate::DocsGenerateArgs;
@@ -98,9 +98,27 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
     let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let mut models = discovery
+    let sql_models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
+
+    // Build Salsa DB from all raw SQL files (including generator files) so
+    // the emitted-models pipeline can run via `smelt_db::emitted_models()`.
+    let db_emitted = init_db(&project_dir, &sql_models);
+
+    // Discover generator-emitted models and their provenance.
+    let (emitted_model_files, origins) =
+        discover_emitted_model_files(&db_emitted, &project_dir, &config.paths);
+
+    // Build the model list:
+    //   - Exclude generator files (.gen.sql) from the hand-authored set so they
+    //     don't appear as both a generator and a regular model.
+    //   - Include the emitted virtual ModelFile entries produced above.
+    let mut models: Vec<ModelFile> = sql_models
+        .into_iter()
+        .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
+        .collect();
+    models.extend(emitted_model_files);
 
     // Filter out test models
     models.retain(|m| !m.is_test());
@@ -127,7 +145,7 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(
+    let mut graph = LogicalGraph::build(
         models.clone(),
         sources.as_ref(),
         &seeds,
@@ -135,6 +153,10 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         default_target,
     )
     .with_context(|| "Failed to build logical graph")?;
+
+    // Annotate generator-emitted nodes with their provenance before validation
+    // so that any selector-based graph rebuild below also retains annotations.
+    graph.annotate_emitted_models(&origins);
 
     graph
         .validate()
@@ -153,20 +175,23 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .into_iter()
             .filter(|m| selected.contains(&m.name))
             .collect();
-        LogicalGraph::build(
+        let mut filtered_graph = LogicalGraph::build(
             filtered_models,
             sources.as_ref(),
             &seeds,
             &config,
             default_target,
         )
-        .with_context(|| "Failed to build filtered logical graph")?
+        .with_context(|| "Failed to build filtered logical graph")?;
+        // Re-apply provenance annotations to the filtered graph.
+        filtered_graph.annotate_emitted_models(&origins);
+        filtered_graph
     } else {
         graph
     };
 
-    // Initialize Salsa DB for type inference
-    let db = smelt_cli::init_db(
+    // Initialize Salsa DB for type inference (uses the final post-filter model set).
+    let db = init_db(
         &project_dir,
         &graph
             .iter_models()

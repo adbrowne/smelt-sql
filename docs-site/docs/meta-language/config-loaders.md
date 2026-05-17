@@ -1,13 +1,13 @@
 # Config Loaders
 
-The meta-language provides a **file-loader family** that reads compile-time configuration from disk and returns typed meta-world values. Loaders are the primary source of `Map<Text, V>` and complex `List<Record>` values.
+The meta-language provides a **file-loader family** that reads compile-time configuration from disk and returns typed meta-world values. Loaders are the primary source of `Map<Text, V>` and complex [`List<Record>`](lists.md) values. A common pattern is to load a YAML file as a `List<MyRecord>` and pass the result to a [generator file](generators.md) that produces one model per record via [`map`](hofs.md#map).
 
 ```sql
 smelt.config.load_yaml(path, schema)
 smelt.config.load_json(path, schema)
 ```
 
-`smelt.config.load_toml(path, schema)` is **reserved** and not yet available. Calling it emits `ConfigLoaderTomlNotYetSupported`.
+`smelt.config.load_toml(path, schema)` is **reserved**. Calling it emits `ConfigLoaderTomlNotYetSupported`.
 
 ## Path argument
 

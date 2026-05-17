@@ -96,7 +96,7 @@ fn render_index(catalog: &Catalog) -> String {
     out
 }
 
-fn render_model_page(model: &crate::docs::CatalogModel) -> String {
+pub fn render_model_page(model: &crate::docs::CatalogModel) -> String {
     let mut out = String::new();
 
     out.push_str(&format!("# {}\n\n", model.name));
@@ -112,6 +112,17 @@ fn render_model_page(model: &crate::docs::CatalogModel) -> String {
     }
     if !model.tags.is_empty() {
         out.push_str(&format!("**Tags**: {}\n", model.tags.join(", ")));
+    }
+    // Generator-emitted models: surface generator file and ModelDef name.
+    if let Some(smelt_core::ModelOriginKind::Generated {
+        ref generator_file,
+        ref generator_name,
+    }) = model.origin
+    {
+        out.push_str(&format!(
+            "**Source**: {} ({})\n",
+            generator_file, generator_name
+        ));
     }
     out.push('\n');
 

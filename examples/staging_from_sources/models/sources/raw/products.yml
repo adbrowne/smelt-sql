@@ -1,0 +1,12 @@
+description: Raw product catalog from the production database
+tags: [raw]
+columns:
+  - name: id
+    type: INTEGER
+    description: Product identifier
+  - name: name
+    type: VARCHAR
+    description: Product display name
+  - name: price
+    type: DOUBLE
+    description: List price

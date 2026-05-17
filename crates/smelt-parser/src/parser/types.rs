@@ -84,7 +84,21 @@ impl<'a> Parser<'a> {
     /// The caller must have verified `self.at(LBRACE)` first.
     pub(super) fn parse_record_type_inline(&mut self) {
         self.start_node(RECORD_TYPE_INLINE);
+        if self.too_deep() {
+            // Bail out — emit an empty RECORD_TYPE_INLINE and skip the body.
+            // Recovery: advance past the `{`, then sync to the next sane boundary
+            // so the outer parser can continue.
+            self.advance(); // consume `{`
+            self.sync_to(&[RBRACE, COMMA, EOF]);
+            if self.at(RBRACE) {
+                self.advance();
+            }
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
         self.parse_record_body_as_type();
+        self.depth -= 1;
         self.finish_node(); // RECORD_TYPE_INLINE
     }
 
@@ -173,6 +187,19 @@ impl<'a> Parser<'a> {
     /// Error recovery: missing value → advance to COMMA/RBRACE sync point.
     pub(super) fn parse_record_literal(&mut self) {
         self.start_node(RECORD_LITERAL);
+        self.parse_record_literal_body();
+        self.finish_node(); // RECORD_LITERAL
+    }
+
+    /// Parse the body of a record literal starting at `{`, including the closing `}`.
+    ///
+    /// This is the shared inner implementation used by both the anonymous `{…}`
+    /// form (`parse_record_literal`) and the named `TypeName {…}` form (where
+    /// the caller has already started a RECORD_LITERAL node via a checkpoint
+    /// and consumed the leading IDENT).
+    ///
+    /// Precondition: `self.at(LBRACE)`.
+    pub(super) fn parse_record_literal_body(&mut self) {
         self.advance(); // consume `{`
 
         loop {
@@ -199,8 +226,16 @@ impl<'a> Parser<'a> {
             if self.at(COLON) {
                 self.advance(); // COLON
                 self.skip_trivia();
-                // Parse the value expression.
-                if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                // Parse the value expression. When the field value starts with
+                // a SQL statement keyword (SELECT, WITH, VALUES), parse it as a
+                // SQL statement rather than a meta-language expression. This
+                // allows record fields like `body: SELECT * FROM orders` to
+                // parse without errors inside generator-file record literals.
+                if self.at(SELECT_KW) || self.at(WITH_KW) {
+                    self.parse_select_stmt();
+                } else if self.at(VALUES_KW) {
+                    self.parse_values_clause();
+                } else if !self.at_any(&[COMMA, RBRACE, EOF]) {
                     self.parse_expression();
                 } else {
                     // Missing value — emit an error token for recovery.
@@ -234,8 +269,6 @@ impl<'a> Parser<'a> {
         } else {
             self.error("Expected '}' to close record literal".to_string());
         }
-
-        self.finish_node(); // RECORD_LITERAL
     }
 
     /// Returns true when the current `{` starts a record literal rather than a

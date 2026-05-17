@@ -4,10 +4,10 @@ use chrono::{NaiveDate, Utc};
 use smelt_backend::PartitionSpec;
 use smelt_cli::{
     compiler::UpstreamSchemas, compute_batches_for_model, compute_incremental_windows,
-    discover_python_models, executor, find_project_root, init_db, inject_time_filter, migration,
-    parse_selector, BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph,
-    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
-    TimeRange,
+    discover_emitted_model_files, discover_python_models, executor, find_project_root, init_db,
+    inject_time_filter, migration, parse_selector, BackendRegistry, BackfillOptions,
+    CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
+    PhysicalStrategy, SourcesConfig, TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -71,12 +71,37 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // 3. Discover models (SQL + Python)
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let mut models = discovery
+    let raw_sql_models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    // Filter out test models — they shouldn't be materialized
-    models.retain(|m| !m.is_test());
+    // Initialise a Salsa DB from ALL discovered files (including generator files
+    // whose meta-language bodies contain parse errors when treated as SQL). The DB
+    // is used by the emitted-models pipeline below.
+    let gen_salsa_db = init_db(&project_dir, &raw_sql_models);
+
+    // Phase E2: expand generator files (*.gen.sql / `generates: models` frontmatter)
+    // into virtual ModelFile entries via the Salsa emitted-models pipeline.
+    let (emitted_model_files, _origins) =
+        discover_emitted_model_files(&gen_salsa_db, &project_dir, &config.paths);
+    if !emitted_model_files.is_empty() {
+        info!(
+            "Generator pipeline produced {} emitted model(s)",
+            emitted_model_files.len()
+        );
+    }
+
+    // Build the working model list:
+    // • exclude generator files (they are not materialisable SQL models; their
+    //   body is a meta-language expression, not a SELECT statement)
+    // • exclude test models (handled separately by `smelt test`)
+    // • add emitted virtual models
+    let mut models: Vec<smelt_cli::ModelFile> = raw_sql_models
+        .into_iter()
+        .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
+        .filter(|m| !m.is_test())
+        .collect();
+    models.extend(emitted_model_files);
 
     // Discover function files (smelt.define / smelt.extern). These are NOT
     // materialisable models (they don't enter the LogicalGraph) but they must

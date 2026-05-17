@@ -225,12 +225,23 @@ pub enum DiagnosticCode {
     /// "lambda is only valid as an argument to a higher-order function".
     /// Introduced in Phase 3 of the meta-language plan (Phase B).
     LambdaInForbiddenPosition,
-    /// Emitted when a lambda with more than one parameter (`fn (a, b) => body`)
-    /// is used in Phase B. Multi-arg lambdas are reserved for Phase F.
-    /// Message: "multi-argument lambdas are not supported in v1; use a single parameter".
-    /// Anchored at the lambda parameter list span.
-    /// Introduced in Phase 3 of the meta-language plan (Phase B).
-    LambdaArityNotSupported,
+    /// Emitted when a lambda passed to a HOF has a different arity from what
+    /// the HOF expects. For `map`/`filter` arity-1 is required; `reduce` takes
+    /// a reducer (not a lambda). Mismatch → `LambdaArityMismatch`.
+    /// Message: "{hof} expects a lambda of arity {expected}; found arity {actual}".
+    /// Anchored at the lambda span.
+    /// Introduced in Phase F of the meta-language plan.
+    LambdaArityMismatch,
+    /// Emitted when a lambda has zero parameters (`fn () => body`).
+    /// Message: "lambda must declare at least one parameter".
+    /// Anchored at the lambda parameter list span (or the `fn` keyword).
+    /// Introduced in Phase F of the meta-language plan.
+    LambdaZeroParameters,
+    /// Emitted when a lambda parameter list contains the same name twice.
+    /// Message: "parameter `{name}` already appears in this lambda's parameter list".
+    /// Anchored at the second occurrence's IDENT span.
+    /// Introduced in Phase F of the meta-language plan.
+    LambdaDuplicateParameter,
     /// Emitted when the lambda body's synthesised type is incompatible with
     /// the HOF's required result shape (e.g. `filter` requires `Boolean`).
     /// Message: "{hof} requires lambda result {expected}; found {actual}".
@@ -279,6 +290,64 @@ pub enum DiagnosticCode {
     /// Anchored at the `reduce` call span.
     /// Introduced in Phase 3 of the meta-language plan (Phase B).
     ReducerEmptyNoIdentity,
+    /// Emitted when a parameterised reducer call has the wrong number of
+    /// positional arguments.
+    /// Message: "reducer {r} expects {expected} argument(s); found {actual}".
+    /// Anchored at the `REDUCER_CALL` node span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerArityMismatch,
+    /// Emitted when a parameterised reducer argument has the wrong type.
+    /// Message: "reducer {r}'s argument `{param}` expects {expected}; found {actual}".
+    /// Anchored at the offending argument expression span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerArgTypeMismatch,
+    /// Emitted when a parameterised reducer argument is a runtime expression
+    /// rather than a compile-time value.
+    /// Message: "reducer {r}'s argument `{param}` must be a compile-time value; found {actual}".
+    /// Anchored at the offending argument expression span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerArgNotCompileTime,
+    /// Emitted when a parameterised reducer call uses named arguments.
+    /// Message: "reducer {r} takes positional arguments only".
+    /// Anchored at the named argument span.
+    /// Introduced in Phase F of the meta-language plan.
+    ReducerNamedArgument,
+    /// Emitted when the ternary condition expression is not Boolean.
+    /// Message: "ternary condition expects Boolean; found {actual}".
+    /// Anchored at the condition expression span.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryConditionNotBoolean,
+    /// Emitted when the then-branch and else-branch of a ternary have
+    /// incompatible types that cannot be unified.
+    /// Message: "ternary branches have incompatible types: {then_type} vs {else_type}".
+    /// Anchored at the `else` keyword span.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryBranchTypeMismatch,
+    /// Emitted when a `smelt.define`, `smelt.record`, or lambda parameter is
+    /// declared with a name that is a reserved ternary keyword.
+    /// Message: "{name} is a reserved meta-language keyword".
+    /// Anchored at the offending name token.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryKeywordShadowed,
+    /// Emitted when a ternary expression appears in a Data-World (SQL) splice
+    /// position. `if-then-else` is meta-only; SQL has `CASE WHEN`.
+    /// Message: "if-then-else is meta-only; use SQL CASE WHEN in this position".
+    /// Anchored at the `if` keyword span.
+    ///
+    /// Note: pure-inference may not have enough parent-context to detect this.
+    /// Phase 3 (`check_file_diagnostics`) wires the splice-context check.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryInDataPosition,
+    /// Emitted when a `then` keyword appears outside of an `if ... then ...` form.
+    /// Message: "unexpected `then` keyword outside of `if ... then ...` form".
+    /// Anchored at the `then` token.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryDanglingThen,
+    /// Emitted when an `else` keyword appears outside of a `... then ... else` form.
+    /// Message: "unexpected `else` keyword outside of `... then ... else` form".
+    /// Anchored at the `else` token.
+    /// Introduced in Phase F of the meta-language plan.
+    TernaryDanglingElse,
     /// Emitted when `smelt.config.var(<name>)` is called and `<name>` is not
     /// present in `smelt.yml` `vars:`. Message:
     /// "compile-time variable {name} not declared in smelt.yml vars".
@@ -475,6 +544,50 @@ pub enum DiagnosticCode {
     /// Severity: Warning.
     /// Message: "null value at {row} coerced to empty string; declare a default in the source file"
     ConfigLoaderNullCoercion,
+
+    // ── Multi-model production diagnostic codes ──────────────────────────────
+    /// `generates:` value other than `models` was supplied.
+    /// Anchored at the YAML value token.
+    /// Message: "generates must be `models`; found {value}"
+    GeneratesUnknownValue,
+    /// `generates: models` frontmatter combined with `name:` field or with
+    /// Layer-1 `--- name: foo ---` section delimiters.
+    /// Anchored at the offending key / delimiter.
+    /// Message: "generates: models cannot coexist with bare-model identity (name field or section delimiter)"
+    GeneratesMixedWithBareModel,
+    /// Generator file body contains a top-level bare SELECT / WITH / VALUES.
+    /// Anchored at the offending statement.
+    /// Message: "generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape"
+    GenerateFileBareSelectForbidden,
+    /// Generator file body synthesises a type not assignable to `List<ModelDef>`.
+    /// Anchored at the body expression.
+    /// Message: "generator file body must evaluate to List<ModelDef>; found {actual}"
+    GenerateFileBodyTypeError,
+    /// `ModelDef {…}` record literal in a non-generator-file context.
+    /// Anchored at the literal's opening brace.
+    /// Message: "ModelDef literals are only valid inside a `generates: models` file body"
+    ModelDefOutsideGeneratorFile,
+    /// `ModelDef.name` value is empty or contains non-path-safe characters.
+    /// Anchored at the field value expression.
+    /// Message: "ModelDef.name must be a non-empty Text of [A-Za-z0-9_]+; found {value}"
+    ModelDefInvalidName,
+    /// `ModelDef.materialization` value not in `{'view', 'table', 'incremental'}`.
+    /// Anchored at the field value expression.
+    /// Message: "ModelDef.materialization must be one of view, table, incremental; found {value}"
+    ModelDefInvalidMaterialization,
+    /// Two `ModelDef`s in the same generator emit with the same `name`.
+    /// Anchored at the second occurrence's name field value.
+    /// Message: "duplicate ModelDef.name `{name}` in this generator file"
+    ModelDefDuplicateName,
+    /// Generator-emitted path collides with a hand-authored model or another
+    /// generator's emission.
+    /// Anchored at the offending `ModelDef`'s name field value.
+    /// Message: "ModelDef emits `{smelt_path}` which collides with {other_path}"
+    ModelDefHandAuthoredCollision,
+    /// A generator's body invokes `smelt.models.with_tag` or `smelt.models.all`.
+    /// Anchored at the `smelt.models.*` call site.
+    /// Message: "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references"
+    GeneratorBodyForbidsModelReflection,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -578,23 +691,27 @@ pub fn meta_list_diagnostic_message(
     }
 }
 
-/// Render the diagnostic message for Phase B (meta-language) HOF, lambda, pipe,
-/// reducer, and `smelt.config.var` diagnostic codes.
+/// Render the diagnostic message for Phase B / Phase F (meta-language) HOF, lambda,
+/// pipe, reducer, ternary, and `smelt.config.var` diagnostic codes.
 ///
 /// Parameters:
-/// - `code`: one of the fourteen Phase B `DiagnosticCode` variants.
-/// - `hof`: HOF name for `LambdaResultTypeMismatch`, `HofExpectsLambda` (e.g. `"map"`).
-/// - `name`: function/reducer/variable name for `HofNameShadowed`, `ReducerNameShadowed`,
-///   `ConfigVarNotFound`, `ConfigVarNullCoercion`.
-/// - `expected`: expected type string for `LambdaResultTypeMismatch`.
-/// - `actual`: actual type string for `LambdaResultTypeMismatch`, `HofExpectsLambda`,
-///   `HofExpectsReducer`.
-/// - `reducer`: reducer name for `ReducerInputTypeMismatch`, `ReducerEmptyNoIdentity`.
-/// - `t_in`: expected input element type string for `ReducerInputTypeMismatch`.
-/// - `t_actual`: actual input element type string for `ReducerInputTypeMismatch`.
+/// - `code`: one of the Phase B/F `DiagnosticCode` variants.
+/// - `hof`: HOF name for `LambdaResultTypeMismatch`, `HofExpectsLambda`,
+///   `LambdaArityMismatch` (e.g. `"map"`).
+/// - `name`: function/reducer/variable/keyword name for `HofNameShadowed`,
+///   `ReducerNameShadowed`, `ConfigVarNotFound`, `ConfigVarNullCoercion`,
+///   `TernaryKeywordShadowed`, `LambdaDuplicateParameter`.
+/// - `expected`: expected type or arity string.
+/// - `actual`: actual type or arity string.
+/// - `reducer`: reducer name for `ReducerInputTypeMismatch`, `ReducerEmptyNoIdentity`,
+///   `ReducerArityMismatch`, `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`,
+///   `ReducerNamedArgument`.
+/// - `t_in`: expected input element type string for `ReducerInputTypeMismatch`; or
+///   parameter name for `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`.
+/// - `t_actual`: actual input element type string for `ReducerInputTypeMismatch`,
+///   or actual type for `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`.
 ///
-/// Returns the exact message string specified in `meta_language.md` §"Diagnostic
-/// codes (new in Phase B)".
+/// Returns the exact message string specified in `meta_language.md` §"Diagnostic codes".
 #[allow(clippy::too_many_arguments)]
 pub fn meta_hof_diagnostic_message(
     code: DiagnosticCode,
@@ -610,8 +727,24 @@ pub fn meta_hof_diagnostic_message(
         DiagnosticCode::LambdaInForbiddenPosition => {
             "lambda is only valid as an argument to a higher-order function".to_string()
         }
-        DiagnosticCode::LambdaArityNotSupported => {
-            "multi-argument lambdas are not supported in v1; use a single parameter".to_string()
+        DiagnosticCode::LambdaArityMismatch => {
+            let h = hof.unwrap_or("HOF");
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!(
+                "{} expects a lambda of arity {}; found arity {}",
+                h, exp, act
+            )
+        }
+        DiagnosticCode::LambdaZeroParameters => {
+            "lambda must declare at least one parameter".to_string()
+        }
+        DiagnosticCode::LambdaDuplicateParameter => {
+            let n = name.unwrap_or("?");
+            format!(
+                "parameter `{}` already appears in this lambda's parameter list",
+                n
+            )
         }
         DiagnosticCode::LambdaResultTypeMismatch => {
             let h = hof.unwrap_or("HOF");
@@ -652,6 +785,61 @@ pub fn meta_hof_diagnostic_message(
             let r = reducer.unwrap_or("?");
             format!("reducer {} has no identity for an empty list", r)
         }
+        DiagnosticCode::ReducerArityMismatch => {
+            let r = reducer.unwrap_or("?");
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!("reducer {} expects {} argument(s); found {}", r, exp, act)
+        }
+        DiagnosticCode::ReducerArgTypeMismatch => {
+            let r = reducer.unwrap_or("?");
+            let param = t_in.unwrap_or("?");
+            let exp = expected.unwrap_or("?");
+            let act = t_actual.unwrap_or("?");
+            format!(
+                "reducer {}'s argument `{}` expects {}; found {}",
+                r, param, exp, act
+            )
+        }
+        DiagnosticCode::ReducerArgNotCompileTime => {
+            let r = reducer.unwrap_or("?");
+            let param = t_in.unwrap_or("?");
+            let act = t_actual.unwrap_or("?");
+            format!(
+                "reducer {}'s argument `{}` must be a compile-time value; found {}",
+                r, param, act
+            )
+        }
+        DiagnosticCode::ReducerNamedArgument => {
+            let r = reducer.unwrap_or("?");
+            format!("reducer {} takes positional arguments only", r)
+        }
+        DiagnosticCode::TernaryConditionNotBoolean => {
+            let act = actual.unwrap_or("?");
+            format!("ternary condition expects Boolean; found {}", act)
+        }
+        DiagnosticCode::TernaryBranchTypeMismatch => {
+            // t_in = then_type, t_actual = else_type
+            let then_ty = t_in.unwrap_or("?");
+            let else_ty = t_actual.unwrap_or("?");
+            format!(
+                "ternary branches have incompatible types: {} vs {}",
+                then_ty, else_ty
+            )
+        }
+        DiagnosticCode::TernaryKeywordShadowed => {
+            let n = name.unwrap_or("?");
+            format!("{} is a reserved meta-language keyword", n)
+        }
+        DiagnosticCode::TernaryInDataPosition => {
+            "if-then-else is meta-only; use SQL CASE WHEN in this position".to_string()
+        }
+        DiagnosticCode::TernaryDanglingThen => {
+            "unexpected `then` keyword outside of `if ... then ...` form".to_string()
+        }
+        DiagnosticCode::TernaryDanglingElse => {
+            "unexpected `else` keyword outside of `... then ... else` form".to_string()
+        }
         DiagnosticCode::ConfigVarNotFound => {
             let n = name.unwrap_or("?");
             format!("compile-time variable {} not declared in smelt.yml vars", n)
@@ -666,7 +854,7 @@ pub fn meta_hof_diagnostic_message(
                 n
             )
         }
-        _ => panic!("meta_hof_diagnostic_message called with non-Phase-B code"),
+        _ => panic!("meta_hof_diagnostic_message called with non-Phase-B/F code"),
     }
 }
 
@@ -977,5 +1165,211 @@ pub fn meta_loader_diagnostic_message(
             "meta_loader_diagnostic_message called with non-loader code: {:?}",
             code
         ),
+    }
+}
+
+/// Render the diagnostic message for multi-model production diagnostic codes.
+///
+/// Parameters vary by code — see the spec table in `meta_language.md`
+/// §"Multi-model production diagnostic codes" for the full message formats.
+///
+/// All `Option<&str>` parameters default to `"?"` when `None`.
+pub fn meta_multi_model_diagnostic_message(
+    code: DiagnosticCode,
+    value: Option<&str>,
+    actual: Option<&str>,
+    name: Option<&str>,
+    smelt_path: Option<&str>,
+    other_path: Option<&str>,
+) -> String {
+    match code {
+        DiagnosticCode::GeneratesUnknownValue => {
+            let v = value.unwrap_or("?");
+            format!("generates must be `models`; found {v}")
+        }
+        DiagnosticCode::GeneratesMixedWithBareModel => {
+            "generates: models cannot coexist with bare-model identity (name field or section delimiter)".to_string()
+        }
+        DiagnosticCode::GenerateFileBareSelectForbidden => {
+            "generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape".to_string()
+        }
+        DiagnosticCode::GenerateFileBodyTypeError => {
+            let act = actual.unwrap_or("?");
+            format!("generator file body must evaluate to List<ModelDef>; found {act}")
+        }
+        DiagnosticCode::ModelDefOutsideGeneratorFile => {
+            "ModelDef literals are only valid inside a `generates: models` file body".to_string()
+        }
+        DiagnosticCode::ModelDefInvalidName => {
+            let v = value.unwrap_or("?");
+            format!("ModelDef.name must be a non-empty Text of [A-Za-z0-9_]+; found {v}")
+        }
+        DiagnosticCode::ModelDefInvalidMaterialization => {
+            let v = value.unwrap_or("?");
+            format!("ModelDef.materialization must be one of view, table, incremental; found {v}")
+        }
+        DiagnosticCode::ModelDefDuplicateName => {
+            let n = name.unwrap_or("?");
+            format!("duplicate ModelDef.name `{n}` in this generator file")
+        }
+        DiagnosticCode::ModelDefHandAuthoredCollision => {
+            let sp = smelt_path.unwrap_or("?");
+            let op = other_path.unwrap_or("?");
+            format!("ModelDef emits `{sp}` which collides with {op}")
+        }
+        DiagnosticCode::GeneratorBodyForbidsModelReflection => {
+            "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references".to_string()
+        }
+        _ => panic!(
+            "meta_multi_model_diagnostic_message called with non-E2 code: {:?}",
+            code
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every multi-model diagnostic code exists in `DiagnosticCode` and its
+    /// rendered message matches the spec table verbatim.
+    #[test]
+    fn diagnostic_codes_multi_model_set_complete() {
+        // GeneratesUnknownValue
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::GeneratesUnknownValue,
+            Some("views"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(msg, "generates must be `models`; found views");
+
+        // GeneratesMixedWithBareModel
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::GeneratesMixedWithBareModel,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "generates: models cannot coexist with bare-model identity (name field or section delimiter)"
+        );
+
+        // GenerateFileBareSelectForbidden
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::GenerateFileBareSelectForbidden,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape"
+        );
+
+        // GenerateFileBodyTypeError
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::GenerateFileBodyTypeError,
+            None,
+            Some("List<Text>"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "generator file body must evaluate to List<ModelDef>; found List<Text>"
+        );
+
+        // ModelDefOutsideGeneratorFile
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::ModelDefOutsideGeneratorFile,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "ModelDef literals are only valid inside a `generates: models` file body"
+        );
+
+        // ModelDefInvalidName
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::ModelDefInvalidName,
+            Some("bad-name!"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "ModelDef.name must be a non-empty Text of [A-Za-z0-9_]+; found bad-name!"
+        );
+
+        // ModelDefInvalidMaterialization
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::ModelDefInvalidMaterialization,
+            Some("external"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "ModelDef.materialization must be one of view, table, incremental; found external"
+        );
+
+        // ModelDefDuplicateName
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::ModelDefDuplicateName,
+            None,
+            None,
+            Some("my_model"),
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "duplicate ModelDef.name `my_model` in this generator file"
+        );
+
+        // ModelDefHandAuthoredCollision
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::ModelDefHandAuthoredCollision,
+            None,
+            None,
+            None,
+            Some("models/revenue.sql"),
+            Some("models/revenue.sql"),
+        );
+        assert_eq!(
+            msg,
+            "ModelDef emits `models/revenue.sql` which collides with models/revenue.sql"
+        );
+
+        // GeneratorBodyForbidsModelReflection
+        let msg = meta_multi_model_diagnostic_message(
+            DiagnosticCode::GeneratorBodyForbidsModelReflection,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            msg,
+            "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references"
+        );
     }
 }

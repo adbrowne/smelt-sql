@@ -5,6 +5,18 @@
     "github@claude-plugins-official": true
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -e '.tool_input.command | test(\"\\\\bpgrep\\\\b\\\\s+-[a-zA-Z]*f\")' >/dev/null 2>&1 && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`pgrep -f` is blocked: it self-matches when its own cmdline contains the search pattern, which deadlocks polling loops (e.g. `while pgrep -f \\\"cargo test\\\"; do sleep N; done` finds itself). Use the Monitor tool to watch background processes, `wait <pid>` if you spawned them, or `pgrep` without -f (matches process name only).\"}}' || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [

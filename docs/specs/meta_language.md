@@ -1,13 +1,13 @@
 ---
 feature: meta_language
 status: experimental
-last_reviewed: 2026-05-13
+last_reviewed: 2026-05-16
 owners: [andrew]
 ---
 
 # Meta-Language
 
-> **What this is.** A normative spec for smelt's typed compile-time meta-language: the user-visible mechanism for constructing, transforming, and reducing lists of fragments at compile time. In scope: `List<T>`, list literals, spread operator, higher-order functions (`map` / `filter` / `reduce`), lambdas, the pipe operator `|>`, contextual reducers, reflection, records, `Map<K, V>`, and multi-model production from compile-time configuration. Out of scope: `smelt.define` function-level fragment composition (see `functions.md`); the data-world `DataType` vocabulary that meta values may eventually splice into (see `types.md`); codegen-time expansion of named functions (see `expansion.md`); resolution of names within meta-evaluated bodies (see `scoping.md`); the YAML/JSON file loader family that supplies meta-world data from disk (see `meta_config_loading.md`).
+> **What this is.** A normative spec for smelt's typed compile-time meta-language: the user-visible mechanism for constructing, transforming, and reducing lists of fragments at compile time. In scope: `List<T>`, list literals, spread operator, higher-order functions (`map` / `filter` / `reduce`), single- and multi-argument lambdas, the pipe operator `|>`, contextual reducers (bare and parameterised), the meta-world `if cond then a else b` ternary, reflection, records, `Map<K, V>`, and multi-model production from compile-time configuration. Out of scope: `smelt.define` function-level fragment composition (see `functions.md`); the data-world `DataType` vocabulary that meta values may eventually splice into (see `types.md`); codegen-time expansion of named functions (see `expansion.md`); resolution of names within meta-evaluated bodies (see `scoping.md`); the YAML/JSON file loader family that supplies meta-world data from disk (see `meta_config_loading.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 
@@ -82,17 +82,20 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 ### Lambdas and higher-order functions
 
-#### Lambda syntax `fn x => body`
+#### Lambda syntax `fn x => body` and `fn (a, b) => body`
 
-`fn` is a reserved keyword (lexer addition). The lambda surface is:
+`fn` is a reserved keyword (lexer addition). The lambda surface admits both single- and multi-argument forms:
 
 - `fn IDENT => EXPR` — single-argument lambda binding `IDENT` for use inside `EXPR`.
-- The body `EXPR` is any meta-evaluable expression: a `smelt.<path>(...)` call, a HOF call, a pipe chain, a list literal, a record-field projection, a SQL expression involving the bound name as a value or — when the bound type is a `ColumnRef` — as an identifier in a splice position.
-- Multi-argument lambdas (`fn (a, b) => body`) are reserved syntactically; an attempt to declare one emits `LambdaArityNotSupported` at the parameter list. Detection runs as a text shape check on the HOF's second argument.
-- A lambda is a value of meta-only type `Lambda<T, U>` (parameter type `T`, return type `U`). It can only be constructed in a HOF positional argument position; a lambda literal in any other position (top-level expression, named-arg value, list element, splice point, `smelt.define` argument) emits `LambdaInForbiddenPosition` at the `fn` keyword.
-- A lambda cannot be assigned to a name and is never the declared sort of a `smelt.define` parameter or return type — `Lambda<T, U>` is not part of the user-writable annotation surface.
+- `fn ( IDENT_1 , IDENT_2 , … , IDENT_k ) => EXPR` — k-argument lambda for `k ≥ 1`, binding each `IDENT_i` for use inside `EXPR`. The parameter list is parenthesised and comma-separated; trailing commas are permitted; `k = 0` is rejected (`LambdaZeroParameters` — a zero-parameter lambda has no use case in the closed HOF surface).
+- The body `EXPR` is any meta-evaluable expression: a `smelt.<path>(...)` call, a HOF call, a pipe chain, a list literal, a record-field projection, a SQL expression involving the bound name(s) as values or — when the bound type is a `ColumnRef` — as identifiers in a splice position.
+- The parenthesised form is required for arity `k ≥ 2`; `fn a, b => body` (no parens) is a parse error at the first comma. The parenthesised form is also accepted for arity `k = 1` (`fn (x) => body`); the two single-arg surfaces are equivalent.
+- Duplicate parameter names within one lambda's parameter list emit `LambdaDuplicateParameter` at the second occurrence's token. The parameter list is a fresh binding scope; shadowing a name from the enclosing scope is permitted (see §Semantics §"Lambdas and higher-order functions" rule 2).
+- A lambda is a value of meta-only type `Lambda<(T_1, …, T_k), U>` (parameter types `T_1, …, T_k`, return type `U`). It can only be constructed in a HOF positional argument position; a lambda literal in any other position (top-level expression, named-arg value, list element, splice point, `smelt.define` argument) emits `LambdaInForbiddenPosition` at the `fn` keyword.
+- A lambda's arity must match the HOF call site's required arity. `map`/`filter` require arity 1; `reduce` does not accept a lambda; future multi-list HOFs (e.g. `zip_with`) require arity ≥ 2. An arity mismatch emits `LambdaArityMismatch` at the lambda's parameter list, naming the expected and actual arities.
+- A lambda cannot be assigned to a name and is never the declared sort of a `smelt.define` parameter or return type — `Lambda<…>` is not part of the user-writable annotation surface.
 
-`=>` continues to mean named-argument `name => value` outside `fn` lambda bodies. The `fn` keyword resolves the parser ambiguity unambiguously: once `fn` is consumed, the immediately-following identifier is a lambda parameter and the next `=>` is the lambda arrow, regardless of surrounding context.
+`=>` continues to mean named-argument `name => value` outside `fn` lambda bodies. The `fn` keyword resolves the parser ambiguity unambiguously: once `fn` is consumed, the immediately-following token starts a parameter list (an `IDENT` or `(`) and the next `=>` outside any inner expression is the lambda arrow, regardless of surrounding context.
 
 #### Higher-order functions
 
@@ -115,7 +118,9 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 | Code | When | Message shape |
 |------|------|---------------|
 | `LambdaInForbiddenPosition` | `fn x => body` outside a HOF positional argument | `lambda is only valid as an argument to a higher-order function` |
-| `LambdaArityNotSupported` | `fn (a, b) => body` (multi-arg) | `multi-argument lambdas are not supported; use a single parameter` |
+| `LambdaArityMismatch` | lambda's parameter-list arity does not match the HOF call site's required arity | `{hof} expects a lambda of arity {expected}; found arity {actual}` |
+| `LambdaZeroParameters` | `fn () => body` — empty parameter list | `lambda must declare at least one parameter` |
+| `LambdaDuplicateParameter` | the same parameter name appears twice in one lambda's parameter list | `parameter `{name}` already appears in this lambda's parameter list` |
 | `LambdaResultTypeMismatch` | lambda body type incompatible with HOF's required result shape | `{hof} requires lambda result {expected}; found {actual}` |
 | `HofExpectsLambda` | second argument to `map`/`filter` is not a `Lambda<…>` | `{hof} expects a lambda; found {actual type}` |
 | `HofExpectsReducer` | second argument to `reduce` is not a registered reducer | `reduce expects a reducer; found {actual}` |
@@ -123,12 +128,13 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 #### LSP support for lambdas and HOFs
 
-- **Hover** on a lambda parameter inside the body shows the parameter's bound type (the HOF's `T`).
+- **Hover** on a lambda parameter inside the body shows the parameter's bound type (the HOF-supplied `T_i` for that parameter slot).
+- **Hover** on a multi-arg lambda's parameter-list opening `(` shows the lambda's full `Lambda<(T_1, …, T_k), U>` signature.
 - **Hover** on a HOF call shows the result type (`List<U>` for `map`/`filter`, the reducer's output sort for `reduce`).
-- **Goto-definition** on a lambda parameter inside the body resolves to the parameter's binding occurrence in the lambda head.
+- **Goto-definition** on a lambda parameter inside the body resolves to the parameter's binding occurrence in the lambda head (the corresponding `IDENT_i` in the parameter list).
 - **Goto-definition** on a HOF name resolves to the built-in's reference page (`docs-site/docs/meta-language/reference.md`) by URL hint when the LSP client supports external links; otherwise no-op (graceful).
 - **Diagnostics with frame stacks**: a type error inside a lambda body carries a `Caller(span_of_hof_call)` frame plus an **anonymous frame** identifying the HOF and the source-list element index when known. The `expansion.md` anonymous-frame contract registers this form (a frame with `function = "<hof>"`, `fn_id = None`, optional `element_index`).
-- **Completion** inside a lambda body offers the bound parameter as the first identifier completion.
+- **Completion** inside a lambda body offers every bound parameter (in declaration order) before any wider-scope identifier completion.
 
 ### Pipe operator
 
@@ -160,7 +166,9 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 ### Contextual reducers
 
-Reducers are a **closed registry of bare identifiers** reserved by the compiler. They are recognised by the type checker only as the second argument to `reduce`; everywhere else they emit `UnknownIdentifier`. A `smelt.define` declared with a reducer name emits `ReducerNameShadowed`.
+Reducers are a **closed registry** reserved by the compiler. Each entry is either a **bare reducer** (a parameter-less identifier) or a **parameterised reducer** (an identifier invoked as a call with one or more parameters). The type checker recognises a reducer only as the second argument to `reduce`; everywhere else its identifier emits `UnknownIdentifier`. A `smelt.define` declared with a reducer name emits `ReducerNameShadowed`.
+
+#### Bare reducers
 
 | Reducer | Input | Output | Empty-list identity |
 |---|---|---|---|
@@ -172,7 +180,21 @@ Reducers are a **closed registry of bare identifiers** reserved by the compiler.
 | `plus_chain` | `List<Expr<Numeric>>` | `Expr<Numeric>` (LUB-promoted) | `0`-cast-to-LUB-element-type |
 | `concat` | `List<Expr<Text>>` | `Expr<Text>` | empty string literal `''` |
 
-Each reducer's empty-list identity (or its absence) is part of the closed registry's contract. Adding a reducer requires a compiler change and a spec edit — the reducer registry is not user-extensible.
+A bare reducer is supplied to `reduce` as a bare identifier with no parentheses: `reduce(xs, and_all)`. Each entry's empty-list identity (or its absence) is part of the closed registry's contract.
+
+#### Parameterised reducers
+
+A parameterised reducer accepts one or more compile-time arguments and produces a `Reducer<T_in, T_out>` value usable at the second argument of `reduce`. The call shape is `reducer_name(arg_1, …, arg_n)`; arguments are positional, named arguments emit `ReducerNamedArgument`, and the call must appear directly as the second argument to `reduce` (a parameterised reducer call in any other position emits `UnknownIdentifier` per the bare-reducer rule).
+
+| Reducer | Parameters | Input | Output | Empty-list identity |
+|---|---|---|---|---|
+| `concat_with(sep: Text)` | `sep` — compile-time `Text` separator | `List<Expr<Text>>` | `Expr<Text>` | empty string literal `''` (independent of `sep`) |
+
+Parameter values must be **compile-time-resolvable** meta values; a non-compile-time argument (a runtime `Expr<T>`, an `Unknown`) emits `ReducerArgNotCompileTime` at the offending argument expression. Each parameter's declared type governs the argument; a mismatch emits `ReducerArgTypeMismatch`. Arity mismatch (too many or too few positional arguments) emits `ReducerArityMismatch` at the offending call expression.
+
+Adding a reducer (bare or parameterised) requires a compiler change and a spec edit — the reducer registry is not user-extensible.
+
+#### Reducer input typing
 
 A reducer applied to a list whose element type is incompatible with the reducer's declared input emits `ReducerInputTypeMismatch` at the `reduce` argument expression. The diagnostic names the reducer and the expected vs actual element types.
 
@@ -185,12 +207,60 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 | `ReducerNameShadowed` | a `smelt.define` function declared with a reducer name | `{name} is a reserved reducer name` |
 | `ReducerInputTypeMismatch` | reducer applied to a list whose elements don't match its declared input | `reducer {r} expects List<{T_in}>; found List<{T_actual}>` |
 | `ReducerEmptyNoIdentity` | `union_all` / `intersect_all` reducing an empty list | `reducer {r} has no identity for an empty list` |
+| `ReducerArityMismatch` | parameterised reducer call with wrong positional-argument count | `reducer {r} expects {expected} argument(s); found {actual}` |
+| `ReducerArgTypeMismatch` | parameterised reducer argument type not assignable to declared parameter type | `reducer {r}'s argument `{param}` expects {expected}; found {actual}` |
+| `ReducerArgNotCompileTime` | parameterised reducer argument is not a compile-time-resolvable meta value | `reducer {r}'s argument `{param}` must be a compile-time value; found {actual}` |
+| `ReducerNamedArgument` | parameterised reducer called with a named argument | `reducer {r} takes positional arguments only` |
 
 #### LSP support for reducers
 
-- **Hover** on a reducer name in `reduce(_, here)` position shows the reducer's input element type, output sort, and empty-list identity (or "no identity").
-- **Goto-definition** on a reducer name resolves to the built-in's reference page (`docs-site/docs/meta-language/reference.md`) by URL hint when the LSP client supports external links; otherwise no-op (graceful).
-- **Completion** at the second argument position of `reduce` offers the closed reducer registry, filtered by the input list's element type when inferable.
+- **Hover** on a bare-reducer identifier in `reduce(_, here)` position shows the reducer's input element type, output sort, and empty-list identity (or "no identity").
+- **Hover** on a parameterised-reducer call name shows the parameter list (names with types), the input element type, the output sort, and the empty-list identity. When the parameter argument is statically known (e.g. a string literal for `concat_with(sep)`), the resolved separator value appears in the hover trailer.
+- **Goto-definition** on a reducer name (bare or parameterised) resolves to the built-in's reference page (`docs-site/docs/meta-language/reference.md`) by URL hint when the LSP client supports external links; otherwise no-op (graceful).
+- **Completion** at the second argument position of `reduce` offers the closed reducer registry — bare entries as bare identifiers, parameterised entries as call snippets with placeholder parameters (`concat_with($sep)`) — filtered by the input list's element type when inferable.
+
+### Meta-world ternary
+
+#### `if cond then a else b` syntax
+
+A compile-time ternary expression with three slots:
+
+```
+if COND then THEN_EXPR else ELSE_EXPR
+```
+
+- `if`, `then`, `else` are reserved keywords (lexer addition). They are reserved at the meta-namespace level — a `smelt.define` declared with one of these names, a `smelt.record` named one of them, or a lambda parameter named one of them emits `TernaryKeywordShadowed` at the offending declaration token.
+- `COND`, `THEN_EXPR`, and `ELSE_EXPR` are arbitrary meta-evaluable expressions.
+- The expression evaluates at compile time: the type checker evaluates `COND` first, then evaluates exactly one of the two branches based on `COND`'s value. The unreached branch is type-checked but **not evaluated** (see §Semantics — short-circuit rule).
+- The construct is **meta-only**. A ternary expression in a Data-World position (where the Data-World grammar admits no `if`/`then`/`else` keywords as identifiers) parses meta-first and is then validated by the splice-context check; mis-placement emits `TernaryInDataPosition`. Data-World conditional logic uses SQL `CASE WHEN … THEN … ELSE … END`; the two surfaces do not interfere.
+- The construct is a value expression — it returns the type of the chosen branch (subject to LUB rules — see §Semantics). It is not a statement form and does not introduce its own scope.
+
+#### Precedence and associativity
+
+- The ternary has **lower precedence** than `|>` (the pipe). `a |> b if cond then c else d` parses as `(a |> b) if cond then c else d` — i.e. an `if` keyword starting after a primary expression begins a fresh ternary, with the preceding expression as the entire `COND`. To avoid this parse, parenthesise the conditional: `a |> b(if cond then c else d)` or use `(a |> b) if cond then c else d` deliberately.
+- Each of the three slots (`COND`, `THEN_EXPR`, `ELSE_EXPR`) extends as far right as a single expression admits before encountering a `then`, `else`, or end-of-expression token. Nested ternaries chain right-associatively: `if c1 then a else if c2 then b else c` parses as `if c1 then a else (if c2 then b else c)` — the `else` consumes the trailing ternary as its branch.
+- A `then` token outside a ternary's `COND` extent emits `TernaryDanglingThen` at the token; an `else` token outside a ternary's `THEN_EXPR` extent emits `TernaryDanglingElse`. These diagnostics anchor at the keyword and surface only when the parser cannot recover.
+
+#### Ternary diagnostic codes
+
+Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offending CST span):
+
+| Code | When | Message shape |
+|---|---|---|
+| `TernaryConditionNotBoolean` | `COND`'s synthesised type is not assignable to `Boolean` | `ternary condition expects Boolean; found {actual}` |
+| `TernaryBranchTypeMismatch` | `THEN_EXPR` and `ELSE_EXPR` synthesise to types that do not unify under LUB | `ternary branches have incompatible types: {then_type} vs {else_type}` |
+| `TernaryKeywordShadowed` | A `smelt.define`, `smelt.record`, lambda parameter, or other meta-namespace identifier declared with name `if`, `then`, or `else` | `{name} is a reserved meta-language keyword` |
+| `TernaryInDataPosition` | A ternary expression appears in a Data-World grammar position that does not admit meta evaluation | `if-then-else is meta-only; use SQL CASE WHEN in this position` |
+| `TernaryDanglingThen` | A `then` keyword appears outside any in-progress ternary's `COND` slot | `unexpected `then` keyword outside of `if ... then ...` form` |
+| `TernaryDanglingElse` | An `else` keyword appears outside any in-progress ternary's `THEN_EXPR` slot | `unexpected `else` keyword outside of `... then ... else` form` |
+
+#### LSP support for ternary
+
+- **Hover** on an `if` keyword shows the ternary's full inferred type — `if cond:{COND_type} then a:{THEN_type} else b:{ELSE_type} -> {LUB type}` — with the LUB resolved when both branches synthesise.
+- **Hover** on a `then` or `else` keyword shows the corresponding branch's synthesised type.
+- **Goto-definition** on `if`/`then`/`else` resolves to the reference page (`docs-site/docs/meta-language/ternary.md`) by URL hint when the LSP client supports external links; otherwise no-op (graceful).
+- **Completion** at the start of a meta-evaluable position offers `if` as a snippet expanding to `if $cond then $then_expr else $else_expr`.
+- **Diagnostics with frame stacks**: a type error inside `THEN_EXPR` or `ELSE_EXPR` carries the surrounding HOF / function frame stack unchanged — the ternary itself does not introduce a new frame, since it is a pure value expression with no scoping effect.
 
 ### Compile-time variables
 
@@ -410,6 +480,8 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 | `RecordLiteralUnknownTarget` | A record literal appears in a position with no inferable target type | `cannot infer record type from context; annotate the target type` |
 | `RecordFieldNotProjectable` | Mid-chain field projection through a non-record-typed value | `value of type {type} has no fields; projection `{field}` is not valid` |
 | `RecordFieldTypeForbidden` | `smelt.record` field type references a meta-only witness (`ColumnRef`, `ModelRef`, `SourceRef`) | `record field types may not reference {type}; reflection witnesses are not user-writable` |
+| `RecordCyclicDeclaration` | A `smelt.record` declaration directly or transitively references itself in its field types | `record `{name}` forms a cycle; recursive record declarations are not supported in v1` |
+| `RecordInDataWorld` | A record-typed value appears at a Data-World position (e.g. as a SELECT-list item without explicit splice) | `record value cannot appear in Data-World position; consume it with a meta-language operation first` |
 
 #### LSP support for records
 
@@ -488,6 +560,105 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 - **Completion** at `m.get(<cursor>)` and `m.has(<cursor>)` offers the statically-known key list of `m` when resolvable (first ~50 keys), each shown with its bound value's type.
 - **Diagnostics with frame stacks**: a `MapGetMissingKey` diagnostic inside a HOF body whose source list comes from `m.entries()` carries the anonymous frame; the frame's `map_origin` field (the load site of `m`) is the wide-reflection-style provenance and registers as a sibling of `column_origin` / `model_origin` on the `expansion.md` anonymous-frame contract.
 
+### Multi-model production
+
+#### `generates: models` frontmatter directive
+
+A `.sql` file's YAML frontmatter may include `generates: models`. The directive marks the file as a **generator file**: its body is a meta-evaluable expression of type `List<ModelDef>`, and each emitted `ModelDef` value becomes a model in the workspace.
+
+The frontmatter key admits exactly the value `models` in v1; any other value (`generates: views`, `generates: 42`) emits `GeneratesUnknownValue` at the value token. The directive is mutually exclusive with both the multi-section `--- name: foo ---` Layer-1 delimiter (per `architecture.md` §"Two-layer multi-model file format") and a `name:` frontmatter field; a file mixing `generates: models` with a `name:` field or with Layer-1 delimiters emits `GeneratesMixedWithBareModel` at the offending key / delimiter.
+
+The `.gen.sql` extension is a recommended convention for visually distinguishing generator files from hand-authored models; it is **not load-bearing**. The compiler determines a file's status from the frontmatter alone. Editor tooling and human readers benefit from the convention; rename refactors that preserve frontmatter preserve generator status.
+
+#### `ModelDef` meta record type
+
+`ModelDef` is a built-in closed meta record type with five fields:
+
+| Field | Type | Required | Default |
+|---|---|---|---|
+| `name` | `Text` | yes | — |
+| `body` | `TableExpr` | yes | — |
+| `materialization` | `Text` | no | `'view'` |
+| `tags` | `List<Text>` | no | `[]` |
+| `description` | `Text` | no | `''` |
+
+Unlike the closed reflection-witness records (`ColumnRef`, `ModelRef`, `SourceRef`), `ModelDef` is **user-constructible** via a record literal. Construction is restricted to the body of a generator file (a file whose frontmatter declares `generates: models`); a `ModelDef` literal anywhere else — inside a hand-authored model, inside a `smelt.define`, inside another record literal that is not nested under a generator body — emits `ModelDefOutsideGeneratorFile` at the literal's opening brace.
+
+Field rules:
+
+- `name` is a meta-`Text` whose value becomes the emitted model's final path segment. The value must be a non-empty `Text` containing only path-safe characters (ASCII alphanumerics and underscore; no dots, slashes, or whitespace); an invalid value emits `ModelDefInvalidName` at the field's value expression.
+- `body` is a `TableExpr`-typed expression — typically a `SELECT … FROM …` SQL statement, optionally referencing meta-language values via the standard meta/Data-World splice rules. `ModelDef.body` is the single carve-out admitting `TableExpr` in a record field; user-defined `smelt.record` declarations remain forbidden from declaring `TableExpr` fields.
+- `materialization` is one of the closed set `{'view', 'table', 'incremental'}` per `incremental_models.md`'s materialization vocabulary; any other value emits `ModelDefInvalidMaterialization`.
+- `tags` is a `List<Text>`; each entry is a string-valued tag attached to the emitted model. Tags merge with any workspace-level `smelt.yml` `models.<emitted_name>.tags` overlays per the existing `Config::get_tags` rule.
+- `description` is a `Text`; consumed by `data_catalog.md` and other documentation surfaces.
+
+`ModelDef` is meta-only — values never reach the database engine. The internal `SmeltType` witness is `SmeltType::ModelDef`; the closed field set lives alongside `COLUMN_REF_FIELDS` / `MODEL_REF_FIELDS` / `SOURCE_REF_FIELDS` in `crates/smelt-types/src/signatures.rs` as `MODEL_DEF_FIELDS`.
+
+#### Generator file body shape
+
+A generator file's body is a meta-evaluable expression whose synthesised type is `List<ModelDef>`. Admissible body forms:
+
+- A list literal of record literals: `[ModelDef {…}, ModelDef {…}]`.
+- A HOF chain producing `List<ModelDef>`: `smelt.config.load_yaml('foo.yaml', Cohort) |> map(fn c => ModelDef {…})`.
+- Any meta-language expression whose synthesised type is assignable to `List<ModelDef>` per `types.md` §"Fragment sort subtyping".
+
+A generator file body whose synthesised type is not `List<ModelDef>` emits `GenerateFileBodyTypeError` at the body's top-level CST node. A generator file containing a bare `SELECT` / `WITH` / `VALUES` statement at the top level (the existing bare-model body form per `architecture.md` §"Bare-model naming") emits `GenerateFileBareSelectForbidden` at the offending statement's first token — the bare-SELECT form is the hand-authored shape, mutually exclusive with `generates: models`.
+
+A generator file's body may evaluate to an empty list (`[]` or a HOF chain whose source list was empty). The empty list emits zero models with no diagnostic; the file contributes no workspace entries.
+
+#### Emitted model path
+
+For a generator file at workspace-relative path `<dir1>/<dir2>/…/<base>.sql` (or `<base>.gen.sql`), each emitted `ModelDef` value with `name: <n>` becomes a model with `smelt.<path>` identifier `<dir_with_dots>.<base>.<n>`, where `<dir_with_dots>` is the directory chain joined by `.` (with the scan-root prefix stripped per `architecture.md` §"Project layout") and `<base>` is the file's stem with `.gen.sql` or `.sql` stripped.
+
+Examples:
+
+- Generator at `models/staging/sources.gen.sql` emitting `name: 'orders'` → smelt path `smelt.staging.sources.orders`.
+- Generator at `models/cohorts.gen.sql` emitting `name: 'us_west'` → smelt path `smelt.cohorts.us_west`.
+
+The generator file's stem **is** part of the emitted path; generator files are not naming-transparent under their parent directory. A generator at `models/cohorts.gen.sql` emitting `name: 'cohorts'` produces `smelt.cohorts.cohorts`, which is permitted but discouraged; downstream lint may flag the duplication. A `generated_path_prefix` frontmatter override for flatter paths is out of scope in v1 (see §"Out-of-scope by deliberate choice").
+
+#### Generator interaction with reflection
+
+A generator file's body **must not** invoke `smelt.models.*` accessors (`smelt.models.with_tag`, `smelt.models.all`). The diagnostic `GeneratorBodyForbidsModelReflection` anchors at the offending accessor's call site. Rationale: workspace shape (which models exist) is determined by evaluating all generators in a single pass; admitting `smelt.models.*` inside a generator body would create a chicken-and-egg dependency between generator emissions and the model-reflection result they observe.
+
+A generator file's body **may** invoke `smelt.sources.*` accessors (sources are loader-time, evaluated before any generator), loaders (`smelt.config.load_yaml`, `smelt.config.load_json`, `smelt.config.load_toml`), `smelt.config.var`, HOFs, lambdas, records, lists, pipe, and literal `smelt.<path>` references to hand-authored models. Literal `smelt.<path>` references inside a generator body resolve against the workspace shape **excluding** generator-emitted models — the same set visible to `smelt.sources.*`.
+
+#### Name uniqueness and collision
+
+Within a single generator file's emission, two `ModelDef` values with the same `name` emit `ModelDefDuplicateName` at the second occurrence's `name` field value expression. The first occurrence is retained as authoritative; the second is discarded (so the file does not emit a "broken" duplicate model).
+
+A generator-emitted model whose smelt path matches a hand-authored model's smelt path emits `ModelDefHandAuthoredCollision` at the offending `name` field's value expression. The hand-authored model is retained as authoritative; the generator's emission is discarded. (Hand-authored models win because they have stable goto-def targets at user-written source spans; generator emissions can be edited by adjusting the generator body.)
+
+Two generator files emitting models with the same smelt path (a cross-file collision) similarly emit `ModelDefHandAuthoredCollision` on the *second* generator file's `name` field, where "second" is determined by workspace-relative path order (byte-lexicographic). The first generator's emission is retained.
+
+#### Multi-model production diagnostic codes
+
+Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offending CST span):
+
+| Code | When | Message shape |
+|---|---|---|
+| `GeneratesUnknownValue` | `generates:` value other than `models` | `generates must be \`models\`; found {value}` |
+| `GeneratesMixedWithBareModel` | `generates: models` frontmatter combined with `name:` field or with `--- name: foo ---` Layer-1 delimiters | `generates: models cannot coexist with bare-model identity (name field or section delimiter)` |
+| `GenerateFileBareSelectForbidden` | Generator file body contains a top-level bare SELECT / WITH / VALUES | `generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape` |
+| `GenerateFileBodyTypeError` | Generator file body synthesises a type that is not assignable to `List<ModelDef>` | `generator file body must evaluate to List<ModelDef>; found {actual}` |
+| `ModelDefOutsideGeneratorFile` | `ModelDef {…}` record literal in a non-generator-file context | `ModelDef literals are only valid inside a \`generates: models\` file body` |
+| `ModelDefInvalidName` | `ModelDef.name` value is empty or contains non-path-safe characters | `ModelDef.name must be a non-empty Text of [A-Za-z0-9_]+; found {value}` |
+| `ModelDefInvalidMaterialization` | `ModelDef.materialization` value is not in `{'view', 'table', 'incremental'}` | `ModelDef.materialization must be one of view, table, incremental; found {value}` |
+| `ModelDefDuplicateName` | Two `ModelDef`s in the same generator emit with the same `name` | `duplicate ModelDef.name \`{name}\` in this generator file` |
+| `ModelDefHandAuthoredCollision` | Generator-emitted path collides with a hand-authored model or another generator's emission | `ModelDef emits \`{smelt_path}\` which collides with {other_path}` |
+| `GeneratorBodyForbidsModelReflection` | A generator's body invokes `smelt.models.with_tag` or `smelt.models.all` | `smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references` |
+
+#### LSP support for multi-model production
+
+- **Hover** on a `generates: models` frontmatter key/value shows the inferred body type (`List<ModelDef>`) and the count of emitted models (when statically resolvable).
+- **Hover** on a `ModelDef { … }` record literal's opening brace shows the inferred emitted-model smelt path (when the `name` field's value is statically known).
+- **Hover** on a `ModelDef.name` field-value expression shows the resulting emitted smelt path.
+- **Hover** on a `ModelDef.body` field-value expression shows the body's synthesised `TableExpr` type and the inferred column list when resolvable.
+- **Goto-definition** on a generator-emitted model reference (e.g. `smelt.staging.sources.orders` consumed elsewhere) resolves to the generator file's emitting `ModelDef` literal — specifically, the `ModelDef.name` field's value-expression token whose evaluation produced the emitted name.
+- **Completion** at the frontmatter `generates: <cursor>` position offers `models`.
+- **Completion** at a `ModelDef { <cursor> … }` field-key position offers the closed five-field set, with the required fields (`name`, `body`) surfaced first.
+- **Diagnostics with frame stacks**: a diagnostic surfacing from inside a generator body's HOF chain (a `RecordFieldMissing` on a `ModelDef` literal, a `MapGetMissingKey` on the loaded config, a `ColumnsOfRequiresTableExpr` deep in a body's lambda) carries the HOF anonymous frame, the loader's `map_origin` / `model_origin` / `source_origin` provenance if applicable, plus a new outermost **`<generator>` frame** identifying the generator file's path. The `expansion.md` anonymous-frame contract registers the `<generator>` form (a frame with `function = "<generator>"`, `fn_id = None`, `call_site_range` = the generator file's body range, optional `model_origin` = the offending `ModelDef.name` range).
+
 ### Meta-`Text`-as-identifier lift
 
 A meta-`Text` value spliced into a position where the Data-World SQL grammar expects an unquoted identifier lifts to that identifier. The lift positions are exactly:
@@ -556,9 +727,9 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 #### Lambdas and higher-order functions
 
-1. **Lambda formation.** `fn x => body` constructs a `Lambda<T, U>` value where `T` is the HOF-supplied parameter type and `U` is the synthesised type of `body` under the binding `x : T`. A lambda outside a HOF positional-argument position is `LambdaInForbiddenPosition`; a lambda with multi-argument syntax is `LambdaArityNotSupported` (detected via a text shape check on the HOF's second argument). Lambdas are values only — they have no declaration site, no name, no `smelt.<path>` reachability.
+1. **Lambda formation.** `fn x => body` and `fn (x_1, …, x_k) => body` construct a `Lambda<(T_1, …, T_k), U>` value where `T_i` is the HOF-supplied type for the `i`-th parameter slot and `U` is the synthesised type of `body` under the bindings `x_i : T_i`. For `k = 1`, the parenthesised and bare forms are equivalent. A lambda outside a HOF positional-argument position is `LambdaInForbiddenPosition`; a lambda whose arity does not match the HOF call site's required arity is `LambdaArityMismatch`; a lambda declaring zero parameters (`fn () => body`) is `LambdaZeroParameters`; a parameter list with a duplicated name is `LambdaDuplicateParameter`. Lambdas are values only — they have no declaration site, no name, no `smelt.<path>` reachability.
 
-2. **Lambda parameter scoping.** Inside `body`, a bare reference to `x` resolves to the lambda parameter before any wider scope (function parameters, CTE columns, `TableExpr`-parameter columns, upstream schemas — see `scoping.md` §"Resolution order"). Lambda parameters are pushed onto the body's `TypeContext` for the duration of the body walk and popped on exit. A lambda parameter shadowing a `smelt.define` parameter or a sibling lambda parameter is permitted (lexical shadowing is the standard meaning); the inner binding wins. The `scoping.md` lambda-scope contract registers lambda parameters as a scope kind.
+2. **Lambda parameter scoping.** Inside `body`, a bare reference to any `x_i` resolves to that lambda parameter before any wider scope (function parameters, CTE columns, `TableExpr`-parameter columns, upstream schemas — see `scoping.md` §"Resolution order"). All `k` parameters scope coterminously over the body — none is in scope inside the other parameters' types (in the closed v1 surface the parameter types are HOF-supplied, so they introduce no syntactic dependency). Lambda parameters are pushed onto the body's `TypeContext` for the duration of the body walk and popped on exit. A lambda parameter shadowing a `smelt.define` parameter or an enclosing lambda parameter is permitted (lexical shadowing is the standard meaning); the inner binding wins. The `scoping.md` lambda-scope contract registers lambda parameters as a scope kind.
 
 3. **Lambda capture.** A lambda body may reference: lambda parameters in scope (the immediate parameter and any enclosing lambda parameters); the enclosing `smelt.define`'s parameters; meta-only outer-scope names (`List<T>` values, `smelt.config.var('x')` results). It must not reference SQL columns reachable only at Data-World runtime — those names do not exist at meta-evaluation time. A capture of a runtime-only name surfaces as `UnknownIdentifier` at the bare reference, with the lambda's enclosing HOF call as the diagnostic anchor.
 
@@ -589,9 +760,10 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 #### Contextual reducers
 
-1. **Reducer evaluation.** `reduce(xs, r)` evaluates as follows:
-   - If `xs` is non-empty, the result is the reducer's left-fold over `xs` rendered into a single fragment of the reducer's declared output sort (using the reducer's binary-operation rule: `comma_sep` produces `e1, e2, …`; `and_all` produces `e1 AND e2 AND …`; `union_all` produces `e1 UNION ALL e2 UNION ALL …`; etc.).
-   - If `xs` is empty and the reducer declares an identity, the result is the identity (e.g. `and_all` → `TRUE`; `concat` → `''`).
+1. **Reducer evaluation.** `reduce(xs, r)` (where `r` is a bare reducer identifier from the closed registry) and `reduce(xs, r(arg_1, …, arg_n))` (where `r` is a parameterised reducer) evaluate as follows:
+   - For a parameterised reducer, each `arg_i` is evaluated **once** at type-check time. The arguments must be compile-time-resolvable meta values (a `ReducerArgNotCompileTime` diagnostic anchors any non-compile-time argument); their types must be assignable to the reducer's declared parameter types (`ReducerArgTypeMismatch`); and the call's positional arity must match the reducer's declared arity (`ReducerArityMismatch`). The argument values parameterise the binary operation used during the left-fold (e.g. for `concat_with(sep)`, `sep` becomes the inter-element separator).
+   - If `xs` is non-empty, the result is the reducer's left-fold over `xs` rendered into a single fragment of the reducer's declared output sort (using the reducer's binary-operation rule: `comma_sep` produces `e1, e2, …`; `and_all` produces `e1 AND e2 AND …`; `union_all` produces `e1 UNION ALL e2 UNION ALL …`; `concat_with(sep)` produces `e1 || sep || e2 || sep || …` for SQL `Text` concatenation; etc.).
+   - If `xs` is empty and the reducer declares an identity, the result is the identity (e.g. `and_all` → `TRUE`; `concat` → `''`; `concat_with(sep)` → `''`, independent of `sep`).
    - If `xs` is empty and the reducer has no identity (`union_all`, `intersect_all`), the diagnostic is `ReducerEmptyNoIdentity` and the surrounding splice position emits no fragment (the position re-validates as if the `reduce` call were absent — same drop-on-error policy as `MetaSpreadInForbiddenPosition`).
    - Reducer evaluation is order-preserving (left-to-right). `union_all` and `intersect_all` produce SQL whose row order is the user's reasonable expectation given the source list's order, but smelt makes no row-order guarantee beyond what SQL itself guarantees for the underlying operator.
 
@@ -609,6 +781,26 @@ The two worlds intersect at **splice points** — places where a meta value mate
    - The argument must be a string literal; non-literal arguments emit `ConfigVarNameNotLiteral`.
 
 2. **Termination.** `smelt.config.var` is a single map lookup.
+
+#### Meta-world ternary
+
+1. **Condition typing.** `if COND then a else b` requires `COND` to synthesise to a type assignable to `Boolean`. A `COND` whose synthesised type is not assignable to `Boolean` emits `TernaryConditionNotBoolean`; the ternary evaluates as if `COND` were `Unknown` (see rule 4).
+
+2. **Branch typing.** `THEN_EXPR` and `ELSE_EXPR` are checked under the same target type as the surrounding context, and their synthesised types must unify under the LUB rules in `types.md` §"Fragment sort subtyping" and §"Numeric promotion chain". The ternary's synthesised type is the LUB; the LUB is computed in the same way as the LUB of a list literal's elements (per §"Lists and spread" rule 2). Branches that do not unify emit `TernaryBranchTypeMismatch` at the ternary's `else` keyword, and the ternary's evaluated type is `Unknown`.
+
+3. **Short-circuit evaluation.** At compile time, evaluation of the ternary proceeds as follows:
+   - Evaluate `COND` exactly once.
+   - If `COND` evaluates to `TRUE`, evaluate `THEN_EXPR`; `ELSE_EXPR` is *not* evaluated. Any diagnostic that would arise from *evaluating* `ELSE_EXPR` (a `MapGetMissingKey` on a statically-resolvable absent key, a `ConfigVarNotFound`) is suppressed; diagnostics from *type-checking* `ELSE_EXPR` (well-formedness errors that arise without execution) are still emitted.
+   - If `COND` evaluates to `FALSE`, evaluate `ELSE_EXPR`; `THEN_EXPR` is *not* evaluated under the same suppression rule.
+   - The short-circuit rule lets users write `if m.has(k) then m.get(k) else default` without `MapGetMissingKey` firing on the unreached branch.
+
+4. **`Unknown` propagation.** If `COND` synthesises to `Unknown` (e.g. its evaluation surfaced a `ConfigVarNotFound` or a `MapGetMissingKey`), the ternary's evaluated value is `Unknown` and **both** branches are type-checked but neither is evaluated. The surrounding expression's drop-on-error policy governs follow-on diagnostics.
+
+5. **No new scope.** The ternary introduces no binding and no scope. Identifiers referenced inside `COND`, `THEN_EXPR`, and `ELSE_EXPR` resolve against the surrounding context's scope unchanged. The construct is a value expression, not a statement.
+
+6. **Determinism.** The ternary is a pure value expression. Same inputs (`COND` resolved value, branch evaluation under unchanged workspace state) → same result, byte-equal at the CST level for codegen-time expansion.
+
+7. **Termination.** The ternary contributes one boolean check plus one branch evaluation per call. Wall-clock cost is O(1) plus the chosen branch's cost.
 
 #### Reflection: `smelt.columns_of`, `ColumnRef`, identifier lift
 
@@ -720,6 +912,42 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 8. **Termination.** Map API method calls are O(log n) for `m.get(k)` / `m.has(k)` (one bounded-depth lookup), O(n) for `m.entries()` / `m.keys()` / `m.values()` (a single linear materialisation). `n` is bounded by the loader-supplied file's size; the file is itself bounded by workspace state.
 
+#### Multi-model production
+
+1. **Generator file detection.** A file is a generator file iff its YAML frontmatter contains `generates: models`. Detection runs at metadata-extraction time in `crates/smelt-core/src/metadata.rs`; the resulting `FileMetadata` variant carries the generator flag. The `.gen.sql` filename suffix is informational only and does not affect detection.
+
+2. **Body type checking.** A generator file's body is parsed as a meta-language expression, not a SQL `SELECT`. The body's expected type is `List<ModelDef>`; bidirectional checking propagates this expectation down to record literals at the body's leaves (a `fn c => ModelDef { … }` lambda inside a `map(…)` chain has its lambda body's target type bound to `ModelDef`). A body whose synthesised type does not unify with `List<ModelDef>` emits `GenerateFileBodyTypeError`; a top-level bare SQL statement emits `GenerateFileBareSelectForbidden` at parse-routing time (before type checking).
+
+3. **`ModelDef` record literal evaluation.** A `ModelDef {…}` literal evaluates each field's value in the surrounding splice context and constructs a `ModelDef` value bound to the built-in closed five-field set. The existing record-literal rules apply (required-field enforcement, duplicate-field detection, unknown-field rejection, per-field type-mismatch checking) via the same code paths that handle user-declared `smelt.record` literals. The defaults for optional fields (`materialization`, `tags`, `description`) are applied at value-construction time when the field is omitted from the literal.
+
+4. **Workspace-shape resolution.** Generators evaluate in a single bounded pass:
+
+   - **Stage W1 — discover.** Workspace `all_files` is scanned. Each file's metadata is parsed; the set of generator files is identified by `generates: models` frontmatter. Hand-authored models, sources, and seeds are also enumerated in this stage.
+   - **Stage W2 — generator evaluation.** Each generator's body is type-checked and evaluated in isolation. The evaluation cannot reference `smelt.models.*` (workspace shape is incomplete); it may reference `smelt.sources.*`, loaders, `smelt.config.var`, literal `smelt.<path>` references to hand-authored models, and any meta-language operation.
+   - **Stage W3 — emission and collision check.** Each generator's resulting `List<ModelDef>` is materialised. For each `ModelDef`, the emitted smelt path is computed (`<dir_with_dots>.<file_stem>.<name>`). Per-file `ModelDefDuplicateName` is checked; cross-file `ModelDefHandAuthoredCollision` (against hand-authored models or other generators' emissions) is checked in workspace-relative-path lexicographic order. Survivors become workspace members alongside hand-authored models.
+   - **Stage W4 — full type-check.** All models (hand-authored and generator-emitted) type-check their bodies. Reflection accessors (`smelt.models.*`, `smelt.sources.*`) see the full workspace shape including generator emissions. Downstream consumers of generator-emitted models resolve their references through the standard `smelt.<path>` resolution.
+
+   The pipeline is Salsa-cached: each stage is incrementally re-evaluated on workspace input changes. An edit to a generator's body invalidates that generator's W2 result and any W3 collision check that depends on it; the downstream W4 type-check is invalidated only for models that reference the changed generator's emissions.
+
+5. **Determinism.** Generator evaluation is deterministic: same workspace input → same emitted models (byte-equal `ModelDef.body` CST, identical field values, identical emitted-path set). The single-pass W1–W4 ordering makes the rule structural — generators cannot observe each other's emissions, so there is no fixed-point iteration and no ordering ambiguity beyond the lexicographic collision tie-break.
+
+6. **`ModelDef.body` evaluation context.** The `body` field's value is a `TableExpr`-typed expression evaluated at record-literal construction time. The surrounding scope is the generator body's scope: lambda parameters bound by the enclosing HOF (a `fn e => ModelDef { body: ... }` body sees `e` as a value), the loader-resolved record values, and the standard meta-language outer-scope names. Identifiers inside the SQL body resolve through the standard splice-context rules; meta values consumed at SQL splice points lift per the existing meta/Data-World rules (the four-position identifier lift, `Expr<T>` splice rules). The body is type-checked under the same regime as a hand-authored model's body — including reference resolution against the workspace's hand-authored models and sources — once the surrounding `ModelDef`'s `name` is statically bound.
+
+7. **Emitted-model `smelt.<path>` resolution.** A generator-emitted model is reachable through the standard `smelt.<path>` resolution machinery in `crates/smelt-db/src/queries/project.rs`. The corresponding `ModelRef` value carries:
+
+   - `path`: workspace-relative file path of the **generator** file (not a per-emission virtual path).
+   - `name`: the `ModelDef.name` value.
+   - `tags`: the `ModelDef.tags` value, merged with any `smelt.yml` `models.<emitted_name>.tags` overlays per `Config::get_tags`.
+   - `columns`: the model's column list, derived from `ModelDef.body`'s synthesised schema.
+
+   The model participates in all reflection accessors (`smelt.models.with_tag`, `smelt.models.all`) on equal terms with hand-authored models. `smelt.models.all` returns the union of hand-authored and generator-emitted models, sorted ascending by `path` then by `name` (the `name` is the tiebreaker when multiple `ModelRef` values share a generator-file `path`).
+
+8. **Generator-body reflection forbid.** `GeneratorBodyForbidsModelReflection` is emitted at every `smelt.models.with_tag` / `smelt.models.all` call inside a generator body, regardless of whether the call would resolve cleanly against the hand-authored-only set. The forbid is structural, not dependency-based, to keep the W2 phase order simple and to give users a clear, anchored diagnostic that points at a forward-compatible refactor (use `smelt.sources.*` or literal `smelt.<path>` references).
+
+9. **Termination.** Generator evaluation terminates structurally: each generator's body evaluates once (HOF rules apply for any lambda chains within it); the emission set per generator is finite (bounded by the body's `List<ModelDef>` length); collision checks are O(N) in workspace size. No fixed-point iteration.
+
+10. **Cross-file evaluation order.** Generator files evaluate in workspace-relative path order (byte-lexicographic) for the purposes of collision tie-breaking under `ModelDefHandAuthoredCollision`. Each generator is otherwise independent and evaluable in parallel; the order is observable only at the collision boundary.
+
 #### Pipe ↔ HOF interaction
 
 `smelt.config.var` and HOFs compose with pipe: `smelt.columns_of(orders) |> filter(fn c => c.is_numeric) |> map(fn c => COALESCE(c.name, 0))` is the standard worked-example shape. Because pipe is parser-level desugaring (§"Pipe operator"), the result has the same evaluated type, value, frame-stack contribution, and diagnostic anchoring as the equivalent un-piped call.
@@ -764,13 +992,33 @@ The exception is `meta_config_loading.md` — the file-loading family is large e
 
 **Why HOF and reducer names are reserved rather than overloadable.** Allowing a `smelt.define` named `map` would force the type checker to disambiguate at every call site between the built-in HOF and the user's function. The disambiguation rule would be either "user wins" (which silently retires the built-in for that workspace) or "built-in wins for two-arg calls with a lambda" (which couples disambiguation to argument shape, propagating into error messages). Reserving the names produces an immediate, anchored diagnostic at the conflicting `smelt.define` declaration. The cost is that workspaces with pre-existing functions named `map` must rename them; the benefit is that every meta-language user reads `map(xs, f)` as the same operation, regardless of workspace. The same argument applies to reducer names.
 
+**Why multi-argument lambdas use parenthesised parameter lists.** Two surfaces were considered for the multi-arg case: (i) bare `fn a, b => body` and (ii) parenthesised `fn (a, b) => body`. Option (i) collides with named-argument syntax — a parser scanning `fn a, b => …` cannot decide locally whether `b => …` is a lambda body or a named-arg pair without unbounded lookahead. Option (ii) introduces a single open-paren token after `fn` that locks the parser into the lambda parameter list, with the matching close-paren terminating the list cleanly. The cost is one paren-pair of ceremony in the multi-arg case; the benefit is that the parser never has to disambiguate `fn`-following tokens against named-arg syntax, and error recovery for an unmatched paren produces a clear "expected `)`" diagnostic rather than a cascading set of "expected `=>`" diagnostics across half the file.
+
+**Why duplicate-parameter detection is a hard error rather than a warning.** A lambda `fn (a, a) => body` could be interpreted as "the second `a` shadows the first", but no consumer of multi-arg lambdas has a sensible use for shadowing within the same parameter list — the call site supplies distinct values to each slot, and shadowing them by name would make the second value reach the body under the same name. Treating the duplicate as a hard error at the parameter list keeps the call-site-to-body parameter contract one-to-one and matches every other parameter-list construct (`smelt.define` declarations, named record fields, generator `ModelDef` field names).
+
+### Ternary — design rationale
+
+**Why `if cond then a else b` rather than `cond ? a : b`.** Three surfaces were considered: (i) C-style `cond ? a : b`; (ii) Haskell/OCaml `if cond then a else b`; (iii) pattern-match style `match cond with TRUE => a | FALSE => b`. Option (i) collides with named-argument syntax (the `:` token already appears in named-arg `name: value`, in record field declarations, and in type annotations) — the parser would need additional context to recognise `:` as the ternary's else-separator. Option (iii) is heavyweight for the binary case and introduces pattern-match syntax that smelt does not otherwise have. Option (ii) introduces three keyword reservations (`if`, `then`, `else`) but reads as natural English, matches SQL `CASE WHEN cond THEN a ELSE b END` shape closely enough to teach, and the keywords are not common user identifiers in the meta-language surface. The cost — three keyword tokens — is paid once at parser implementation time; the benefit is unambiguous parsing without context-sensitive lookahead.
+
+**Why LUB rather than strict-equality branch typing.** Branches must unify under LUB rules so users can write `if cond then 0 else maybe_decimal` and get `Number` (the LUB of `Integer` and `Decimal`) without an annotation. The alternative — strict equality — would force every conditional with numeric branches to annotate one branch to match the other's exact type, which is friction with no soundness benefit (LUB already handles widening soundly per `types.md`). Strict equality remains the rule for `Map<K, V>` invariance and `Lambda<S, T>` invariance because those are *consumed* in invariant positions (key lookup, multi-arg application); ternary branches are *produced* into a context whose target type widens by LUB. The two rules are not in tension.
+
+**Why short-circuit evaluation suppresses runtime-style diagnostics on the unreached branch.** A meta-evaluator that fully evaluates both branches and then picks the chosen result would emit `MapGetMissingKey` on `if m.has(k) then m.get(k) else default` for every absent `k`, defeating the construct's primary use case (safe defaulting on missing keys). Short-circuit evaluation matches every language that has both an `if-then-else` form and a strict missing-key surface (Rust, Haskell, OCaml) — both branches must *type-check* but only one *evaluates*. The cost — a one-line addition to the evaluator's branch-walk rule — is paid once; the benefit is that `m.has(k) |> if then m.get(k) else default` is a working, idiomatic, type-safe defaulting pattern.
+
+**Why no Boolean coercion of non-Boolean `COND` types.** `TernaryConditionNotBoolean` is a hard diagnostic — a `COND` whose type is not assignable to `Boolean` does not silently coerce. The alternative (treating any non-null, non-zero, non-empty value as truthy) was considered and rejected because it collides with `types.md`'s strict-by-default doctrine and makes refactoring a typed predicate to a different shape silent. The strict rule produces an anchored error at the offending `COND` expression; the user adds `== TRUE` or restructures the predicate. The narrower rule is the dial that can widen under concrete pressure; widening is a spec edit with explicit truthiness rules.
+
+**Why no `else if` chaining sugar.** A nested ternary `if c1 then a else if c2 then b else c` parses right-associatively per the existing precedence rule; no special `else if` token is required. Languages that ship `else if` as sugar (Python's `elif`, Rust's `else if` keyword pair) do so to avoid deep `else { if … }` nesting in statement form. The meta-language ternary is an expression form with no braces, so the natural right-associative chain already reads as cleanly as `elif` would. Adding `elif` would introduce another reserved keyword for no behavioural payback.
+
 ### Pipe — design rationale
 
 **Why pipe is first-arg, meta-only, and purely sugar.** Research §4.6 argues for first-arg over last-arg because HOFs naturally take their data first; matching Google Pipe SQL and DuckDB Pipe is the right ecosystem signal. Last-arg (F# style) would force every HOF signature to flip; placeholder pipe (`|>` with `_`) loses the terseness of the common case. Meta-only scope (alt a) keeps the surface focused — pipe-SQL extension (alt b) is a separate paper that extends the SQL grammar and the planner, not the meta-language. Purely-sugar semantics means the type checker can desugar before checking: a pipe expression and the equivalent un-piped call have identical synthesised types, evaluation results, frame-stack contributions, and diagnostic anchoring, modulo the pipe-introduced LHS span. There is no "pipe value" type and no pipe-aware codegen; once the parser is past `|>`, the rest of the pipeline is unchanged.
 
 ### Reducers — design rationale
 
-**Why a closed reducer registry (research §4.7 alt (i)).** A user-defined reducer would need to assert associativity (so the compiler can fold in any order), an identity element, and the type system tracking those properties — alternatives (ii), (iii), and (iv) in research §4.7 each require either trust-without-verification or a bigger language change (type classes / monoid instances) than the meta-plan budgets. A closed registry of seven reducers is enough for every dbt-style use case (comma-separated SELECTs, AND/OR composition, table unions, numeric sums, text concatenation). The cost is that adding a reducer requires a compiler change; the benefit is that every reducer's empty-list identity is vetted and every user gets predictable semantics. Parameterised reducers (`concat_with(sep)`) extend the registry's expressive power without opening it to user definition — that is the right axis to grow when concrete pain emerges.
+**Why a closed reducer registry (research §4.7 alt (i)).** A user-defined reducer would need to assert associativity (so the compiler can fold in any order), an identity element, and the type system tracking those properties — alternatives (ii), (iii), and (iv) in research §4.7 each require either trust-without-verification or a bigger language change (type classes / monoid instances) than the meta-plan budgets. A closed registry of seven bare reducers plus parameterised entries is enough for every dbt-style use case (comma-separated SELECTs, AND/OR composition, table unions, numeric sums, text concatenation with a user-chosen separator). The cost is that adding a reducer requires a compiler change; the benefit is that every reducer's empty-list identity is vetted and every user gets predictable semantics.
+
+**Why parameterised reducers (`concat_with(sep)`).** The bare `concat` produces SQL `e1 || e2 || …` without a separator, which is correct for byte-level concatenation but seldom what the user wants when joining a list of column names (`a, b, c`) or path components (`a/b/c`). Three alternatives were considered: (i) ship `concat_with(sep)` as a parameterised reducer; (ii) leave the user to express it via `map(xs, fn x => x || sep) |> reduce(concat) |> trim_trailing(sep)` or similar; (iii) lift `sep` into the surrounding map step (`map(xs, fn (x, idx) => if idx == 0 then x else sep || x) |> reduce(concat)`). Option (ii) introduces a trailing-separator artefact and a string-trim primitive that smelt does not have. Option (iii) requires a multi-arg-lambda HOF surface (`map_indexed`) that smelt does not have. Option (i) is the smallest commitment: extend the reducer call shape from bare identifier to `r(args…)`, register `concat_with(sep: Text)` in the closed registry, evaluate `sep` once at type-check time, and emit `e1 || sep || e2 || sep || …`. The argument's compile-time-resolvability constraint matches `smelt.config.var`'s literal-only rule: a parameter that flows into SQL fragment construction must be known at compile time so the produced fragment is itself a compile-time CST node.
+
+**Why parameterised reducers via call syntax rather than method syntax.** Two alternatives were considered: (i) `reduce(xs, concat_with(sep))` — the call shape sits at the second argument of `reduce`; (ii) `reduce(xs, concat).with(sep)` — a fluent method that mutates a base reducer's parameter. Option (ii) requires registering each reducer's `Reducer<T>` witness as a user-facing type with a method surface, which collides with the closed-registry rule (`Reducer<T> is not a user-writable type`). Option (i) keeps the witness internal: the parameterised reducer call is parsed as a reducer-call form at exactly the second-argument position of `reduce`, and nowhere else. The parser's parameterised-reducer-call recognition is a single positional rule, not a value-bearing type system extension. This is the same discipline the closed-bare-identifier registry uses, lifted to admit one level of parametrisation without admitting full user reducer definition.
 
 ### Compile-time variables — design rationale
 
@@ -845,6 +1093,26 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
 
 **Why `Map<K, V>` is invariant in both axes.** Covariant `K` would admit unsound lookups (a `Map<NarrowKey, V>` typed as `Map<WiderKey, V>` accepts wider-key lookups with no binding, defeating static `MapGetMissingKey` detection). Covariant `V` is sound (no `Map` value mutation), but matching `K`'s invariance keeps the rule uniform and avoids users having to memorise that `K` is invariant while `V` is covariant. The cost — a `Map<Text, Integer>` cannot widen to `Map<Text, Number>` even when the LUB would be safe — is recovered by `m |> entries |> map(fn e => {key: e.key, value: e.value : Number})` if the user genuinely needs the widening. The simpler rule wins.
 
+### Multi-model production — design rationale
+
+**Why a frontmatter directive rather than a top-level form.** Research §4.10.4 considered three alternatives: (i) `generates: models` frontmatter directive + body returning `List<ModelDef>`; (ii) a `smelt.generate.models { … }` top-level form parallel to `smelt.define`; (iii) external codegen. Option (ii) introduces another top-level form parallel to `smelt.define` and `smelt.record`, but unlike those it is mutually exclusive with the rest of the file's body — a generator file's "body" *is* the generation logic, not a side declaration. The frontmatter directive captures this asymmetry cleanly: presence of `generates: models` flips the body's expected type from bare-SELECT to `List<ModelDef>`, which the parser dispatches on without ambiguity. Option (iii) (external codegen) loses LSP, types, and the smelt-over-dbt value proposition (research §4.10.4 lists this rejection explicitly). Option (i) wins on the same axis the rest of the meta-language wins: every meta value has a type, every cross-reference has a goto-def target, every diagnostic anchors at a source span.
+
+**Why `ModelDef` is user-constructible (unlike `ColumnRef` / `ModelRef` / `SourceRef`).** The reflection witnesses are produced exclusively by reflection accessors — they witness workspace state, they do not represent user intent. `ModelDef`, by contrast, is precisely user intent (the user's declaration of a model the workspace should contain). Restricting `ModelDef` construction to reflection would produce no `ModelDef` values; the closed five-field record needs literal construction to be useful at all. The construction is scoped to generator-file bodies (via `ModelDefOutsideGeneratorFile`) so that `ModelDef` values cannot leak into non-shape contexts; the asymmetry with the other closed witnesses is contained.
+
+**Why the closed five-field set.** Research §4.10.4's `ModelDef` sketch listed `{name, body, materialization, description, tags}` plus "frontmatter-equivalent fields (sketch, not enumerated further)". v1 commits to exactly these five fields, with `name` and `body` required and `materialization` / `tags` / `description` optional with explicit defaults. Adding more fields (`incremental:` block, `owner:`, `backend_hints:`, `target:`) is paced by examples that demand them. The closed-record discipline matches `ColumnRef` / `ModelRef`'s rationale. An emitted-model's frontmatter-equivalent fields beyond these five are inherited from the generator file's frontmatter (which applies file-wide to every emission); per-`ModelDef` overrides of those keys await a future spec edit when concrete pressure emerges.
+
+**Why path = `<dir>.<file_stem>.<modeldef.name>` rather than transparent file naming.** Research §4.10.4 considered three path-construction options: (a) generator-file-path + `.<name>` (the lean); (b) generator-transparent (emitted models live at the parent directory, the file's stem is consumed); (c) frontmatter override `generated_path_prefix`. Option (b) "would cause collisions across generators in the same directory" per the research; option (c) is an escape hatch that can be added later when path-depth pain emerges. Option (a) wins: the generator file's stem is included in every emitted path, making collisions impossible across generators in the same directory (each generator owns its own prefix). The cost — deeper smelt paths (`smelt.staging.sources.staging_orders`) — is recovered by users who want flatter paths via a future `generated_path_prefix` override. The v1 default favours collision-safety over path brevity.
+
+**Why generator bodies forbid `smelt.models.*` in v1.** A generator body that references `smelt.models.with_tag('cohort')` introduces a dependency on workspace shape, which itself depends on every generator's emissions. Resolving this is mechanically tractable — `python_models.md` §"Iterative evaluation" specifies a five-round fixed-point convergence loop for the analogous case (Python `@model` functions emitting models that other Python `@model` functions then consume). v1 forbids `smelt.models.*` inside generator bodies as a **pragmatic simplification, not a structural impossibility**: (i) the meta-language evaluator is integrated with Salsa for incremental recomputation, and adding fixed-point convergence inside Salsa is meaningfully more complex than the standalone Python loop; (ii) meta-language convergence is *structural-and-type* (model identities stabilise **and** every `TableExpr` body's schema references resolve consistently across rounds), more delicate than Python's string-convergence; (iii) round-aware type checking degrades LSP responsiveness in the typing loop. Two consistent designs were considered: (a) admit `smelt.models.*` but freeze its result to hand-authored models only (a partial-shape rule); (b) forbid `smelt.models.*` inside generator bodies entirely. v1 picks (b) for the clearer diagnostic (`GeneratorBodyForbidsModelReflection`) and the cleaner mental model (generator bodies are *shape-determining*, model reflection is *shape-observing*). A future spec edit can relax to fixed-point evaluation when concrete pressure justifies the complexity; the `python_models.md` precedent is the working template. The forward path for v1 use cases: `smelt.sources.*` for tag-driven generation from sources, or literal `smelt.<path>` references to hand-authored upstream models.
+
+**Why generators-of-generators are forbidden.** A generator B whose body depends on generator A's output produces an ordering dependency. The simple case (B's body references `smelt.<A's emitted path>` literally) is forbidden by the rule "generator bodies see only hand-authored models when resolving literal paths" — A's emitted path is not a hand-authored model and therefore does not resolve inside B's body. The general case (B's body uses `smelt.models.*` to find A's output) is forbidden by `GeneratorBodyForbidsModelReflection`. Both rules together close the loop: there is no syntactic surface a generator body can use to reference another generator's output. The cost — losing valid use cases like "one config file describes other config files" — is recovered when a future spec extends workspace-shape evaluation to multi-pass; v1 ships the simple flat case.
+
+**Why path-component lift is deferred.** Research §8 lists "identifier-vs-string in lambda bodies" as an open question and specifically flags `smelt.sources.<e.source_table>` as a candidate position for a meta-`Text` lift at the path-component position. v1 commits to **no path-component lift**: the lift table specified in §"Meta-`Text`-as-identifier lift" remains exactly the four inside-SQL-expression positions (column-reference, AS-alias, ORDER BY, GROUP BY). Rationale: (i) the killer demo `examples/per_cohort_union/` works without it — each cohort's body references a static source path with cohort-specific WHERE predicates; (ii) the `examples/staging_from_sources/` demo can be expressed via tag-based source reflection (`smelt.sources.with_tag('staging_source')`) or by enumerating sources via literal paths; (iii) the four-position lift is already a significant surface — adding path-component lift expands the lift from within-expression to between-expression, which is a structurally larger commitment. A future spec edit can add path positions when concrete pressure emerges; the v1 lift remains exactly the four E1 positions.
+
+**Why frontmatter inheritance is global (not per-`ModelDef`).** A generator file's frontmatter (the YAML keys other than `generates:`) is shared across every emitted model. Per-`ModelDef` frontmatter would either require a new syntax inside the body or a parallel field set on `ModelDef` for each frontmatter key. The simpler rule: file-wide concerns (`target: redshift`, `backend_hints: …`) live in the generator's frontmatter; per-emission concerns (`name`, `materialization`, `tags`, `description`) live on `ModelDef`. The split is intentional and the closed `ModelDef` field set is the load-bearing piece. Concrete demand for per-`ModelDef` keys outside the closed set is the trigger for revisiting; the path is to add a field to `ModelDef`, not to extend frontmatter inheritance into a per-emission overlay.
+
+**Why hand-authored models win on collision.** A `ModelDefHandAuthoredCollision` retains the hand-authored model and discards the generator's emission. The alternative — generator wins — was rejected because hand-authored models have stable, user-visible goto-def targets at their source spans; generator emissions live at a derived path that the user did not directly write. Treating the user-authored declaration as authoritative matches the user's mental model ("I wrote this model; that other thing's name happens to collide"). The cost — generators silently "missing" emissions on collision — is mitigated by the loud `ModelDefHandAuthoredCollision` diagnostic at the generator's `name` field expression; the user sees the collision in their editor and can rename either side.
+
 ## Constraints & Invariants
 
 ### Meta-world invariants (always hold)
@@ -865,11 +1133,12 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
 
 ### Lambda and HOF invariants
 
-- **Lambdas have no first-class surface.** `Lambda<T, U>` is a meta-only type whose values are constructed only at HOF positional argument positions and consumed only by the corresponding HOF. The type does not appear in user-writable annotations, in `smelt.define` parameters / return types, in record fields, in list elements, or in named-argument values.
+- **Lambdas have no first-class surface.** `Lambda<…>` is a meta-only type whose values are constructed only at HOF positional argument positions and consumed only by the corresponding HOF. The type does not appear in user-writable annotations, in `smelt.define` parameters / return types, in record fields, in list elements, or in named-argument values.
+- **Lambda parameter arity is fixed at the literal and checked at the HOF call site.** A lambda's parameter list arity is established when the lambda is parsed; the HOF dispatch rule emits `LambdaArityMismatch` if the lambda's arity does not match the HOF's required arity (1 for `map`/`filter`). Zero-parameter lambdas (`fn () => body`) are not admissible (`LambdaZeroParameters`).
 - **HOFs are pure functions of their inputs.** `map`, `filter`, and `reduce` produce a result fully determined by `(xs, f|p|r)` — no clock, no random, no hidden state. Re-evaluation under the same inputs produces the same result, byte-equal at the CST level for codegen-time expansion.
 - **HOF and reducer names are workspace-wide reserved.** No `smelt.define` declaration, lambda parameter, or other meta-namespace identifier may bind these names. The reservation is part of the closed-registry contract.
 - **HOF inline-expansion frames carry no `fn_id`.** The anonymous-frame form registered in `expansion.md`'s anonymous-frame contract is the only addition to the frame-stack contract for HOFs; HOF lambda bodies are not declarations and have no per-function identity. The frame's `function` field carries the HOF name; producers must populate `call_site_range` and the optional `element_index`.
-- **`SmeltType::Lambda` is invariant in its parameters.** `Lambda<S, T>` and `Lambda<S', T'>` unify only when `S = S'` and `T = T'`. No subtyping rule applies. The HOF's type-checking rule binds the lambda's parameter and synthesises its return; it does not need lambda subtyping.
+- **`SmeltType::Lambda` is invariant in its parameters.** `Lambda<S_1…S_k, T>` and `Lambda<S_1'…S_k', T'>` unify only when `k = k'`, each `S_i = S_i'`, and `T = T'`. No subtyping rule applies. The HOF's type-checking rule binds the lambda's parameters and synthesises its return; it does not need lambda subtyping.
 
 ### Pipe invariants
 
@@ -877,12 +1146,23 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
 
 ### Reducer invariants
 
-- **Reducer registry is closed.** The seven reducers in §"Contextual reducers" are the entire set. Adding one requires a spec edit and a compiler change. User code may not introduce a reducer; user code may not pass an arbitrary value as `reduce`'s second argument (the second argument is parsed as a bare reducer identifier, not a value-bearing expression).
-- **`Reducer<T>` is not a user-writable type.** The internal type-system witness for reducer identifiers is unspeced at the user surface. The surface presents reducers as bare identifiers with closed-registry membership; future user-defined reducers would have to surface a `Reducer<T>` type, but that is post-plan.
+- **Reducer registry is closed.** The bare reducers in §"Contextual reducers" plus the parameterised entries (`concat_with(sep)` in v1) are the entire set. Adding a bare or parameterised entry requires a spec edit and a compiler change. User code may not introduce a reducer; user code may not pass an arbitrary value as `reduce`'s second argument — the second argument is parsed as a bare reducer identifier or a parameterised reducer call, not a value-bearing expression.
+- **Parameterised reducer arguments are compile-time-resolvable.** Each argument's value must be a compile-time meta value (literal, `smelt.config.var` result, statically-known field projection); runtime `Expr<T>` arguments emit `ReducerArgNotCompileTime`. The arguments are evaluated once at type-check time and parameterise the binary operation for the lifetime of the `reduce` call. Empty-list identity is fixed by the registry entry, not by the argument values (e.g. `concat_with(sep)` returns `''` on an empty list independent of `sep`).
+- **`Reducer<T_in, T_out>` is not a user-writable type.** The internal type-system witness for reducer identifiers (bare or parameterised) is unspeced at the user surface. The surface presents reducers as identifiers at the second argument of `reduce`, with closed-registry membership; future user-defined reducers would have to surface a `Reducer<…>` type, but that is post-plan.
 
 ### Compile-time variable invariants
 
 - **`smelt.config.var` is literal-only.** The argument is constrained to be a string literal. Expression-valued lookups require loader-family integration and are a deliberate exclusion at this layer.
+
+### Ternary invariants
+
+- **Meta-only.** `if cond then a else b` is a compile-time value expression. It does not produce SQL `CASE WHEN`; mis-placement in a Data-World position emits `TernaryInDataPosition`.
+- **Strict Boolean condition.** `COND` must synthesise to a type assignable to `Boolean`. No truthiness coercion. Non-Boolean conditions emit `TernaryConditionNotBoolean` and the ternary evaluates to `Unknown`.
+- **Branches unify by LUB.** `THEN_EXPR` and `ELSE_EXPR` must unify under the type-system LUB rules (`types.md` §"Fragment sort subtyping" and §"Numeric promotion chain"). The ternary's synthesised type is the LUB.
+- **Short-circuit evaluation is observable.** Exactly one of `THEN_EXPR` and `ELSE_EXPR` is *evaluated*; both are *type-checked*. Diagnostics arising from evaluation of the unreached branch (e.g. `MapGetMissingKey`, `ConfigVarNotFound`) are suppressed. This is the load-bearing rule that makes `if m.has(k) then m.get(k) else default` a working defaulting pattern.
+- **No scope introduced.** The ternary binds no name and creates no scope. Identifiers inside each slot resolve against the surrounding scope unchanged.
+- **`if`, `then`, `else` are workspace-wide reserved keywords.** No `smelt.define`, `smelt.record`, or lambda parameter may bind these names. `TernaryKeywordShadowed` anchors at the offending declaration.
+- **Right-associative chaining.** `if c1 then a else if c2 then b else c` is `if c1 then a else (if c2 then b else c)`. No `else if` sugar token.
 
 ### Reflection invariants
 
@@ -918,6 +1198,20 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
 - **Map API is closed.** The five methods (`entries`, `keys`, `values`, `get`, `has`) are the entire surface; misuse emits `MapApiUnknown`. Future methods require a spec edit and a compiler change.
 - **Maps are pure meta-world values.** Map values do not reach the database engine; consumers transform a `Map` to a `List` via the entries/keys/values projections and consume the list at splice points.
 
+### Multi-model production invariants
+
+- **Generator files are marked by `generates: models` frontmatter.** No other mechanism (filename extension, body shape) determines generator status. The `.gen.sql` extension is a recommended convention; rename refactors that preserve frontmatter preserve generator status.
+- **A generator file's body is `List<ModelDef>`-typed.** Bare SELECT in a generator file is `GenerateFileBareSelectForbidden`; a body whose synthesised type does not unify with `List<ModelDef>` is `GenerateFileBodyTypeError`.
+- **`ModelDef` is the only user-constructible closed meta record type.** All other closed records (`ColumnRef`, `ModelRef`, `SourceRef`) originate from reflection. `ModelDef` literals outside a generator file's body emit `ModelDefOutsideGeneratorFile`.
+- **`ModelDef`'s closed field set is `{name, body, materialization, tags, description}`.** Adding a field requires a spec edit and a compiler change.
+- **`ModelDef.body` is the single carve-out admitting `TableExpr` in a record field.** User-declared `smelt.record` declarations cannot declare a `TableExpr`-typed field; the rule's existing enforcement in `find_forbidden_type_name` is preserved.
+- **Emitted-model path is `<dir>.<file_stem>.<name>`.** The generator file's stem is part of every emitted path; transparent-file naming is not in v1.
+- **Generator bodies cannot reflect on the model set.** `smelt.models.with_tag` and `smelt.models.all` inside a generator body emit `GeneratorBodyForbidsModelReflection`. Generators-of-generators are structurally impossible because no syntactic surface admits the chain.
+- **Workspace-shape resolution is single-pass.** Generators evaluate independently after sources/seeds are loaded and before model bodies are type-checked. Generator emissions become workspace members during shape resolution; subsequent type-checking sees the full workspace.
+- **Generator evaluation is deterministic.** Same workspace input → byte-equal emitted models. Cross-file evaluation order is workspace-relative-path lexicographic, observable only at the collision boundary.
+- **Hand-authored models win over generator emissions on collision.** `ModelDefHandAuthoredCollision` retains the hand-authored model and discards the generator emission. Generator-vs-generator collisions retain the lexicographically-earlier generator.
+- **The four-position identifier lift is unchanged.** Path-component lift (admitting meta-`Text` in `smelt.<…>` positions), CTE-name lift, and table-alias lift are **not** in v1; the lift table remains exactly the column-reference, AS-alias, ORDER BY, GROUP BY positions.
+
 ### Out-of-scope by deliberate choice
 
 - **Pipe-SQL extension** (research §4.6 alternative b) — porting the pipe operator into Data-World queries is a separate paper.
@@ -930,19 +1224,28 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
 - **Non-`Text` `Map` keys** — `Map<Integer, V>`, `Map<Date, V>`, record-typed keys deferred until a concrete equality/hashing surface is needed.
 - **`Optional<T>` and record-shape inference** — `m.get(k)` returns `V` strictly; record literals require explicit target types. Both soften to ergonomic alternatives only when a separate spec defines `Optional<T>` and the surrounding consumer pattern.
 - **Mutually recursive records** — record declarations form a DAG; a future spec can lift the restriction when a use case demands it.
+- **Path-component identifier lift** — `smelt.<…>` paths admit only literal identifier segments; dynamic source/model lookup uses `smelt.sources.*` reflection or a future explicit accessor.
+- **CTE-name and table-alias identifier lift** — neither admits a meta-`Text` lift in v1; the lift surface stays inside SQL expressions.
+- **Transparent generator file naming** — emitted paths always include the generator file's stem; a `generated_path_prefix` frontmatter override is deferred until path-depth pain emerges.
+- **Per-`ModelDef` frontmatter beyond the closed five fields** — `incremental:` blocks, `owner:`, `backend_hints:`, etc. must live in the generator's file-wide frontmatter (inherited by every emission) or wait for a spec edit that adds to the closed `ModelDef` field set.
+- **Python-`@model` generators** — `generates: models` is a SQL meta-language feature; Python `@model` functions cannot emit multiple models via this directive. See `python_models.md`.
 
 ## Known Divergences / Open Questions
 
 - **Reflection (`smelt.columns_of`, `ColumnRef`, identifier lift) is not yet implemented.** The surface and semantics above are normative; the implementation, the four reflection diagnostic codes, the `column_origin` extension to the anonymous expansion frame, and the LSP hover/goto/completion paths have not yet landed. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 - **Cross-spec touches required for reflection.** The reflection implementation must land two adjacent-spec touches: (i) `expansion.md`'s `column_origin` field on the anonymous-frame contract; (ii) `lsp.md`'s reflection LSP obligations (hover/completion/goto-def for ColumnRef field projection and lifted identifiers). `schema_evolution.md` records (informationally, not normatively) the implication that a column added to a source must propagate to `smelt.columns_of`-sourced HOF outputs; this is observable behaviour falling out of expansion-time evaluation, not a separate behavioural change. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 - **Records, `Map<K,V>`, and schema-typed loaders are implemented.** The record, map, and loader surfaces above are normative and landed. Residual divergences — recursive schemas, per-key deep-merge for `Map<Text, S>` overlays, and `Optional<V>` schema fields — remain deferred per `meta_config_loading.md`. Tracked in `docs/plans/20260509-meta-language-E1.md`.
+- **Record and Map diagnostic codes not yet emitted via `file_diagnostics`.** The 10 record codes (`SmeltRecordRedefinition` through `RecordInDataWorld`) and 7 Map codes (`MapKeyTypeNotText` through `MapApiArgTypeMismatch`) are normatively defined in §Surface and emitted by pure inference functions in `crates/smelt-db/src/type_inference/record.rs` with full unit-test coverage. `check_file_diagnostics` does not yet walk `RECORD_LITERAL` / `RECORD_TYPE_INLINE` / `MAP_METHOD_CALL` nodes, so an editor opening a workspace with these errors will not see the corresponding LSP diagnostic squiggles. The validator (`validate_map_type_expression`) and registry sentinels (`record_registry_for_workspace`) similarly exist as pure helpers but are not invoked from `file_diagnostics`. Production wiring is mechanical (walk the AST, call the pure functions, append sentinels) but high-volume — tracked in `docs/plans/20260509-meta-language-E1.md`'s "Deferred during implementation" section and slated for a focused integration phase.
+- **Record / Map / loader LSP backend dispatch not yet wired.** Hover, completion, and goto-def behaviours for `smelt.record` declarations, record literals, record field projections, `Map<K,V>` bindings, Map API method calls, and loader call sites are implemented as pure helper functions in `crates/smelt-lsp/src/hover.rs` (`hover_text_for_record_decl_name`, `record_field_projection_completions`, `goto_def_for_smelt_record_name`, etc.) with full unit-test coverage. They are NOT yet dispatched from the production `Backend::hover` / `Backend::completion` / `Backend::goto_definition` handlers — a user opening `examples/meta_config/` in an editor today will not see record/map/loader hover, completion, or goto-def at the cursor. The deferral lags the prior-phase bar for hover/completion (Phases C/D dispatched their hover/completion helpers) but matches it for goto-def (Phases C/D left their `goto_def_*` stubs as pure helpers, awaiting expansion-time-context wiring). Tracked in `docs/plans/20260509-meta-language-E1.md` and `docs/plans/20260509-meta-language-overall.md` — production wiring lands alongside LSP-smoke regression coverage in a focused phase.
 - **Map iteration order and `m.get` strictness are committed.** Two design dials closed in §"Maps — design rationale": (i) `m.entries()` / `m.keys()` / `m.values()` produce ascending byte-lexicographic order on keys; (ii) `m.get(k)` on a statically-known missing key is `MapGetMissingKey`, not a silent `Unknown`. Future softening (insertion-order iteration, `Optional<V>` return type) requires a separate spec edit.
-- **Multi-model production not yet implemented.** Will define the `generates: models` frontmatter directive; the `ModelDef` record meta type; the meta-`Text`-as-identifier lift in path positions; and the workspace-shape change ("one file may produce N models"). Mechanism is not yet finalised — research §4.10.4 leans on a frontmatter directive plus a body returning `List<ModelDef>`. Tracked in `docs/plans/20260509-meta-language-overall.md`.
-- **Identifier-lift positions in path contexts undecided.** Multi-model production must commit to which SQL grammar slots admit a meta-`Text` lift (model path components, column aliases, CTE names) and which do not (arbitrary keywords). The narrowness is what keeps the lift from drifting into Jinja territory. Tracked in `docs/plans/20260509-meta-language-overall.md`.
-- **Polish (parameterised reducers, multi-arg lambdas, ternary, `zip_with`) not yet implemented.** Will define parameterised reducers (e.g. `concat_with(sep)`); multi-arg lambdas; the meta-world ternary `if cond then a else b`; and `zip_with` if any shipped example demands it. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Multi-model production is implemented.** The `generates: models` frontmatter directive, the `ModelDef` meta record type and its closed five-field set, the workspace-shape resolution pipeline (W1–W4 Salsa-cached stages), the ten diagnostic codes (`GeneratesUnknownValue` through `GeneratorBodyForbidsModelReflection`), the `<generator>` anonymous expansion frame, the LSP hover / completion / goto-def helpers for `ModelDef` literals and their Backend dispatch wiring, and end-to-end `smelt build` materialisation of emitted models are all live. The killer demo `examples/per_cohort_union/` builds cleanly with zero LSP diagnostics, and `cargo test -p smelt-cli --test cohort_count_acceptance` exercises Phase B reducers, Phase C reflection, Phase E1 records and loaders, and Phase E2 multi-model production as a single end-to-end demo. Full LSP completeness (rename, universal hover/goto-def/completion sweep) is tracked as remaining work in `docs/plans/20260509-meta-language-overall.md` Phase G.
+- **Generator-body driver shape is `smelt.config.load_yaml` / `smelt.config.load_json` only in the current evaluator.** The type system admits `smelt.sources.with_tag('raw') |> map(fn s => ModelDef {…})` as a generator-body driver (§"Multi-model production" Semantics rules 6 and 8 do not forbid it), but the runtime evaluator in `crates/smelt-db/src/queries/project.rs::evaluate_body_emissions` currently only enumerates per-record bindings when the pipeline driver is a `smelt.config.load_yaml` or `smelt.config.load_json` call. A `smelt.sources.with_tag(…)`-driven generator type-checks cleanly but resolves to zero emissions at evaluation time. `examples/staging_from_sources/` ships with a hardcoded `[ModelDef {…}, …]` list literal as an intentional workaround; the fixture's `README.md` records the divergence. Extending the evaluator to iterate `smelt.sources.*` results as a generator driver is tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Path-component identifier lift is committed-as-deferred.** Research §8's open question "identifier-vs-string in lambda bodies" includes the candidate position `smelt.sources.<e.source_table>` for a meta-`Text` lift in `smelt.<…>` paths. This spec commits to **no path-component lift in v1**: the lift table in §"Meta-`Text`-as-identifier lift" remains exactly the four inside-SQL-expression positions. Dynamic source/model lookup is expressed through `smelt.sources.with_tag` or future explicit accessors. A future spec edit can extend the lift when concrete pressure surfaces. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Frontmatter as a meta-evaluable value is an open architectural question.** Generator file frontmatter is statically YAML-parsed in v1: one config bag per file, applied identically to every emission, read by downstream consumers (catalog, schema-evolution, incremental compiler) without invoking the meta evaluator. An alternative shape — frontmatter as a meta-evaluable `ModelConfig` record value, with `generates: models` and a small set of bootstrap keys staying static and the remaining keys becoming dynamic — would (i) let each `ModelDef` carry an optional `config: ModelConfig` field that merges with or overrides the file-wide value, enabling per-emission `cluster_by`, `partition_by`, `owner`, and similar without widening `ModelDef`'s closed field set; (ii) enable a typed registry for planner-rule-specific metadata (each rule contributes a closed record type under a known namespace) rather than widening core types for each new rule's needs; (iii) let generators compute config per emission from the same data they compute `name` and `body` from. The static shape ships in v1 because it keeps the consumer-side reads cheap (no meta evaluator required), keeps the Salsa graph simpler (frontmatter is parse-time data, not a post-expansion meta-value), and is sufficient for the killer demos. The architectural commitment — *which keys are static vs meta-evaluable, and what Salsa phasing the dynamic keys require* — is deferred until concrete pressure emerges (planner rules accumulating per-model metadata; demos demanding per-emission overrides; a user surface for `ModelConfig`). The decision is **additive-relaxable**: shipping static-first does not foreclose the dynamic shape, because no user code today declares per-`ModelDef` config fields. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Polish surfaces (parameterised reducers, multi-arg lambdas, meta-world ternary) are implemented.** The §Surface entries for `concat_with(sep)`, `fn (a, b) => body`, and `if cond then a else b` have landed, along with the associated diagnostic codes: `LambdaArityMismatch` (replaces the pre-implementation placeholder `LambdaArityNotSupported`), `LambdaZeroParameters`, `LambdaDuplicateParameter`, `ReducerArityMismatch`, `ReducerArgTypeMismatch`, `ReducerArgNotCompileTime`, `ReducerNamedArgument`, `TernaryConditionNotBoolean`, `TernaryBranchTypeMismatch`, `TernaryKeywordShadowed`, `TernaryInDataPosition`, `TernaryDanglingThen`, and `TernaryDanglingElse`. The corresponding LSP hover/completion/goto-def paths for these surfaces are also live. `zip_with` remains deferred — it is a theoretical-completeness ledger entry and will ship only when a concrete use case demands a multi-list HOF. Tracked in `docs/plans/20260509-meta-language-overall.md` and `docs/plans/20260509-meta-language-F.md`.
 - **LSP completeness work not yet implemented.** Rename support for new constructs and guaranteed hover/goto-def/completion/diagnostics-with-frame-stacks across every shipped meta-language surface element have not yet landed. (No new syntactic surface; LSP capability is part of the spec because the user-visible behaviour of editor tooling is part of "how this feature works".) Tracked in `docs/plans/20260509-meta-language-overall.md`.
 - **`Array<U>(…)` runtime-array constructor.** §"Per-construct semantics — Lists and spread" rule 3 references `Array<U>(…)` as the explicit opt-in for the runtime-array reading of `[…]`. The constructor is not yet implemented; until it lands, the only Data-World path to a runtime array is the existing `[1, 2, 3]` literal in an `Expr<Array<U>>` position (governed by `types.md`). Tracked in `docs/plans/20260509-meta-language-overall.md`.
-- **Lambda surface is `fn x => body`.** Position-based disambiguation (research §4.5 backup) is not part of the surface.
+- **Lambda surface is `fn x => body` (single-arg) or `fn (a_1, …, a_k) => body` (multi-arg).** Position-based disambiguation (research §4.5 backup) is not part of the surface.
 - **HOF expansion frames are anonymous.** Producers populate the `function` field with the HOF name, but the frame has no `fn_id` (HOFs are built-ins, not user-defined functions). The LSP renderer reads only `call_site_range`; the per-element-index field is producer-side until a renderer follow-up surfaces it. Tracked here so future planner / renderer work preserves the contract.
 - **`Reducer<T>` is not a user surface.** The closed registry presents reducers as bare identifiers; the type-system witness behind them is internal. Future user-defined reducers would require a `Reducer<T>` user-writable type and a soundness-verification approach (associativity, identity); both are post-plan.
 - **Lifted-identifier hover and goto-def Backend dispatch not yet wired.** `hover_text_for_lifted_identifier` and `goto_def_for_lifted_identifier` are implemented as pure helpers (no Salsa dependency), but the LSP dispatch in `Backend::hover` and `Backend::goto_definition` does not yet detect when the cursor is inside one of the four lift positions (column-reference, AS-alias, ORDER BY, GROUP BY) and route to these helpers. Full wiring requires distinguishing a `c.name` field-projection (which uses the existing ColumnRef field-hover path) from a `c.name` expression used as an SQL identifier (the lift case); this distinction requires parent-AST-context analysis not yet implemented in the pure dispatch layer. The `goto_def_for_lifted_identifier` helper also returns `None` in v1 because the `source_span` field on `ColumnRefValue` is `Option<TextRange>` without a file path, making PathBuf construction impossible without Salsa context. Tracked in `docs/plans/20260509-meta-language-overall.md`.
@@ -953,33 +1256,39 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
 ## References
 
 - **Code**:
-  - `crates/smelt-parser/src/lexer.rs` — `LBRACKET`, `RBRACKET`, `DOTDOTDOT`, `FN`, `PIPE_ARROW` tokens (lex `||` before `|>` to avoid mis-tokenisation).
-  - `crates/smelt-parser/src/parser.rs` — `ARRAY_LITERAL` (reused for list literals), `LIST_SPREAD`, `LAMBDA`, `PIPE_EXPR` productions; lowest-precedence left-associative `|>`; `RHS-must-be-call` validator producing `PipeRhsNotCall`.
+  - `crates/smelt-parser/src/lexer.rs` — `LBRACKET`, `RBRACKET`, `DOTDOTDOT`, `FN`, `PIPE_ARROW`, `IF_KW`, `THEN_KW`, `ELSE_KW` tokens (lex `||` before `|>` to avoid mis-tokenisation).
+  - `crates/smelt-parser/src/parser/{mod,expr,select,meta,types,smelt_ext}.rs` — `ARRAY_LITERAL` (reused for list literals), `LIST_SPREAD`, `LAMBDA` (single- and multi-arg parameter list with parenthesised form), `PIPE_EXPR`, `TERNARY_EXPR` productions; lowest-precedence left-associative `|>`; `RHS-must-be-call` validator producing `PipeRhsNotCall`; right-associative ternary parser with dangling-keyword recovery (`TernaryDanglingThen`, `TernaryDanglingElse`); `SMELT_RECORD_DECL`, `RECORD_LITERAL`, `RECORD_TYPE_INLINE`, `MAP_METHOD_CALL`, `REDUCER_CALL` productions; mutual-recursion depth guard on `parse_record_type_inline`.
   - `crates/smelt-parser/src/ast.rs` — typed wrappers for the new CST nodes.
-  - `crates/smelt-types/src/signatures.rs` — `SmeltType::List(Box<SmeltType>)`, `SmeltType::Lambda(Box<SmeltType>, Box<SmeltType>)` variants; meta-only `ColumnRef` `SmeltType` witness (the spec leaves the exact variant shape — dedicated `ColumnRef` variant vs internal `Record` instantiation — to the implementation, subject to the closed-field invariant); user-writable `SmeltType::Record { fields, name: Option<String> }` variant (structural by field set; the optional name is hover-only metadata, not a nominal distinguisher) and `SmeltType::Map(Box<SmeltType>, Box<SmeltType>)` variant (invariant in both axes); workspace-level `SmeltRecordDeclaration` registry keyed by `smelt.record` name with declaration spans.
-  - `crates/smelt-db/src/type_inference.rs` — pure inference for list literals and spread (LUB, covariant subtyping, empty-literal handling); HOF dispatch (bidirectional binding of lambda parameter type from HOF `T`); reducer dispatch (closed-registry lookup, input-type validation, empty-list identity); pipe desugaring at AST level; `smelt.columns_of` (synthesises `List<ColumnRef>` from a `TableExpr` argument); `ColumnRef` field projection (closed lookup against the field set); meta-`Text`-as-identifier lift detection at the four enumerated grammar positions; record literal bidirectional checking (target-type-driven field validation, width-subtyping assignability); record field projection (closed-set lookup against the target's declared fields); `Map<K, V>` method-call dispatch (closed `{entries, keys, values, get, has}` registry, statically-resolvable-key `get`/`has` evaluation).
+  - `crates/smelt-types/src/signatures.rs` — `SmeltType::List(Box<SmeltType>)`, `SmeltType::Lambda(Vec<SmeltType>, Box<SmeltType>)` variants (the parameter vector carries arity ≥ 1; arity is invariant under unification); meta-only `ColumnRef` `SmeltType` witness (the spec leaves the exact variant shape — dedicated `ColumnRef` variant vs internal `Record` instantiation — to the implementation, subject to the closed-field invariant); user-writable `SmeltType::Record { fields, name: Option<String> }` variant (structural by field set; the optional name is hover-only metadata, not a nominal distinguisher) and `SmeltType::Map(Box<SmeltType>, Box<SmeltType>)` variant (invariant in both axes); workspace-level `SmeltRecordDeclaration` registry keyed by `smelt.record` name with declaration spans; `SmeltType::ModelDef` variant and `MODEL_DEF_FIELDS` static (closed `{name, body, materialization, tags, description}` set with the same `&[(&str, SmeltType)]` shape as `COLUMN_REF_FIELDS` / `MODEL_REF_FIELDS` / `SOURCE_REF_FIELDS`).
+  - `crates/smelt-core/src/metadata.rs` — `ModelMetadata` gains a `generates: Option<String>` field; `FileMetadata` gains a `Generator { metadata, body_offset }` variant alongside the existing `Single` / `Multi`; `extract_file_metadata` routes generator files to the new variant before SQL parsing.
+  - `crates/smelt-db/src/type_inference/{mod,literal,binary,case_coalesce,subquery,function_call,composite,hof,record,loader_and_reflection,dispatch,type_context,ternary}.rs` — pure inference for list literals and spread (LUB, covariant subtyping, empty-literal handling); HOF dispatch (bidirectional binding of lambda parameter types from the HOF's per-slot `T_i`); single- and multi-arg lambda parameter-list checking (duplicate-parameter detection, arity-against-HOF-required matching); reducer dispatch (closed bare-registry lookup, parameterised reducer call recognition, argument compile-time-resolvability and type checking, empty-list identity); meta-world ternary inference (Boolean condition check, LUB branch unification, short-circuit evaluation, `Unknown` propagation, keyword-shadowing detection); pipe desugaring at AST level; `smelt.columns_of` (synthesises `List<ColumnRef>` from a `TableExpr` argument); `ColumnRef` field projection (closed lookup against the field set); meta-`Text`-as-identifier lift detection at the four enumerated grammar positions; record literal bidirectional checking (target-type-driven field validation, width-subtyping assignability); record field projection (closed-set lookup against the target's declared fields); `Map<K, V>` method-call dispatch (closed `{entries, keys, values, get, has}` registry, statically-resolvable-key `get`/`has` evaluation). The closed registries (`REDUCER_REGISTRY`, `COLUMN_REF_FIELDS`, `MAP_API_METHODS`) live in `hof.rs`, `loader_and_reflection.rs`, and `record.rs` (or `signatures.rs`) respectively.
   - `crates/smelt-db/src/function_body_check.rs` — anonymous-frame stamping at HOF call sites; lambda parameter scoping in body walks; `column_origin` extension on the anonymous expansion frame; per-element provenance stamping for `columns_of`-sourced HOF iterations; expansion-time materialisation of `List<ColumnRef>` from a resolved `TableExpr` schema; record-literal validation at body-walk time (required/duplicate/unknown field detection); `map_origin` extension on the anonymous expansion frame for HOF chains sourced from `m.entries()`.
-  - `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed under §Surface (lists, lambdas, pipe, reducers, compile-time variables, reflection, records, maps).
-  - `crates/smelt-db/src/lib.rs` — closed reducer registry (`REDUCER_REGISTRY`); `smelt.config.var` resolver query against `smelt.yml` `vars:`; `smelt.columns_of` Salsa query (resolves source schema via existing `ModelSchema` machinery); closed `COLUMN_REF_FIELDS` registry; closed `MAP_API_METHODS` registry; workspace-level `smelt_record_declarations()` Salsa query indexing every `smelt.record` declaration in the workspace, used for goto-def and redefinition detection.
-  - `crates/smelt-parser/src/{lexer,parser,ast}.rs` — `LBRACE`, `RBRACE`, `COLON` already exist for SQL grammar; reuse for record literals and inline record types. New parser productions: `SMELT_RECORD_DECL` (top-level `smelt.record Name = { fields }`), `RECORD_LITERAL` (brace-delimited key-value list at value positions), `RECORD_TYPE_INLINE` (brace-delimited typed field list at type-annotation positions), `MAP_METHOD_CALL` (post-dot method-call dispatch on `Map<…>`-typed expressions).
-  - `crates/smelt-lsp/src/lib.rs` — hover for list/spread, lambdas, HOF calls, pipe expressions, reducer names, `smelt.config.var`, `smelt.columns_of`, ColumnRef field projection, lifted identifiers, record-typed bindings, record literal opening brace, record field projection, `Map<K, V>`-typed bindings, Map API methods; goto-def for lambda parameters, `smelt.config.var` arguments, lifted identifiers, `smelt.record` declarations, record-literal field names; completion in lambda bodies, reducer-argument positions, ColumnRef field set, `smelt.columns_of` argument positions, record-literal field positions (offering unfilled target fields), record-field projection (offering declared field list), `m.<cursor>` (offering closed Map API), `m.get(<cursor>)`/`m.has(<cursor>)` (offering statically-known keys).
+  - `crates/smelt-db/src/diagnostics_types.rs::DiagnosticCode` — every diagnostic code listed under §Surface (lists, lambdas, pipe, reducers, compile-time variables, reflection, records, maps, multi-model production).
+  - `crates/smelt-db/src/queries/{check_types,function_diagnostics,functions,loader,project,schema}.rs` and `crates/smelt-db/src/lib.rs` — `smelt.config.var` resolver query against `smelt.yml` `vars:`; `smelt.columns_of` Salsa query (resolves source schema via existing `ModelSchema` machinery); workspace-level `smelt_record_declarations()` Salsa query indexing every `smelt.record` declaration in the workspace, used for goto-def and redefinition detection; the W1–W4 workspace-shape resolution pipeline (`generator_files`, `evaluate_generator(file)`, `emitted_models`, `models_all_with_generators`) for multi-model production. The closed registries (`REDUCER_REGISTRY`, `COLUMN_REF_FIELDS`, `MAP_API_METHODS`, `MODEL_DEF_FIELDS`) live alongside the pure inference functions in `crates/smelt-db/src/type_inference/`.
+  - `crates/smelt-db/src/type_inference/multi_model.rs` (new) — pure inference for generator file body type-checking (`List<ModelDef>` bidirectional check); `ModelDef` record-literal validation (closed-field-set check, materialization-value validation, name path-safety validation); generator-body reflection-forbid check (`GeneratorBodyForbidsModelReflection`); emitted-path computation from generator file path + `ModelDef.name`.
+  - `crates/smelt-parser/src/{lexer,ast,syntax_kind}.rs` and `crates/smelt-parser/src/parser/` — `LBRACE`, `RBRACE`, `COLON` already exist for SQL grammar; reuse for record literals and inline record types. Parser productions: `SMELT_RECORD_DECL` (top-level `smelt.record Name = { fields }`), `RECORD_LITERAL` (brace-delimited key-value list at value positions), `RECORD_TYPE_INLINE` (brace-delimited typed field list at type-annotation positions), `MAP_METHOD_CALL` (post-dot method-call dispatch on `Map<…>`-typed expressions).
+  - `crates/smelt-lsp/src/{lib,backend,hover,completion,column_resolution,db_helpers}.rs` — hover for list/spread, lambdas, HOF calls, pipe expressions, reducer names, `smelt.config.var`, `smelt.columns_of`, ColumnRef field projection, lifted identifiers, record-typed bindings, record literal opening brace, record field projection, `Map<K, V>`-typed bindings, Map API methods; goto-def for lambda parameters, `smelt.config.var` arguments, lifted identifiers, `smelt.record` declarations, record-literal field names; completion in lambda bodies, reducer-argument positions, ColumnRef field set, `smelt.columns_of` argument positions, record-literal field positions (offering unfilled target fields), record-field projection (offering declared field list), `m.<cursor>` (offering closed Map API), `m.get(<cursor>)`/`m.has(<cursor>)` (offering statically-known keys). Production `Backend::hover`/`Backend::completion`/`Backend::goto_definition` dispatch for the record / map / loader pure helpers is deferred — see §Known Divergences.
 - **Tests**:
-  - `crates/smelt-parser/src/{lexer,parser}.rs::tests` — token, production, and error-recovery cases for `[…]`, `...`, `fn`, `|>`, `LAMBDA`, `PIPE_EXPR`; multi-arg-lambda parser error; pipe-rhs-not-call recovery; `smelt.record Name = { fields }` top-level declaration; record literal `{f: v, …}` at value positions; inline record type `{f: T, …}` at annotation positions; Map method-call (`m.entries()` etc.) parser productions.
-  - `crates/smelt-db/src/type_inference.rs::tests` — list literal LUB, empty-literal target inference, spread evaluation, forbidden positions; HOF dispatch, lambda parameter binding, reducer input-type checking, empty-list identity, pipe desugaring; `smelt.config.var` resolution and YAML scalar coercion; `smelt.columns_of` argument-type checking (TableExpr-only); `ColumnRef` field projection (closed-set lookup); lift-position grammar checks (the four enumerated positions accept; all others reject); lift narrowness rejection cases (runtime `Expr<Text>` in identifier position remains a Data-World type error); record literal bidirectional checking (required field, duplicate field, unknown field, type-mismatch, no-target diagnostics); record field projection (closed-set lookup, mid-chain projection on non-record value); width subtyping (`{a: T, b: U}` assignable to `{a: T}` but not reverse); `smelt.record` redefinition detection; record-cycle detection; Map API closed-set dispatch (every method, every arity error, every diagnostic code); statically-known `m.get(k)` present/absent paths; `MapKeyTypeNotText` at non-Text key declarations.
+  - `crates/smelt-parser/src/parser/tests.rs` and `crates/smelt-parser/src/lexer.rs::tests` — token, production, and error-recovery cases for `[…]`, `...`, `fn`, `|>`, `LAMBDA`, `PIPE_EXPR`; multi-arg-lambda parser error; pipe-rhs-not-call recovery; `smelt.record Name = { fields }` top-level declaration; record literal `{f: v, …}` at value positions; inline record type `{f: T, …}` at annotation positions; Map method-call (`m.entries()` etc.) parser productions; depth-guard regression for deeply nested inline record types.
+  - `crates/smelt-db/src/type_inference/tests.rs` — list literal LUB, empty-literal target inference, spread evaluation, forbidden positions; HOF dispatch, lambda parameter binding, reducer input-type checking, empty-list identity, pipe desugaring; `smelt.config.var` resolution and YAML scalar coercion; `smelt.columns_of` argument-type checking (TableExpr-only); `ColumnRef` field projection (closed-set lookup); lift-position grammar checks (the four enumerated positions accept; all others reject); lift narrowness rejection cases (runtime `Expr<Text>` in identifier position remains a Data-World type error); record literal bidirectional checking (required field, duplicate field, unknown field, type-mismatch, no-target diagnostics); record field projection (closed-set lookup, mid-chain projection on non-record value); width subtyping (`{a: T, b: U}` assignable to `{a: T}` but not reverse); `smelt.record` redefinition detection; record-cycle detection; Map API closed-set dispatch (every method, every arity error, every diagnostic code); statically-known `m.get(k)` present/absent paths; `MapKeyTypeNotText` at non-Text key declarations.
   - `crates/smelt-db/src/function_body_check.rs::tests` — anonymous-frame stamping; multi-frame chains crossing a HOF; lambda parameter scoping under `TableExpr` parameters; `column_origin` frame stamping for `columns_of`-sourced HOF lambda bodies; expansion-time materialisation of `List<ColumnRef>` from a resolved schema; `ColumnsOfUnresolvableSchema` recovery (drop-on-error); per-element provenance through the lift; record-literal validation under HOF body walks; `map_origin` frame stamping for HOF chains sourced from `m.entries()`.
-  - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/meta_lists/`, `examples/meta_hofs/`, `examples/meta_columns/`, `examples/meta_workspace/`, `examples/meta_config/` acceptance gates.
+  - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/meta_lists/`, `examples/meta_hofs/`, `examples/meta_columns/`, `examples/meta_workspace/`, `examples/meta_config/`, `examples/per_cohort_union/`, `examples/staging_from_sources/` acceptance gates.
+  - `crates/smelt-core/src/metadata.rs::tests` — `generates: models` frontmatter parsing; `FileMetadata::Generator` extraction; `generates: <other>` rejection; `generates: models` + `name:` field rejection; `generates: models` + `--- name: ---` Layer-1 delimiter rejection.
+  - `crates/smelt-db/src/type_inference/multi_model.rs::tests` — generator-file body type-checking (`List<ModelDef>` accepted; non-`List<ModelDef>` rejected); `ModelDef` literal field validation (required fields, duplicates, unknown fields, invalid name characters, invalid materialization values); `ModelDefOutsideGeneratorFile` at non-generator-file contexts; `GeneratorBodyForbidsModelReflection` at `smelt.models.*` call sites inside generator bodies; emitted-path computation across nested directories.
 - **User docs**:
   - `docs-site/docs/meta-language/index.md` — overview of the meta-language.
   - `docs-site/docs/meta-language/lists.md` — `List<T>`, list literals, spread.
   - `docs-site/docs/meta-language/hofs.md` — `map`, `filter`, `reduce`.
   - `docs-site/docs/meta-language/lambdas.md` — `fn x => body` surface and scoping.
   - `docs-site/docs/meta-language/pipes.md` — `|>` operator.
-  - `docs-site/docs/meta-language/reducers.md` — closed reducer registry and empty-list identities.
+  - `docs-site/docs/meta-language/reducers.md` — closed reducer registry, empty-list identities, parameterised reducer call shape (`concat_with(sep)`).
+  - `docs-site/docs/meta-language/ternary.md` — meta-world `if cond then a else b`, LUB branch unification, short-circuit evaluation, defaulting-with-`m.has(k)` pattern.
   - `docs-site/docs/meta-language/config-vars.md` — `smelt.config.var` lookups.
   - `docs-site/docs/meta-language/reflection.md` — `smelt.columns_of`, `ColumnRef`, the closed field set, the four-position identifier lift, the `coalesce_numeric` worked example; also covers `smelt.models.*` / `smelt.sources.*` wide reflection, `ModelRef` / `SourceRef`, and the union-by-tag worked example.
   - `docs-site/docs/meta-language/records.md` — `smelt.record` declarations, inline record types, record literals, field projection, width subtyping.
   - `docs-site/docs/meta-language/maps.md` — `Map<K, V>` type, the closed `{entries, keys, values, get, has}` API, missing-key diagnostics, iteration order.
-  - `docs-site/docs/meta-language/reference.md` — alphabetical reference covering every HOF, reducer, `smelt.config.var`, `smelt.columns_of`, `ColumnRef`, `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`, `smelt.record`, `Map<K, V>` API, and the lift positions table.
+  - `docs-site/docs/meta-language/generators.md` — `generates: models` frontmatter, `ModelDef` record type, the closed field set, the per-cohort-union worked example, and the workspace-shape resolution rules (W1–W4).
+  - `docs-site/docs/meta-language/reference.md` — alphabetical reference covering every HOF, reducer, `smelt.config.var`, `smelt.columns_of`, `ColumnRef`, `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`, `smelt.record`, `Map<K, V>` API, `generates: models`, `ModelDef`, and the lift positions table.
 - **Plans (history)**:
   - `docs/plans/20260509-meta-language-overall.md` — meta-plan tracking the meta-language work
   - `docs/plans/20260509-meta-language-A.md`
@@ -987,6 +1296,8 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
   - `docs/plans/20260509-meta-language-C.md`
   - `docs/plans/20260509-meta-language-D.md`
   - `docs/plans/20260509-meta-language-E1.md`
+  - `docs/plans/20260509-meta-language-E2.md` — Phase E2 plan covering multi-model production
+  - `docs/plans/20260509-meta-language-F.md` — Phase F polish: parameterised reducers, multi-arg lambdas, meta-world ternary
 - **Related specs**:
   - `docs/specs/functions.md` — `smelt.define`, fragment sorts, named arguments (parser disambiguation surface)
   - `docs/specs/types.md` — `DataType` vocabulary, fragment-sort grammar, strict-by-default doctrine

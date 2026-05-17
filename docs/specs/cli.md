@@ -93,7 +93,12 @@ owners: [andrew]
         "batch_safety": "FullyBatchSafe" | "BoundedSafe" | "PerPartitionOnly"
       },
       "tags": ["<tag>", ...],               // omitted if empty
-      "owner": "<string>"                   // omitted if unset
+      "owner": "<string>",                  // omitted if unset
+      "origin": {                           // omitted when the model is hand-authored
+        "type": "generated",
+        "generator_file": "<workspace-relative path>",
+        "generator_name": "<string>"        // ModelDef.name that produced this model
+      }
     }
   },
   "execution_order": ["<model_name>", ...],
@@ -236,6 +241,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **No project-wide compile-only flag (TB-3).** `smelt build --dry-run` does not exist; `smelt build --show-plan` requires a positional model-file argument. There is no single command to compile every model and show the plan without executing. Two candidate resolutions: (1) extend `--show-plan` to accept no positional argument for project-wide output, or (2) add `smelt build --dry-run` mirroring `smelt run --dry-run` semantics across the seed→run lifecycle.
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
 - **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
+- **Generator-emitted model `origin` field in `smelt explain --json` is landed.** The `origin` field in §"`smelt explain --json` output schema" surfaces generator emissions distinctly from hand-authored models (per `meta_language.md` §"Multi-model production"). The `ModelOriginKind::Generated { generator_file, generator_name }` enum in `smelt-core/src/origin.rs` is the production type; `ExplainModel.origin` and `CatalogModel.origin` carry it. The `generator_file:<path>` selector parses via `SelectionMethod::GeneratorFile` and resolves against the `emitted_models()` survivor set. The `smelt docs generate` Markdown renderer includes a `**Source**:` line for emitted models. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References
 

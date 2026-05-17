@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use salsa::{Accumulator, Setter};
+use smelt_core::metadata::{extract_file_metadata, FileMetadata, MetadataError, MixedKind};
 use smelt_parser::{self, File as AstFile};
 
 pub mod backends;
@@ -72,9 +73,10 @@ pub use smelt_types::{
 
 pub use diagnostics_types::{
     meta_hof_diagnostic_message, meta_list_diagnostic_message, meta_loader_diagnostic_message,
-    meta_map_diagnostic_message, meta_record_diagnostic_message,
-    meta_reflection_diagnostic_message, meta_reflection_diagnostic_message_with_table_expr,
-    Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity,
+    meta_map_diagnostic_message, meta_multi_model_diagnostic_message,
+    meta_record_diagnostic_message, meta_reflection_diagnostic_message,
+    meta_reflection_diagnostic_message_with_table_expr, Diagnostic, DiagnosticCode, DiagnosticData,
+    DiagnosticSeverity,
 };
 
 pub use function_body_check::{
@@ -109,15 +111,18 @@ pub use queries::functions::{
 pub use queries::loader::{
     loader_call_diagnostics_for_file, loader_call_diagnostics_for_file_with_content,
     loader_file_parsed, loader_resolved_value, loader_resolved_value_with_overlay,
-    smelt_record_declarations, LoaderCallSiteId, LoaderResolvedValue,
+    parse_smelt_type_from_field_annotation, smelt_record_declarations, LoaderCallSiteId,
+    LoaderResolvedValue,
 };
 pub use queries::parse::{
     model_path_refs, model_refs, model_sources, parse_file, parse_model, PathRefLocation,
 };
 pub use queries::project::{
-    all_models, models_all, models_with_tag, project_active_backends, project_paths, project_seeds,
-    project_sources, project_unstable_schema, smelt_yml_vars_query, sources_all, sources_config,
-    sources_type_errors, sources_with_tag, sources_yaml_error, SourceTypeError, YamlParseError,
+    all_models, emitted_model_smelt_path, emitted_models, evaluate_generator, generator_files,
+    models_all, models_all_with_generators, models_with_tag, project_active_backends,
+    project_paths, project_seeds, project_sources, project_unstable_schema, smelt_yml_vars_query,
+    sources_all, sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
+    EmittedModelDef, EmittedModelsResult, EvaluatedGenerator, SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, available_columns, build_type_context,
@@ -556,6 +561,41 @@ pub fn resolve_ref_path(
                 });
             }
         }
+
+        // Generator-emitted models: check the W3 emission survivors for a path
+        // match. Emitted models are not registered as SourceFile inputs, so they
+        // are not found in the SQL-files walk above. The smelt path of an emitted
+        // model is `<dir_dots>.<file_stem>.<ModelDef.name>` (from
+        // `emitted_model_smelt_path`), and the dot-separated components equal the
+        // `path` Vec we are resolving.
+        let emitted = crate::queries::project::emitted_models(db, workspace);
+        for emitted_model in &emitted.survivors {
+            if !emitted_model.generator_file.starts_with(&project_root) {
+                continue;
+            }
+            let smelt_name = crate::queries::project::emitted_model_smelt_path(
+                &emitted_model.generator_file,
+                &project_root,
+                scan_roots.as_slice(),
+                &emitted_model.name,
+            );
+            let emitted_path: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+            if emitted_path == path {
+                // Return a ResolvedRef pointing at the generator file; the
+                // goto-def handler will navigate to the ModelDef.name span within it.
+                // Look up the generator file's SourceFile handle from workspace files.
+                let gen_file = workspace
+                    .files(db)
+                    .iter()
+                    .copied()
+                    .find(|f| f.path(db) == &emitted_model.generator_file);
+                return Some(ResolvedRef {
+                    kind: RefKind::Model,
+                    source_file: gen_file,
+                    path,
+                });
+            }
+        }
     }
 
     None
@@ -642,6 +682,9 @@ fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
                 }
             }
             smelt_core::FileMetadata::Empty => {}
+            // Generator files produce models via meta-language evaluation;
+            // they are not test files.
+            smelt_core::FileMetadata::Generator { .. } => {}
         }
     }
     // 3. Default: Model.
@@ -708,6 +751,137 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
         // CSV files have no SQL content — skip all SQL-level checks.
         return;
+    }
+
+    // Generator-file frontmatter diagnostics: bridge MetadataError variants
+    // that arise from `generates:` key validation into standard diagnostics.
+    // These must run before parse errors so that callers see the frontmatter
+    // error rather than a confusing "Expected SELECT statement" parse error.
+    match extract_file_metadata(text) {
+        Err(MetadataError::GeneratesUnknownValue { value, value_span }) => {
+            // Anchor at the YAML value token (1-based line/col → 0-based).
+            let diag_line = value_span.line.saturating_sub(1) as u32;
+            let diag_col = value_span.column.saturating_sub(1) as u32;
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("generates must be `models`; found {}", value),
+                range: Range {
+                    start: Position {
+                        line: diag_line,
+                        column: diag_col,
+                    },
+                    end: Position {
+                        line: diag_line,
+                        column: diag_col + value.len() as u32,
+                    },
+                },
+                code: Some(DiagnosticCode::GeneratesUnknownValue),
+                data: None,
+            })
+            .accumulate(db);
+            // File does not parse as SQL; no further checks make sense.
+            return;
+        }
+        Err(MetadataError::GeneratesMixedWithBareModel { offending, span }) => {
+            // Anchor at the offending key / delimiter (1-based → 0-based).
+            let diag_line = span.line.saturating_sub(1) as u32;
+            let diag_col = span.column.saturating_sub(1) as u32;
+            let key_len = match &offending {
+                MixedKind::NameField => "name:".len() as u32,
+                MixedKind::SectionDelimiter => "--- name:".len() as u32,
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: "generates: models cannot coexist with bare-model identity (name field or section delimiter)".to_string(),
+                range: Range {
+                    start: Position {
+                        line: diag_line,
+                        column: diag_col,
+                    },
+                    end: Position {
+                        line: diag_line,
+                        column: diag_col + key_len,
+                    },
+                },
+                code: Some(DiagnosticCode::GeneratesMixedWithBareModel),
+                data: None,
+            })
+            .accumulate(db);
+            // File cannot be used further; bail.
+            return;
+        }
+        Ok(FileMetadata::Generator { .. }) => {
+            // Check whether the parsed generator body starts with a bare SQL
+            // statement. The parse_file query routes generator files through the
+            // meta-expression parser which produces a SELECT_STMT node when it
+            // encounters SELECT/WITH/VALUES as the first body token.
+            let parse = parse_file(db, file);
+            let syntax = parse.syntax();
+            // A bare SELECT is only a problem when it is a *direct* child of the
+            // FILE root — that is, when the generator body itself is a top-level
+            // SELECT/WITH/VALUES statement (the hand-authored model shape).
+            // SELECT_STMT nodes nested inside record-literal field values (e.g.
+            // `ModelDef { body: SELECT * FROM t }`) are valid TableExpr values and
+            // must NOT trigger this diagnostic.
+            let has_bare_sql = syntax
+                .children()
+                .any(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
+            if has_bare_sql {
+                // Find the SELECT_STMT direct child to anchor the diagnostic.
+                let select_node = syntax
+                    .children()
+                    .find(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
+                let bare_range = select_node
+                    .and_then(|n| n.first_token())
+                    .map(|t| smelt_parser::ast::text_range_to_range(text, t.text_range()))
+                    .unwrap_or(Range {
+                        start: Position { line: 0, column: 0 },
+                        end: Position { line: 0, column: 0 },
+                    });
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape".to_string(),
+                    range: bare_range,
+                    code: Some(DiagnosticCode::GenerateFileBareSelectForbidden),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+
+            // Surface diagnostics from the W2 (evaluate_generator) and W3
+            // (emitted_models) pipeline for this generator file.
+            //
+            // W2 diagnostics include: GenerateFileBodyTypeError,
+            // ModelDefDuplicateName, ModelDefInvalidName,
+            // ModelDefInvalidMaterialization, GeneratorBodyForbidsModelReflection.
+            //
+            // W3 diagnostics include: ModelDefHandAuthoredCollision and
+            // cross-generator collisions anchored at this file.
+            let gen_file_path = file.path(db).to_path_buf();
+            let evaluated = evaluate_generator(db, workspace, file);
+            for diag in &evaluated.diagnostics {
+                DiagnosticAcc(diag.clone()).accumulate(db);
+            }
+            // W3 collision diagnostics: each `DiscardedEmission` pairs the
+            // dropped emission with its collision diagnostic in a single
+            // struct, so there is no risk of the two drifting out of step
+            // (`DiscardedEmission` in `crates/smelt-db/src/queries/project.rs`).
+            // We emit only those where the discarded emission's
+            // `generator_file` matches the current file.
+            let emitted_result = emitted_models(db, workspace);
+            for item in emitted_result.discarded.iter() {
+                if item.emission.generator_file == gen_file_path {
+                    DiagnosticAcc(item.diagnostic.clone()).accumulate(db);
+                }
+            }
+
+            // Generator files are not SQL models; skip the model-validity check
+            // and all SQL-only diagnostics.
+            return;
+        }
+        _ => {
+            // Non-generator file: continue with the standard parse-error pipeline.
+        }
     }
 
     // Parse errors
@@ -868,6 +1042,55 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             for define in ast.defines() {
                 for diag in type_inference::check_define_name_shadowing(&define, text) {
                     DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+        }
+    }
+
+    // Phase E2 — ModelDefOutsideGeneratorFile: scan for ModelDef record literals
+    // in non-generator files. A `ModelDef { name: '…', body: … }` construct is
+    // only valid inside a generator file (generates: models); using it in a
+    // regular SQL model file is an error.
+    {
+        use smelt_parser::ast::RecordLiteral;
+        use smelt_parser::SyntaxKind::{IDENT, RECORD_LITERAL};
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+        let mut ctx = type_inference::TypeContext::new();
+        ctx.is_inside_generator_file = false; // non-generator file
+        for node in syntax.descendants().filter(|n| n.kind() == RECORD_LITERAL) {
+            if let Some(lit) = RecordLiteral::cast(node) {
+                // Only check record literals whose leading token is the identifier
+                // "ModelDef". In the CST, a named record literal `TypeName { … }`
+                // has the type-name IDENT as its first token.
+                let leading_name = lit
+                    .syntax()
+                    .children_with_tokens()
+                    .find_map(|e| {
+                        let tok = e.into_token()?;
+                        if tok.kind() == IDENT {
+                            Some(tok.text().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                if leading_name != "ModelDef" {
+                    continue;
+                }
+                let result = type_inference::infer_model_def_literal(&lit, &ctx);
+                for sentinel in result.sentinels {
+                    if sentinel.code == DiagnosticCode::ModelDefOutsideGeneratorFile {
+                        let range = smelt_parser::ast::text_range_to_range(text, sentinel.span);
+                        DiagnosticAcc(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: sentinel.message,
+                            range,
+                            code: Some(sentinel.code),
+                            data: None,
+                        })
+                        .accumulate(db);
+                    }
                 }
             }
         }
@@ -1133,15 +1356,32 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // Phase B (meta-language) Phase 3: HOF + lambda + pipe diagnostics.
             //
             // Walks every LAMBDA, FUNCTION_CALL (HOF), and PIPE_EXPR descendant.
-            // Covers: LambdaInForbiddenPosition, LambdaArityNotSupported,
-            //   LambdaResultTypeMismatch, HofExpectsLambda, HofExpectsReducer,
-            //   PipeRhsNotCall, PipeInDataPosition, ReducerInputTypeMismatch,
-            //   ReducerEmptyNoIdentity.
+            // Covers: LambdaInForbiddenPosition, LambdaArityMismatch, LambdaZeroParameters,
+            //   LambdaDuplicateParameter, LambdaResultTypeMismatch, HofExpectsLambda,
+            //   HofExpectsReducer, PipeRhsNotCall, PipeInDataPosition,
+            //   ReducerInputTypeMismatch, ReducerEmptyNoIdentity.
+            // Also covers Phase F REDUCER_CALL nodes (parameterised reducers):
+            //   ReducerArityMismatch, ReducerArgTypeMismatch, ReducerArgNotCompileTime,
+            //   ReducerNamedArgument.
             // Uses an empty TypeContext (consistent with spread/window checks above).
             let hof_diags =
                 type_inference::check_hof_position_diagnostics(&select_stmt, &kind_ctx, text);
             for diag in hof_diags {
                 DiagnosticAcc(diag).accumulate(db);
+            }
+
+            // Phase F (meta-language) — Ternary expression diagnostics.
+            //
+            // Walks every TERNARY_EXPR descendant and bare THEN_KW tokens.
+            // Covers: TernaryConditionNotBoolean, TernaryBranchTypeMismatch,
+            //   TernaryDanglingElse, TernaryDanglingThen.
+            // Uses an empty TypeContext (consistent with HOF checks above).
+            {
+                let ternary_diags =
+                    type_inference::check_ternary_expr_diagnostics(&select_stmt, &kind_ctx, text);
+                for diag in ternary_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
             }
 
             // Phase C (meta-language) — smelt.columns_of diagnostic wiring.
@@ -1346,6 +1586,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         }
                     }
                 }
+            }
+        }
+
+        // Phase F (meta-language) — File-level dangling THEN_KW detection.
+        //
+        // The parser's error recovery may eject a bare `then` keyword to the
+        // top-level FILE node when it appears in an unexpected expression
+        // position (e.g. `SELECT then x FROM t`).  `check_ternary_expr_diagnostics`
+        // walks only the SelectStmt subtree and cannot reach FILE-level tokens.
+        // This block walks the FULL file syntax so dangling THEN_KW tokens are
+        // always caught, regardless of where error recovery placed them.
+        //
+        // Emits: TernaryDanglingThen.
+        {
+            let file_syntax = ast.syntax().clone();
+            for diag in type_inference::check_dangling_ternary_keywords(&file_syntax, text) {
+                DiagnosticAcc(diag).accumulate(db);
             }
         }
     }

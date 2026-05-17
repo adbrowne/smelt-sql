@@ -498,6 +498,62 @@ impl<'a> Parser<'a> {
         self.finish_node(); // SMELT_AS_STRUCT_CALL
     }
 
+    /// Parse a generator file body: skip all leading trivia (the frontmatter's
+    /// comment-replacement lines), then parse a single meta-language expression.
+    ///
+    /// The entire content is wrapped in a `FILE` node so that callers receive
+    /// the same `Parse` type as the regular `parse_file` path. Bare SQL keyword
+    /// forms (`SELECT`, `WITH`, `VALUES`) at the first non-trivia token are
+    /// detected before parsing begins; they are parsed as a best-effort
+    /// `SELECT_STMT` for error recovery and the `bare_sql_at_body` field on the
+    /// returned `Parse` is set so the diagnostic layer can anchor
+    /// `GenerateFileBareSelectForbidden` at the correct span.
+    ///
+    /// `body_offset` is the byte offset into `self.input` where the body
+    /// starts. All tokens before that offset are trivia (comment lines produced
+    /// by frontmatter stripping) and are consumed without emitting errors.
+    pub(super) fn parse_generator_body(&mut self, body_offset: usize) {
+        self.start_node(FILE);
+
+        // Consume all trivia tokens that lie entirely before `body_offset`.
+        // `strip_frontmatter` replaces every frontmatter line with a `-- `
+        // comment of the same byte length, so these are COMMENT tokens.
+        loop {
+            if self.at(EOF) {
+                break;
+            }
+            // If the current token's start offset is at or past the body offset,
+            // stop consuming prefix trivia.
+            if self.offset >= body_offset {
+                break;
+            }
+            self.advance();
+        }
+
+        // Skip any inline trivia (whitespace) after the body offset.
+        self.skip_trivia();
+
+        // Detect bare SQL forms at the body start.  These are not valid as
+        // generator body expressions; parse them for error recovery and let
+        // the caller emit the appropriate diagnostic.
+        if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(VALUES_KW) {
+            // Parse as a SELECT statement for error-recovery purposes.
+            // The caller checks the CST for SELECT_STMT presence to emit the
+            // GenerateFileBareSelectForbidden diagnostic at the correct span.
+            self.parse_select_stmt();
+        } else if !self.at(EOF) {
+            // Normal generator body: a single meta-language expression.
+            self.parse_expression();
+        }
+
+        // Consume any trailing trivia or leftover tokens.
+        while !self.at(EOF) {
+            self.advance();
+        }
+
+        self.finish_node(); // FILE
+    }
+
     /// Sync forward to EOF or the start of the next top-level declaration.
     /// Anything skipped is wrapped in ERROR nodes (one per token).
     pub(super) fn sync_to_top_level(&mut self) {
@@ -536,9 +592,12 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.advance(); // IDENT "define"
 
-        // DEFINE_NAME: wrap the next identifier.
+        // DEFINE_NAME: wrap the next identifier (or a reserved keyword used as a name).
+        // We also accept `IF_KW`, `THEN_KW`, and `ELSE_KW` here so that the semantic
+        // checker (`check_define_name_shadowing`) can detect and report the keyword as
+        // shadowed rather than producing a cryptic parse error.
         self.skip_trivia();
-        if self.at(IDENT) {
+        if self.at(IDENT) || self.at(IF_KW) || self.at(THEN_KW) || self.at(ELSE_KW) {
             self.start_node(DEFINE_NAME);
             self.advance();
             self.finish_node();
@@ -1099,9 +1158,8 @@ impl<'a> Parser<'a> {
             self.parse_expression();
             self.finish_node();
         } else if self.is_fn_lambda_start() {
-            // Phase B meta-language lambda: `fn IDENT => body` (single-arg only).
-            // Multi-arg (`fn (a, b) => body`) is deferred to Phase F and is not
-            // routed here by is_fn_lambda_start() in Phase B.
+            // Phase B/F meta-language lambda: `fn IDENT => body` (single-arg)
+            // or `fn (IDENT, ...) => body` (multi-arg, Phase F).
             // Wrap in EXPRESSION so the argument tree structure is consistent.
             self.start_node(EXPRESSION);
             self.parse_fn_lambda();

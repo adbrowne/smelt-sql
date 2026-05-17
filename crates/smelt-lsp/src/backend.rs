@@ -36,16 +36,44 @@ use crate::db_helpers::{
     project_sources_yaml,
 };
 use crate::hover::{
-    column_ref_field_completions, columns_of_arg_completions_for_sql, find_smelt_fn_call_at_cursor,
-    find_var_line_in_smelt_yml, hover_text_for_column_ref_field, hover_text_for_columns_of_call,
-    hover_text_for_hof_meta_language, hover_text_for_list_literal_dual, hover_text_for_list_spread,
-    hover_text_for_model_ref_field, hover_text_for_models_all, hover_text_for_models_with_tag_call,
-    hover_text_for_pipe_expr, hover_text_for_source_ref_field, hover_text_for_sources_all,
-    hover_text_for_sources_with_tag_call, is_column_ref_param_before_dot,
-    is_model_ref_param_before_dot, is_source_ref_param_before_dot, lambda_param_binder_range,
-    lambda_params_for_completion, model_ref_field_completions, passing_body_aggregate_labels,
-    passing_body_completion_columns, reducer_completions_for_element_type, render_expansion_frames,
-    source_ref_field_completions, wide_reflection_accessor_completions,
+    column_ref_field_completions,
+    columns_of_arg_completions_for_sql,
+    // Phase E2 goto-def + completion helpers
+    completion_for_generates_value,
+    completion_for_model_def_field_key,
+    completion_item_for_if_snippet,
+    completion_items_for_reduce_second_arg_with_snippets,
+    find_smelt_fn_call_at_cursor,
+    find_var_line_in_smelt_yml,
+    goto_def_for_emitted_model_reference,
+    hover_text_for_column_ref_field,
+    hover_text_for_columns_of_call,
+    hover_text_for_generates_frontmatter,
+    hover_text_for_hof_meta_language,
+    hover_text_for_list_literal_dual,
+    hover_text_for_list_spread,
+    hover_text_for_model_def_body_field_value,
+    hover_text_for_model_def_literal_open_brace,
+    hover_text_for_model_def_name_field_value,
+    hover_text_for_model_def_optional_field_value,
+    hover_text_for_model_ref_field,
+    hover_text_for_models_all,
+    hover_text_for_models_with_tag_call,
+    hover_text_for_pipe_expr,
+    hover_text_for_source_ref_field,
+    hover_text_for_sources_all,
+    hover_text_for_sources_with_tag_call,
+    is_column_ref_param_before_dot,
+    is_model_ref_param_before_dot,
+    is_source_ref_param_before_dot,
+    lambda_param_binder_range,
+    lambda_params_for_completion,
+    model_ref_field_completions,
+    passing_body_aggregate_labels,
+    passing_body_completion_columns,
+    render_expansion_frames,
+    source_ref_field_completions,
+    wide_reflection_accessor_completions,
 };
 use crate::python_scan::PythonModelCache;
 
@@ -213,7 +241,9 @@ impl Backend {
                 DbCode::MetaSpreadOnNonList => "meta-spread-on-non-list",
                 // Phase B (meta-language) diagnostic codes.
                 DbCode::LambdaInForbiddenPosition => "lambda-in-forbidden-position",
-                DbCode::LambdaArityNotSupported => "lambda-arity-not-supported",
+                DbCode::LambdaArityMismatch => "lambda-arity-mismatch",
+                DbCode::LambdaZeroParameters => "lambda-zero-parameters",
+                DbCode::LambdaDuplicateParameter => "lambda-duplicate-parameter",
                 DbCode::LambdaResultTypeMismatch => "lambda-result-type-mismatch",
                 DbCode::HofExpectsLambda => "hof-expects-lambda",
                 DbCode::HofExpectsReducer => "hof-expects-reducer",
@@ -223,6 +253,17 @@ impl Backend {
                 DbCode::PipeInDataPosition => "pipe-in-data-position",
                 DbCode::ReducerInputTypeMismatch => "reducer-input-type-mismatch",
                 DbCode::ReducerEmptyNoIdentity => "reducer-empty-no-identity",
+                // Phase F (meta-language) parameterised reducer + ternary codes.
+                DbCode::ReducerArityMismatch => "reducer-arity-mismatch",
+                DbCode::ReducerArgTypeMismatch => "reducer-arg-type-mismatch",
+                DbCode::ReducerArgNotCompileTime => "reducer-arg-not-compile-time",
+                DbCode::ReducerNamedArgument => "reducer-named-argument",
+                DbCode::TernaryConditionNotBoolean => "ternary-condition-not-boolean",
+                DbCode::TernaryBranchTypeMismatch => "ternary-branch-type-mismatch",
+                DbCode::TernaryKeywordShadowed => "ternary-keyword-shadowed",
+                DbCode::TernaryInDataPosition => "ternary-in-data-position",
+                DbCode::TernaryDanglingThen => "ternary-dangling-then",
+                DbCode::TernaryDanglingElse => "ternary-dangling-else",
                 DbCode::ConfigVarNotFound => "config-var-not-found",
                 DbCode::ConfigVarNameNotLiteral => "config-var-name-not-literal",
                 DbCode::ConfigVarNullCoercion => "config-var-null-coercion",
@@ -271,6 +312,19 @@ impl Backend {
                 DbCode::ConfigLoaderRootShapeMismatch => "config-loader-root-shape-mismatch",
                 DbCode::ConfigLoaderDuplicateMapKey => "config-loader-duplicate-map-key",
                 DbCode::ConfigLoaderNullCoercion => "config-loader-null-coercion",
+                // Multi-model production diagnostic codes.
+                DbCode::GeneratesUnknownValue => "generates-unknown-value",
+                DbCode::GeneratesMixedWithBareModel => "generates-mixed-with-bare-model",
+                DbCode::GenerateFileBareSelectForbidden => "generate-file-bare-select-forbidden",
+                DbCode::GenerateFileBodyTypeError => "generate-file-body-type-error",
+                DbCode::ModelDefOutsideGeneratorFile => "model-def-outside-generator-file",
+                DbCode::ModelDefInvalidName => "model-def-invalid-name",
+                DbCode::ModelDefInvalidMaterialization => "model-def-invalid-materialization",
+                DbCode::ModelDefDuplicateName => "model-def-duplicate-name",
+                DbCode::ModelDefHandAuthoredCollision => "model-def-hand-authored-collision",
+                DbCode::GeneratorBodyForbidsModelReflection => {
+                    "generator-body-forbids-model-reflection"
+                }
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -1307,6 +1361,12 @@ impl LanguageServer for Backend {
                 yml_path: PathBuf,
                 line: u32,
             },
+            /// Phase E2: goto-def from a generator-emitted model reference to the
+            /// emitting `ModelDef.name` field's value-token in the generator file.
+            EmittedModelRef {
+                gen_file: PathBuf,
+                name_range: Range,
+            },
         }
 
         let target = {
@@ -1594,6 +1654,78 @@ impl LanguageServer for Backend {
                             }
                         }
 
+                        // Phase E2: goto-def on a `smelt.<path>` ref that resolves to a
+                        // generator-emitted model — jump to the `ModelDef.name` field's
+                        // value-token in the generator file.
+                        //
+                        // We look at `smelt_db::emitted_models` to find a survivor whose
+                        // computed smelt path matches the dotted path under the cursor.
+                        // The path must NOT be a `smelt.models.*` or `smelt.sources.*`
+                        // accessor call — those are already handled above.
+                        {
+                            // Find the SmeltPathRef under the cursor (excluding models/sources).
+                            let path_ref_under_cursor = file
+                                .syntax()
+                                .descendants()
+                                .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                                .filter(|pr| {
+                                    let segs = pr.segments();
+                                    let first = segs.first().map(|s| s.as_str());
+                                    first != Some("models") && first != Some("sources")
+                                })
+                                .find(|pr| {
+                                    let r = pr.text_range();
+                                    let s: usize = r.start().into();
+                                    let e: usize = r.end().into();
+                                    cursor_offset >= s && cursor_offset <= e
+                                });
+
+                            if let Some(pr) = path_ref_under_cursor {
+                                let segments = pr.segments();
+                                let cursor_path = segments.join(".");
+                                let ws = Workspace::try_get(&db);
+                                if let Some(w) = ws {
+                                    let survivors = smelt_db::emitted_models(&db, w);
+                                    let project_root = file_project_root(&db, &effective_path);
+                                    let project = lookup_project(&db, &project_root);
+                                    let scan_roots = project
+                                        .map(|p| smelt_db::project_paths(&db, p).as_ref().clone())
+                                        .unwrap_or_else(|| vec!["models".to_string()]);
+                                    if let Some(em) = survivors.survivors.iter().find(|em| {
+                                        let sp = smelt_db::emitted_model_smelt_path(
+                                            &em.generator_file,
+                                            &project_root,
+                                            &scan_roots,
+                                            &em.name,
+                                        );
+                                        sp == cursor_path
+                                    }) {
+                                        // Convert the name_span (TextRange) to an LSP Range.
+                                        let gen_text = std::fs::read_to_string(&em.generator_file)
+                                            .unwrap_or_default();
+                                        let pr_range = smelt_parser::ast::text_range_to_range(
+                                            &gen_text,
+                                            em.name_span,
+                                        );
+                                        let name_range = Range {
+                                            start: Position::new(
+                                                pr_range.start.line,
+                                                pr_range.start.column,
+                                            ),
+                                            end: Position::new(
+                                                pr_range.end.line,
+                                                pr_range.end.column,
+                                            ),
+                                        };
+                                        return Some(GotoTarget::EmittedModelRef {
+                                            gen_file: em.generator_file.clone(),
+                                            name_range,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
                         None
                     })
                 } else {
@@ -1687,6 +1819,25 @@ impl LanguageServer for Backend {
                             end: Position::new(line, 0),
                         },
                     })))
+                } else {
+                    Ok(None)
+                }
+            }
+            // Phase E2: emitted-model ref — jump to the ModelDef.name value-token.
+            Some(GotoTarget::EmittedModelRef {
+                gen_file,
+                name_range,
+            }) => {
+                if let Ok(target_uri) = Url::from_file_path(&gen_file) {
+                    let loc = goto_def_for_emitted_model_reference(&gen_file, name_range);
+                    if let Some(location) = loc {
+                        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: target_uri,
+                            range: location.range,
+                        })))
+                    } else {
+                        Ok(None)
+                    }
                 } else {
                     Ok(None)
                 }
@@ -2212,7 +2363,27 @@ impl LanguageServer for Backend {
                         }
                         return Ok(None);
                     }
-                    _ => None,
+                    _ => {
+                        // Try lambda-parameter prepare-rename as a fallback.
+                        if let Some((start_byte, end_byte, placeholder)) =
+                            crate::rename_lambda::prepare_rename_lambda_param(&file, &text, offset)
+                        {
+                            use smelt_parser::TextRange;
+                            let range = TextRange::new(
+                                (start_byte as u32).into(),
+                                (end_byte as u32).into(),
+                            );
+                            let r = smelt_parser::ast::text_range_to_range(&text, range);
+                            return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                                range: Range {
+                                    start: Position::new(r.start.line, r.start.column),
+                                    end: Position::new(r.end.line, r.end.column),
+                                },
+                                placeholder,
+                            }));
+                        }
+                        None
+                    }
                 }
             } else {
                 None
@@ -2290,6 +2461,11 @@ impl LanguageServer for Backend {
                 yaml_edit: Option<(u32, String, String)>,
                 /// Path to sources.yml
                 sources_yml_path: PathBuf,
+            },
+            /// Lambda parameter — binder + every use in the lambda body.
+            LambdaParam {
+                /// (start_line, start_col, end_line, end_col) for each renamed span.
+                edits: Vec<(u32, u32, u32, u32)>,
             },
         }
 
@@ -2583,7 +2759,27 @@ impl LanguageServer for Backend {
                                 None
                             }
                         }
-                        _ => None,
+                        _ => {
+                            // Try lambda-parameter rename as a fallback.
+                            match crate::rename_lambda::rename_lambda_param(
+                                &file, &text, offset, &new_name,
+                            ) {
+                                Ok(crate::rename_lambda::RenameLambdaResult::Edits(byte_edits)) => {
+                                    let lsp_edits = crate::rename_lambda::byte_edits_to_lsp_ranges(
+                                        &text, byte_edits,
+                                    );
+                                    Some(RenameKind::LambdaParam { edits: lsp_edits })
+                                }
+                                Ok(crate::rename_lambda::RenameLambdaResult::NotALambdaParam) => {
+                                    None
+                                }
+                                Err(e) => {
+                                    return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                                        e.to_string(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 } else {
                     None
@@ -2769,6 +2965,27 @@ impl LanguageServer for Backend {
 
                 Ok(Some(WorkspaceEdit {
                     document_changes: Some(DocumentChanges::Operations(document_changes)),
+                    ..Default::default()
+                }))
+            }
+            Some(RenameKind::LambdaParam { edits }) => {
+                if edits.is_empty() {
+                    return Ok(None);
+                }
+                let text_edits: Vec<TextEdit> = edits
+                    .into_iter()
+                    .map(|(sl, sc, el, ec)| TextEdit {
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                        new_text: new_name.clone(),
+                    })
+                    .collect();
+                let mut changes = HashMap::new();
+                changes.insert(uri, text_edits);
+                Ok(Some(WorkspaceEdit {
+                    changes: Some(changes),
                     ..Default::default()
                 }))
             }
@@ -3466,6 +3683,263 @@ impl LanguageServer for Backend {
                         }
                     }
                 }
+
+                // Phase E2: generator-file hover —
+                // (a) cursor in YAML frontmatter on the `generates: models` value,
+                // (b) cursor on a `ModelDef { … }` opening brace,
+                // (c) cursor on the `name:` field value in a `ModelDef` literal,
+                // (d) cursor on the `body:` field value in a `ModelDef` literal.
+                {
+                    let raw = text.as_str();
+                    // Detect generator files by checking frontmatter variant.
+                    if let Ok(smelt_core::metadata::FileMetadata::Generator {
+                        body_offset, ..
+                    }) = smelt_core::metadata::extract_file_metadata(raw)
+                    {
+                        // (a) Is the cursor in the frontmatter (before body_offset)?
+                        if cursor_offset < body_offset {
+                            // Check if the line under the cursor contains `generates:`
+                            let line_start =
+                                raw[..cursor_offset].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                            let line_end = raw[cursor_offset..]
+                                .find('\n')
+                                .map(|p| cursor_offset + p)
+                                .unwrap_or(raw.len());
+                            let line_text = &raw[line_start..line_end];
+                            if line_text.trim_start().starts_with("generates:") {
+                                // Resolve emission count from Salsa.
+                                let ws = Workspace::try_get(&db);
+                                let emission_count = ws.and_then(|w| {
+                                    let gen_files = smelt_db::generator_files(&db, w);
+                                    let file_input = lookup_file(&db, &effective_path);
+                                    file_input.and_then(|fi| {
+                                        gen_files.iter().find(|&&gf| gf == fi).map(|&gf| {
+                                            smelt_db::evaluate_generator(&db, w, gf).emissions.len()
+                                        })
+                                    })
+                                });
+                                let value = hover_text_for_generates_frontmatter(emission_count);
+                                return Ok(Some(Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value,
+                                    }),
+                                    range: None,
+                                }));
+                            }
+                        } else {
+                            // Cursor is in the generator body — check for ModelDef positions.
+                            // We look at the CST for RECORD_LITERAL nodes whose first
+                            // keyword is `ModelDef`.
+
+                            // Walk record literals to find a ModelDef that contains cursor.
+                            use smelt_parser::SyntaxKind;
+                            for node in file.syntax().descendants() {
+                                if node.kind() != SyntaxKind::RECORD_LITERAL {
+                                    continue;
+                                }
+                                let rec_start: usize = node.text_range().start().into();
+                                let rec_end: usize = node.text_range().end().into();
+                                if !(cursor_offset >= rec_start && cursor_offset <= rec_end) {
+                                    continue;
+                                }
+                                // Check that this record starts with `ModelDef`.
+                                let first_tok = node
+                                    .children_with_tokens()
+                                    .filter_map(|e| e.into_token())
+                                    .find(|t| !t.kind().is_trivia());
+                                let is_model_def = first_tok
+                                    .as_ref()
+                                    .map(|t| t.text() == "ModelDef")
+                                    .unwrap_or(false);
+                                if !is_model_def {
+                                    continue;
+                                }
+
+                                // (b) Is the cursor on the `ModelDef` IDENT keyword
+                                // or the opening brace?  Both positions serve the
+                                // same hover content per the spec.
+                                let open_brace_tok = node
+                                    .children_with_tokens()
+                                    .filter_map(|e| e.into_token())
+                                    .find(|t| t.kind() == SyntaxKind::LBRACE);
+                                let on_keyword = first_tok
+                                    .as_ref()
+                                    .map(|t| {
+                                        let s: usize = t.text_range().start().into();
+                                        let e: usize = t.text_range().end().into();
+                                        cursor_offset >= s && cursor_offset <= e
+                                    })
+                                    .unwrap_or(false);
+                                let on_brace = open_brace_tok
+                                    .as_ref()
+                                    .map(|t| {
+                                        let s: usize = t.text_range().start().into();
+                                        let e: usize = t.text_range().end().into();
+                                        cursor_offset >= s && cursor_offset <= e
+                                    })
+                                    .unwrap_or(false);
+                                if on_keyword || on_brace {
+                                    // Resolve emitted smelt path from Salsa survivors.
+                                    let ws = Workspace::try_get(&db);
+                                    let smelt_path: Option<String> = ws.and_then(|w| {
+                                        let survivors = smelt_db::emitted_models(&db, w);
+                                        let project_root = file_project_root(&db, &effective_path);
+                                        let project = lookup_project(&db, &project_root);
+                                        let scan_roots = project
+                                            .map(|p| {
+                                                smelt_db::project_paths(&db, p).as_ref().clone()
+                                            })
+                                            .unwrap_or_else(|| vec!["models".to_string()]);
+                                        // Find the survivor whose generator_file
+                                        // matches this file AND whose name_span
+                                        // falls within the RECORD_LITERAL node
+                                        // that contains the cursor's open brace.
+                                        // This disambiguates multiple ModelDef
+                                        // literals in the same generator file.
+                                        let rec_start_u: u32 = node.text_range().start().into();
+                                        let rec_end_u: u32 = node.text_range().end().into();
+                                        survivors
+                                            .survivors
+                                            .iter()
+                                            .find(|em| {
+                                                if em.generator_file != effective_path {
+                                                    return false;
+                                                }
+                                                // name_span must be contained within
+                                                // this record literal's range.
+                                                let ns: u32 = em.name_span.start().into();
+                                                let ne: u32 = em.name_span.end().into();
+                                                ns >= rec_start_u && ne <= rec_end_u
+                                            })
+                                            .map(|em| {
+                                                smelt_db::emitted_model_smelt_path(
+                                                    &em.generator_file,
+                                                    &project_root,
+                                                    &scan_roots,
+                                                    &em.name,
+                                                )
+                                            })
+                                    });
+                                    let value = hover_text_for_model_def_literal_open_brace(
+                                        smelt_path.as_deref(),
+                                    );
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value,
+                                        }),
+                                        range: None,
+                                    }));
+                                }
+
+                                // Walk field entries of the RecordLiteral.
+                                for field in node.children() {
+                                    if field.kind() != SyntaxKind::RECORD_FIELD {
+                                        continue;
+                                    }
+                                    let field_start: usize = field.text_range().start().into();
+                                    let field_end: usize = field.text_range().end().into();
+                                    if !(cursor_offset >= field_start && cursor_offset <= field_end)
+                                    {
+                                        continue;
+                                    }
+                                    // Extract field key and value tokens.
+                                    let mut tokens = field
+                                        .children_with_tokens()
+                                        .filter_map(|e| e.into_token())
+                                        .filter(|t| !t.kind().is_trivia());
+                                    let key_tok = tokens.next();
+                                    let key_text =
+                                        key_tok.as_ref().map(|t| t.text()).unwrap_or_default();
+                                    // Skip the colon token.
+                                    let _colon = tokens.next();
+                                    let val_tok = tokens.next();
+
+                                    if let Some(val) = val_tok {
+                                        let vs: usize = val.text_range().start().into();
+                                        let ve: usize = val.text_range().end().into();
+                                        if cursor_offset >= vs && cursor_offset <= ve {
+                                            // (c) cursor on `name:` value.
+                                            if key_text == "name" {
+                                                let raw_name = val.text();
+                                                let model_name =
+                                                    raw_name.trim_matches('\'').trim_matches('"');
+                                                let ws = Workspace::try_get(&db);
+                                                let project_root =
+                                                    file_project_root(&db, &effective_path);
+                                                let project = lookup_project(&db, &project_root);
+                                                let scan_roots = project
+                                                    .map(|p| {
+                                                        smelt_db::project_paths(&db, p)
+                                                            .as_ref()
+                                                            .clone()
+                                                    })
+                                                    .unwrap_or_else(|| vec!["models".to_string()]);
+                                                let smelt_path = ws.map(|_w| {
+                                                    smelt_db::emitted_model_smelt_path(
+                                                        &effective_path,
+                                                        &project_root,
+                                                        &scan_roots,
+                                                        model_name,
+                                                    )
+                                                });
+                                                let value = match &smelt_path {
+                                                    Some(p) => {
+                                                        hover_text_for_model_def_name_field_value(p)
+                                                    }
+                                                    None => {
+                                                        format!("Emitted as `smelt.{model_name}`")
+                                                    }
+                                                };
+                                                return Ok(Some(Hover {
+                                                    contents: HoverContents::Markup(
+                                                        MarkupContent {
+                                                            kind: MarkupKind::Markdown,
+                                                            value,
+                                                        },
+                                                    ),
+                                                    range: None,
+                                                }));
+                                            }
+                                            // (d) cursor on `body:` value.
+                                            if key_text == "body" {
+                                                let value =
+                                                    hover_text_for_model_def_body_field_value(None);
+                                                return Ok(Some(Hover {
+                                                    contents: HoverContents::Markup(
+                                                        MarkupContent {
+                                                            kind: MarkupKind::Markdown,
+                                                            value,
+                                                        },
+                                                    ),
+                                                    range: None,
+                                                }));
+                                            }
+                                            // (e) cursor on optional field value:
+                                            // `materialization`, `tags`, or `description`.
+                                            if let Some(value) =
+                                                hover_text_for_model_def_optional_field_value(
+                                                    key_text,
+                                                )
+                                            {
+                                                return Ok(Some(Hover {
+                                                    contents: HoverContents::Markup(
+                                                        MarkupContent {
+                                                            kind: MarkupKind::Markdown,
+                                                            value,
+                                                        },
+                                                    ),
+                                                    range: None,
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3522,6 +3996,91 @@ impl LanguageServer for Backend {
             offset
         };
 
+        // Phase E2: generator-file frontmatter completion — `generates: <cursor>`.
+        // Detection: cursor is in the frontmatter of a Generator file, on a line
+        // that starts with `generates:` (with optional partial value typed).
+        {
+            let raw = text.as_str();
+            if let Ok(smelt_core::metadata::FileMetadata::Generator { body_offset, .. }) =
+                smelt_core::metadata::extract_file_metadata(raw)
+            {
+                if cursor_offset < body_offset {
+                    let line_start = raw[..cursor_offset].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                    let line_end = raw[cursor_offset..]
+                        .find('\n')
+                        .map(|p| cursor_offset + p)
+                        .unwrap_or(raw.len());
+                    let line_text = &raw[line_start..line_end];
+                    if line_text.trim_start().starts_with("generates:") {
+                        let items = completion_for_generates_value();
+                        if !items.is_empty() {
+                            return Ok(Some(CompletionResponse::Array(items)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase E2: ModelDef field-key completion — cursor inside a `ModelDef { <cursor> … }`
+        // record literal in a generator file body.  Detection mirrors the hover dispatch.
+        {
+            let raw = text.as_str();
+            if let Ok(smelt_core::metadata::FileMetadata::Generator { body_offset, .. }) =
+                smelt_core::metadata::extract_file_metadata(raw)
+            {
+                if cursor_offset >= body_offset {
+                    use smelt_parser::SyntaxKind;
+                    let file_input = lookup_file(&db, &effective_path);
+                    let parse = file_input.map(|f| smelt_db::parse_file(&db, f));
+                    if let Some(syntax) = parse.as_ref().map(|p| p.syntax()) {
+                        if let Some(file_ast) = AstFile::cast(syntax) {
+                            // Find the tightest ModelDef RECORD_LITERAL containing cursor.
+                            let model_def_node = file_ast
+                                .syntax()
+                                .descendants()
+                                .filter(|n| n.kind() == SyntaxKind::RECORD_LITERAL)
+                                .filter(|n| {
+                                    let s: usize = n.text_range().start().into();
+                                    let e: usize = n.text_range().end().into();
+                                    cursor_offset >= s && cursor_offset <= e
+                                })
+                                .filter(|n| {
+                                    n.children_with_tokens()
+                                        .filter_map(|e| e.into_token())
+                                        .find(|t| !t.kind().is_trivia())
+                                        .map(|t| t.text() == "ModelDef")
+                                        .unwrap_or(false)
+                                })
+                                .min_by_key(|n| {
+                                    let s: usize = n.text_range().start().into();
+                                    let e: usize = n.text_range().end().into();
+                                    e - s
+                                });
+
+                            if let Some(rec_node) = model_def_node {
+                                // Collect already-filled field names.
+                                let already_filled: Vec<String> = rec_node
+                                    .children()
+                                    .filter(|n| n.kind() == SyntaxKind::RECORD_FIELD)
+                                    .filter_map(|field| {
+                                        field
+                                            .children_with_tokens()
+                                            .filter_map(|e| e.into_token())
+                                            .find(|t| !t.kind().is_trivia())
+                                            .map(|t| t.text().to_string())
+                                    })
+                                    .collect();
+                                let items = completion_for_model_def_field_key(&already_filled);
+                                if !items.is_empty() {
+                                    return Ok(Some(CompletionResponse::Array(items)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Phase B: check for reduce second-arg position BEFORE the standard
         // context dispatch — this is a meta-language-specific completion that
         // should be offered regardless of the SQL-level context.
@@ -3576,16 +4135,9 @@ impl LanguageServer for Backend {
                                         None
                                     }
                                 });
-                                let names = reducer_completions_for_element_type(list_ty.as_ref());
-                                let items: Vec<CompletionItem> = names
-                                    .into_iter()
-                                    .map(|name| CompletionItem {
-                                        label: name.clone(),
-                                        kind: Some(CompletionItemKind::FUNCTION),
-                                        detail: Some(format!("reducer: {}", name)),
-                                        ..Default::default()
-                                    })
-                                    .collect();
+                                let items = completion_items_for_reduce_second_arg_with_snippets(
+                                    list_ty.as_ref(),
+                                );
                                 if !items.is_empty() {
                                     return Ok(Some(CompletionResponse::Array(items)));
                                 }
@@ -3787,19 +4339,20 @@ impl LanguageServer for Backend {
                                 });
                             if arrow_pos.map(|p| cursor_offset >= p).unwrap_or(false) {
                                 let params = lambda_params_for_completion(&lambda);
-                                if !params.is_empty() {
-                                    // Build param completions — they will be prepended
-                                    // to the standard column completions below.
-                                    let param_items: Vec<CompletionItem> = params
-                                        .iter()
-                                        .map(|p| CompletionItem {
-                                            label: p.clone(),
-                                            kind: Some(CompletionItemKind::VARIABLE),
-                                            detail: Some("lambda parameter".to_string()),
-                                            sort_text: Some(format!("0_{p}")), // sort first
-                                            ..Default::default()
-                                        })
-                                        .collect();
+                                // Build param completions — they will be prepended
+                                // to the standard column completions below.
+                                // Phase F: also prepend the `if` snippet since a lambda
+                                // body is a meta-expression context where ternary is valid.
+                                let mut param_items: Vec<CompletionItem> =
+                                    vec![completion_item_for_if_snippet()];
+                                param_items.extend(params.iter().map(|p| CompletionItem {
+                                    label: p.clone(),
+                                    kind: Some(CompletionItemKind::VARIABLE),
+                                    detail: Some("lambda parameter".to_string()),
+                                    sort_text: Some(format!("0_{p}")), // sort first
+                                    ..Default::default()
+                                }));
+                                if !param_items.is_empty() {
                                     // Return the param completions immediately so they
                                     // appear first in the list.
                                     return Ok(Some(CompletionResponse::Array(param_items)));
@@ -3807,6 +4360,25 @@ impl LanguageServer for Backend {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Phase F: `if` snippet fallback for generator-file body context.
+        // If none of the earlier meta-language blocks claimed the cursor (reduce
+        // second-arg, ModelDef field-key, lambda body, etc.), and the cursor is
+        // in the body of a Generator file, offer `if … then … else …` as the
+        // sole completion item.  Generator bodies are meta-expression contexts
+        // where ternary is valid.
+        {
+            let raw = text.as_str();
+            if let Ok(smelt_core::metadata::FileMetadata::Generator { body_offset, .. }) =
+                smelt_core::metadata::extract_file_metadata(raw)
+            {
+                if cursor_offset >= body_offset {
+                    return Ok(Some(CompletionResponse::Array(vec![
+                        completion_item_for_if_snippet(),
+                    ])));
                 }
             }
         }

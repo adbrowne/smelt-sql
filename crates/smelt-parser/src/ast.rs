@@ -54,13 +54,18 @@ impl SmeltDefine {
         &self.0
     }
 
-    /// The declared function name (text of the single IDENT inside DEFINE_NAME).
+    /// The declared function name (text of the name token inside DEFINE_NAME).
+    ///
+    /// Accepts both `IDENT` tokens (normal names) and the ternary keyword tokens
+    /// (`IF_KW`, `THEN_KW`, `ELSE_KW`) — the latter are wrapped in `DEFINE_NAME` by
+    /// the parser for error-recovery purposes so that `check_define_name_shadowing`
+    /// can emit `TernaryKeywordShadowed` rather than a cryptic parse error.
     pub fn name(&self) -> Option<String> {
         let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
         name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)
+            .find(|t| matches!(t.kind(), IDENT | IF_KW | THEN_KW | ELSE_KW))
             .map(|t| t.text().to_string())
     }
 
@@ -70,7 +75,7 @@ impl SmeltDefine {
         let ident = name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)?;
+            .find(|t| matches!(t.kind(), IDENT | IF_KW | THEN_KW | ELSE_KW))?;
         Some(ident.text_range())
     }
 
@@ -1526,6 +1531,8 @@ impl Expr {
             | SMELT_PATH_CALL
             // Phase B (meta-language): lambdas and pipe expressions are expressions.
             | LAMBDA | PIPE_EXPR
+            // Phase F (meta-language): ternary expressions and reducer calls are expressions.
+            | TERNARY_EXPR | REDUCER_CALL
             // Phase E1 (meta-language): type-reference expressions parsed via
             // `is_generic_type_start` in argument positions (e.g. `List<Cohort>`,
             // `Map<Text, {f: T}>` as loader schema arguments).  The TYPE_REF node
@@ -1553,6 +1560,9 @@ impl Expr {
                             // Phase B (meta-language)
                             | LAMBDA
                             | PIPE_EXPR
+                            // Phase F (meta-language)
+                            | TERNARY_EXPR
+                            | REDUCER_CALL
                     )
                 }) {
                     Some(Self(node))
@@ -3291,14 +3301,57 @@ impl ListSpread {
     }
 }
 
-// ===== Phase B (meta-language): Lambda and PipeExpr typed wrappers =====
+// ===== Phase B + Phase F (meta-language): Lambda, TernaryExpr, ReducerCall typed wrappers =====
 
-/// A `LAMBDA_PARAM_LIST` node — the parameter list of a Phase B `fn` lambda.
+/// A single parameter in a `fn` lambda parameter list (Phase F).
 ///
-/// For a single-arg lambda (`fn x => body`) this contains one IDENT token.
-/// For a multi-arg lambda (`fn (a, b) => body`) it contains LPAREN, IDENTs,
-/// and RPAREN tokens.  Multi-arg lambdas produce a generic parse error in
-/// Phase B (the form is reserved for Phase F).
+/// CST shape:
+/// ```text
+/// LAMBDA_PARAM
+///   IDENT   (the parameter name)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LambdaParam(SyntaxNode);
+
+impl LambdaParam {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `LAMBDA_PARAM` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LAMBDA_PARAM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The parameter name (the text of the IDENT token inside this node).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// A `LAMBDA_PARAM_LIST` node — the parameter list of a `fn` lambda.
+///
+/// Phase F shape (canonical):
+/// ```text
+/// LAMBDA_PARAM_LIST
+///   LAMBDA_PARAM  (one per parameter)
+///     IDENT
+///   LAMBDA_PARAM
+///     IDENT
+///   ...
+/// ```
+///
+/// For a single-arg lambda (`fn x => body`) this contains one `LAMBDA_PARAM` child.
+/// For a multi-arg lambda (`fn (a, b) => body`) it contains two or more.
+/// For a zero-arg lambda (`fn () => body`) it contains zero (flagged downstream).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LambdaParamList(SyntaxNode);
 
@@ -3316,34 +3369,35 @@ impl LambdaParamList {
         &self.0
     }
 
+    /// The typed parameter nodes, in declaration order.
+    pub fn lambda_params(&self) -> Vec<LambdaParam> {
+        self.0.children().filter_map(LambdaParam::cast).collect()
+    }
+
     /// The parameter names, in order. For `fn x => body` this is `["x"]`.
     /// For `fn (a, b) => body` this is `["a", "b"]`.
     pub fn params(&self) -> Vec<String> {
-        self.0
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == IDENT)
-            .map(|t| t.text().to_string())
+        self.lambda_params()
+            .into_iter()
+            .filter_map(|p| p.name())
             .collect()
     }
 
-    /// Returns `true` if this is a multi-arg parameter list (parenthesised form).
-    /// Phase 3 rejects multi-arg lambdas with `LambdaArityNotSupported`.
+    /// Returns `true` if this is a multi-arg parameter list (more than one LAMBDA_PARAM child).
     pub fn is_multi_arg(&self) -> bool {
-        self.0
-            .children_with_tokens()
-            .any(|e| e.as_token().map(|t| t.kind()) == Some(LPAREN))
+        self.lambda_params().len() > 1
     }
 }
 
-/// A Phase B meta-language lambda: `fn IDENT => EXPR`.
+/// A Phase B/F meta-language lambda: `fn IDENT => EXPR` or `fn (IDENT, ...) => EXPR`.
 ///
 /// CST shape:
 /// ```text
 /// LAMBDA
 ///   FN_KW    (reserved `fn` keyword)
 ///   LAMBDA_PARAM_LIST
-///     IDENT  (single-arg) or LPAREN IDENTs... RPAREN (multi-arg)
+///     LAMBDA_PARAM  (one per parameter)
+///       IDENT
 ///   ARROW (=>)
 ///   EXPRESSION
 /// ```
@@ -3369,6 +3423,13 @@ impl Lambda {
         self.0.children().find_map(LambdaParamList::cast)
     }
 
+    /// The typed parameter nodes (via `param_list()`).
+    pub fn lambda_params(&self) -> Vec<LambdaParam> {
+        self.param_list()
+            .map(|p| p.lambda_params())
+            .unwrap_or_default()
+    }
+
     /// Convenience: the parameter names (from `param_list()`).
     pub fn params(&self) -> Vec<String> {
         self.param_list().map(|p| p.params()).unwrap_or_default()
@@ -3379,10 +3440,105 @@ impl Lambda {
         self.0.children().find_map(Expr::cast)
     }
 
-    /// `true` if this lambda has a multi-arg parameter list.
-    /// Phase 3 rejects these with `LambdaArityNotSupported`.
+    /// `true` if this lambda has more than one parameter.
     pub fn is_multi_arg(&self) -> bool {
         self.param_list().map(|p| p.is_multi_arg()).unwrap_or(false)
+    }
+}
+
+/// A Phase F meta-world ternary expression: `if COND then THEN_EXPR else ELSE_EXPR`.
+///
+/// CST shape:
+/// ```text
+/// TERNARY_EXPR
+///   IF_KW
+///   EXPRESSION  (condition)
+///   THEN_KW
+///   EXPRESSION  (then-branch)
+///   ELSE_KW
+///   EXPRESSION  (else-branch, absent when dangling)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TernaryExpr(SyntaxNode);
+
+impl TernaryExpr {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `TERNARY_EXPR` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == TERNARY_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Helper: return the Nth `EXPRESSION` child (0-indexed).
+    fn nth_expr(&self, n: usize) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(n)
+    }
+
+    /// The condition expression (first `EXPRESSION` child).
+    pub fn condition(&self) -> Option<Expr> {
+        self.nth_expr(0)
+    }
+
+    /// The then-branch expression (second `EXPRESSION` child).
+    pub fn then_branch(&self) -> Option<Expr> {
+        self.nth_expr(1)
+    }
+
+    /// The else-branch expression (third `EXPRESSION` child).
+    /// Returns `None` for incomplete ternaries (`TernaryDanglingElse`).
+    pub fn else_branch(&self) -> Option<Expr> {
+        self.nth_expr(2)
+    }
+}
+
+/// A Phase F parameterised reducer call: `IDENT(args...)` in the second-argument
+/// position of a `reduce` call.
+///
+/// CST shape:
+/// ```text
+/// REDUCER_CALL
+///   IDENT   (reducer name, e.g. `concat_with`)
+///   ARG_LIST
+///     EXPRESSION  (first argument, e.g. `' OR '`)
+/// ```
+///
+/// Only emitted in `reduce`'s second-argument context; everywhere else the same
+/// syntax produces a generic `FUNCTION_CALL` node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReducerCall(SyntaxNode);
+
+impl ReducerCall {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `REDUCER_CALL` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == REDUCER_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The reducer name (the leading IDENT token).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The argument list of the parameterised reducer call.
+    pub fn args(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| n.kind() == ARG_LIST)
     }
 }
 

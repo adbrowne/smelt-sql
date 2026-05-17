@@ -1,6 +1,6 @@
 # Lambdas
 
-The meta-language provides **lambda expressions** — anonymous single-argument functions written inline as arguments to `map` or `filter`. (`reduce`'s second argument is a bare reducer identifier, not a lambda — see [Reducers](reducers.md).) A lambda lets you describe a per-element transformation or predicate without declaring a named `smelt.define`.
+The meta-language provides **lambda expressions** — anonymous single-argument functions written inline as arguments to [`map` or `filter`](hofs.md). (`reduce`'s second argument is a bare reducer identifier, not a lambda — see [Reducers](reducers.md).) A lambda lets you describe a per-element transformation or predicate without declaring a named `smelt.define`. Lambdas chain naturally with the [pipe operator `|>`](pipes.md).
 
 Lambdas are a meta-world construct. They are evaluated entirely at compile time and never reach the database engine.
 
@@ -36,9 +36,38 @@ SELECT
     )
 ```
 
-## Single-argument only (v1)
+## Multiple parameters
 
-Lambdas support exactly one parameter. Multi-argument syntax (`fn (a, b) => body`) is planned but not yet supported; writing it emits `LambdaArityNotSupported`.
+The parenthesised form `fn (a, b, …) => body` declares a lambda with two or more parameters:
+
+```
+fn ( IDENT_1 , IDENT_2 , … , IDENT_k ) => EXPR
+```
+
+- The parameter list is parenthesised and comma-separated; trailing commas are permitted.
+- `k = 0` is rejected with `LambdaZeroParameters` — a zero-parameter lambda has no use case in the closed HOF surface.
+- All `k` parameter names must be distinct within the lambda; a duplicate emits `LambdaDuplicateParameter` at the second occurrence.
+- The parenthesised form is also accepted for arity `k = 1` (`fn (x) => body`); the two single-arg surfaces are equivalent.
+- `fn a, b => body` (no parens, comma between parameters) is a parse error at the first comma.
+
+The lambda's type is `Lambda<(T_1, …, T_k), U>` where `T_1 … T_k` are the parameter types inferred from the HOF call site and `U` is the body's synthesised return type.
+
+**Multi-arg lambdas and the v1 HOF surface.** `map` and `filter` require arity-1 lambdas (`Lambda<T, Boolean>` and `Lambda<T, U>` respectively). Passing a multi-arg lambda to either emits `LambdaArityMismatch`. No v1 HOF accepts a multi-arg lambda yet — multi-arg lambdas parse and type-check but become useful only when a multi-list HOF such as `zip_with` is added in a future version.
+
+**Example — correct (arity 1):**
+
+```sql
+SELECT map([1, 2, 3], fn (x) => x * 2)
+-- fn (x) => x * 2 is equivalent to fn x => x * 2
+```
+
+**Example — arity mismatch (emits `LambdaArityMismatch`):**
+
+```sql
+-- map requires a Lambda<T, U> of arity 1; (a, b) is arity 2
+-- ← LambdaArityMismatch: map expects arity 1; found arity 2
+SELECT map([1, 2, 3], fn (a, b) => a + b)
+```
 
 ## Where lambdas are allowed
 
@@ -109,20 +138,58 @@ Lambdas capture the compile-time meta-world. Runtime SQL columns do not exist at
 
 ---
 
-!!! warning "LambdaArityNotSupported"
-    **When it fires:** A lambda with more than one parameter is written: `fn (a, b) => body`.
+<a id="lambdaaritymismatch"></a>
+!!! warning "LambdaArityMismatch"
+    **When it fires:** The lambda's parameter count does not match the arity required by the surrounding HOF call site. For example, `map` and `filter` require arity 1; passing a two-parameter lambda emits this diagnostic.
 
-    **Message:** `multi-argument lambdas are not supported in v1; use a single parameter`
+    **Message:** `{hof} expects a lambda of arity {expected}; found arity {actual}`
 
-    **Fires at:** the parameter list.
+    **Fires at:** the lambda's parameter list.
 
     **Example:**
     ```sql
-    -- ← LambdaArityNotSupported: (a, b) is multi-arg syntax, not supported in v1
+    -- map requires arity 1; fn (a, b) => a + b is arity 2
+    -- ← LambdaArityMismatch: map expects arity 1; found arity 2
     SELECT map([1, 2, 3], fn (a, b) => a + b)
     ```
 
-    **What to fix:** Rewrite to use a single lambda parameter. If your transformation needs two values from the list, consider restructuring the source list or using `smelt.define` to accept both as regular parameters. Multi-argument lambdas are planned but not yet implemented.
+    **What to fix:** Match the lambda's parameter count to what the HOF requires. `map` and `filter` take an arity-1 lambda. If you need a multi-arg lambda, you need a HOF that accepts one — no v1 HOF does this yet.
+
+---
+
+<a id="lambdazeroparameters"></a>
+!!! warning "LambdaZeroParameters"
+    **When it fires:** A lambda's parameter list is empty: `fn () => body`.
+
+    **Message:** `lambda must declare at least one parameter`
+
+    **Fires at:** the empty parameter list `()`.
+
+    **Example:**
+    ```sql
+    -- ← LambdaZeroParameters: lambda must declare at least one parameter
+    SELECT map([1, 2, 3], fn () => 42)
+    ```
+
+    **What to fix:** Add at least one parameter. If the body does not use the parameter, name it `_` by convention: `fn _ => 42`.
+
+---
+
+<a id="lambdaduplicateparameter"></a>
+!!! warning "LambdaDuplicateParameter"
+    **When it fires:** The same parameter name appears more than once in a single lambda's parameter list.
+
+    **Message:** `parameter '{name}' already appears in this lambda's parameter list`
+
+    **Fires at:** the second (duplicate) occurrence of the parameter name.
+
+    **Example:**
+    ```sql
+    -- ← LambdaDuplicateParameter: 'x' already appears in this lambda's parameter list
+    SELECT map([1, 2, 3], fn (x, x) => x)
+    ```
+
+    **What to fix:** Give each parameter a distinct name. If you intended two separate bindings, choose different identifiers for each slot.
 
 ---
 

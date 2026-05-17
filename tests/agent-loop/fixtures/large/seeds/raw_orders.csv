@@ -1,0 +1,13 @@
+order_id,customer_id,order_date,country,status,amount
+1,1,2025-01-01,US,shipped,100.00
+2,1,2025-01-02,US,shipped,150.00
+3,2,2025-01-03,US,cancelled,75.00
+4,2,2025-01-04,US,shipped,200.00
+5,3,2025-01-05,UK,shipped,80.00
+6,3,2025-01-06,UK,shipped,120.00
+7,4,2025-01-07,UK,cancelled,60.00
+8,4,2025-01-08,UK,shipped,90.00
+9,5,2025-01-09,DE,shipped,50.00
+10,5,2025-01-10,DE,shipped,110.00
+11,6,2025-01-11,DE,cancelled,40.00
+12,6,2025-01-12,DE,shipped,130.00

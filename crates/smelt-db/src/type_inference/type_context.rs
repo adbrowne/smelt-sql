@@ -118,6 +118,26 @@ pub struct TypeContext {
     record_registry: Arc<RecordRegistry>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
+    /// Whether the expression currently being type-checked lives inside a
+    /// generator file (a file whose frontmatter declares `generates: models`).
+    ///
+    /// When `true`, `ModelDef { … }` record literals are permitted and do not
+    /// emit `ModelDefOutsideGeneratorFile`. When `false` (the default), any
+    /// `ModelDef` literal emits that diagnostic.
+    ///
+    /// Set by the Phase 4 Salsa caller (`infer_generator_file_body`) before
+    /// delegating to the pure inference layer. Phase 3 tests set this field
+    /// directly on a `TypeContext::new()` instance.
+    pub is_inside_generator_file: bool,
+    /// Whether the workspace shape (the set of hand-authored models) has been
+    /// fully resolved at the time this context is used.
+    ///
+    /// When `true` (the default), literal `smelt.<path>` references inside a
+    /// generator body resolve against the hand-authored-model set (excluding
+    /// generator emissions — see spec Semantics rule 4). When `false`, smelt
+    /// path references are left unresolved (used by Phase 3 pure tests that
+    /// don't wire Salsa workspace state).
+    pub workspace_shape_includes_generators: bool,
 }
 
 impl PartialEq for TypeContext {
@@ -136,6 +156,8 @@ impl PartialEq for TypeContext {
             && self.fragment_param_kinds == other.fragment_param_kinds
             && self.expected_return == other.expected_return
             && self.function_param_smelt_types == other.function_param_smelt_types
+            && self.is_inside_generator_file == other.is_inside_generator_file
+            && self.workspace_shape_includes_generators == other.workspace_shape_includes_generators
         // record_registry and missed_lookups are intentionally excluded —
         // the registry is shared state and missed_lookups is transient tracking state.
     }
@@ -162,6 +184,8 @@ impl Default for TypeContext {
             function_param_smelt_types: HashMap::new(),
             record_registry: Arc::new(RecordRegistry::default()),
             missed_lookups: Mutex::new(Vec::new()),
+            is_inside_generator_file: false,
+            workspace_shape_includes_generators: true,
         }
     }
 }
@@ -185,6 +209,8 @@ impl Clone for TypeContext {
             function_param_smelt_types: self.function_param_smelt_types.clone(),
             record_registry: Arc::clone(&self.record_registry),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
+            is_inside_generator_file: self.is_inside_generator_file,
+            workspace_shape_includes_generators: self.workspace_shape_includes_generators,
         }
     }
 }

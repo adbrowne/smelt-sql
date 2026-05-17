@@ -113,6 +113,11 @@ Prints a message indicating that docs are embedded in the binary and advises usi
         "partition_column": "<string>",
         "event_time_column": "<string>",
         "unique_key": ["<string>"]      // omitted if empty
+      },
+      "origin": {                       // omitted when the model is hand-authored
+        "type": "generated",
+        "generator_file": "<workspace-relative path>",
+        "generator_name": "<string>"    // the ModelDef.name that produced this model
       }
     }
   },
@@ -164,7 +169,11 @@ When `--select` is specified, only selected models appear in the output. Test mo
 
 The wide-reflection accessors `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` observe the same model and source identities that the catalog renders: workspace-relative `path`, short `name`, and merged `tags`. The `path` and `name` fields on `ModelRef` / `SourceRef` values are derived from the same entity resolution that produces catalog page paths and model names. The `tags` field on `ModelRef` is the same merged set (smelt.yml first, then frontmatter) that drives the catalog's tag index.
 
-No normative extension to catalog rendering is introduced by the wide-reflection accessors. Deeper catalog changes — such as per-model cohort-of-origin fields or multi-source-of-origin column tracking — are deferred to later work tracked in `docs/plans/20260509-meta-language-overall.md`.
+### Generator-emitted model provenance
+
+A model emitted by a generator file (per `meta_language.md` §"Multi-model production") is rendered in the catalog on equal terms with a hand-authored model — every standard field (`name`, `description`, `materialization`, `columns`, `upstream`, `downstream`, `tags`, `incremental`) is populated from the emitted `ModelDef`'s values and the generator's frontmatter inheritance. The `origin` field carries the per-emission provenance: `type = "generated"`, `generator_file` = the workspace-relative path to the generator file (the same `.sql` or `.gen.sql` file the user can navigate to), `generator_name` = the `ModelDef.name` value that produced this emission.
+
+Hand-authored models omit the `origin` field (the standard `skip_serializing_if` rule applies). The Markdown output's metadata block surfaces an additional "Source" line for generator-emitted models pointing at the generator file. The tag index (`tag_index`) includes generator-emitted models on equal terms with hand-authored ones.
 
 ## Design
 

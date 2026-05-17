@@ -3756,15 +3756,21 @@ fn diagnostic_code_lambda_in_forbidden_position() {
     );
 }
 
-/// `LambdaArityNotSupported` exists and renders the spec message.
+/// `LambdaArityMismatch` exists and renders the spec message.
 #[test]
-fn diagnostic_code_lambda_arity_not_supported() {
-    let code = DiagnosticCode::LambdaArityNotSupported;
-    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
-    assert_eq!(
-        msg,
-        "multi-argument lambdas are not supported in v1; use a single parameter"
+fn diagnostic_code_lambda_arity_mismatch() {
+    let code = DiagnosticCode::LambdaArityMismatch;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        Some("map"),
+        None,
+        Some("1"),
+        Some("2"),
+        None,
+        None,
+        None,
     );
+    assert_eq!(msg, "map expects a lambda of arity 1; found arity 2");
 }
 
 /// `LambdaResultTypeMismatch` exists and renders the spec message with substitutions.

@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod graph;
 pub mod metadata;
 pub mod model_id;
+pub mod origin;
 pub mod project;
 #[cfg(feature = "python")]
 pub mod python_models;
@@ -26,6 +27,7 @@ pub use metadata::{
     ModelSection, TestConfig,
 };
 pub use model_id::ModelId;
+pub use origin::ModelOriginKind;
 pub use project::{
     find_config_file, find_project_root, find_project_root_by_walking_up,
     find_project_root_for_file, find_smelt_projects, is_sources_file, ProjectError,

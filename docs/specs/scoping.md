@@ -1,13 +1,13 @@
 ---
 feature: scoping
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-16
 owners: [andrew]
 ---
 
 # Scoping
 
-> **Scope.** Normative spec for name resolution inside `smelt.define` bodies: the `Expr<T, ctx>` annotation grammar, parameters-first lookup ordering, the no-overlap rule and its escape hatches, and splice-point context inference. Surrounding specs: `functions.md` (declaration grammar, frontmatter, function-level diagnostics), `types.md` (fragment sorts, type vocabulary, row polymorphism), `gradual_typing.md` (Tier 1/2/3 dispatch).
+> **Scope.** Normative spec for name resolution inside `smelt.define` bodies and generator-file bodies: the `Expr<T, ctx>` annotation grammar, parameters-first lookup ordering, the no-overlap rule and its escape hatches, splice-point context inference, and the distinct scope rules for generator-file bodies. Surrounding specs: `functions.md` (declaration grammar, frontmatter, function-level diagnostics), `types.md` (fragment sorts, type vocabulary, row polymorphism, `ModelDef`), `gradual_typing.md` (Tier 1/2/3 dispatch), `meta_language.md` (generator-file semantics, `ModelDef` field rules).
 
 ## Surface
 
@@ -51,6 +51,17 @@ User-visible codes anchored to scoping. Full descriptions live alongside `Diagno
 | `FragmentColumnMissing` | At a call site, a caller-supplied fragment references a column that is not in the parameter's inferred splice context. |
 | `FragmentKindMismatch` | At a call site, a caller-supplied fragment is of a lower expression kind than the parameter requires (e.g. scalar passed where `SelectItems<Agg>` is expected). |
 | `CteCycle` | A CTE in a body forms a cyclic reference, directly or transitively. |
+
+### Generator-file body scope
+
+A generator file (a `.sql` file whose frontmatter contains `generates: models`) carries a **distinct splice context** from both hand-authored models and `smelt.define` function bodies. The body scope rules are:
+
+- **No CTEs.** A generator-file body is a meta-evaluable expression, not a SQL statement; `WITH … AS (…)` blocks are not syntactically admissible at the top level. All composition is via meta-language constructs (lists, HOFs, pipe, record literals).
+- **No fragment parameters.** Generator files declare no `smelt.define` parameters and accept no caller-supplied fragments. There is no splice-point inference pass and no `Expr<T, ctx>` annotation grammar to interpret.
+- **Name-resolution root is the body expression itself.** The compiler type-checks the body as a standalone expression whose expected type is `List<ModelDef>`. Outer resolution contexts (SQL FROM scopes, CTE columns, upstream model schemas) are not in scope; they are reachable only through `ModelDef.body` field-value expressions (which are evaluated as `TableExpr`-typed sub-expressions with their own FROM scope).
+- **Loader-resolved record fields as externally-bound names.** When a HOF chain loads structured data via `smelt.config.load_yaml` or similar, the lambda parameter receives a record type whose fields are determined by the loader schema. Inside the lambda body, bare field accesses on that parameter (e.g. `c.name`, `c.region`) are the only externally-bound column-like names. They follow the lambda parameter scoping rule (step 1 of the resolution order), not FROM-scope resolution. The lambda parameter's record type is **not** a `TableExpr`; its fields are meta-`Text` or other meta-only values, not SQL columns.
+
+See `meta_language.md` §"Multi-model production" for the full generator-file semantics, and `types.md` for the `ModelDef` type.
 
 ## Semantics
 

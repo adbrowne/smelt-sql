@@ -19,8 +19,10 @@ pub mod function_call;
 pub mod hof;
 pub mod literal;
 pub mod loader_and_reflection;
+pub mod multi_model;
 pub mod record;
 pub mod subquery;
+pub mod ternary;
 pub mod type_context;
 
 #[cfg(test)]
@@ -67,11 +69,14 @@ pub use hof::{
     check_define_name_shadowing, check_forbidden_position_spreads, check_hof_position_diagnostics,
     check_select_list_spreads, disambiguate_list_literal, expand_spread_into_position,
     infer_hof_call, infer_hof_call_from_function_call,
-    infer_hof_call_from_function_call_with_expected, infer_list_literal, infer_pipe_expr,
-    infer_reduce_call, list_literal_sentinels_to_diagnostics, lookup_reducer, EmptyIdentity,
-    HofInferResult, HofInferSentinel, HofKind, HofSecondArg, ListDisambiguation, ListInferSentinel,
-    ListLiteralInferResult, OriginTag, ReducerInputConstraint, ReducerOutputSort, ReducerSpec,
-    SelectListSpreadResult, SplicePosition, SynthesizedReason, REDUCER_REGISTRY,
+    infer_hof_call_from_function_call_with_expected, infer_list_literal,
+    infer_parameterised_reducer_call, infer_pipe_expr, infer_reduce_call,
+    list_literal_sentinels_to_diagnostics, lookup_parameterised_reducer, lookup_reducer,
+    EmptyIdentity, HofInferResult, HofInferSentinel, HofKind, HofSecondArg, ListDisambiguation,
+    ListInferSentinel, ListLiteralInferResult, OriginTag, ParameterisedReducerResult,
+    ParameterisedReducerSentinel, ParameterisedReducerSpec, ReducerInputConstraint,
+    ReducerOutputSort, ReducerSpec, SelectListSpreadResult, SplicePosition, SynthesizedReason,
+    PARAMETERISED_REDUCER_REGISTRY, REDUCER_REGISTRY,
 };
 
 pub use loader_and_reflection::{
@@ -89,4 +94,15 @@ pub use record::{
     record_registry_for_workspace, registry_code_to_diagnostic_code, validate_map_type_expression,
     MapCallArg, MapMethodCallResult, MetaTextLiftPosition, RecordFieldProjectionResult,
     RecordLiteralResult, RecordLiteralSentinel, StaticResolution,
+};
+
+pub use multi_model::{
+    check_generator_body_reflection_forbid, infer_generator_file_body, infer_model_def_literal,
+    validate_model_def_materialization, validate_model_def_name, GeneratorBodyInferResult,
+    ModelDefLiteralInferResult, MultiModelSentinel,
+};
+
+pub use ternary::{
+    check_dangling_ternary_keywords, check_ternary_expr_diagnostics, infer_ternary_type,
+    ShortCircuitHint, TernaryResult, TernarySentinel,
 };

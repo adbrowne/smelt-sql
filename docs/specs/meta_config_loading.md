@@ -1,7 +1,7 @@
 ---
 feature: meta_config_loading
 status: experimental
-last_reviewed: 2026-05-13
+last_reviewed: 2026-05-14
 owners: [andrew]
 ---
 
@@ -209,19 +209,21 @@ A `smelt.record SourceEntry = {…}` declaration is visible from every loader ca
 - **Loaders are implemented per this spec.** Residual divergences (recursive schemas, per-key deep-merge for `Map<Text, S>` overlays, `Optional<V>` schema fields) are listed below.
 - **Recursive schemas.** Whether mutually-recursive `smelt.record` declarations should be admissible at loader-call schema positions is deferred. The acyclic-DAG record-declaration rule applies; loader-schemas inherit the same restriction.
 - **Per-target overlay merge of `Map<K, V>` is per-key replace, not per-key deep-merge.** A future spec edit may add per-key deep-merge if real configs demand it; today's rule is "overlay key replaces base value at that key", matching the `List<S>` replacement rule's spirit (the overlay is a value substitution, not a structural blend).
-- **Loader-call type synthesis is callable but not yet consumed by upstream inference.** `infer_loader_call_smelt_type` synthesises `SmeltType::Record` / `SmeltType::List(Record)` / `SmeltType::Map(Text, Record)` correctly for a `smelt.config.load_yaml`/`_json` call site. However, the production inference dispatch (`infer_smelt_path_call_type` in `crates/smelt-db/src/type_inference.rs`) returns `Option<TypedColumn>` (a `DataType`-based wrapper) and cannot structurally carry meta-language types. The first production consumer — LSP hover on a loader call — wires `infer_loader_call_smelt_type` directly; HOF dispatch over loader-call source lists is wired in a later iteration. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Loader-call type synthesis is callable but not yet consumed by upstream inference.** `infer_loader_call_smelt_type` synthesises `SmeltType::Record` / `SmeltType::List(Record)` / `SmeltType::Map(Text, Record)` correctly for a `smelt.config.load_yaml`/`_json` call site. However, the production inference dispatch (`infer_smelt_path_call_type` in `crates/smelt-db/src/type_inference/`) returns `Option<TypedColumn>` (a `DataType`-based wrapper) and cannot structurally carry meta-language types. The first production consumer — LSP hover on a loader call — wires `infer_loader_call_smelt_type` directly; HOF dispatch over loader-call source lists is wired in a later iteration. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **LSP goto-def on the loader name and hover on the schema argument are not yet wired.** Spec §LSP support asserts a graceful-no-op goto-def from the bare loader-name token (`load_yaml`, `load_json`) and a hover popup on the `schema` argument that renders the resolved schema. The corresponding pure helpers have not been written; `goto_def_for_loader_path` and `hover_text_for_loader_call` handle adjacent surfaces (path argument and full call site respectively). Tracked in `docs/plans/20260509-meta-language-E1.md` "Deferred during implementation".
+- **`Date` / `Timestamp` / `Decimal` schema-field strict-format validation is not yet implemented.** §Per-format YAML rule 2 asserts that `Date` / `Timestamp` fields require canonical ISO-8601 strings and that `Decimal(p, s)` fields validate against the declared precision/scale, emitting `ConfigLoaderTypeMismatch` on violations. The current YAML/JSON loaders accept any string at `Date` / `Timestamp` fields and any number at `Decimal` fields without format/precision validation. The diagnostic infrastructure (`ConfigLoaderTypeMismatch` code, span tracking) is in place; only the format-check predicates and Decimal range/scale arithmetic are missing. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References
 
 - **Code**:
-  - `crates/smelt-db/src/lib.rs` — Salsa queries: `loader_file_text(path)` and `loader_file_parsed(path)` for raw and parsed file content; `loader_resolved_value(call_site)` for the validated meta-world value; per-target overlay resolution.
-  - `crates/smelt-db/src/type_inference.rs` — `smelt.config.load_yaml` / `smelt.config.load_json` dispatch (schema admissibility check, return-type synthesis, validation invocation); literal-only `path` argument validation.
-  - `crates/smelt-db/src/loader.rs` — new module: per-format parsers (YAML via `yaml-rust2` or `serde_yaml`, JSON via `serde_json`), schema validation with source-span retention, per-target overlay resolution and merge.
-  - `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed under §Validation diagnostics.
-  - `crates/smelt-lsp/src/lib.rs` — hover for loader calls, goto-def for `path` arguments, completion for `path` (filesystem) and `schema` (in-scope `smelt.record` names) positions.
+  - `crates/smelt-db/src/lib.rs` and `crates/smelt-db/src/queries/loader.rs` — Salsa-tracked `LoaderFileInput` (raw text + exists bit, registered via `set_loader_file`); `loader_resolved_value_with_overlay(call_site)` for the validated meta-world value with per-target overlay resolution.
+  - `crates/smelt-db/src/type_inference/loader_and_reflection.rs` — `smelt.config.load_yaml` / `smelt.config.load_json` dispatch (schema admissibility check, return-type synthesis via `infer_loader_call_smelt_type`, validation invocation); literal-only `path` argument validation.
+  - `crates/smelt-db/src/loader.rs` — per-format parsers (YAML via `marked_yaml`, JSON via `serde_json`), schema validation with source-span retention, per-target overlay resolution and merge.
+  - `crates/smelt-db/src/diagnostics_types.rs::DiagnosticCode` — every diagnostic code listed under §Validation diagnostics.
+  - `crates/smelt-lsp/src/{lib,backend,hover}.rs` — hover for loader call sites (`hover_text_for_loader_call`), goto-def for `path` arguments (`goto_def_for_loader_path`) and loaded-record field projections (`goto_def_for_loaded_record_field_projection`), completion for `path` (filesystem-aware by extension) and `schema` (in-scope `smelt.record` names) positions. Loader-name goto-def and schema-argument hover are pure-helpers-pending — see Known Divergences.
 - **Tests**:
-  - `crates/smelt-db/src/loader.rs::tests` — per-format parsing (YAML core schema, JSON strict mode); inline-schema validation; named-schema validation; `List<S>` and `Map<Text, S>` root shapes; per-target overlay resolution and merge (record deep-merge, list replacement, map per-key replacement); duplicate-key detection.
-  - `crates/smelt-db/src/type_inference.rs::tests` — loader call type-checking (schema admissibility, return-type synthesis); literal-only `path` enforcement; reserved `load_toml` diagnostic.
+  - `crates/smelt-db/src/loader.rs::tests` and `crates/smelt-db/src/tests.rs` — per-format parsing (YAML core schema, JSON strict mode); inline-schema validation; named-schema validation; `List<S>` and `Map<Text, S>` root shapes; per-target overlay resolution and merge (record deep-merge, list replacement, map per-key replacement); duplicate-key detection (`yaml_parse_map_root_emits_duplicate_key`); Salsa invalidation (`loader_file_text_is_salsa_input`, `loader_resolved_value_invalidated_on_file_change`, `overlay_file_change_invalidates_loader_value`).
+  - `crates/smelt-db/src/type_inference/tests.rs` — loader call type-checking (schema admissibility, return-type synthesis); literal-only `path` enforcement; reserved `load_toml` diagnostic.
   - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/meta_config/` acceptance gate (loaders + record consumers + per-target overlay).
 - **User docs**:
   - `docs-site/docs/meta-language/config-loaders.md` — `smelt.config.load_yaml`, `smelt.config.load_json`, schema authoring, per-target overlay, validation diagnostics.

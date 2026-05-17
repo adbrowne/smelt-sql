@@ -1,11 +1,27 @@
 # Reflection
 
-smelt's **reflection** surface lets you inspect the column schema of a model, source, or seed at compile time and turn that schema into SQL — without manually listing column names. The reflection API operates entirely in the meta-world: no column name ever reaches the database engine as a literal string; it is lifted to a SQL identifier at the splice point.
+Reflection solves a class of problems that comes up constantly in data pipelines: you want to write a transformation that works on *any* set of columns or models, not just the specific ones that exist today. As the schema evolves — new columns added, old ones renamed — reflection-based models stay correct without edits, because the column list is computed fresh at every compile. smelt's reflection API operates entirely in the meta-world: column names, model paths, and source identifiers are never string literals in your SQL; they are compile-time values that become SQL identifiers at their splice points. This means the type checker validates every lifted identifier against the scope where it appears, so schema errors surface immediately in the editor rather than at query time.
 
 This page covers two reflection areas:
 
-- **Narrow reflection** — `smelt.columns_of` reflects a single `TableExpr`-typed value into a `List<ColumnRef>`.
-- **Wide reflection** — `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` reflect the entire workspace into `List<ModelRef>` or `List<SourceRef>` values.
+- **Narrow reflection** — `smelt.columns_of` reflects a single model, source, or seed into a [`List<ColumnRef>`](reference.md#columnref-closed-meta-record-type-for-column-reflection), letting you iterate over a table's columns.
+- **Wide reflection** — `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` reflect the entire workspace into [`List<ModelRef>`](reference.md#modelref-closed-meta-record-type-for-model-reflection) or [`List<SourceRef>`](reference.md#sourceref-closed-meta-record-type-for-source-reflection) values, letting you build cross-model queries that update automatically as the workspace grows.
+
+**Complete example — coalesce all numeric columns in any model:**
+
+```sql
+-- models/orders_safe.sql
+-- smelt.columns_of(smelt.orders) returns List<ColumnRef> at compile time.
+-- filter keeps only numeric columns; map wraps each in COALESCE.
+-- The spread splices the resulting SelectItems into the SELECT list.
+SELECT
+    customer_name,
+    ...smelt.columns_of(smelt.orders)
+          |> filter(fn c => c.is_numeric)
+          |> map(fn c => COALESCE(c.name, 0))
+FROM smelt.orders
+-- Engine sees: SELECT customer_name, COALESCE(id, 0), COALESCE(amount, 0), COALESCE(discount, 0) FROM smelt.orders
+```
 
 ## `smelt.columns_of`
 
@@ -484,12 +500,33 @@ SELECT map(smelt.models.all(), fn m => m.path)
 
 ---
 
-## Planned but not yet implemented
+## Generator-body restriction
 
-The following reflection capabilities are planned but not yet available:
+`smelt.models.*` accessors (`smelt.models.with_tag`, `smelt.models.all`) are **not available inside generator file bodies** (files whose frontmatter declares `generates: models`). Calling them emits `GeneratorBodyForbidsModelReflection`.
 
-- **Record types and config loaders** (`Record<{…}>`, `Map<K,V>`, YAML/JSON/TOML loaders): user-writable record types and structured config loading.
-- **Multi-model production**: one file generates multiple output models.
+**Why.** Workspace shape — which models exist — is determined by evaluating all generators in a single pass. Admitting `smelt.models.*` inside a generator would create a circular dependency between generator emissions and the model-reflection they observe.
+
+**`smelt.sources.*` is allowed** inside generator bodies. Sources are evaluated before any generator, so there is no circularity.
+
+```sql
+---
+generates: models
+---
+-- OK: smelt.sources.with_tag works inside generator bodies.
+smelt.sources.with_tag('raw')
+  |> map(fn s => ModelDef {
+       name: s.name,
+       body: SELECT * FROM smelt.sources.raw.[s.name]
+     })
+
+-- NOT OK: smelt.models.with_tag fires GeneratorBodyForbidsModelReflection.
+-- smelt.models.with_tag('staging') |> map(fn m => ModelDef { … })
+```
+
+For driving a generator from a data file, use `smelt.config.load_yaml` / `load_json` instead. See [Generator Files](generators.md) and [Config Loaders](config-loaders.md).
+
+## Planned but not yet available
+
 - **Additional `ModelRef`/`SourceRef` fields** (`materialization`, `backends`, `description`, …): the field set will expand as concrete use cases are identified.
 
 ## See also

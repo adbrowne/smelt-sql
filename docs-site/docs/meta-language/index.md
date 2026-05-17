@@ -6,7 +6,7 @@ smelt's meta-language is a compile-time evaluation layer that lets you compute S
 
 Every smelt model lives in two overlapping worlds:
 
-**Meta-world** — evaluated at compile time. Values are fragment sorts (`Expr<T>`, `TableExpr`, `OrderSpec`) and the meta types introduced by the meta-language (`List<T>`, `Lambda<T, U>`, with `Record<…>` and `Map<K,V>` planned). Meta values never reach the database engine; they are consumed during type-checking and codegen.
+**Meta-world** — evaluated at compile time. Values are fragment sorts (`Expr<T>`, `TableExpr`, `OrderSpec`) and the meta types introduced by the meta-language (`List<T>`, `Lambda<T, U>`, records declared with `smelt.record`, and `Map<K, V>`). Meta values never reach the database engine; they are consumed during type-checking and codegen.
 
 **Data-world** — the SQL the database engine sees. Types are the `DataType` vocabulary (`INTEGER`, `TEXT`, `BOOLEAN`, …). Data values exist at query runtime.
 
@@ -35,16 +35,19 @@ The meta-language provides three constructs that exercise the meta/data boundary
 | `...xs` | Spread operator — splices a `List<T>` into a comma-separated position | [Lists & Spread](lists.md) |
 | `List<T>` | Meta-only type: finite, ordered, immutable | [Lists & Spread](lists.md) |
 
-The meta-language also provides iteration, transformation, compile-time configuration, schema reflection, structured data types, and file-based configuration loading:
+The meta-language also provides iteration, transformation, compile-time branching, compile-time configuration, schema reflection, structured data types, and file-based configuration loading:
 
 | Construct | Description | Documentation |
 |-----------|-------------|---------------|
 | `fn x => body` | Lambda expression — inline single-argument function | [Lambdas](lambdas.md) |
+| `fn (a, b) => body` | Multi-parameter lambda (arity ≥ 2; parenthesised) | [Lambdas](lambdas.md) |
 | `map` | Apply a lambda to every element of a list | [Higher-Order Functions](hofs.md) |
 | `filter` | Keep list elements matching a predicate | [Higher-Order Functions](hofs.md) |
 | `reduce` | Fold a list into a single SQL fragment using a reducer | [Higher-Order Functions](hofs.md) |
 | `\|>` | Pipe operator — left-to-right HOF chaining | [Pipe Operator](pipes.md) |
-| `and_all`, `comma_sep`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat` | Contextual reducers | [Reducers](reducers.md) |
+| `and_all`, `comma_sep`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat` | Bare contextual reducers | [Reducers](reducers.md) |
+| `concat_with(sep)` | Parameterised text-join reducer with a compile-time separator | [Reducers](reducers.md) |
+| `if cond then a else b` | Meta-world ternary — compile-time Boolean branching with short-circuit evaluation | [Ternary](ternary.md) |
 | `smelt.config.var('name')` | Compile-time variable lookup from `smelt.yml` | [Config Variables](config-vars.md) |
 | `smelt.columns_of(t)` | Compile-time column list of a `TableExpr` → `List<ColumnRef>` | [Reflection](reflection.md) |
 | `ColumnRef` | Closed meta record type: `name`, `type`, `is_numeric` fields | [Reflection](reflection.md) |
@@ -57,16 +60,85 @@ The meta-language also provides iteration, transformation, compile-time configur
 | `smelt.config.load_yaml(path, schema)` | Load a YAML file as a typed meta value | [Config Loaders](config-loaders.md) |
 | `smelt.config.load_json(path, schema)` | Load a JSON file as a typed meta value | [Config Loaders](config-loaders.md) |
 
+The meta-language also provides **multi-model production** — generating an entire family of models from a single compile-time expression:
+
+| Construct | Description | Documentation |
+|-----------|-------------|---------------|
+| `generates: models` | Frontmatter directive marking a file as a generator | [Generator Files](generators.md) |
+| `ModelDef { name, body, … }` | Built-in closed record: declares one emitted model | [Generator Files](generators.md) |
+
 Quick reference for all constructs and diagnostic codes: [Reference](reference.md).
 
-## Planned but not yet implemented
+---
 
-The following meta-language capabilities are planned but not yet available:
+## How the pieces fit together
 
-| Capability | Content |
-|------------|---------|
-| **Multi-model production** | One file generates N models |
-| **Polish** | Multi-arg lambdas, meta ternary, parameterised reducers |
-| **LSP completeness** | Rename, completion, diagnostics-with-frame-stacks across all surface |
+The constructs above compose. Here is a complete worked example that reads a YAML configuration file, generates one model per cohort, and then unions all the cohort models together in a downstream query. Every line references only constructs documented on this site.
 
-These capabilities land incrementally. Each addition extends the [Reference](reference.md) page.
+### Step 1 — Load the config file and emit one model per cohort
+
+```sql
+-- models/cohorts.gen.sql
+---
+generates: models
+tags: [cohort]
+---
+smelt.config.load_yaml('cohorts.yaml', List<{ name: Text, region: Text, min_revenue: Integer }>)
+  |> map(fn c => ModelDef {
+       name: c.name,
+       body: SELECT id, user_id, region, revenue, created_at
+             FROM smelt.orders
+             WHERE region = c.region AND revenue >= c.min_revenue
+     })
+```
+
+`cohorts.yaml` lives at the workspace root:
+
+```yaml
+- name: us_west
+  region: us-west-2
+  min_revenue: 100
+- name: us_east
+  region: us-east-1
+  min_revenue: 100
+- name: eu
+  region: eu-west-1
+  min_revenue: 50
+```
+
+**What each construct does:**
+
+- [`smelt.config.load_yaml('cohorts.yaml', List<{ … }>)`](config-loaders.md) — reads the file, validates each row against the inline schema, and returns a `List<{ name: Text, region: Text, min_revenue: Integer }>` as a compile-time meta value. The inline schema is the preferred form for short, single-use shapes; for reuse across files, [`smelt.record`](records.md) declares a named type.
+- [`|>`](pipes.md) — pipes the list into the next call, keeping the chain readable left-to-right.
+- [`map(fn c => ModelDef { … })`](hofs.md) — applies the [lambda](lambdas.md) to every cohort, converting each record into a [`ModelDef`](generators.md). The result is `List<ModelDef>`.
+- [`generates: models`](generators.md) frontmatter — marks the file as a generator. smelt expands the `List<ModelDef>` and emits three models: `smelt.cohorts.us_west`, `smelt.cohorts.us_east`, `smelt.cohorts.eu`.
+
+### Step 2 — Union all cohort models in a downstream query
+
+There are two patterns for the downstream union. The **explicit form** lists each emitted model by name — useful for clarity in small, stable cohort sets:
+
+```sql
+-- models/all_cohorts_unioned.sql (explicit form — matches examples/per_cohort_union/)
+SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.us_west
+UNION ALL
+SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.us_east
+UNION ALL
+SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.eu
+```
+
+The **dynamic-discovery form** uses workspace reflection so that adding a new cohort to `cohorts.yaml` automatically emits a new model and adds it to the union — no SQL edits required:
+
+```sql
+-- models/all_cohorts_unioned.sql (dynamic-discovery form)
+SELECT * FROM reduce(
+    smelt.models.with_tag('cohort'),
+    union_all
+)
+```
+
+**What the dynamic form does:**
+
+- [`smelt.models.with_tag('cohort')`](reflection.md) — returns `List<ModelRef>` for every model in the workspace tagged `cohort`, including all models emitted by the generator in Step 1.
+- [`reduce(…, union_all)`](hofs.md) — folds the list into a single `TableExpr` using [the `union_all` reducer](reducers.md), producing one `UNION ALL` branch per cohort.
+
+The runnable starter in `examples/per_cohort_union/` uses the explicit form for clarity. The dynamic-discovery form is the pattern to reach for when the cohort list grows or changes frequently.

@@ -3,7 +3,7 @@ use crate::logical_graph::LogicalGraph;
 use crate::physical_graph::{PhysicalGraph, PhysicalStrategy};
 use anyhow::Result;
 use serde::Serialize;
-use smelt_core::{Granularity, IncrementalConfig, Materialization};
+use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
 use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
 use std::collections::BTreeMap;
 
@@ -27,6 +27,11 @@ pub struct ExplainModel {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// For generator-emitted models: provenance identifying the generator file
+    /// and the `ModelDef.name` that produced this model. Omitted for hand-authored
+    /// models (per `docs/specs/cli.md` §"`smelt explain --json` output schema").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ModelOriginKind>,
 }
 
 /// Incremental-specific metadata in the explain output.
@@ -87,6 +92,15 @@ pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
         let owner = metadata.and_then(|m| m.owner.clone());
         let dependencies = graph.get_upstream(&node.name);
 
+        // Build origin for generator-emitted models.
+        let origin = match (&node.generator_file, &node.generator_name) {
+            (Some(gf), Some(gn)) => Some(ModelOriginKind::Generated {
+                generator_file: gf.clone(),
+                generator_name: gn.clone(),
+            }),
+            _ => None,
+        };
+
         models.insert(
             node.name.clone(),
             ExplainModel {
@@ -95,6 +109,7 @@ pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
                 incremental,
                 tags: node.tags.clone(),
                 owner,
+                origin,
             },
         );
     }

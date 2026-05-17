@@ -2164,6 +2164,31 @@ fn test_deeply_nested_subqueries_produces_error() {
 }
 
 #[test]
+fn test_deeply_nested_inline_record_types_produces_error() {
+    // 300 levels of nested inline record types — exceeds the 256 depth limit.
+    // Without a guard on `parse_record_type_inline`, this would blow the stack.
+    let depth = 300;
+    let mut input = String::new();
+    input.push_str("smelt.record Deep = ");
+    for _ in 0..depth {
+        input.push_str("{ a: ");
+    }
+    input.push_str("Text");
+    for _ in 0..depth {
+        input.push_str(" }");
+    }
+    let result = parse(&input);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("nesting depth")),
+        "Expected nesting depth error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
 fn test_normal_nesting_depth_unaffected() {
     // Reasonable nesting (depth ~20) should parse fine
     let input = "SELECT COALESCE(COALESCE(COALESCE(COALESCE(COALESCE(1, 2), 3), 4), 5), 6)";
@@ -4109,23 +4134,29 @@ fn parse_lambda_single_arg() {
         .descendants()
         .find(|n| n.kind() == LAMBDA)
         .expect("must have a LAMBDA node");
-    // The LAMBDA must have a LAMBDA_PARAM_LIST child with one ident.
+    // The LAMBDA must have a LAMBDA_PARAM_LIST child with one LAMBDA_PARAM.
     let param_list = lambda
         .children()
         .find(|n| n.kind() == LAMBDA_PARAM_LIST)
         .expect("LAMBDA must have a LAMBDA_PARAM_LIST child");
+    // Phase F: parameters are LAMBDA_PARAM nodes inside LAMBDA_PARAM_LIST.
     let params: Vec<_> = param_list
-        .children_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| t.kind() == IDENT)
+        .children()
+        .filter(|n| n.kind() == LAMBDA_PARAM)
         .collect();
     assert_eq!(
         params.len(),
         1,
-        "expected 1 parameter, got {}",
+        "expected 1 LAMBDA_PARAM child, got {}",
         params.len()
     );
-    assert_eq!(params[0].text(), "c");
+    // The single LAMBDA_PARAM must contain an IDENT token "c".
+    let param_ident = params[0]
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == IDENT)
+        .expect("LAMBDA_PARAM must have an IDENT token");
+    assert_eq!(param_ident.text(), "c");
     // The LAMBDA must have an EXPRESSION body child.
     assert!(
         lambda.children().any(|n| n.kind() == EXPRESSION),
@@ -4945,5 +4976,520 @@ fn record_literal_recovers_on_missing_value() {
         2,
         "RECORD_LITERAL must have two RECORD_FIELD children even with error recovery, got {}",
         fields.len()
+    );
+}
+
+// ===== Phase F (meta-language): multi-arg lambdas, parameterised reducers, meta-world ternary =====
+
+// ----- Lexer tests (embedded in parser/tests.rs for convenience) -----
+
+#[test]
+fn lex_ternary_keywords() {
+    use crate::lexer::tokenize;
+    // `if` must lex as IF_KW (reserved keyword).
+    let tokens = tokenize("if");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws.len(),
+        1,
+        "expected one token for `if`, got: {:?}",
+        non_ws
+    );
+    assert_eq!(
+        non_ws[0].kind, IF_KW,
+        "`if` must lex as IF_KW, got {:?}",
+        non_ws[0].kind
+    );
+
+    // `then` must lex as THEN_KW (already a SQL CASE keyword).
+    let tokens = tokenize("then");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws.len(),
+        1,
+        "expected one token for `then`, got: {:?}",
+        non_ws
+    );
+    assert_eq!(
+        non_ws[0].kind, THEN_KW,
+        "`then` must lex as THEN_KW, got {:?}",
+        non_ws[0].kind
+    );
+
+    // `else` must lex as ELSE_KW (already a SQL CASE keyword).
+    let tokens = tokenize("else");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws.len(),
+        1,
+        "expected one token for `else`, got: {:?}",
+        non_ws
+    );
+    assert_eq!(
+        non_ws[0].kind, ELSE_KW,
+        "`else` must lex as ELSE_KW, got {:?}",
+        non_ws[0].kind
+    );
+
+    // All three are case-sensitive: `IF` is still IF_KW (lexer is case-insensitive for keywords).
+    let tokens = tokenize("IF");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws[0].kind, IF_KW,
+        "`IF` must also lex as IF_KW, got {:?}",
+        non_ws[0].kind
+    );
+
+    // `iffy` must remain an IDENT (no over-eager keyword match).
+    let tokens = tokenize("iffy");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws[0].kind, IDENT,
+        "`iffy` must lex as IDENT, got {:?}",
+        non_ws[0].kind
+    );
+}
+
+#[test]
+fn lex_keywords_not_in_strings() {
+    use crate::lexer::tokenize;
+    // `'if'`, `'then'`, `'else'` inside string literals must lex as STRING_LITERAL (STRING).
+    let tokens = tokenize("'if'");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws.len(),
+        1,
+        "`'if'` must be a single STRING token, got: {:?}",
+        non_ws
+    );
+    assert_eq!(
+        non_ws[0].kind, STRING,
+        "`'if'` must lex as STRING, got {:?}",
+        non_ws[0].kind
+    );
+
+    let tokens = tokenize("'then'");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws.len(),
+        1,
+        "`'then'` must be a single STRING token, got: {:?}",
+        non_ws
+    );
+    assert_eq!(
+        non_ws[0].kind, STRING,
+        "`'then'` must lex as STRING, got {:?}",
+        non_ws[0].kind
+    );
+
+    let tokens = tokenize("'else'");
+    let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+    assert_eq!(
+        non_ws.len(),
+        1,
+        "`'else'` must be a single STRING token, got: {:?}",
+        non_ws
+    );
+    assert_eq!(
+        non_ws[0].kind, STRING,
+        "`'else'` must lex as STRING, got {:?}",
+        non_ws[0].kind
+    );
+}
+
+// ----- Multi-arg lambda tests -----
+
+#[test]
+fn parse_multi_arg_lambda() {
+    // `fn (a, b) => a + b` must parse as a LAMBDA with two LAMBDA_PARAM children.
+    let parse = parse("SELECT map2(xs, ys, fn (a, b) => a + b) FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_multi_arg_lambda: unexpected errors: {:?}",
+        parse.errors
+    );
+    let lambda = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LAMBDA)
+        .expect("must have a LAMBDA node");
+    // The LAMBDA must have a LAMBDA_PARAM_LIST child.
+    let param_list = lambda
+        .children()
+        .find(|n| n.kind() == LAMBDA_PARAM_LIST)
+        .expect("LAMBDA must have a LAMBDA_PARAM_LIST child");
+    // The LAMBDA_PARAM_LIST must have two LAMBDA_PARAM children.
+    let params: Vec<_> = param_list
+        .children()
+        .filter(|n| n.kind() == LAMBDA_PARAM)
+        .collect();
+    assert_eq!(
+        params.len(),
+        2,
+        "expected 2 LAMBDA_PARAM children, got {}",
+        params.len()
+    );
+    // Each LAMBDA_PARAM must have an IDENT token.
+    let param_names: Vec<String> = params
+        .iter()
+        .flat_map(|p| {
+            p.children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == IDENT)
+                .map(|t| t.text().to_string())
+        })
+        .collect();
+    assert_eq!(
+        param_names,
+        vec!["a", "b"],
+        "expected params [a, b], got {:?}",
+        param_names
+    );
+}
+
+#[test]
+fn parse_multi_arg_lambda_trailing_comma() {
+    // `fn (a, b,) => body` — trailing comma must be accepted.
+    let parse = parse("SELECT f(xs, fn (a, b,) => a + b) FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_multi_arg_lambda_trailing_comma: unexpected errors: {:?}",
+        parse.errors
+    );
+    let lambda = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LAMBDA)
+        .expect("must have a LAMBDA node");
+    let param_list = lambda
+        .children()
+        .find(|n| n.kind() == LAMBDA_PARAM_LIST)
+        .expect("LAMBDA must have LAMBDA_PARAM_LIST");
+    let params: Vec<_> = param_list
+        .children()
+        .filter(|n| n.kind() == LAMBDA_PARAM)
+        .collect();
+    assert_eq!(
+        params.len(),
+        2,
+        "expected 2 LAMBDA_PARAM children (trailing comma), got {}",
+        params.len()
+    );
+}
+
+#[test]
+fn parse_single_arg_lambda_parenthesised() {
+    // `fn (x) => x` must parse as a LAMBDA with one LAMBDA_PARAM child,
+    // equivalent to `fn x => x`.
+    let parse = parse("SELECT f(xs, fn (x) => x) FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_single_arg_lambda_parenthesised: unexpected errors: {:?}",
+        parse.errors
+    );
+    let lambda = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LAMBDA)
+        .expect("must have a LAMBDA node");
+    let param_list = lambda
+        .children()
+        .find(|n| n.kind() == LAMBDA_PARAM_LIST)
+        .expect("LAMBDA must have LAMBDA_PARAM_LIST");
+    let params: Vec<_> = param_list
+        .children()
+        .filter(|n| n.kind() == LAMBDA_PARAM)
+        .collect();
+    assert_eq!(
+        params.len(),
+        1,
+        "expected 1 LAMBDA_PARAM child for fn (x), got {}",
+        params.len()
+    );
+}
+
+#[test]
+fn parse_lambda_zero_params_rejected() {
+    // `fn () => body` — zero params. Parser admits the shape (produces a LAMBDA
+    // node) and the downstream `LambdaZeroParameters` diagnostic fires.
+    // The parse does NOT need to be error-free — it just must not crash and must
+    // produce a LAMBDA node.
+    let parse = parse("SELECT f(xs, fn () => body) FROM t");
+    // May have errors; the important thing is a LAMBDA node exists.
+    let lambda = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LAMBDA)
+        .expect("fn () => body must produce a LAMBDA node (for downstream diagnostics)");
+    // LAMBDA_PARAM_LIST must exist with zero LAMBDA_PARAM children.
+    let param_list = lambda
+        .children()
+        .find(|n| n.kind() == LAMBDA_PARAM_LIST)
+        .expect("LAMBDA must have LAMBDA_PARAM_LIST");
+    let params: Vec<_> = param_list
+        .children()
+        .filter(|n| n.kind() == LAMBDA_PARAM)
+        .collect();
+    assert_eq!(
+        params.len(),
+        0,
+        "fn () => body must have 0 LAMBDA_PARAM children, got {}",
+        params.len()
+    );
+}
+
+#[test]
+fn parse_lambda_no_parens_multi_arg_rejected() {
+    // `fn a, b => body` — no parens around multi-arg. This is a parse error
+    // at the comma; the parser should recover with a LAMBDA containing one
+    // param plus an ERROR token (or similar recovery).
+    let parse = parse("SELECT f(xs, fn a, b => body) FROM t");
+    // Must NOT be error-free — comma after unparenthesised parameter is a parse error.
+    // Must have a LAMBDA node (error recovery).
+    let lambda_exists = parse.syntax().descendants().any(|n| n.kind() == LAMBDA);
+    assert!(
+        lambda_exists,
+        "fn a, b => body must produce a LAMBDA node for error recovery"
+    );
+    // Must have parse errors (the unparenthesised multi-arg form is rejected).
+    assert!(
+        !parse.errors.is_empty(),
+        "fn a, b => body must produce parse errors (missing parens for multi-arg)"
+    );
+}
+
+// ----- Ternary expression tests -----
+
+#[test]
+fn parse_ternary_basic() {
+    // `if cond then a else b` must parse as a TERNARY_EXPR with three sub-expressions.
+    let parse = parse("SELECT if x > 0 then 1 else 0 FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_ternary_basic: unexpected errors: {:?}",
+        parse.errors
+    );
+    let ternary = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TERNARY_EXPR)
+        .expect("must have a TERNARY_EXPR node");
+    // Must have three EXPRESSION children (cond, then_branch, else_branch).
+    let exprs: Vec<_> = ternary
+        .children()
+        .filter(|n| n.kind() == EXPRESSION)
+        .collect();
+    assert_eq!(
+        exprs.len(),
+        3,
+        "TERNARY_EXPR must have 3 EXPRESSION children, got {}",
+        exprs.len()
+    );
+}
+
+#[test]
+fn parse_ternary_nested_right_associative() {
+    // `if c1 then a else if c2 then b else c` must parse as:
+    // TERNARY_EXPR(c1, a, TERNARY_EXPR(c2, b, c)) — right-associative.
+    let parse = parse("SELECT if c1 then a else if c2 then b else c FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_ternary_nested_right_associative: unexpected errors: {:?}",
+        parse.errors
+    );
+    let ternaries: Vec<_> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == TERNARY_EXPR)
+        .collect();
+    assert_eq!(
+        ternaries.len(),
+        2,
+        "expected 2 TERNARY_EXPR nodes, got {}",
+        ternaries.len()
+    );
+    // The outer ternary must contain the inner one as a descendant (right-associative).
+    let outer = ternaries
+        .iter()
+        .max_by_key(|n| n.text_range().len())
+        .unwrap();
+    assert!(
+        outer
+            .descendants()
+            .any(|n| n.kind() == TERNARY_EXPR && &n != outer),
+        "outer TERNARY_EXPR must contain the inner one (right-associative)"
+    );
+}
+
+#[test]
+fn parse_ternary_in_lambda_body() {
+    // `fn x => if x > 0 then 'pos' else 'neg'` — ternary as lambda body.
+    let parse = parse("SELECT f(xs, fn x => if x > 0 then 'pos' else 'neg') FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_ternary_in_lambda_body: unexpected errors: {:?}",
+        parse.errors
+    );
+    let lambda = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LAMBDA)
+        .expect("must have a LAMBDA node");
+    // The LAMBDA body must contain a TERNARY_EXPR.
+    assert!(
+        lambda.descendants().any(|n| n.kind() == TERNARY_EXPR),
+        "LAMBDA body must contain a TERNARY_EXPR"
+    );
+}
+
+#[test]
+fn parse_ternary_in_pipe_chain() {
+    // Spec rule: ternary has LOWER precedence than `|>` (pipe binds more tightly).
+    // Inside the COND slot of a ternary, a pipe expression parses correctly because
+    // `|>` has higher precedence than the ternary.
+    //
+    // Test: `if xs |> f() then a else b` — the COND is the pipe expression `xs |> f()`.
+    // The pipe result determines which branch is taken.
+    let parse = parse("SELECT if xs |> f() then a else b FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_ternary_in_pipe_chain: unexpected errors: {:?}",
+        parse.errors
+    );
+    let ternary = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TERNARY_EXPR)
+        .expect("must have a TERNARY_EXPR node");
+    // The TERNARY_EXPR must contain a PIPE_EXPR descendant (the pipe is the COND).
+    assert!(
+        ternary.descendants().any(|n| n.kind() == PIPE_EXPR),
+        "TERNARY_EXPR must contain a PIPE_EXPR as its COND (pipe higher-precedence than ternary)"
+    );
+}
+
+#[test]
+fn parse_ternary_dangling_then_recovery() {
+    // `then x else y` — no leading `if`. The parser must recover without consuming
+    // the surrounding expression; an ERROR must be emitted at `then`.
+    // Critically: existing CASE WHEN ... THEN ... ELSE ... END must not regress.
+    // First verify CASE WHEN still works:
+    let case_parse = parse("SELECT CASE WHEN x = 1 THEN 'a' ELSE 'b' END FROM t");
+    assert!(
+        case_parse.errors.is_empty(),
+        "CASE WHEN must still parse correctly after ternary addition: {:?}",
+        case_parse.errors
+    );
+    // Now test dangling `then` recovery:
+    let parse = parse("SELECT then x FROM t");
+    // Must produce errors (dangling `then`).
+    assert!(
+        !parse.errors.is_empty(),
+        "dangling `then` must produce parse errors"
+    );
+}
+
+#[test]
+fn parse_ternary_dangling_else_recovery() {
+    // `if c then x` — missing `else` branch. The parser must recover by producing
+    // an incomplete TERNARY_EXPR (missing else slot) flagged for downstream diagnostics.
+    let parse = parse("SELECT if c then x FROM t");
+    // A TERNARY_EXPR must still be produced (error recovery).
+    let ternary = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TERNARY_EXPR)
+        .expect("if c then x must produce a TERNARY_EXPR node even with missing else");
+    // The TERNARY_EXPR must have fewer than 3 EXPRESSION children (else slot missing).
+    let exprs: Vec<_> = ternary
+        .children()
+        .filter(|n| n.kind() == EXPRESSION)
+        .collect();
+    assert!(
+        exprs.len() < 3,
+        "incomplete ternary (missing else) must have fewer than 3 EXPRESSION children, got {}",
+        exprs.len()
+    );
+}
+
+// ----- Parameterised reducer tests -----
+
+#[test]
+fn parse_reducer_call() {
+    // `reduce(xs, concat_with(' OR '))` — the second argument is a parameterised
+    // reducer call. Must produce a REDUCER_CALL node.
+    let parse = parse("SELECT reduce(xs, concat_with(' OR ')) FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_reducer_call: unexpected errors: {:?}",
+        parse.errors
+    );
+    let reducer = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == REDUCER_CALL)
+        .expect("must have a REDUCER_CALL node");
+    // The REDUCER_CALL must contain an IDENT token for the reducer name.
+    let name_token = reducer
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == IDENT)
+        .expect("REDUCER_CALL must have an IDENT name token");
+    assert_eq!(name_token.text(), "concat_with");
+    // The REDUCER_CALL must contain an ARG_LIST.
+    assert!(
+        reducer.children().any(|n| n.kind() == ARG_LIST),
+        "REDUCER_CALL must have an ARG_LIST child"
+    );
+}
+
+#[test]
+fn parse_reducer_call_bare_identifier_still_works() {
+    // `reduce(xs, and_all)` — bare-identifier reducer second argument.
+    // Must NOT produce a REDUCER_CALL node; must parse as a normal identifier.
+    let parse = parse("SELECT reduce(xs, and_all) FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "parse_reducer_call_bare_identifier_still_works: unexpected errors: {:?}",
+        parse.errors
+    );
+    // Must NOT have a REDUCER_CALL node.
+    assert!(
+        !parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == REDUCER_CALL),
+        "bare-identifier reducer `and_all` must NOT produce a REDUCER_CALL node"
+    );
+    // Must have a FUNCTION_CALL for `reduce`.
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == FUNCTION_CALL),
+        "reduce(xs, and_all) must have a FUNCTION_CALL node for `reduce`"
+    );
+}
+
+#[test]
+fn parse_reducer_call_at_non_reduce_position_rejected() {
+    // `concat_with('|')` at a top-level expression position — the parser
+    // must NOT produce a REDUCER_CALL node; it must be a generic FUNCTION_CALL.
+    let parse = parse("SELECT concat_with('|') FROM t");
+    // No REDUCER_CALL expected (only in reduce's second-argument context).
+    assert!(
+        !parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == REDUCER_CALL),
+        "concat_with('|') outside reduce context must NOT produce a REDUCER_CALL node"
+    );
+    // Must parse as a FUNCTION_CALL.
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == FUNCTION_CALL),
+        "concat_with('|') must produce a FUNCTION_CALL node"
     );
 }

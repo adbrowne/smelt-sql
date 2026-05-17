@@ -20,6 +20,7 @@ A minimum-viable smelt project looks like this:
 ```
 my-project/
 ├── smelt.yml          # project config
+├── tests/             # (optional) `.test.sql` or `materialization: test` files
 ├── seeds/             # CSV seed data
 │   └── *.csv
 ├── sources.yml        # (optional) declares external tables
@@ -35,6 +36,7 @@ version: 1
 paths:
   - models
   - seeds
+  - tests              # only if you have a tests/ directory
 targets:
   dev:
     type: duckdb
@@ -171,6 +173,20 @@ SELECT
     smelt.functions.safe_revenue(amount) AS amount
 FROM smelt.raw_orders
 ```
+
+## Generator files & tests (only when the spec asks for them)
+
+- **Generators** (`*.gen.sql` with `generates: models` frontmatter): emitted
+  smelt path is `<file-stem>.<emitted-name>` — `name: 'us'` in
+  `models/cohorts.gen.sql` becomes `smelt.cohorts.us` (NOT `smelt.us`), which
+  in DuckDB is table `cohorts_us` (`.` → `_`). `smelt build --show-plan
+  <generator>.sql` is currently terse for generators; after `smelt build`,
+  verify with `duckdb …  -c "SELECT table_name FROM information_schema.tables WHERE table_name LIKE '<stem>_%'"`.
+- **Tests**: two layouts exist — (a) `materialization: test` files with a
+  boolean `SELECT … AS passes` body, and (b) `test:`/`expect:` YAML-block
+  files (`smelt docs show guide/testing`). Form (a) compiles into DuckDB
+  during `smelt build` but `smelt test` may silently report `0 total` —
+  validate directly via `duckdb … -c "SELECT passes FROM <test_model>"`.
 
 ## Stuck-points checklist
 

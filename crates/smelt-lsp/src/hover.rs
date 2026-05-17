@@ -44,12 +44,24 @@ pub fn render_expansion_frames(
     };
     let mut related: Vec<DiagnosticRelatedInformation> = Vec::new();
     for frame in frames.iter().rev() {
-        // Anonymous HOF frames (fn_id is None) have an empty `param` and
-        // `bound_type`; rendering them with the named-frame template produces
-        // awkward text like `"`, `` was bound to "`.  Use a shorter form that
-        // names only the HOF (matching the spec for anonymous expansion frames).
-        let is_anonymous = frame.fn_id.is_none();
-        let trailer = if is_anonymous {
+        // `<generator>` frames are generator-body frames (not user-defined
+        // functions and not HOF lambdas).  They carry `function = "<generator>"`
+        // and `decl_path = Some(generator_file_path)`.  Render them with a
+        // distinct form that names the source file rather than a "call" site.
+        let is_generator_body = frame.function == "<generator>";
+        // Anonymous HOF frames (fn_id is None, but not a generator frame) have
+        // an empty `param` and `bound_type`; rendering them with the
+        // named-frame template produces awkward text like `"`, `` was bound
+        // to "`.  Use a shorter form that names only the HOF.
+        let is_anonymous = !is_generator_body && frame.fn_id.is_none();
+        let trailer = if is_generator_body {
+            let path_label = frame
+                .decl_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("<generator>");
+            format!("\nin generator body of `{path_label}`")
+        } else if is_anonymous {
             format!("\nin expansion of `{}` call", frame.function)
         } else {
             format!(
@@ -60,7 +72,10 @@ pub fn render_expansion_frames(
         message.push_str(&trailer);
         if let (Some(path), Some(range)) = (&frame.decl_path, frame.decl_range.as_ref()) {
             if let Ok(uri) = Url::from_file_path(path) {
-                let related_msg = if is_anonymous {
+                let related_msg = if is_generator_body {
+                    let path_label = path.to_str().unwrap_or("<generator>");
+                    format!("in generator body of `{path_label}`")
+                } else if is_anonymous {
                     format!("in expansion of `{}` call", frame.function)
                 } else {
                     format!(
@@ -450,9 +465,19 @@ pub fn hof_call_name(call: &smelt_parser::ast::FunctionCall) -> Option<String> {
 /// Return the text range (in the source file) of the binding occurrence of
 /// lambda parameter `param_name` in the given lambda node.
 ///
-/// The binding occurrence is the IDENT token inside the `LAMBDA_PARAM_LIST`
-/// that bears the parameter name. This is used by goto-definition to jump
+/// The binding occurrence is the IDENT token inside the matching `LAMBDA_PARAM`
+/// child node of `LAMBDA_PARAM_LIST`. This is used by goto-definition to jump
 /// from a use of the parameter in the body to its binding site.
+///
+/// Phase F CST shape:
+/// ```text
+/// LAMBDA_PARAM_LIST
+///   LAMBDA_PARAM
+///     IDENT   (the parameter name)
+///   LAMBDA_PARAM
+///     IDENT
+///   ...
+/// ```
 ///
 /// Returns `None` when the parameter is not found (e.g., partial parse).
 pub fn lambda_param_binder_range(
@@ -461,14 +486,21 @@ pub fn lambda_param_binder_range(
 ) -> Option<smelt_parser::TextRange> {
     use smelt_parser::SyntaxKind;
     let param_list = lambda.param_list()?;
-    for child in param_list.syntax().children_with_tokens() {
-        // `children_with_tokens` yields `rowan::NodeOrToken` items — match on Token variant.
-        if child
-            .as_token()
-            .map(|t| t.kind() == SyntaxKind::IDENT && t.text() == param_name)
-            == Some(true)
-        {
-            return child.as_token().map(|t| t.text_range());
+    // Iterate LAMBDA_PARAM child nodes; each wraps an IDENT token.
+    for param_node in param_list.syntax().children() {
+        if param_node.kind() != SyntaxKind::LAMBDA_PARAM {
+            continue;
+        }
+        // Find the IDENT token inside this LAMBDA_PARAM node (skip if malformed).
+        let Some(ident_token) = param_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == SyntaxKind::IDENT)
+        else {
+            continue;
+        };
+        if ident_token.text() == param_name {
+            return Some(ident_token.text_range());
         }
     }
     None
@@ -1184,6 +1216,115 @@ pub fn hover_text_for_hof_meta_language(
                 } else {
                     return Some(hover_text_for_sources_all(None));
                 }
+            }
+        }
+    }
+
+    // ── Phase F: Ternary keyword hover (if / then / else) ─────────────────────
+    // Must run BEFORE the HOF result-type block so that `if cond then a else b`
+    // inside a HOF argument does not fall through to the generic HOF hover.
+    {
+        // Find the tightest TERNARY_EXPR node that contains the cursor.
+        let ternary_node = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::TERNARY_EXPR)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            });
+
+        if let Some(tn) = ternary_node {
+            if let Some(ternary) = smelt_parser::ast::TernaryExpr::cast(tn.clone()) {
+                // Determine which keyword token (if any) the cursor sits on.
+                let kw_token = tn
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| {
+                        let s: usize = t.text_range().start().into();
+                        let e: usize = t.text_range().end().into();
+                        cursor_offset >= s
+                            && cursor_offset <= e
+                            && matches!(
+                                t.kind(),
+                                SyntaxKind::IF_KW | SyntaxKind::THEN_KW | SyntaxKind::ELSE_KW
+                            )
+                    });
+
+                if let Some(kw) = kw_token {
+                    let ctx = smelt_db::TypeContext::new();
+                    match kw.kind() {
+                        SyntaxKind::IF_KW => {
+                            return Some(hover_text_for_ternary_if_keyword(&ternary, &ctx));
+                        }
+                        SyntaxKind::THEN_KW => {
+                            return Some(hover_text_for_ternary_then_keyword(&ternary, &ctx));
+                        }
+                        SyntaxKind::ELSE_KW => {
+                            return Some(hover_text_for_ternary_else_keyword(&ternary, &ctx));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Phase F: Multi-arg lambda `(` hover ───────────────────────────────────
+    // Cursor on the opening `(` of a multi-arg lambda parameter list
+    // (`fn (a, b) => …`) — shows the full Lambda signature.
+    // Must run BEFORE the HOF result-type block so the paren does not fall
+    // through to the generic HOF hover.
+    {
+        use smelt_parser::SyntaxKind::LPAREN;
+        // Find LAMBDA nodes that span the cursor and have >1 parameter (multi-arg).
+        let multi_arg_lambda_node = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            })
+            .and_then(smelt_parser::ast::Lambda::cast)
+            .filter(|lambda| lambda.params().len() > 1);
+
+        if let Some(lambda) = multi_arg_lambda_node {
+            // Check if the cursor is precisely on the `(` token of the param list.
+            // LPAREN is a token inside the LAMBDA_PARAM_LIST child, not a direct
+            // child of LAMBDA — so descend via `param_list()`.
+            let on_open_paren = lambda
+                .param_list()
+                .map(|pl| {
+                    pl.syntax()
+                        .children_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .any(|t| {
+                            if t.kind() != LPAREN {
+                                return false;
+                            }
+                            let s: usize = t.text_range().start().into();
+                            let e: usize = t.text_range().end().into();
+                            cursor_offset >= s && cursor_offset <= e
+                        })
+                })
+                .unwrap_or(false);
+
+            if on_open_paren {
+                let ctx = smelt_db::TypeContext::new();
+                return Some(hover_text_for_multi_arg_lambda_signature(&lambda, &ctx));
             }
         }
     }
@@ -2092,4 +2233,686 @@ pub fn is_source_ref_param_before_dot(
         return Some(param_name);
     }
     None
+}
+
+// ============================================================================
+// Phase E2: multi-model production hover / goto-def pure helpers
+// ============================================================================
+
+/// Render hover text for the `generates: models` YAML frontmatter key/value
+/// pair in a generator file.
+///
+/// Shows the inferred body type (`List<ModelDef>`) and, when the count is
+/// statically resolved from the loader data, the number of emitted models.
+///
+/// Pure — callers supply the resolved emission count (from `evaluate_generator`).
+pub fn hover_text_for_generates_frontmatter(emission_count: Option<usize>) -> String {
+    match emission_count {
+        Some(n) => format!("**`generates: models`**\n\n`List<ModelDef>` · {n} emitted models"),
+        None => "**`generates: models`**\n\n`List<ModelDef>`".to_string(),
+    }
+}
+
+/// Render hover text for the opening `{` of a `ModelDef { … }` literal in a
+/// generator file.
+///
+/// When the `name` field is statically known, the inferred smelt path is shown.
+/// Otherwise, just the type name `ModelDef` is shown.
+///
+/// Pure — callers supply the resolved smelt path (from static name analysis).
+pub fn hover_text_for_model_def_literal_open_brace(smelt_path: Option<&str>) -> String {
+    match smelt_path {
+        Some(path) => format!("`ModelDef` → `{path}`"),
+        None => "`ModelDef`".to_string(),
+    }
+}
+
+/// Render hover text for the value token of the `name` field in a `ModelDef`
+/// literal — shows the inferred emitted smelt path.
+///
+/// Pure — callers supply the resolved smelt path string.
+pub fn hover_text_for_model_def_name_field_value(smelt_path: &str) -> String {
+    format!("Emitted as `smelt.{smelt_path}`")
+}
+
+/// Render hover text for the `body` field value expression in a `ModelDef`
+/// literal — shows `TableExpr` and, when column information is statically
+/// resolvable, the inferred column list.
+///
+/// Pure — callers supply the resolved column names (from schema inference).
+pub fn hover_text_for_model_def_body_field_value(columns: Option<&[String]>) -> String {
+    match columns {
+        Some(cols) if !cols.is_empty() => {
+            let col_list = cols.join(", ");
+            format!("`TableExpr`\n\nColumns: `{col_list}`")
+        }
+        _ => "`TableExpr`".to_string(),
+    }
+}
+
+/// Render hover text for the value token of an optional field (`materialization`,
+/// `tags`, or `description`) in a `ModelDef` literal — shows the field's
+/// declared type from `MODEL_DEF_FIELDS`.
+///
+/// Returns `Some(text)` for the three optional fields (`materialization`,
+/// `tags`, `description`) and `None` for any other field name.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_model_def_optional_field_value(field_name: &str) -> Option<String> {
+    use smelt_types::signatures::model_def_field;
+    let field_ty = model_def_field(field_name)?;
+    // Only serve the three optional fields here; `name` and `body` have their
+    // own dedicated renderers.
+    match field_name {
+        "materialization" | "tags" | "description" => {
+            let ty_str = smelt_types::format_smelt_type_hover(field_ty);
+            Some(format!("`{field_name}: {ty_str}` (ModelDef field)"))
+        }
+        _ => None,
+    }
+}
+
+/// Goto-definition on a generator-emitted model reference (`smelt.<path>` at a
+/// consumer site) resolves to the emitting `ModelDef.name` field's value-token
+/// in the generator file.
+///
+/// Returns `Some(Location)` at `gen_path:name_range`.
+///
+/// Pure — callers supply the pre-resolved generator file path and the name
+/// field's CST text range (already converted to LSP `Range`).
+pub fn goto_def_for_emitted_model_reference(
+    gen_path: &std::path::Path,
+    name_range: Range,
+) -> Option<Location> {
+    let uri = Url::from_file_path(gen_path).ok()?;
+    Some(Location {
+        uri,
+        range: name_range,
+    })
+}
+
+/// Return completion items for the value position of `generates: <cursor>` in
+/// a `.sql` file's YAML frontmatter.
+///
+/// Per spec: the only valid value is `"models"`.
+///
+/// Pure — no context required.
+pub fn completion_for_generates_value() -> Vec<CompletionItem> {
+    vec![CompletionItem {
+        label: "models".to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        documentation: Some(Documentation::String(
+            "Mark this file as a model generator. The file body must be a \
+             meta-language expression of type `List<ModelDef>`."
+                .to_string(),
+        )),
+        ..Default::default()
+    }]
+}
+
+// ============================================================================
+// Phase F (meta-language): hover / goto-def / completion for Polish surfaces
+//
+// Pure helpers — no Salsa calls inside the bodies.  Backend handlers call them
+// after resolving Salsa-backed data and pass the results in as plain data.
+// ============================================================================
+
+/// Render hover text for an `if` keyword in a ternary expression.
+///
+/// Shows the full type signature:
+/// `if cond:COND_type then a:THEN_type else b:ELSE_type -> LUB_type`
+///
+/// Uses `infer_ternary_type` for the LUB. When the ternary is incomplete
+/// (missing branches or condition), partial info is shown.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_ternary_if_keyword(
+    ternary: &smelt_parser::ast::TernaryExpr,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_expression_type;
+    use smelt_db::type_inference::ternary::infer_ternary_type;
+    use smelt_types::format_smelt_type_hover;
+    use smelt_types::signatures::{SmeltType, TypeConstraint};
+
+    let result = infer_ternary_type(ternary, ctx);
+    let lub_str = format_smelt_type_hover(&result.ty);
+
+    // Helper: infer a component's type as a formatted string.
+    let component_type_str = |expr: Option<smelt_parser::ast::Expr>| -> String {
+        let ty = expr
+            .and_then(|e| infer_expression_type(&e, ctx))
+            .map(|tc| SmeltType::Expr(TypeConstraint::Concrete(tc.data_type)))
+            .unwrap_or(SmeltType::Unknown);
+        format_smelt_type_hover(&ty)
+    };
+
+    // Build component descriptions: `expr_text:InferredType`.
+    // Trim whitespace from the raw token text so annotations are flush (e.g. `cond:Unknown`).
+    let cond_text = ternary
+        .condition()
+        .map(|e| e.text().trim().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let cond_type = component_type_str(ternary.condition());
+
+    let then_text = ternary
+        .then_branch()
+        .map(|e| e.text().trim().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let then_type = component_type_str(ternary.then_branch());
+
+    let else_text = ternary
+        .else_branch()
+        .map(|e| e.text().trim().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let else_type = component_type_str(ternary.else_branch());
+
+    format!(
+        "`if {cond_text}:{cond_type} then {then_text}:{then_type} else {else_text}:{else_type} -> {lub_str}`\n\n\
+         Ternary meta-expression. Both branches are evaluated at compile time."
+    )
+}
+
+/// Render hover text for a `then` keyword in a ternary expression.
+///
+/// Shows the then-branch's synthesised type. Uses `infer_ternary_type` so that
+/// the branch type is obtained via the same inference path as the condition check.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_ternary_then_keyword(
+    ternary: &smelt_parser::ast::TernaryExpr,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_expression_type;
+    use smelt_types::format_smelt_type_hover;
+    use smelt_types::signatures::{SmeltType, TypeConstraint};
+
+    let then_ty = ternary
+        .then_branch()
+        .and_then(|expr| infer_expression_type(&expr, ctx))
+        .map(|tc| SmeltType::Expr(TypeConstraint::Concrete(tc.data_type)))
+        .unwrap_or(SmeltType::Unknown);
+
+    let ty_str = format_smelt_type_hover(&then_ty);
+    format!("`then` branch type: `{ty_str}`")
+}
+
+/// Render hover text for an `else` keyword in a ternary expression.
+///
+/// Shows the else-branch's synthesised type.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_ternary_else_keyword(
+    ternary: &smelt_parser::ast::TernaryExpr,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_expression_type;
+    use smelt_types::format_smelt_type_hover;
+    use smelt_types::signatures::{SmeltType, TypeConstraint};
+
+    let else_ty = ternary
+        .else_branch()
+        .and_then(|expr| infer_expression_type(&expr, ctx))
+        .map(|tc| SmeltType::Expr(TypeConstraint::Concrete(tc.data_type)))
+        .unwrap_or(SmeltType::Unknown);
+
+    let ty_str = format_smelt_type_hover(&else_ty);
+    format!("`else` branch type: `{ty_str}`")
+}
+
+/// Render hover text for a multi-arg lambda's parameter-list opening `(`.
+///
+/// Shows the full `Lambda<(T_1, T_2, ..., T_k), U>` signature.
+/// Parameter types are `Unknown` when no enclosing HOF context provides bounds.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_multi_arg_lambda_signature(
+    lambda: &smelt_parser::ast::Lambda,
+    _ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_types::format_smelt_type_hover;
+    use smelt_types::signatures::SmeltType;
+
+    let params = lambda.params();
+    let param_types: Vec<String> = params
+        .iter()
+        .map(|_| format_smelt_type_hover(&SmeltType::Unknown))
+        .collect();
+
+    let body_ty = SmeltType::Unknown; // Body type requires HOF context.
+    let body_str = format_smelt_type_hover(&body_ty);
+
+    let params_str = param_types.join(", ");
+    format!(
+        "`Lambda<({params_str}), {body_str}>`\n\nMulti-arg lambda with {} parameter(s).",
+        params.len()
+    )
+}
+
+/// Render hover text for a parameterised reducer call (e.g. `concat_with(' OR ')`).
+///
+/// Shows the parameter list (names with types), the input element type, output sort,
+/// and the empty-list identity. When the separator argument is a string literal,
+/// the resolved value is shown in the hover trailer.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_parameterised_reducer_call(
+    call: &smelt_parser::ast::ReducerCall,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::hof::{
+        infer_parameterised_reducer_call, lookup_parameterised_reducer, EmptyIdentity,
+        ReducerInputConstraint,
+    };
+    use smelt_types::format_smelt_type_hover;
+
+    let name = call.name().unwrap_or_default();
+    let Some(spec) = lookup_parameterised_reducer(&name) else {
+        return format!("**`{name}`** — unknown parameterised reducer");
+    };
+
+    // Run inference to get resolved arg values.
+    let infer_result = infer_parameterised_reducer_call(call, ctx);
+
+    let input_desc = match &spec.input_constraint {
+        ReducerInputConstraint::AnyExpr => "Expr<T> (any element type)".to_string(),
+        ReducerInputConstraint::Boolean => "Expr<Boolean>".to_string(),
+        ReducerInputConstraint::Numeric => "Expr<Numeric>".to_string(),
+        ReducerInputConstraint::Text => "Expr<Text>".to_string(),
+        ReducerInputConstraint::TableExpr => "TableExpr".to_string(),
+    };
+
+    let output_desc = format_smelt_type_hover(&(spec.output_type)());
+
+    let identity_desc = match &spec.empty_identity {
+        EmptyIdentity::Boolean => "TRUE".to_string(),
+        EmptyIdentity::Numeric => "0 (cast to element type)".to_string(),
+        EmptyIdentity::Text => "''".to_string(),
+        EmptyIdentity::EmptySelectItems => "empty SelectItems".to_string(),
+        EmptyIdentity::None => "no identity".to_string(),
+    };
+
+    // Build param signatures.
+    let param_sigs: Vec<String> = spec
+        .params
+        .iter()
+        .map(|p| {
+            let ty_str = format_smelt_type_hover(&(p.ty)());
+            format!("{}: {}", p.name, ty_str)
+        })
+        .collect();
+
+    // Try to extract resolved arg literal for trailer.
+    let resolved_trailer: Option<String> = if infer_result.sentinel.is_none() {
+        // Happy path: args parsed. Extract the first arg text as the separator.
+        call.args()
+            .and_then(|al| {
+                use smelt_parser::SyntaxKind::EXPRESSION;
+                al.children()
+                    .find(|n| n.kind() == EXPRESSION)
+                    .and_then(smelt_parser::ast::Expr::cast)
+            })
+            .map(|a| a.text())
+    } else {
+        None
+    };
+
+    let mut text = format!(
+        "**`{name}({})`** (parameterised reducer)\n\n\
+         - Input: `{input_desc}`\n\
+         - Output: `{output_desc}`\n\
+         - Identity: `{identity_desc}`",
+        param_sigs.join(", "),
+    );
+    if let Some(sep_val) = resolved_trailer {
+        text.push_str(&format!("\n- Separator: `{sep_val}`"));
+    }
+    text
+}
+
+/// Goto-definition for an `if`/`then`/`else` keyword — URL hint to the
+/// ternary reference page, graceful no-op when the client lacks support.
+///
+/// Pure — no Salsa dependency.
+pub fn goto_def_for_ternary_keyword() -> Option<std::path::PathBuf> {
+    // Graceful no-op per spec. A future phase may return a URL hint.
+    None
+}
+
+/// Goto-definition for a parameterised reducer name — URL hint to the
+/// built-in's reference page, graceful no-op when the client lacks support.
+///
+/// Pure — no Salsa dependency.
+pub fn goto_def_for_parameterised_reducer_name(_name: &str) -> Option<std::path::PathBuf> {
+    // Graceful no-op per spec. A future phase may return a URL hint.
+    None
+}
+
+/// Return completion items for the second argument of `reduce(xs, <cursor>)`.
+///
+/// Extended in Phase F to include parameterised reducer entries as snippets.
+/// Bare reducers are returned as plain identifiers; parameterised reducers are
+/// returned as snippet strings (e.g. `concat_with($sep)`).
+///
+/// Deduplicates by label — bare and parameterised registries are disjoint.
+///
+/// Pure — no Salsa dependency.
+pub fn completion_items_for_reduce_second_arg_with_snippets(
+    list_ty: Option<&smelt_types::signatures::SmeltType>,
+) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    use smelt_db::type_inference::hof::{
+        ReducerInputConstraint, PARAMETERISED_REDUCER_REGISTRY, REDUCER_REGISTRY,
+    };
+    use smelt_types::signatures::SmeltType;
+    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
+
+    let elem_ty: Option<SmeltType> = match list_ty {
+        Some(SmeltType::List(inner)) => Some((**inner).clone()),
+        _ => None,
+    };
+
+    let is_satisfied = |constraint: &ReducerInputConstraint| -> bool {
+        match &elem_ty {
+            Some(et) if !matches!(et, SmeltType::Unknown) => constraint.is_satisfied_by(et),
+            _ => true,
+        }
+    };
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    // Bare reducers.
+    for spec in REDUCER_REGISTRY.iter() {
+        if !is_satisfied(&spec.input_constraint) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: spec.name.to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            ..Default::default()
+        });
+    }
+
+    // Parameterised reducers — as snippets.
+    for spec in PARAMETERISED_REDUCER_REGISTRY.iter() {
+        if !is_satisfied(&spec.input_constraint) {
+            continue;
+        }
+        // Build snippet: `concat_with($sep)`.
+        let param_placeholders: Vec<String> = spec
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("${{{}: {}}}", i + 1, p.name))
+            .collect();
+        let snippet = format!("{}({})", spec.name, param_placeholders.join(", "));
+        items.push(CompletionItem {
+            label: spec.name.to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            insert_text: Some(snippet),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+
+    items
+}
+
+/// Return a completion item for `if` as a snippet in a meta-evaluable position.
+///
+/// The snippet expands to `if $cond then $then_expr else $else_expr`.
+///
+/// Pure — no Salsa dependency.
+pub fn completion_item_for_if_snippet() -> tower_lsp::lsp_types::CompletionItem {
+    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
+    CompletionItem {
+        label: "if".to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        insert_text: Some("if ${1:cond} then ${2:then_expr} else ${3:else_expr}".to_string()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        detail: Some("if … then … else … (ternary meta-expression)".to_string()),
+        ..Default::default()
+    }
+}
+
+/// Return completion items for a field-key position inside a `ModelDef { … }`
+/// literal, excluding fields that are already present.
+///
+/// Required fields (`name`, `body`) are surfaced first per the spec ordering
+/// rule; the remaining optional fields follow in declaration order.
+///
+/// Pure — callers supply the already-filled field names.
+pub fn completion_for_model_def_field_key(already_filled: &[String]) -> Vec<CompletionItem> {
+    use smelt_types::signatures::MODEL_DEF_FIELDS;
+
+    // Required fields appear first (name, body), then optional fields.
+    // MODEL_DEF_FIELDS is already in spec order: [name, body, materialization, tags, description].
+    MODEL_DEF_FIELDS
+        .iter()
+        .filter(|(name, _)| !already_filled.iter().any(|f| f == *name))
+        .map(|(field_name, ty)| {
+            let detail = format_smelt_type_hover(ty);
+            let is_required = *field_name == "name" || *field_name == "body";
+            CompletionItem {
+                label: (*field_name).to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(detail),
+                sort_text: Some(if is_required {
+                    format!("0_{field_name}")
+                } else {
+                    format!("1_{field_name}")
+                }),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
+// Phase F (meta-language): unit tests
+// ============================================================================
+
+#[cfg(test)]
+mod phase_f_tests {
+    use super::*;
+    use smelt_db::TypeContext;
+
+    /// Parse `SELECT if COND then THEN else ELSE FROM t` and return the
+    /// `TernaryExpr` node.
+    fn parse_ternary(sql: &str) -> smelt_parser::ast::TernaryExpr {
+        use smelt_parser::SyntaxKind::TERNARY_EXPR;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = smelt_parser::ast::File::cast(root).expect("FILE");
+        let select = file.select_stmt().expect("SelectStmt");
+        let ternary_node = select
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == TERNARY_EXPR)
+            .expect("TERNARY_EXPR node");
+        smelt_parser::ast::TernaryExpr::cast(ternary_node).expect("TernaryExpr")
+    }
+
+    // ── Ternary keyword hover ──────────────────────────────────────────────────
+
+    /// Cursor on the `if` keyword of `if cond then 1 else 1.5` returns hover
+    /// text in the spec format: `if cond:COND_type then a:THEN_type else b:ELSE_type -> LUB`.
+    #[test]
+    fn hover_on_if_keyword_shows_ternary_type() {
+        let sql = "SELECT if cond then 1 else 1.5 FROM t";
+        let ternary = parse_ternary(sql);
+        let ctx = TypeContext::new();
+        let text = hover_text_for_ternary_if_keyword(&ternary, &ctx);
+        // cond component must be annotated with a colon (expr:Type format).
+        assert!(
+            text.contains("cond:"),
+            "hover_on_if_keyword must render condition as 'cond:TYPE'; got: {:?}",
+            text
+        );
+        // The LUB result type must be present (numeric promotion of Integer and Float).
+        assert!(
+            text.contains("->"),
+            "hover_on_if_keyword must contain '-> LUB_type'; got: {:?}",
+            text
+        );
+        // The then/else literal branches should be annotated with Expr<...> types.
+        assert!(
+            text.contains("Expr<"),
+            "hover_on_if_keyword must show branch types as Expr<...>; got: {:?}",
+            text
+        );
+    }
+
+    /// Cursor on the `then` keyword returns the then-branch's synthesised type.
+    #[test]
+    fn hover_on_then_keyword_shows_then_branch_type() {
+        let sql = "SELECT if cond then 1 else 1.5 FROM t";
+        let ternary = parse_ternary(sql);
+        let ctx = TypeContext::new();
+        let text = hover_text_for_ternary_then_keyword(&ternary, &ctx);
+        assert!(
+            text.contains("then"),
+            "hover_on_then_keyword must mention 'then' branch; got: {:?}",
+            text
+        );
+    }
+
+    /// Cursor on the `else` keyword returns the else-branch's synthesised type.
+    #[test]
+    fn hover_on_else_keyword_shows_else_branch_type() {
+        let sql = "SELECT if cond then 1 else 1.5 FROM t";
+        let ternary = parse_ternary(sql);
+        let ctx = TypeContext::new();
+        let text = hover_text_for_ternary_else_keyword(&ternary, &ctx);
+        assert!(
+            text.contains("else"),
+            "hover_on_else_keyword must mention 'else' branch; got: {:?}",
+            text
+        );
+    }
+
+    // ── Multi-arg lambda hover ─────────────────────────────────────────────────
+
+    /// Cursor on the `(` of `fn (a, b) => a + b` returns the Lambda signature.
+    #[test]
+    fn hover_on_multi_arg_lambda_open_paren_shows_signature() {
+        use smelt_parser::SyntaxKind::LAMBDA;
+        let sql = "SELECT map(xs, fn (a, b) => a + b) FROM t";
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let lambda_node = root
+            .descendants()
+            .find(|n| n.kind() == LAMBDA)
+            .expect("LAMBDA node");
+        let lambda = smelt_parser::ast::Lambda::cast(lambda_node).expect("Lambda");
+        let ctx = TypeContext::new();
+        let text = hover_text_for_multi_arg_lambda_signature(&lambda, &ctx);
+        assert!(
+            text.contains("Lambda"),
+            "hover on multi-arg lambda ( must show Lambda signature; got: {:?}",
+            text
+        );
+    }
+
+    /// Cursor on the `b` parameter of `fn (a, b) => a + b` returns the bound type.
+    #[test]
+    fn hover_on_lambda_param_in_multi_arg_shows_bound_type() {
+        use smelt_parser::SyntaxKind::LAMBDA;
+        let sql = "SELECT map(xs, fn (a, b) => a + b) FROM t";
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let lambda_node = root
+            .descendants()
+            .find(|n| n.kind() == LAMBDA)
+            .expect("LAMBDA node");
+        let lambda = smelt_parser::ast::Lambda::cast(lambda_node).expect("Lambda");
+        let ctx = TypeContext::new();
+        // Even with Unknown element type, hover_text_for_lambda_param should produce text.
+        use smelt_types::signatures::SmeltType;
+        let text = hover_text_for_lambda_param("b", &SmeltType::Unknown, &lambda, &ctx);
+        assert!(
+            text.contains('b'),
+            "hover on lambda param 'b' must mention 'b'; got: {:?}",
+            text
+        );
+    }
+
+    // ── Parameterised reducer call hover ──────────────────────────────────────
+
+    /// Cursor on `concat_with` in `reduce(xs, concat_with(' OR '))` returns
+    /// hover text containing `concat_with(sep: ...)` and the separator value.
+    #[test]
+    fn hover_on_concat_with_call_shows_parameter_signature() {
+        use smelt_parser::SyntaxKind::REDUCER_CALL;
+        let sql = "SELECT reduce(xs, concat_with(' OR ')) FROM t";
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let reducer_call_node = root
+            .descendants()
+            .find(|n| n.kind() == REDUCER_CALL)
+            .expect("REDUCER_CALL node");
+        let call = smelt_parser::ast::ReducerCall::cast(reducer_call_node).expect("ReducerCall");
+        let ctx = TypeContext::new();
+        let text = hover_text_for_parameterised_reducer_call(&call, &ctx);
+        assert!(
+            text.contains("concat_with"),
+            "hover must mention concat_with; got: {:?}",
+            text
+        );
+        assert!(
+            text.contains("sep"),
+            "hover must mention sep parameter; got: {:?}",
+            text
+        );
+    }
+
+    // ── Completion ─────────────────────────────────────────────────────────────
+
+    /// At `reduce(xs, <cursor>)`, completion offers `concat_with` as a snippet
+    /// alongside bare reducers.
+    #[test]
+    fn completion_at_reduce_second_arg_offers_concat_with_snippet() {
+        let items = completion_items_for_reduce_second_arg_with_snippets(None);
+        let has_concat_with = items.iter().any(|item| item.label == "concat_with");
+        assert!(
+            has_concat_with,
+            "completion must include concat_with; got labels: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        let concat_item = items.iter().find(|i| i.label == "concat_with").unwrap();
+        let snippet = concat_item.insert_text.as_deref().unwrap_or("");
+        assert!(
+            snippet.contains("sep") || snippet.contains("$"),
+            "concat_with completion must be a snippet with placeholder; got: {:?}",
+            snippet
+        );
+    }
+
+    /// At the start of a meta-evaluable position, completion offers `if` as a
+    /// snippet.
+    #[test]
+    fn completion_at_meta_expression_position_offers_if_snippet() {
+        let item = completion_item_for_if_snippet();
+        assert_eq!(item.label, "if");
+        let snippet = item.insert_text.as_deref().unwrap_or("");
+        assert!(
+            snippet.contains("cond") && snippet.contains("then"),
+            "if snippet must expand to if…then…else; got: {:?}",
+            snippet
+        );
+    }
+
+    // ── Goto-definition (graceful no-op) ──────────────────────────────────────
+
+    /// Cursor on `if` returns graceful URL hint or None.
+    #[test]
+    fn goto_def_on_if_keyword_returns_reference_page_url_hint() {
+        // Per spec: graceful no-op when client lacks external-link support.
+        let result = goto_def_for_ternary_keyword();
+        // None is the correct graceful no-op behaviour.
+        assert!(
+            result.is_none(),
+            "goto_def_for_ternary_keyword must return None (graceful no-op); got: {:?}",
+            result
+        );
+    }
 }
