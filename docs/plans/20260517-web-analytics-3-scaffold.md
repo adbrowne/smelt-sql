@@ -518,6 +518,8 @@ The first implementer pass wrapped non-anonymous shapes' `user_id` in `optional 
 
 **Phase 2: partition column declared as `VARCHAR` in source yml (expert-review fix).** The partitioned Parquet writer emits the partition column as `DataType::Utf8` (`crates/smelt-datagen/src/generic_parquet.rs:128`), and the established convention in `examples/retail_analytics/models/sources/raw/{orders,web_events}.yml` is to declare partition columns as `VARCHAR`. The first Phase 2 pass declared `event_date: DATE`, which papers over the physical-vs-logical type with DuckDB's implicit cast at read time. Fix: `event_date: VARCHAR` with an inline comment; downstream silver (Phase 4) casts to DATE explicitly via `CAST(event_date AS DATE)` — same pattern as `retail_analytics/models/staging/stg_web_events.sql:18`.
 
+**Phase 3: `functions` must NOT appear in `smelt.yml`'s `paths:` list.** The plan's Phase 1 `smelt.yml` template included `paths: [models, functions]`. When the `functions/` directory was empty this caused no harm (discover_models found no SQL files there). Once `parse_event_payload.sql` was added, `discover_models()` treated the function file as a regular SQL model and `smelt build` tried to execute the `smelt.define` declaration as raw DuckDB SQL — causing a parser error in `test_bronze_raw_events_view`. The fix: remove `functions` from `paths:`. `discover_function_files()` in `smelt-cli/src/discovery.rs` already hardcodes looking at `project_root/functions/` independently of `paths:`, so function discovery is unaffected. The `smelt.yml` for `examples/functions_demo/` (the reference implementation) similarly has only `paths: [models]`.
+
 ---
 
 ## Verification
