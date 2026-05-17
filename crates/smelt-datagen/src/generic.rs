@@ -223,6 +223,19 @@ pub fn apply_spec(
             json.push('}');
             GenericValue::JsonRaw(json)
         }
+        // `LinkedChoice` resolves against a per-row pool sample threaded
+        // through a separate code path (the pool-aware row generator in
+        // `generic_parquet.rs`). Reaching `apply_spec` with a `LinkedChoice`
+        // means a caller skipped the pool-context plumbing or invoked the
+        // generator path without first running `validate_config` (which
+        // rejects any `LinkedChoice` whose pool/field cannot be resolved).
+        GeneratorSpec::LinkedChoice { pool, field } => {
+            panic!(
+                "LinkedChoice {{ pool: {pool:?}, field: {field:?} }} reached apply_spec \
+                 without a pool context; ensure validate_config has run and the \
+                 pool-aware row generator is in use"
+            )
+        }
     }
 }
 

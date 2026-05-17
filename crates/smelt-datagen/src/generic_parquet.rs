@@ -374,6 +374,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![
                 ColumnConfig {
                     name: "id".to_string(),
@@ -413,6 +414,7 @@ mod tests {
                 days: 3,
             }),
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "id".to_string(),
                 generator: GeneratorSpec::Uuid,
@@ -453,6 +455,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "event_date".to_string(),
                 generator: GeneratorSpec::Date {
@@ -477,6 +480,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "created_at".to_string(),
                 generator: GeneratorSpec::Timestamp {
@@ -509,6 +513,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "customer_id".to_string(),
                 generator: GeneratorSpec::Optional {
@@ -582,6 +587,7 @@ mod tests {
                 days: 5,
             }),
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "customer_id".to_string(),
                 generator: GeneratorSpec::Optional {
@@ -669,6 +675,7 @@ mod tests {
                     },
                 }],
             }),
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "session_id".to_string(),
                 generator: GeneratorSpec::Uuid,
@@ -742,6 +749,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "payload".to_string(),
                 generator: GeneratorSpec::JsonObject { fields },
@@ -804,6 +812,7 @@ mod tests {
                 days: 3,
             }),
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "payload".to_string(),
                 generator: GeneratorSpec::JsonObject { fields },
@@ -876,6 +885,7 @@ mod tests {
                     generator: GeneratorSpec::JsonObject { fields },
                 }],
             }),
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "event_id".to_string(),
                 generator: GeneratorSpec::SequentialId,
@@ -953,6 +963,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![ColumnConfig {
                 name: "payload".to_string(),
                 generator: GeneratorSpec::JsonObject { fields },
@@ -1043,6 +1054,7 @@ mod tests {
                     days: 3,
                 }),
                 entity: None,
+                linked_pools: None,
                 columns: vec![ColumnConfig {
                     name: "payload".to_string(),
                     generator: GeneratorSpec::JsonObject { fields },
@@ -1089,6 +1101,7 @@ mod tests {
             seed: Some(42),
             partition: None,
             entity: None,
+            linked_pools: None,
             columns: vec![
                 ColumnConfig {
                     name: "email".to_string(),

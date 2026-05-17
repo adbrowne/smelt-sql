@@ -145,6 +145,8 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to read config {:?}: {}", config_path, e))?;
         let config: smelt_datagen::config::DatagenConfig = serde_yaml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+        smelt_datagen::config::validate_config(&config)
+            .map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
         run_config(config, args.scale_factor, args.quiet)
     } else {
         run_session_generator(args)
