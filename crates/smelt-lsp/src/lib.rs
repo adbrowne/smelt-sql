@@ -14,6 +14,7 @@ mod completion;
 mod db_helpers;
 pub mod hover;
 mod python_scan;
+pub mod rename_lambda;
 
 // Re-exports for the binary and integration tests.
 pub use backend::Backend;

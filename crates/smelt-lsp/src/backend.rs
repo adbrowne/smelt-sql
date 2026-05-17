@@ -2363,7 +2363,27 @@ impl LanguageServer for Backend {
                         }
                         return Ok(None);
                     }
-                    _ => None,
+                    _ => {
+                        // Try lambda-parameter prepare-rename as a fallback.
+                        if let Some((start_byte, end_byte, placeholder)) =
+                            crate::rename_lambda::prepare_rename_lambda_param(&file, &text, offset)
+                        {
+                            use smelt_parser::TextRange;
+                            let range = TextRange::new(
+                                (start_byte as u32).into(),
+                                (end_byte as u32).into(),
+                            );
+                            let r = smelt_parser::ast::text_range_to_range(&text, range);
+                            return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                                range: Range {
+                                    start: Position::new(r.start.line, r.start.column),
+                                    end: Position::new(r.end.line, r.end.column),
+                                },
+                                placeholder,
+                            }));
+                        }
+                        None
+                    }
                 }
             } else {
                 None
@@ -2441,6 +2461,11 @@ impl LanguageServer for Backend {
                 yaml_edit: Option<(u32, String, String)>,
                 /// Path to sources.yml
                 sources_yml_path: PathBuf,
+            },
+            /// Lambda parameter — binder + every use in the lambda body.
+            LambdaParam {
+                /// (start_line, start_col, end_line, end_col) for each renamed span.
+                edits: Vec<(u32, u32, u32, u32)>,
             },
         }
 
@@ -2734,7 +2759,27 @@ impl LanguageServer for Backend {
                                 None
                             }
                         }
-                        _ => None,
+                        _ => {
+                            // Try lambda-parameter rename as a fallback.
+                            match crate::rename_lambda::rename_lambda_param(
+                                &file, &text, offset, &new_name,
+                            ) {
+                                Ok(crate::rename_lambda::RenameLambdaResult::Edits(byte_edits)) => {
+                                    let lsp_edits = crate::rename_lambda::byte_edits_to_lsp_ranges(
+                                        &text, byte_edits,
+                                    );
+                                    Some(RenameKind::LambdaParam { edits: lsp_edits })
+                                }
+                                Ok(crate::rename_lambda::RenameLambdaResult::NotALambdaParam) => {
+                                    None
+                                }
+                                Err(e) => {
+                                    return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                                        e.to_string(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 } else {
                     None
@@ -2920,6 +2965,27 @@ impl LanguageServer for Backend {
 
                 Ok(Some(WorkspaceEdit {
                     document_changes: Some(DocumentChanges::Operations(document_changes)),
+                    ..Default::default()
+                }))
+            }
+            Some(RenameKind::LambdaParam { edits }) => {
+                if edits.is_empty() {
+                    return Ok(None);
+                }
+                let text_edits: Vec<TextEdit> = edits
+                    .into_iter()
+                    .map(|(sl, sc, el, ec)| TextEdit {
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                        new_text: new_name.clone(),
+                    })
+                    .collect();
+                let mut changes = HashMap::new();
+                changes.insert(uri, text_edits);
+                Ok(Some(WorkspaceEdit {
+                    changes: Some(changes),
                     ..Default::default()
                 }))
             }

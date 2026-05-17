@@ -80,7 +80,16 @@ In dbt, discovering downstream impact means grepping the codebase for `ref('mode
 
 Rename a model and have every reference across the project update automatically. The LSP shows a preview of all changes before applying them, so you can review the impact.
 
-This works for model names inside `smelt.<name>` calls across all files in the project.
+Rename refactoring works for the following targets:
+
+| Cursor position | What is renamed |
+|---|---|
+| `smelt.<name>` model reference | All references to that model across the workspace |
+| CTE name | The CTE definition and all usages within the same file |
+| Column name | The column across local, upstream, and downstream files |
+| Lambda parameter | The binder and every reference to it inside the lambda body |
+
+When renaming a lambda parameter (for example the `x` in `fn x => x + 1`), the rename updates the parameter binder and every use of that parameter within the lambda's body. Inner lambdas that shadow the parameter are left untouched. The new name must be a valid identifier and must not collide with a meta-namespace keyword (`if`, `then`, `else`, `fn`, `let`).
 
 ![Rename model across project](../assets/editor-features/rename-model-across-project.gif)
 
