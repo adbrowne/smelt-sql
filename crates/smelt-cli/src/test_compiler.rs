@@ -156,6 +156,32 @@ fn is_date_string(s: &str) -> bool {
         && bytes[8..10].iter().all(|b| b.is_ascii_digit())
 }
 
+/// Check if a string matches the `YYYY-MM-DD HH:MM:SS` timestamp pattern
+/// (with an optional fractional-seconds suffix).  These strings are cast to
+/// `TIMESTAMP` rather than `VARCHAR` so that functions like `epoch_us()` can
+/// consume them directly in inline tests.
+fn is_timestamp_string(s: &str) -> bool {
+    // Minimum form: "YYYY-MM-DD HH:MM:SS" = 19 chars; separator is space or 'T'
+    if s.len() < 19 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    // Date part: YYYY-MM-DD
+    if !is_date_string(&s[..10]) {
+        return false;
+    }
+    // Separator must be ' ' or 'T'
+    if bytes[10] != b' ' && bytes[10] != b'T' {
+        return false;
+    }
+    // Time part: HH:MM:SS
+    bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[11..13].iter().all(|b| b.is_ascii_digit())
+        && bytes[14..16].iter().all(|b| b.is_ascii_digit())
+        && bytes[17..19].iter().all(|b| b.is_ascii_digit())
+}
+
 /// Convert a serde_yaml::Value to a SQL literal.
 fn yaml_value_to_sql(v: &serde_yaml::Value) -> String {
     match v {
@@ -180,6 +206,8 @@ fn yaml_value_to_sql(v: &serde_yaml::Value) -> String {
         serde_yaml::Value::String(s) => {
             if is_date_string(s) {
                 format!("'{}'::DATE", s)
+            } else if is_timestamp_string(s) {
+                format!("'{}'::TIMESTAMP", s)
             } else {
                 format!("'{}'", s.replace('\'', "''"))
             }
@@ -349,12 +377,89 @@ pub fn compile_whole_model_test(
         }
     }
 
-    // Prepend WITH clause
+    // Prepend WITH clause.
+    //
+    // If the model SQL already contains a WITH clause (common for multi-CTE
+    // models), inject the mock CTEs inside the existing WITH rather than
+    // prepending a second WITH keyword, which is invalid SQL.
+    //
+    // Models often have a leading block of SQL comments before the WITH keyword,
+    // so we scan for the first occurrence of " WITH " (case-insensitive) rather
+    // than checking whether the SQL starts with "WITH".
+    //
+    // e.g. model SQL (comments elided):
+    //   WITH lagged AS (...) SELECT ... FROM lagged
+    // becomes:
+    //   WITH silver_events_parsed AS (...),
+    //   lagged AS (...) SELECT ... FROM lagged
     let trimmed = result_sql.trim();
     if mock_cte_parts.is_empty() {
         Ok(trimmed.to_string())
     } else {
-        Ok(format!("WITH {}\n{}", mock_cte_parts.join(",\n"), trimmed))
+        let mock_sql = mock_cte_parts.join(",\n");
+        if let Some(with_pos) = find_leading_with(trimmed) {
+            // Inject mock CTEs right after the existing WITH keyword.
+            let (prefix, after_with) = trimmed.split_at(with_pos + "WITH".len());
+            Ok(format!(
+                "{} {},\n{}",
+                prefix,
+                mock_sql,
+                after_with.trim_start()
+            ))
+        } else {
+            Ok(format!("WITH {}\n{}", mock_sql, trimmed))
+        }
+    }
+}
+
+/// Find the byte position of the first top-level `WITH` keyword in `sql`.
+///
+/// Returns `Some(pos)` if the SQL's non-comment, non-whitespace content begins
+/// with `WITH`, and `None` otherwise.  Only leading single-line (`--`) and
+/// block (`/* */`) comments are skipped; the function stops as soon as it
+/// encounters anything other than whitespace or a comment prefix.
+fn find_leading_with(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    loop {
+        // Skip whitespace
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= len {
+            return None;
+        }
+
+        // Skip single-line comment: -- ... \n
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip block comment: /* ... */
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2; // skip closing */
+            continue;
+        }
+
+        // Check for WITH keyword (case-insensitive), followed by whitespace.
+        if i + 4 < len
+            && bytes[i..i + 4].eq_ignore_ascii_case(b"WITH")
+            && bytes[i + 4].is_ascii_whitespace()
+        {
+            return Some(i);
+        }
+
+        return None;
     }
 }
 

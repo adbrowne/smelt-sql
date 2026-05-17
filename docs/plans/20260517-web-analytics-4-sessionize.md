@@ -74,7 +74,7 @@ The overall plan's Goal items 2 and 4 require an incremental sessionization (30-
 | 1     | done     | `d03890a1` | 2026-05-18 |
 | 2     | done     | `49da2c78` | 2026-05-18 |
 | 3     | done     | `e98f42aa` | 2026-05-18 |
-| 4     | pending  |        |      |
+| 4     | done     |        | 2026-05-18 |
 | 5     | pending  |        |      |
 
 ---
@@ -485,6 +485,17 @@ flip lands as: `chore(web-analytics-4): mark Phase 4 done in overall plan`.
 **Phase 2: `session_id` uses `CONCAT(...)` rather than `md5(...)`.** Smelt's type-inference layer does not recognise `md5` as a standard SQL function and emits a Warning diagnostic that fails the `example_diagnostics` gate. `CONCAT` is recognised and produces a deterministic, idempotent surrogate key from the same `(device_id, session_seq, MIN(event_ts))` inputs. Registering `md5` in the smelt function registry would let this revert to a fixed-width hash if a shorter key becomes desirable.
 
 **Phase 2: plan typo on the materialized table name.** The plan's Phase 2 TDD step 4 says `SELECT count(*) FROM main.sessions`. Smelt materialises `models/silver/sessions.sql` as `main.silver_sessions` (the address segments include the directory). All queries in the implemented `test_sessions_model_materializes` use the correct `main.silver_sessions` name. Future readers of the plan should treat the `main.sessions` reference as a typo.
+
+**Phase 4: two product fixes in `crates/smelt-cli/src/test_compiler.rs` (scope-creep, accepted).** The inline `.test.sql` exercises two pre-existing gaps that block any multi-CTE model from being tested with mock inputs and `YYYY-MM-DD HH:MM:SS` timestamps. Both fixes are small, focused, and landed together with this sub-phase:
+
+  1. **WITH-clause merging.** `compile_whole_model_test` previously prepended `WITH` unconditionally, producing invalid SQL like `WITH <mock_cte>\nWITH lagged AS (...)` when the model itself opens with `WITH` (the case for `silver/sessions.sql`'s two-CTE structure). The fix adds a `find_leading_with()` helper that scans past leading `--`/`/* */` comments to locate the first top-level `WITH` keyword; when present, mock CTEs are injected inside it (`WITH <mock>, <model's existing ctes>`). Models without a leading `WITH` keep the original prepend behaviour.
+  2. **Timestamp coercion.** `yaml_value_to_sql` previously coerced only `YYYY-MM-DD` → `DATE`; timestamp strings were emitted as `VARCHAR`, which `epoch_us()` rejects. The fix adds an `is_timestamp_string()` helper that recognises the 19-char `YYYY-MM-DD HH:MM:SS` form (with either a space or `T` separator, and any trailing fractional-seconds suffix passed through to DuckDB) and emits `'...'::TIMESTAMP`.
+
+The `docs/specs/testing.md` spec was updated in the same commit to keep the YAML-coercion table and the Whole-model tests paragraph in sync with the new code. No phase vocabulary leaked into the spec edits.
+
+**Phase 4: `tests` added to `smelt.yml` `paths:`.** Mirrors the convention in `examples/per_cohort_union/smelt.yml`, `examples/retail_analytics/smelt.yml`, and `examples/timeseries/smelt.yml`. Required for the test file to be discovered by `smelt test`.
+
+**Phase 4: invariant test uses Option B (whole-model, no `target_cte`).** The plan's Phase 4 implementation shape preferred targeting the `sessionized` CTE inside `silver/sessions.sql`, but that path requires mocking `lagged` (the upstream CTE that contains the pre-computed `LAG()` columns) — awkward. The whole-model test mocks `silver_events_parsed` directly (the only `smelt.<path>` reference in the body) and asserts the aggregated session rows. Coverage is equivalent: each of the three boundary rules (gap, platform, no-boundary) is exercised by a distinct `device_id` so a failure is attributable to one rule.
 
 ---
 

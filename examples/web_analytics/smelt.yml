@@ -2,6 +2,7 @@ name: web_analytics
 version: 1
 paths:
   - models
+  - tests
 targets:
   dev:
     type: duckdb
