@@ -55,7 +55,7 @@ To run manually: `/clear` between phases and type `continue` — the resumabilit
 | 0 | Foundation: this overall plan + meta-plan + autonomy-loop repoint | done | this file | 2026-05-17 | *(this commit)* |
 | 1 | datagen: `json_object` generator (spec + impl + docs) | done | `docs/plans/20260517-web-analytics-1-datagen-json-object.md` | 2026-05-17 | `57ce9489` |
 | 2 | datagen: `linked_choice` joint-distribution generator (spec + impl + docs) | done | `docs/plans/20260517-web-analytics-2-datagen-linked-choice.md` | 2026-05-18 | `8fd0955c` |
-| 3 | Example scaffolding: `smelt.yml`, `datagen.yaml`, bronze view, `silver/events_parsed`, `functions/parse_event_payload.sql` | pending | `docs/plans/20260517-web-analytics-3-scaffold.md` | | |
+| 3 | Example scaffolding: `smelt.yml`, `datagen.yaml`, bronze view, `silver/events_parsed`, `functions/parse_event_payload.sql` | done | `docs/plans/20260517-web-analytics-3-scaffold.md` | 2026-05-18 | `51800515` |
 | 4 | Sessionization: `functions/sessionize.sql`, `silver/sessions.sql` (incremental, 7-day lookback), `silver/device_user_edges.sql` | pending | `docs/plans/20260517-web-analytics-4-sessionize.md` | | |
 | 5 | `identity_forward_only` + initial `eventstream_with_identity` (single column) | pending | `docs/plans/20260517-web-analytics-5-forward-only.md` | | |
 | 6 | `identity_backward_fill` (extends `eventstream_with_identity`) | pending | `docs/plans/20260517-web-analytics-6-backward-fill.md` | | |
