@@ -2,6 +2,8 @@
 
 The meta-language provides two constructs for working with compile-time lists: **list literals** for building compile-time lists of SQL fragments, and the **spread operator** for splicing those lists into SELECT lists and other comma-separated grammar positions.
 
+See also: [Higher-Order Functions](hofs.md) for `map`, `filter`, and `reduce` that transform lists; [Pipe Operator](pipes.md) for chaining list operations left-to-right; [Reducers](reducers.md) for folding a list into a single SQL fragment; [Reference](reference.md) for the complete alphabetical construct index.
+
 ## The `List<T>` type
 
 `List<T>` is a meta-only type. A `List<T>` value is:
@@ -193,7 +195,7 @@ The list and spread surface introduces four diagnostic codes. All are anchored a
     **Message:** `spread is not allowed in {position name}`
 
     **Forbidden positions:**
-    - WHERE clauses — no comma-separated grammar; use the `and_all` reducer.
+    - WHERE clauses — no comma-separated grammar; use the [`and_all`](reducers.md#and_all) reducer.
     - FROM clauses without an explicit reducer — no default join semantics for `List<TableExpr>`.
     - Boolean-composition contexts (`x AND ...preds`, `y OR ...preds`).
     - Named-argument positions — spread cannot stand on the left of `=>`.

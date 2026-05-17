@@ -1,6 +1,6 @@
 # Generator Files: Multi-Model Production
 
-A **generator file** produces multiple models from a single compile-time expression. Instead of writing one `.sql` file per model, you write a meta-language expression that evaluates to a `List<ModelDef>` — one entry per model to emit.
+Generator files solve the problem of maintaining large families of structurally similar models. Instead of writing one `.sql` file per model and updating each one every time the schema changes, you write a single compile-time expression that produces all the models at once. The expression evaluates to a [`List<ModelDef>`](reference.md#modeldef-built-in-closed-record-type-for-generator-files), where each element declares one model's name, body query, and optional metadata. smelt expands the list at compile time, treating each emitted model exactly as if it had been hand-authored — it participates in reflection, goto-definition, and the same dependency graph as any other model. The canonical use case is cohort-based pipelines: a config loader reads a YAML file of cohort definitions, a [`map`](hofs.md#map) HOF converts each entry to a `ModelDef`, and the generator emits one model per cohort without any repetitive SQL.
 
 ## Declaring a generator file
 
@@ -79,7 +79,7 @@ A generator body **must not** call `smelt.models.with_tag` or `smelt.models.all`
 
 **Why.** Workspace shape (which models exist) is determined by evaluating all generators; admitting `smelt.models.*` inside a generator would create a circular dependency between generator emissions and the model-reflection they observe.
 
-**Alternative.** Use `smelt.sources.*` or loaders to drive the generation:
+**Alternative.** Use [`smelt.sources.*`](reflection.md#wide-reflection-workspace-introspection) or [loaders](config-loaders.md) to drive the generation:
 
 ```sql
 -- OK: sources are loader-time, evaluated before generators.
@@ -152,3 +152,11 @@ The full working example is in `examples/per_cohort_union/`.
 | `ModelDefDuplicateName` | Two `ModelDef`s in the same file share the same `name` |
 | `ModelDefHandAuthoredCollision` | Generator-emitted path collides with a hand-authored model or another generator's emission |
 | `GeneratorBodyForbidsModelReflection` | Generator body calls `smelt.models.with_tag` or `smelt.models.all` |
+
+## See also
+
+- [Config Loaders](config-loaders.md) — `smelt.config.load_yaml` / `load_json`, the primary source of generator input data.
+- [Records](records.md) — named record declarations that serve as loader schemas consumed inside generator files.
+- [Higher-Order Functions](hofs.md) — `map` is the main HOF used to convert a loaded `List<Record>` into a `List<ModelDef>`.
+- [Reflection](reflection.md) — `smelt.sources.with_tag` is allowed inside generator bodies; `smelt.models.*` is not.
+- [Reference](reference.md) — alphabetical reference for `generates: models`, `ModelDef`, and `generator_file:`.

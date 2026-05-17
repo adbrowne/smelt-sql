@@ -1,6 +1,6 @@
 # Pipe Operator `|>`
 
-The meta-language provides the **pipe operator `|>`**, which lets you write a chain of HOF calls in left-to-right reading order instead of nesting them inside-out.
+The meta-language provides the **pipe operator `|>`**, which lets you write a chain of [HOF](hofs.md) calls in left-to-right reading order instead of nesting them inside-out. The pipe operator works particularly well with [lambdas](lambdas.md): `xs |> filter(fn x => …) |> map(fn x => …)` reads as a natural left-to-right pipeline.
 
 The pipe operator is meta-world only: both sides evaluate at compile time. No `|>` expression ever reaches the database engine.
 

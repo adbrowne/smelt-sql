@@ -299,47 +299,6 @@ See [Lists & Spread — The `List<T>` type](lists.md#the-listt-type) for the cov
 
 ---
 
-## `map` — HOF: apply a lambda to every element
-
-**Kind:** built-in higher-order function; reserved name.
-
-**Signature:**
-```
-map(xs: List<T>, f: Lambda<T, U>) -> List<U>
-```
-
-**Example:**
-```sql
--- Double every element
-SELECT map([1, 2, 3], fn c => c * 2)
-```
-
-**Editor support:** hover shows `List<U>` with `U` from the lambda body's inferred type.
-
-See [Higher-Order Functions — `map`](hofs.md#map) for full details and diagnostic codes.
-
----
-
-## `Map<K, V>` — meta map type
-
-**Kind:** meta-only type; never appears in data-world SQL.
-
-**Definition:** a finite, immutable key-value collection. In v1 `K` must be `Text`; `V` is any meta-language type. Invariant in both `K` and `V`. Produced exclusively by the config-loader family.
-
-**Iteration order:** byte-lexicographic ascending by key for `entries()`, `keys()`, and `values()`.
-
-**No literal syntax in v1** — maps originate from `smelt.config.load_yaml` / `smelt.config.load_json` with a `Map<Text, S>` schema.
-
-**Example:**
-```sql
--- Load a YAML mapping and iterate over entries
-SELECT smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>)
-```
-
-See [Maps](maps.md) for the full API, missing-key behaviour, and diagnostic codes.
-
----
-
 ## `m.entries` — Map entries method
 
 **Kind:** Map API method; returns `List<{key: K, value: V}>`.
@@ -412,6 +371,47 @@ m.values() -> List<V>
 Returns values ordered by their corresponding keys' ascending sort. Takes no arguments; any argument emits `MapApiUnexpectedArgument`.
 
 See [Maps — Map API](maps.md#map-api) for full details.
+
+---
+
+## `map` — HOF: apply a lambda to every element
+
+**Kind:** built-in higher-order function; reserved name.
+
+**Signature:**
+```
+map(xs: List<T>, f: Lambda<T, U>) -> List<U>
+```
+
+**Example:**
+```sql
+-- Double every element
+SELECT map([1, 2, 3], fn c => c * 2)
+```
+
+**Editor support:** hover shows `List<U>` with `U` from the lambda body's inferred type.
+
+See [Higher-Order Functions — `map`](hofs.md#map) for full details and diagnostic codes.
+
+---
+
+## `Map<K, V>` — meta map type
+
+**Kind:** meta-only type; never appears in data-world SQL.
+
+**Definition:** a finite, immutable key-value collection. In v1 `K` must be `Text`; `V` is any meta-language type. Invariant in both `K` and `V`. Produced exclusively by the config-loader family.
+
+**Iteration order:** byte-lexicographic ascending by key for `entries()`, `keys()`, and `values()`.
+
+**No literal syntax in v1** — maps originate from `smelt.config.load_yaml` / `smelt.config.load_json` with a `Map<Text, S>` schema.
+
+**Example:**
+```sql
+-- Load a YAML mapping and iterate over entries
+SELECT smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>)
+```
+
+See [Maps](maps.md) for the full API, missing-key behaviour, and diagnostic codes.
 
 ---
 

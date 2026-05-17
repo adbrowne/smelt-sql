@@ -68,3 +68,77 @@ The meta-language also provides **multi-model production** — generating an ent
 | `ModelDef { name, body, … }` | Built-in closed record: declares one emitted model | [Generator Files](generators.md) |
 
 Quick reference for all constructs and diagnostic codes: [Reference](reference.md).
+
+---
+
+## How the pieces fit together
+
+The constructs above compose. Here is a complete worked example that reads a YAML configuration file, generates one model per cohort, and then unions all the cohort models together in a downstream query. Every line references only constructs documented on this site.
+
+### Step 1 — Load the config file and emit one model per cohort
+
+```sql
+-- models/cohorts.gen.sql
+---
+generates: models
+tags: [cohort]
+---
+smelt.config.load_yaml('cohorts.yaml', List<{ name: Text, region: Text, min_revenue: Integer }>)
+  |> map(fn c => ModelDef {
+       name: c.name,
+       body: SELECT id, user_id, region, revenue, created_at
+             FROM smelt.orders
+             WHERE region = c.region AND revenue >= c.min_revenue
+     })
+```
+
+`cohorts.yaml` lives at the workspace root:
+
+```yaml
+- name: us_west
+  region: us-west-2
+  min_revenue: 100
+- name: us_east
+  region: us-east-1
+  min_revenue: 100
+- name: eu
+  region: eu-west-1
+  min_revenue: 50
+```
+
+**What each construct does:**
+
+- [`smelt.config.load_yaml('cohorts.yaml', List<{ … }>)`](config-loaders.md) — reads the file, validates each row against the inline schema, and returns a `List<{ name: Text, region: Text, min_revenue: Integer }>` as a compile-time meta value. The inline schema is the preferred form for short, single-use shapes; for reuse across files, [`smelt.record`](records.md) declares a named type.
+- [`|>`](pipes.md) — pipes the list into the next call, keeping the chain readable left-to-right.
+- [`map(fn c => ModelDef { … })`](hofs.md) — applies the [lambda](lambdas.md) to every cohort, converting each record into a [`ModelDef`](generators.md). The result is `List<ModelDef>`.
+- [`generates: models`](generators.md) frontmatter — marks the file as a generator. smelt expands the `List<ModelDef>` and emits three models: `smelt.cohorts.us_west`, `smelt.cohorts.us_east`, `smelt.cohorts.eu`.
+
+### Step 2 — Union all cohort models in a downstream query
+
+There are two patterns for the downstream union. The **explicit form** lists each emitted model by name — useful for clarity in small, stable cohort sets:
+
+```sql
+-- models/all_cohorts_unioned.sql (explicit form — matches examples/per_cohort_union/)
+SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.us_west
+UNION ALL
+SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.us_east
+UNION ALL
+SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.eu
+```
+
+The **dynamic-discovery form** uses workspace reflection so that adding a new cohort to `cohorts.yaml` automatically emits a new model and adds it to the union — no SQL edits required:
+
+```sql
+-- models/all_cohorts_unioned.sql (dynamic-discovery form)
+SELECT * FROM reduce(
+    smelt.models.with_tag('cohort'),
+    union_all
+)
+```
+
+**What the dynamic form does:**
+
+- [`smelt.models.with_tag('cohort')`](reflection.md) — returns `List<ModelRef>` for every model in the workspace tagged `cohort`, including all models emitted by the generator in Step 1.
+- [`reduce(…, union_all)`](hofs.md) — folds the list into a single `TableExpr` using [the `union_all` reducer](reducers.md), producing one `UNION ALL` branch per cohort.
+
+The runnable starter in `examples/per_cohort_union/` uses the explicit form for clarity. The dynamic-discovery form is the pattern to reach for when the cohort list grows or changes frequently.

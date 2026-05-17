@@ -1,6 +1,6 @@
 # Reducers
 
-The meta-language provides **contextual reducers** — a closed set of seven identifiers that can be passed as the second argument to `reduce`. Each reducer folds a `List<T>` into a single SQL fragment of a declared output sort.
+The meta-language provides **contextual reducers** — a closed set of seven identifiers that can be passed as the second argument to `reduce`. Each reducer folds a [`List<T>`](lists.md) into a single SQL fragment of a declared output sort. Reducers complement the [pipe operator `|>`](pipes.md): a HOF chain that produces a list often ends with `|> reduce(…, reducer_name)`.
 
 Reducers are compile-time constructs. The database engine sees the already-folded SQL fragment, never the `reduce(...)` call itself.
 

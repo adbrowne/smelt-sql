@@ -1,6 +1,6 @@
 # Lambdas
 
-The meta-language provides **lambda expressions** — anonymous single-argument functions written inline as arguments to `map` or `filter`. (`reduce`'s second argument is a bare reducer identifier, not a lambda — see [Reducers](reducers.md).) A lambda lets you describe a per-element transformation or predicate without declaring a named `smelt.define`.
+The meta-language provides **lambda expressions** — anonymous single-argument functions written inline as arguments to [`map` or `filter`](hofs.md). (`reduce`'s second argument is a bare reducer identifier, not a lambda — see [Reducers](reducers.md).) A lambda lets you describe a per-element transformation or predicate without declaring a named `smelt.define`. Lambdas chain naturally with the [pipe operator `|>`](pipes.md).
 
 Lambdas are a meta-world construct. They are evaluated entirely at compile time and never reach the database engine.
 

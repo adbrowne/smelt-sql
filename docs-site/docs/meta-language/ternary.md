@@ -1,6 +1,6 @@
 # Ternary
 
-The meta-language provides a **compile-time ternary expression** — `if cond then a else b` — for branching on Boolean values that are known at build time. The condition and both branches are fully type-checked; exactly one branch is evaluated at compile time.
+The meta-language provides a **compile-time ternary expression** — `if cond then a else b` — for branching on Boolean values that are known at build time. The condition and both branches are fully type-checked; exactly one branch is evaluated at compile time. A common use of the ternary is to guard a [`Map`](maps.md) key lookup with `m.has(k)`, or to branch on a [`smelt.config.var`](config-vars.md) value.
 
 Ternary expressions are a meta-world construct. The database engine never sees `if`/`then`/`else`; it sees only the chosen branch's compiled SQL fragment.
 

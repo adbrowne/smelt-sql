@@ -1,6 +1,6 @@
 # Records
 
-The meta-language provides two ways to work with structured, named-field data at compile time: **named record declarations** (`smelt.record TypeName = { … }`) for shapes that recur across files, and **inline record types** (`{f: T, …}`) for one-off schemas at any type-annotation position. Record values are constructed by **record literals** (`{f: v, …}`) and navigated by **field projection** (`r.field`).
+The meta-language provides two ways to work with structured, named-field data at compile time: **named record declarations** (`smelt.record TypeName = { … }`) for shapes that recur across files, and **inline record types** (`{f: T, …}`) for one-off schemas at any type-annotation position. Record values are constructed by **record literals** (`{f: v, …}`) and navigated by **field projection** (`r.field`). Records are the schema type for [config loaders](config-loaders.md) — `smelt.config.load_yaml(path, List<MyRecord>)` validates every YAML row against the declared field set. They are also the element type in [`List<T>`](lists.md) HOF chains: a [`map`](hofs.md#map) over a `List<MyRecord>` projects fields via `r.fieldname`.
 
 Records are meta-only: no `Record<…>` value ever reaches the database engine.
 
