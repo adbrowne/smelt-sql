@@ -100,7 +100,7 @@ This is the **terminal phase**. After Phase 6's acceptance gate, the meta-plan �
 | 0     | done     | 5ef1a6dd | 2026-05-17 |
 | 1     | done     | c224ebde | 2026-05-17 |
 | 2     | done     | 2cb3ca85 | 2026-05-17 |
-| 3     | pending  |        |      |
+| 3     | done     | _pending push_ | 2026-05-17 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
@@ -398,6 +398,8 @@ After Phase 6's acceptance gate is met, all eight phases A–G are `done`. The m
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 3 audit outcome (2026-05-17):** No fixture edits required. `large/spec.md`, `large/validate.py`, and `large/seeds/raw_orders.csv` (13 lines = header + 12 rows, 3 shipped + 1 cancelled per country) are consistent with both the shipped meta-language surface and `.claude/commands/smelt-loop.md` §"Tier overview" (union table, per-country counts, generator frontmatter, configs/ YAML). `medium/spec.md` already includes Phase A meta-list lift, Phase B HOF + `smelt.config.var`, Phase C column reflection, Phase D wide reflection, and records/maps/loader extensions at lines 105–168; all diagnostic codes referenced match the spec's diagnostic tables. Harness smoke test `setup_run.sh large local /tmp/smelt-loop-smoke-G-<ts>` succeeded (wheel built, smelt 0.3.2 installed, `smelt --help` and `smelt docs list` smoke checks both passed). All four cargo CI gates green.
 
 ## Verification
 
