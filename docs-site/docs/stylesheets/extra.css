@@ -629,7 +629,7 @@
  * smelt tokens instead so the left nav header sits quietly with the rest
  * of the design.
  * ----------------------------------------------------------------------- */
-.md-nav__title[for=__drawer] {
+.md-nav--primary .md-nav__title[for=__drawer] {
   background: var(--smelt-ink-50);
   color: var(--smelt-iron);
   font-family: var(--smelt-display);
@@ -642,8 +642,8 @@
   height: auto;
   line-height: 1.3;
 }
-.md-nav__title[for=__drawer] .md-nav__button.md-logo img,
-.md-nav__title[for=__drawer] .md-nav__button.md-logo svg {
+.md-nav--primary .md-nav__title[for=__drawer] .md-nav__button.md-logo img,
+.md-nav--primary .md-nav__title[for=__drawer] .md-nav__button.md-logo svg {
   height: 22px;
   width: auto;
   margin-right: 0.4rem;
@@ -664,7 +664,7 @@
 .md-nav__source:hover { background: var(--smelt-ink-100); }
 
 /* Dark-mode (slate) equivalents */
-[data-md-color-scheme="slate"] .md-nav__title[for=__drawer] {
+[data-md-color-scheme="slate"] .md-nav--primary .md-nav__title[for=__drawer] {
   background: rgba(255, 255, 255, 0.04);
   color: #fff;
   border-bottom-color: rgba(255, 255, 255, 0.06);
