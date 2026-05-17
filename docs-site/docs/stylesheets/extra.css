@@ -547,3 +547,74 @@
 .md-typeset .highlight .cp {
   font-style: italic;
 }
+
+/* ---------- Header controls — explicit token overrides -----------------
+ * Material wires several header controls (search icons + placeholder,
+ * source/repo block, mode toggle, drawer button) to --md-primary-bg-color,
+ * which we leave at white for use on the indigo accent button. Override
+ * those controls directly so they read on our white-translucent header.
+ * ----------------------------------------------------------------------- */
+.md-header__source { color: var(--smelt-ink-700); }
+.md-source__icon,
+.md-source__repository { color: inherit; }
+.md-source__fact { color: var(--smelt-ink-500); }
+
+.md-header__button { color: var(--smelt-ink-600); }
+.md-header__button:hover { color: var(--smelt-indigo); opacity: 1; }
+
+/* Search form in the header — Material's .md-header .md-search__form rule
+   has higher specificity than our earlier .md-search__form override. */
+.md-header .md-search__form {
+  background-color: var(--smelt-ink-50);
+  color: var(--smelt-iron);
+  box-shadow: none;
+}
+.md-header .md-search__form:hover { background-color: var(--smelt-ink-100); }
+.md-header .md-search__input { color: var(--smelt-iron); }
+.md-header .md-search__input::placeholder { color: var(--smelt-ink-400); }
+.md-header .md-search__input + .md-search__icon,
+.md-header .md-search__icon {
+  color: var(--smelt-ink-500);
+}
+
+/* ---------- Tabs strip --------------------------------------------------
+ * Was transparent — meant content scrolled visibly behind the sticky bar.
+ * Match the header: white-translucent with the same blur treatment.
+ * Active tab gets indigo to match the sidebar's active treatment.
+ * ----------------------------------------------------------------------- */
+.md-tabs {
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: saturate(160%) blur(8px);
+}
+.md-tabs__link--active,
+.md-tabs__item--active > .md-tabs__link {
+  color: var(--smelt-indigo);
+  font-weight: 500;
+  opacity: 1;
+}
+
+/* ---------- Dark-mode (slate) header equivalents ----------------------- */
+[data-md-color-scheme="slate"] .md-header__source,
+[data-md-color-scheme="slate"] .md-source__fact { color: #d8dbe1; }
+[data-md-color-scheme="slate"] .md-header__button { color: #d8dbe1; }
+[data-md-color-scheme="slate"] .md-header__button:hover { color: #8087ff; }
+
+[data-md-color-scheme="slate"] .md-header .md-search__form {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+[data-md-color-scheme="slate"] .md-header .md-search__form:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+[data-md-color-scheme="slate"] .md-header .md-search__input { color: #fff; }
+[data-md-color-scheme="slate"] .md-header .md-search__input::placeholder { color: #97A0AE; }
+[data-md-color-scheme="slate"] .md-header .md-search__input + .md-search__icon,
+[data-md-color-scheme="slate"] .md-header .md-search__icon { color: #97A0AE; }
+
+[data-md-color-scheme="slate"] .md-tabs {
+  background: rgba(20, 23, 31, 0.92);
+}
+[data-md-color-scheme="slate"] .md-tabs__link--active,
+[data-md-color-scheme="slate"] .md-tabs__item--active > .md-tabs__link {
+  color: #9aa1ff;
+}
