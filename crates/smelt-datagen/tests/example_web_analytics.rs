@@ -960,3 +960,134 @@ fn test_end_to_end_smelt_build() {
         "url should be non-null and non-empty, got: {url:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 8: silver/sessions model materializes with sessionization invariants
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.silver_sessions` materializes with at
+/// least one row, every row has a non-null platform, and the maximum
+/// `session_seq` across all sessions is >= 1 (confirming that the 30-minute
+/// inactivity / platform-boundary rule fired at least once).
+///
+/// `models/silver/sessions.sql` address segments are `["silver", "sessions"]`,
+/// so smelt materializes the table as `silver_sessions` in the `main` schema.
+#[test]
+fn test_sessions_model_materializes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: clone the web_analytics project tree into tmp_path ---
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    // --- Step 2: run smelt-datagen with rewritten outputs into tmp_path ---
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 3: rewrite setup_sources.sql with absolute paths, execute ---
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+
+    // Close connection so smelt build can open the file exclusively.
+    drop(conn);
+
+    // --- Step 4: run `smelt build` from the temp workspace directory ---
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // --- Step 5: verify silver_sessions has > 0 rows ---
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let session_count: i64 = conn2
+        .query_row("SELECT COUNT(*) FROM main.silver_sessions", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_sessions: {e}"));
+
+    assert!(
+        session_count > 0,
+        "silver_sessions should have at least one row, got 0"
+    );
+
+    // --- Step 6: verify every row has a non-null platform ---
+    let null_platform_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_sessions WHERE platform IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("platform null check on silver_sessions: {e}"));
+
+    assert_eq!(
+        null_platform_count, 0,
+        "every silver_sessions row must have a non-null platform; {null_platform_count} rows have NULL platform"
+    );
+
+    // --- Step 6b: verify each session has exactly one platform (boundary rule) ---
+    let multi_platform_sessions: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT session_id, COUNT(DISTINCT platform) AS plats
+                 FROM main.silver_sessions
+                 GROUP BY session_id
+                 HAVING plats > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("per-session platform uniqueness query failed: {e}"));
+
+    assert_eq!(
+        multi_platform_sessions, 0,
+        "every session must have exactly one distinct platform value (boundary rule); {multi_platform_sessions} sessions have multiple platforms"
+    );
+
+    // --- Step 7: verify max session_seq >= 1 (sessionization fired at least once) ---
+    let max_seq: i64 = conn2
+        .query_row(
+            "SELECT MAX(session_seq) FROM main.silver_sessions",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("MAX(session_seq) from silver_sessions: {e}"));
+
+    assert!(
+        max_seq >= 1,
+        "MAX(session_seq) should be >= 1, indicating at least one session boundary was detected; got {max_seq}"
+    );
+}

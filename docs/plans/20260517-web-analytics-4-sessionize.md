@@ -72,7 +72,7 @@ The overall plan's Goal items 2 and 4 require an incremental sessionization (30-
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | `d03890a1` | 2026-05-18 |
-| 2     | pending  |        |      |
+| 2     | done     |        | 2026-05-18 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -475,6 +475,16 @@ flip lands as: `chore(web-analytics-4): mark Phase 4 done in overall plan`.
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+**Phase 1: `IS DISTINCT FROM` not supported by smelt-parser; both function body and inline model use plain `!=`.** The plan's prose specified `LAG(platform_col) IS DISTINCT FROM platform_col` for the platform-boundary check. The smelt-parser's `IS` handler only recognises `IS [NOT] NULL`. Both `functions/sessionize.sql` and `models/silver/sessions.sql` use plain `!=` instead. This is semantically *more correct* for the first-row case under three-valued logic: `LAG` returns NULL on the first row per partition → `NULL != platform = NULL` → OR'd with the also-NULL time-gap result stays NULL → `CASE WHEN NULL THEN 1 ELSE 0 = 0` → session_seq = 0 for the first row. `IS DISTINCT FROM` would have evaluated to TRUE on the first row and started session_seq at 1, contradicting the Phase 4 invariant test's `expect:` rows. The plan's review checklist note "must not spuriously start a second session" captures the intent; the `!=` form realises it. If smelt-parser ever gains `IS DISTINCT FROM` support, the function body cannot mechanically switch to it without also handling the first-row case (e.g., `COALESCE(LAG(platform), platform) != platform`).
+
+**Phase 2: two-CTE structure required for nested window functions.** DuckDB rejects `LAG(...)` nested inside `SUM(... OVER ...)`. The plan's single-CTE shape compiles in some engines but not DuckDB. The model splits into `lagged` (resolves the `LAG` columns) and `sessionized` (applies the `SUM(CASE ...) OVER` over those pre-resolved values). Semantics are identical.
+
+**Phase 2: `epoch_us()` arithmetic instead of `INTERVAL` subtraction.** Smelt's silver `events_parsed` model composes `event_ts` as `CAST(event_date AS DATE) + to_seconds(seconds_in_day)`. DuckDB executes this correctly at runtime, but the smelt-db type-inference layer does not recognise `to_seconds` (see Phase 3 plan deferred §"`to_seconds` is unknown to smelt's type inference"), so the inferred type for `event_ts` is not `Timestamp`. `event_ts - LAG(event_ts) > INTERVAL '30 minutes'` therefore fails type-checking inside the model body. The model uses `epoch_us(event_ts) - prev_ts_us > 30 * 60 * 1000000` (microseconds) instead. Threshold: 30 min × 60 s × 1,000,000 µs/s = 1,800,000,000 µs. NULL propagation still holds: `LAG(epoch_us(event_ts))` on first row is NULL → `epoch_us(event_ts) - NULL = NULL` → `NULL > 1.8e9 = NULL` → CASE = 0. Resolving the upstream type-inference gap (registering `to_seconds` in `crates/smelt-types/src/functions.rs` as returning `Interval`) would let this revert to the cleaner `INTERVAL` form.
+
+**Phase 2: `session_id` uses `CONCAT(...)` rather than `md5(...)`.** Smelt's type-inference layer does not recognise `md5` as a standard SQL function and emits a Warning diagnostic that fails the `example_diagnostics` gate. `CONCAT` is recognised and produces a deterministic, idempotent surrogate key from the same `(device_id, session_seq, MIN(event_ts))` inputs. Registering `md5` in the smelt function registry would let this revert to a fixed-width hash if a shorter key becomes desirable.
+
+**Phase 2: plan typo on the materialized table name.** The plan's Phase 2 TDD step 4 says `SELECT count(*) FROM main.sessions`. Smelt materialises `models/silver/sessions.sql` as `main.silver_sessions` (the address segments include the directory). All queries in the implemented `test_sessions_model_materializes` use the correct `main.silver_sessions` name. Future readers of the plan should treat the `main.sessions` reference as a typo.
 
 ---
 
