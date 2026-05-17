@@ -1,11 +1,13 @@
 //! Generic value types and row generation driven by [`GeneratorSpec`].
 
-use crate::config::{ColumnConfig, EntityConfig, FkCounts, GeneratorSpec};
+use crate::config::{ColumnConfig, EntityConfig, FkCounts, GeneratorSpec, LinkedPoolConfig};
 use crate::gen::Gen;
 use crate::generators::{
     bool_with_prob, geometric, log_normal, one_of, uniform, uuid_gen, weighted_choice,
 };
 use chrono::NaiveDate;
+use indexmap::IndexMap;
+use rand::distributions::{Distribution, WeightedIndex};
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -46,6 +48,104 @@ impl EntityPool {
             })
             .collect();
         Self { rows }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// A pre-computed joint-distribution pool of tuples drawn from [`LinkedPoolConfig`].
+///
+/// `rows[i]` is the i-th pool entry: a tuple of [`GenericValue`]s in the order the
+/// shape's `fields:` were declared. `field_index` maps field name → position within
+/// each tuple (built once from the first shape, since all shapes agree on field names
+/// per spec invariant 7).
+pub struct LinkedPool {
+    pub rows: Vec<Vec<GenericValue>>,
+    pub field_index: IndexMap<String, usize>,
+}
+
+impl LinkedPool {
+    /// Build a linked pool from `cfg`, using `seed` as the RNG seed.
+    ///
+    /// Callers are responsible for deriving the seed. When `cfg.seed` is set,
+    /// pass it directly; otherwise the caller derives a deterministic offset
+    /// from the dataset seed (per `docs/specs/datagen.md` §Pool construction:
+    /// `dataset_seed.wrapping_add(linked_pool_index + 1)`). Pool seeding is
+    /// kept separate from row generation so that changing `num_rows` does
+    /// not perturb pool contents.
+    pub fn new(seed: u64, cfg: &LinkedPoolConfig, fk_counts: &FkCounts) -> LinkedPool {
+        // Build the field_index from the first shape (all shapes agree on field names).
+        let field_index: IndexMap<String, usize> = cfg.shapes[0]
+            .fields
+            .keys()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        // Build a WeightedIndex over shapes by weight.
+        let weights: Vec<f64> = cfg.shapes.iter().map(|s| s.weight).collect();
+        let shape_dist = WeightedIndex::new(&weights)
+            .expect("WeightedIndex construction failed (all weights must be > 0)");
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let pool_size = cfg.pool_size;
+        let mut rows: Vec<Vec<GenericValue>> = Vec::with_capacity(pool_size);
+
+        while rows.len() < pool_size {
+            // Sample a shape by weight.
+            let shape_idx = shape_dist.sample(&mut rng);
+            let shape = &cfg.shapes[shape_idx];
+
+            // Determine which fields are sticky (draw once per shape-draw).
+            let sticky_set: std::collections::HashSet<&str> =
+                shape.sticky.iter().map(String::as_str).collect();
+
+            // Draw all sticky fields once, in fields: declaration order.
+            let mut sticky_values: IndexMap<&str, GenericValue> = IndexMap::new();
+            for (field_name, spec) in &shape.fields {
+                if sticky_set.contains(field_name.as_str()) {
+                    let val = apply_spec(&mut rng, spec, rows.len(), fk_counts);
+                    sticky_values.insert(field_name.as_str(), val);
+                }
+            }
+
+            // Emit `emit` entries, redrawing non-sticky fields per entry.
+            for _ in 0..shape.emit {
+                let mut tuple = Vec::with_capacity(shape.fields.len());
+                for (field_name, spec) in &shape.fields {
+                    let val = if sticky_set.contains(field_name.as_str()) {
+                        // Reuse the once-drawn sticky value.
+                        sticky_values[field_name.as_str()].clone()
+                    } else {
+                        // Redraw for each emitted entry.
+                        apply_spec(&mut rng, spec, rows.len(), fk_counts)
+                    };
+                    tuple.push(val);
+                }
+                rows.push(tuple);
+                // Stop as soon as we reach pool_size (truncate overshoot).
+                if rows.len() >= pool_size {
+                    break;
+                }
+            }
+        }
+
+        LinkedPool { rows, field_index }
+    }
+
+    /// Look up the value of `field` in pool entry `row_idx`.
+    ///
+    /// Returns `None` if `field` is not declared in this pool or if `row_idx`
+    /// is out of bounds.
+    pub fn get(&self, row_idx: usize, field: &str) -> Option<&GenericValue> {
+        let col_idx = *self.field_index.get(field)?;
+        self.rows.get(row_idx)?.get(col_idx)
     }
 
     pub fn len(&self) -> usize {
@@ -700,5 +800,451 @@ fields:
             unreachable!()
         };
         assert_eq!(json, r#"{"weird\"key":1}"#);
+    }
+
+    // ── Phase 3 TDD tests: LinkedPool construction ────────────────────────────
+
+    use crate::config::{LinkedPoolConfig, ShapeConfig};
+    use indexmap::IndexMap;
+
+    /// Helper: build a minimal single-shape `LinkedPoolConfig`.
+    fn make_single_shape_pool(
+        pool_size: usize,
+        emit: usize,
+        sticky: Vec<String>,
+        fields: IndexMap<String, GeneratorSpec>,
+    ) -> LinkedPoolConfig {
+        LinkedPoolConfig {
+            name: "test_pool".to_string(),
+            pool_size,
+            seed: Some(42),
+            shapes: vec![ShapeConfig {
+                weight: 1.0,
+                emit,
+                sticky,
+                fields,
+            }],
+        }
+    }
+
+    /// Helper: make fields with two FK generators.
+    fn two_fk_fields() -> IndexMap<String, GeneratorSpec> {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "device_id".to_string(),
+            GeneratorSpec::ForeignKey {
+                dataset: "devices".to_string(),
+            },
+        );
+        fields.insert(
+            "user_id".to_string(),
+            GeneratorSpec::ForeignKey {
+                dataset: "users".to_string(),
+            },
+        );
+        fields
+    }
+
+    /// Helper: make fk_counts for devices and users.
+    fn fk_counts_100() -> FkCounts {
+        let mut fk = FkCounts::new();
+        fk.insert("devices".to_string(), 100);
+        fk.insert("users".to_string(), 100);
+        fk
+    }
+
+    /// A pool with `pool_size: 1000` and shapes with various `emit:` values
+    /// produces exactly 1000 entries.
+    #[test]
+    fn test_linked_pool_size_is_exact() {
+        let cfg = make_single_shape_pool(1000, 3, vec![], two_fk_fields());
+        let fk = fk_counts_100();
+        let pool = LinkedPool::new(42, &cfg, &fk);
+        assert_eq!(pool.len(), 1000, "pool must have exactly pool_size entries");
+    }
+
+    /// Two builds with the same seed and config produce byte-identical pool
+    /// contents (determinism guarantee).
+    #[test]
+    fn test_linked_pool_deterministic() {
+        let cfg = make_single_shape_pool(500, 2, vec![], two_fk_fields());
+        let fk = fk_counts_100();
+        let pool_a = LinkedPool::new(99, &cfg, &fk);
+        let pool_b = LinkedPool::new(99, &cfg, &fk);
+        assert_eq!(pool_a.rows.len(), pool_b.rows.len());
+        for (i, (ra, rb)) in pool_a.rows.iter().zip(pool_b.rows.iter()).enumerate() {
+            for (j, (va, vb)) in ra.iter().zip(rb.iter()).enumerate() {
+                match (va, vb) {
+                    (GenericValue::Int(a), GenericValue::Int(b)) => {
+                        assert_eq!(a, b, "row {i} field {j} differs");
+                    }
+                    (GenericValue::Str(a), GenericValue::Str(b)) => {
+                        assert_eq!(a, b, "row {i} field {j} differs");
+                    }
+                    _ => panic!("unexpected variant combination at row {i} field {j}"),
+                }
+            }
+        }
+    }
+
+    /// Pool RNG stream is isolated from anything else the dataset is doing
+    /// with RNG state. Build pool A, exhaustively consume an unrelated
+    /// `ChaCha8Rng` seeded with the same value (simulating a row generator
+    /// burning through draws against the dataset seed), then build pool B
+    /// with the same args. A and B must be byte-identical — proving pool
+    /// construction does not share RNG state with any other stream and
+    /// therefore changing `num_rows` (which affects only the row side) cannot
+    /// perturb pool contents.
+    #[test]
+    fn test_linked_pool_seed_isolation() {
+        let cfg = make_single_shape_pool(200, 1, vec![], two_fk_fields());
+        let fk = fk_counts_100();
+        let pool_a = LinkedPool::new(7, &cfg, &fk);
+
+        // Burn an unrelated RNG seeded with the same value. If pool
+        // construction shared global state with any other ChaCha8 stream,
+        // pool_b below would diverge from pool_a.
+        let mut unrelated = ChaCha8Rng::seed_from_u64(7);
+        for _ in 0..10_000 {
+            let _ = unrelated.next_u64();
+        }
+
+        let pool_b = LinkedPool::new(7, &cfg, &fk);
+        assert_eq!(pool_a.rows.len(), pool_b.rows.len());
+        for (i, (ra, rb)) in pool_a.rows.iter().zip(pool_b.rows.iter()).enumerate() {
+            for (j, (va, vb)) in ra.iter().zip(rb.iter()).enumerate() {
+                match (va, vb) {
+                    (GenericValue::Int(a), GenericValue::Int(b)) => {
+                        assert_eq!(a, b, "row {i} field {j} differs");
+                    }
+                    _ => panic!("variant mismatch at row {i} field {j}"),
+                }
+            }
+        }
+    }
+
+    /// A single-shape pool with `emit: 1` produces N tuples whose fields are
+    /// drawn independently per entry (no sticky fields means all are redrawn).
+    #[test]
+    fn test_linked_pool_emit_one_basic() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "device_id".to_string(),
+            GeneratorSpec::ForeignKey {
+                dataset: "devices".to_string(),
+            },
+        );
+        let mut fk = FkCounts::new();
+        fk.insert("devices".to_string(), 1000);
+        let cfg = make_single_shape_pool(100, 1, vec![], fields);
+        let pool = LinkedPool::new(42, &cfg, &fk);
+        assert_eq!(pool.len(), 100);
+        // All device_id values must be in [1, 1000].
+        for (i, row) in pool.rows.iter().enumerate() {
+            match &row[0] {
+                GenericValue::Int(v) => assert!(
+                    *v >= 1 && *v <= 1000,
+                    "row {i}: device_id={v} out of [1,1000]"
+                ),
+                other => panic!("row {i}: expected Int, got {:?}", other),
+            }
+        }
+        // With 1000 candidates and 100 draws, expect multiple distinct values.
+        let distinct: std::collections::HashSet<i32> = pool
+            .rows
+            .iter()
+            .map(|r| match &r[0] {
+                GenericValue::Int(v) => *v,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(
+            distinct.len() > 5,
+            "expected diversity in emit:1 draws; only {} distinct",
+            distinct.len()
+        );
+    }
+
+    /// `emit: 2, sticky: [device_id]` — pairs share `device_id`, differ in `user_id`.
+    #[test]
+    fn test_linked_pool_emit_two_sticky() {
+        let fk = fk_counts_100();
+        let cfg = make_single_shape_pool(100, 2, vec!["device_id".to_string()], two_fk_fields());
+        let pool = LinkedPool::new(42, &cfg, &fk);
+        assert_eq!(pool.len(), 100);
+        let device_idx = *pool.field_index.get("device_id").unwrap();
+        let user_idx = *pool.field_index.get("user_id").unwrap();
+
+        // Check pairs: every consecutive pair (0,1), (2,3), ... shares device_id.
+        let mut any_differing_user = false;
+        for pair in pool.rows.chunks(2) {
+            if pair.len() < 2 {
+                break;
+            }
+            let (d0, d1) = match (&pair[0][device_idx], &pair[1][device_idx]) {
+                (GenericValue::Int(a), GenericValue::Int(b)) => (a, b),
+                _ => panic!("expected Int for device_id"),
+            };
+            assert_eq!(d0, d1, "sticky device_id must be shared within a pair");
+            let (u0, u1) = match (&pair[0][user_idx], &pair[1][user_idx]) {
+                (GenericValue::Int(a), GenericValue::Int(b)) => (a, b),
+                _ => panic!("expected Int for user_id"),
+            };
+            if u0 != u1 {
+                any_differing_user = true;
+            }
+        }
+        assert!(
+            any_differing_user,
+            "non-sticky user_id should differ within at least one pair (almost surely)"
+        );
+    }
+
+    /// `emit: 2, sticky: [user_id]` — pairs share `user_id`.
+    #[test]
+    fn test_linked_pool_emit_two_sticky_user() {
+        let fk = fk_counts_100();
+        let cfg = make_single_shape_pool(100, 2, vec!["user_id".to_string()], two_fk_fields());
+        let pool = LinkedPool::new(42, &cfg, &fk);
+        assert_eq!(pool.len(), 100);
+        let user_idx = *pool.field_index.get("user_id").unwrap();
+        let device_idx = *pool.field_index.get("device_id").unwrap();
+
+        let mut any_differing_device = false;
+        for pair in pool.rows.chunks(2) {
+            if pair.len() < 2 {
+                break;
+            }
+            let (u0, u1) = match (&pair[0][user_idx], &pair[1][user_idx]) {
+                (GenericValue::Int(a), GenericValue::Int(b)) => (a, b),
+                _ => panic!("expected Int for user_id"),
+            };
+            assert_eq!(u0, u1, "sticky user_id must be shared within a pair");
+            let (d0, d1) = match (&pair[0][device_idx], &pair[1][device_idx]) {
+                (GenericValue::Int(a), GenericValue::Int(b)) => (a, b),
+                _ => panic!("expected Int for device_id"),
+            };
+            if d0 != d1 {
+                any_differing_device = true;
+            }
+        }
+        assert!(
+            any_differing_device,
+            "non-sticky device_id should differ within at least one pair (almost surely)"
+        );
+    }
+
+    /// Shape weight distribution: three shapes with weights [0.6, 0.3, 0.1] produce
+    /// pool entries in those proportions within ±1 pp across 100_000 entries.
+    #[test]
+    fn test_linked_pool_shape_weight_distribution() {
+        let make_const_field = |val: &str| -> IndexMap<String, GeneratorSpec> {
+            let mut m = IndexMap::new();
+            m.insert(
+                "tag".to_string(),
+                GeneratorSpec::Constant {
+                    value: serde_yaml::Value::String(val.to_string()),
+                },
+            );
+            m
+        };
+        let cfg = LinkedPoolConfig {
+            name: "wt_pool".to_string(),
+            pool_size: 100_000,
+            seed: Some(1),
+            shapes: vec![
+                ShapeConfig {
+                    weight: 0.6,
+                    emit: 1,
+                    sticky: vec![],
+                    fields: make_const_field("A"),
+                },
+                ShapeConfig {
+                    weight: 0.3,
+                    emit: 1,
+                    sticky: vec![],
+                    fields: make_const_field("B"),
+                },
+                ShapeConfig {
+                    weight: 0.1,
+                    emit: 1,
+                    sticky: vec![],
+                    fields: make_const_field("C"),
+                },
+            ],
+        };
+        let pool = LinkedPool::new(1, &cfg, &FkCounts::new());
+        assert_eq!(pool.len(), 100_000);
+
+        let mut counts = std::collections::HashMap::new();
+        for row in &pool.rows {
+            if let GenericValue::Str(tag) = &row[0] {
+                *counts.entry(tag.clone()).or_insert(0usize) += 1;
+            }
+        }
+        let a_share = counts["A"] as f64 / 100_000.0;
+        let b_share = counts["B"] as f64 / 100_000.0;
+        let c_share = counts["C"] as f64 / 100_000.0;
+        assert!(
+            (a_share - 0.6).abs() < 0.01,
+            "A share {a_share:.4} not within 1pp of 0.60"
+        );
+        assert!(
+            (b_share - 0.3).abs() < 0.01,
+            "B share {b_share:.4} not within 1pp of 0.30"
+        );
+        assert!(
+            (c_share - 0.1).abs() < 0.01,
+            "C share {c_share:.4} not within 1pp of 0.10"
+        );
+    }
+
+    /// Weights [2.0, 1.0] (sum 3.0) produce the same distribution as [0.667, 0.333].
+    /// WeightedIndex normalises automatically.
+    #[test]
+    fn test_linked_pool_normalises_weights() {
+        let make_const_fields = |val: &str| -> IndexMap<String, GeneratorSpec> {
+            let mut m = IndexMap::new();
+            m.insert(
+                "tag".to_string(),
+                GeneratorSpec::Constant {
+                    value: serde_yaml::Value::String(val.to_string()),
+                },
+            );
+            m
+        };
+        let make_cfg = |w0: f64, w1: f64, seed: u64| LinkedPoolConfig {
+            name: "norm_pool".to_string(),
+            pool_size: 10_000,
+            seed: Some(seed),
+            shapes: vec![
+                ShapeConfig {
+                    weight: w0,
+                    emit: 1,
+                    sticky: vec![],
+                    fields: make_const_fields("A"),
+                },
+                ShapeConfig {
+                    weight: w1,
+                    emit: 1,
+                    sticky: vec![],
+                    fields: make_const_fields("B"),
+                },
+            ],
+        };
+        // Both with the same seed should produce similar distributions.
+        let pool_abs = LinkedPool::new(5, &make_cfg(2.0, 1.0, 5), &FkCounts::new());
+        let pool_norm = LinkedPool::new(5, &make_cfg(0.6667, 0.3333, 5), &FkCounts::new());
+
+        let count_a = |pool: &LinkedPool| -> usize {
+            pool.rows
+                .iter()
+                .filter(|r| matches!(&r[0], GenericValue::Str(s) if s == "A"))
+                .count()
+        };
+        let a_abs = count_a(&pool_abs) as f64 / 10_000.0;
+        let a_norm = count_a(&pool_norm) as f64 / 10_000.0;
+        // Both should be near 2/3 (~0.667); allow ±2 pp relative to each other.
+        assert!(
+            (a_abs - a_norm).abs() < 0.02,
+            "abs weights ({a_abs:.4}) vs norm weights ({a_norm:.4}) differ by more than 2pp"
+        );
+    }
+
+    /// Overshoot truncation: `pool_size: 100` with `emit: 30` produces exactly 100.
+    /// The 4th shape draw (entries 90–119) is truncated at 100.
+    #[test]
+    fn test_linked_pool_truncates_overshoot() {
+        let mut fields = IndexMap::new();
+        fields.insert("v".to_string(), GeneratorSpec::SequentialId);
+        let cfg = LinkedPoolConfig {
+            name: "trunc_pool".to_string(),
+            pool_size: 100,
+            seed: Some(42),
+            shapes: vec![ShapeConfig {
+                weight: 1.0,
+                emit: 30,
+                sticky: vec![],
+                fields,
+            }],
+        };
+        let pool = LinkedPool::new(42, &cfg, &FkCounts::new());
+        assert_eq!(
+            pool.len(),
+            100,
+            "truncation must give exactly pool_size=100"
+        );
+    }
+
+    /// Degenerate `pool_size: 1` works.
+    #[test]
+    fn test_linked_pool_handles_pool_size_one() {
+        let cfg = make_single_shape_pool(1, 1, vec![], two_fk_fields());
+        let fk = fk_counts_100();
+        let pool = LinkedPool::new(42, &cfg, &fk);
+        assert_eq!(pool.len(), 1);
+    }
+
+    /// A `foreign_key { dataset: devices }` field with `FkCounts { devices: 100 }`
+    /// produces values in [1, 100].
+    #[test]
+    fn test_linked_pool_foreign_key_resolves() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "device_id".to_string(),
+            GeneratorSpec::ForeignKey {
+                dataset: "devices".to_string(),
+            },
+        );
+        let mut fk = FkCounts::new();
+        fk.insert("devices".to_string(), 100);
+        let cfg = make_single_shape_pool(500, 1, vec![], fields);
+        let pool = LinkedPool::new(42, &cfg, &fk);
+        assert_eq!(pool.len(), 500);
+        for (i, row) in pool.rows.iter().enumerate() {
+            match &row[0] {
+                GenericValue::Int(v) => assert!(
+                    *v >= 1 && *v <= 100,
+                    "row {i}: device_id={v} out of [1,100]"
+                ),
+                other => panic!("row {i}: expected Int, got {:?}", other),
+            }
+        }
+    }
+
+    /// `LinkedPool::get` resolves a field by name to the correct value.
+    #[test]
+    fn test_linked_pool_get_by_name() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "device_id".to_string(),
+            GeneratorSpec::Constant {
+                value: serde_yaml::Value::Number(serde_yaml::Number::from(7i64)),
+            },
+        );
+        fields.insert(
+            "user_id".to_string(),
+            GeneratorSpec::Constant {
+                value: serde_yaml::Value::Number(serde_yaml::Number::from(99i64)),
+            },
+        );
+        let cfg = make_single_shape_pool(5, 1, vec![], fields);
+        let pool = LinkedPool::new(1, &cfg, &FkCounts::new());
+        // All constant so every row has device_id=7, user_id=99.
+        for i in 0..5 {
+            let dev = pool.get(i, "device_id").expect("device_id present");
+            let usr = pool.get(i, "user_id").expect("user_id present");
+            assert!(
+                matches!(dev, GenericValue::Int(7)),
+                "row {i}: device_id={:?}",
+                dev
+            );
+            assert!(
+                matches!(usr, GenericValue::Int(99)),
+                "row {i}: user_id={:?}",
+                usr
+            );
+        }
+        assert!(pool.get(0, "missing").is_none());
     }
 }
