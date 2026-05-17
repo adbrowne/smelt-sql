@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779050245962,
+  "lastUpdate": 1779050248480,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -22235,6 +22235,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.60344102826676,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5c4c49a5db5ba37a0e54d889dbe707dc8a0de61d",
+          "message": "Merge pull request #119 from adbrowne/research/decimal-type-system",
+          "timestamp": "2026-05-18T06:35:16+10:00",
+          "tree_id": "d1f5b4c6e0fba023be95311c02309a6fec12d0a9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5c4c49a5db5ba37a0e54d889dbe707dc8a0de61d"
+        },
+        "date": 1779050247623,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 22.608038820409096,
             "unit": "MB/s"
           }
         ]
