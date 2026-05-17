@@ -102,8 +102,8 @@ This is the **terminal phase**. After Phase 6's acceptance gate, the meta-plan Â
 | 2     | done     | 2cb3ca85 | 2026-05-17 |
 | 3     | done     | 16477eb6 | 2026-05-17 |
 | 4     | done     | 727b85d4 | 2026-05-17 |
-| 5     | pending  |        |      |
-| 6     | pending  |        |      |
+| 5     | done     | a77de490 | 2026-05-17 |
+| 6     | done     | 67d22a17 | 2026-05-17 |
 
 ---
 
