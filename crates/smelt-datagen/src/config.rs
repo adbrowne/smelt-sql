@@ -40,6 +40,7 @@ pub struct ShapeConfig {
 #[serde(deny_unknown_fields)]
 pub struct LinkedPoolConfig {
     pub name: String,
+    #[serde(deserialize_with = "deserialize_nonzero_pool_size")]
     pub pool_size: usize,
     /// Per-pool seed override. When absent the runtime derives one from the
     /// dataset seed and pool index.
@@ -117,6 +118,25 @@ where
         return Err(D::Error::custom("shape `emit:` must be at least 1 (got 0)"));
     }
     Ok(e)
+}
+
+/// Reject `pool_size: 0`; the spec describes `pool_size:` as the exact
+/// number of pool entries, and a zero-entry pool cannot satisfy any
+/// `linked_choice` reference at row time. A `pool_size: 0` would slip past
+/// pool construction (empty loop) and then panic the first time a
+/// `linked_choice` column tried to look up a non-existent entry.
+fn deserialize_nonzero_pool_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let n = usize::deserialize(deserializer)?;
+    if n == 0 {
+        return Err(D::Error::custom(
+            "linked_pool `pool_size:` must be at least 1 (got 0)",
+        ));
+    }
+    Ok(n)
 }
 
 fn default_shape_emit() -> usize {
@@ -681,6 +701,36 @@ columns:
         let msg = err.to_string();
         assert!(
             msg.contains("emit") || msg.contains("0") || msg.contains("least"),
+            "error must explain the rule; got: {msg}"
+        );
+    }
+
+    /// `pool_size: 0` is a parse error. An empty pool cannot satisfy any
+    /// `linked_choice` reference at row time; rejecting at parse time
+    /// catches the misconfiguration before any panic-prone runtime path.
+    #[test]
+    fn linked_pool_rejects_zero_pool_size() {
+        let yaml = r#"
+name: events
+output: data/events
+num_rows: 1000
+linked_pools:
+  - name: device_user
+    pool_size: 0
+    shapes:
+      - weight: 1.0
+        fields:
+          device_id: { type: sequential_id }
+columns:
+  - name: id
+    generator:
+      type: uuid
+"#;
+        let err =
+            serde_yaml::from_str::<DatasetConfig>(yaml).expect_err("pool_size: 0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pool_size") || msg.contains("at least 1") || msg.contains("0"),
             "error must explain the rule; got: {msg}"
         );
     }

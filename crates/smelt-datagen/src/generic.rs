@@ -41,14 +41,20 @@ pub type PoolSamples<'a> = HashMap<&'a str, usize>;
 ///
 /// The caller passes in the full pools map; this function returns a map of
 /// pool name → sampled index. The index is in `[0, pool.len())`.
+///
+/// Uses `rand::distributions::Uniform` rather than modulo on a `u64` draw
+/// so the sampling is unbiased for arbitrary pool sizes — `validate_config`
+/// rejects `pool_size: 0`, so `pool.len()` is always positive here.
 pub fn sample_pools<'a>(
     rng: &mut impl RngCore,
     pools: &'a HashMap<String, Arc<LinkedPool>>,
 ) -> PoolSamples<'a> {
+    use rand::distributions::{Distribution, Uniform};
     pools
         .iter()
         .map(|(name, pool)| {
-            let idx = (rng.next_u64() as usize) % pool.len().max(1);
+            let len = pool.len().max(1);
+            let idx = Uniform::new(0, len).sample(rng);
             (name.as_str(), idx)
         })
         .collect()
