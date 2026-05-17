@@ -13,9 +13,13 @@ incremental:
 -- in functions/sessionize.sql is the canonical signature for that future
 -- refactor.
 --
--- Two-CTE approach is required because DuckDB does not allow nested window
--- functions: the LAG calls must be resolved in a separate CTE before the
--- outer SUM window function can reference them.
+-- Three-CTE approach: DuckDB does not allow nested window functions, so the
+-- LAG calls are resolved in `lagged`, the SUM-based session counter in
+-- `sessionized`, and then `with_start_date` adds session_start_date as a
+-- per-row column using FIRST_VALUE before the final aggregation. This is
+-- required because session_start_date is the incremental partition_column and
+-- must appear in both the SELECT list and the GROUP BY — not as an aggregate
+-- alias — so that the optimizer can inject the incremental filter correctly.
 --
 -- session_id is constructed via CONCAT rather than md5() because the smelt
 -- type-inference layer recognizes CONCAT as a standard SQL function.
@@ -51,6 +55,16 @@ sessionized AS (
             END
         ) OVER (PARTITION BY device_id ORDER BY event_ts) AS session_seq
     FROM lagged
+),
+with_start_date AS (
+    SELECT
+        device_id,
+        event_ts,
+        event_date,
+        platform,
+        session_seq,
+        CAST(FIRST_VALUE(event_ts) OVER (PARTITION BY device_id, session_seq ORDER BY event_ts) AS DATE) AS session_start_date
+    FROM sessionized
 )
 SELECT
     CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_seq AS VARCHAR), '-', CAST(MIN(event_ts) AS VARCHAR)) AS session_id,
@@ -58,8 +72,8 @@ SELECT
     session_seq,
     MIN(event_ts) AS session_start,
     MAX(event_ts) AS session_end,
-    CAST(MIN(event_ts) AS DATE) AS session_start_date,
+    session_start_date,
     COUNT(*) AS event_count,
     ANY_VALUE(platform) AS platform
-FROM sessionized
-GROUP BY device_id, session_seq
+FROM with_start_date
+GROUP BY device_id, session_seq, session_start_date
