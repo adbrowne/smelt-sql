@@ -318,6 +318,61 @@ Rules to know:
 - **No arrays.** v1 does not have a `json_array` generator. For array-valued fields, either pre-shape your event schema (e.g. `item_count` + numbered columns) or post-process the JSON in a downstream model.
 - **Sticky payloads.** A `json_object` placed under `entity.columns` is generated once per entity and reused — useful for per-user feature flags or settings that don't change across an entity's events.
 
+#### `linked_choice` — correlated columns from a joint-distribution pool
+
+Use `linked_choice` when two or more columns in the same row need to be drawn **jointly**, not independently. Typical case: `(device_id, user_id)` pairs in a web-analytics events table, where most devices have one logged-in user, some devices have multiple users (shared family devices), some users have multiple devices, and some sessions are anonymous. Drawing the two columns independently gives every (device, user) pair equal probability — losing the real co-occurrence pattern.
+
+A `linked_pools:` block, declared at the dataset level, pre-builds a list of correlated tuples. Each row picks one tuple from the pool, and any `linked_choice` column in that row references the picked tuple's field by name:
+
+```yaml
+- name: events
+  output: data/events
+  num_rows: 1000000
+  linked_pools:
+    - name: device_user
+      pool_size: 200000
+      shapes:
+        - weight: 0.60                       # single-owner: 1 device → 1 user
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:   { type: foreign_key, dataset: users }
+        - weight: 0.25                       # anonymous: device with no logged-in user
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:
+              type: optional
+              prob: 0.0
+              inner: { type: foreign_key, dataset: users }
+        - weight: 0.10                       # shared device: same device, 2 users
+          emit: 2
+          sticky: [device_id]
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:   { type: foreign_key, dataset: users }
+        - weight: 0.05                       # multi-device user: same user, 2 devices
+          emit: 2
+          sticky: [user_id]
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:   { type: foreign_key, dataset: users }
+  columns:
+    - name: device_id
+      generator: { type: linked_choice, pool: device_user, field: device_id }
+    - name: user_id
+      generator: { type: linked_choice, pool: device_user, field: user_id }
+```
+
+Rules to know:
+
+- **Same pool, same row → same tuple.** A row picks one pool entry index; every `linked_choice` column referencing that pool sees the *same* entry. Different pools sample independently.
+- **`weight`** controls each shape's probability of being drawn next during pool construction; weights are normalised.
+- **`emit:`** (default `1`) is the number of pool entries one shape draw produces. `emit: 2` with `sticky: [device_id]` models a single device shared by two users.
+- **`sticky:`** lists fields that are drawn **once** per shape draw and shared across the emitted entries. Non-sticky fields are redrawn for each emitted entry.
+- **`pool_size`** is an absolute entry count, not a fraction. `--scale-factor` does not scale pools — the pool stays fixed and the larger row count just samples it more times, which is usually what you want for "vary scale without changing the user/device universe."
+- **Field type uniformity.** Every shape's `fields:` must declare the same keys, and the generator under a given key must produce the same Arrow type across shapes. A `linked_choice` column's nullability is `nullable` iff the referenced field is wrapped in `optional` in any shape.
+- **Forbidden inside shapes.** `linked_choice` cannot itself be a field generator inside `shapes[].fields:` — pools cannot reference other pools.
+- **Row-level only.** `linked_choice` columns belong under the dataset's `columns:`, not under `entity.columns:`. Pool entries are drawn per row, not per entity.
+
 ## Partitioning
 
 Add a `partition` block to create Hive-style date-partitioned output. Each day gets its own directory with a `data.parquet` file, and rows are distributed evenly across days.
