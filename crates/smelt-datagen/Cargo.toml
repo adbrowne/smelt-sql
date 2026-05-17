@@ -24,6 +24,7 @@ indexmap.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+duckdb = { workspace = true }
 
 [[bin]]
 name = "smelt-datagen"

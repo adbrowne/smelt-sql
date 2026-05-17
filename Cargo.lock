@@ -4152,6 +4152,7 @@ dependencies = [
  "arrow",
  "chrono",
  "clap",
+ "duckdb",
  "indexmap 2.14.0",
  "parquet",
  "rand 0.8.6",

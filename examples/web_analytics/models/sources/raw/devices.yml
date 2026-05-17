@@ -1,0 +1,8 @@
+description: Web analytics devices dimension (synthetic).
+columns:
+  - name: device_id
+    type: INTEGER
+  - name: device_type
+    type: VARCHAR
+  - name: first_seen_date
+    type: DATE

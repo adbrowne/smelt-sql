@@ -80,7 +80,7 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 | Phase | Status | Commit | Date |
 |-------|--------|--------|------|
 | 1 | done | `055786a5` | 2026-05-18 |
-| 2 | pending |  |  |
+| 2 | done | *(this commit)* | 2026-05-18 |
 | 3 | pending |  |  |
 | 4 | pending |  |  |
 | 5 | pending |  |  |
@@ -355,8 +355,8 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
       event_id,
       device_id,
       user_id,
-      event_date + (seconds_in_day * INTERVAL 1 SECOND) AS event_ts,
-      event_date,
+      CAST(event_date AS DATE) + (seconds_in_day * INTERVAL 1 SECOND) AS event_ts,
+      CAST(event_date AS DATE) AS event_date,
       smelt.functions.parse_event_payload(payload) AS parsed
   FROM smelt.ref('raw_events')
   ```
@@ -513,6 +513,10 @@ The spec says the Arrow schema for `linked_choice` columns is derived from the *
 
 **Phase 1: non-anonymous shapes use bare `foreign_key` (expert-review fix).**
 The first implementer pass wrapped non-anonymous shapes' `user_id` in `optional { prob: 1.0, inner: foreign_key }` to keep types "uniform across shapes". This is unnecessary: `build_schema` derives the Arrow type only from `shapes[0]` (spec invariant — the first shape is the type oracle), and the Parquet writer accepts `GenericValue::Int` into a nullable Int32 column without wrapping. Spec §Constraints invariant 7 says types must agree "modulo Optional wrapping", explicitly tolerating the mix. Fix: non-anonymous shapes use bare `{ type: foreign_key, dataset: users }`. The `datagen.yaml` inline comment explains the schema-ordering constraint and why the bare FK is valid at the Arrow layer.
+
+**Phase 2: source yml per-column nullability is unrepresentable.** The smelt source schema yml format has no nullability field (verified by comparison with `examples/retail_analytics/models/sources/raw/*.yml`). The `user_id` column in `examples/web_analytics/models/sources/raw/events.yml` is nullable in data but typed as `INTEGER` without a nullability qualifier. The type system treats source columns as nullable by default in SQL semantics, so this has no functional impact for Phases 3–8. Tracked as a schema-format gap that would matter if smelt grew strict nullability checking against source schemas.
+
+**Phase 2: partition column declared as `VARCHAR` in source yml (expert-review fix).** The partitioned Parquet writer emits the partition column as `DataType::Utf8` (`crates/smelt-datagen/src/generic_parquet.rs:128`), and the established convention in `examples/retail_analytics/models/sources/raw/{orders,web_events}.yml` is to declare partition columns as `VARCHAR`. The first Phase 2 pass declared `event_date: DATE`, which papers over the physical-vs-logical type with DuckDB's implicit cast at read time. Fix: `event_date: VARCHAR` with an inline comment; downstream silver (Phase 4) casts to DATE explicitly via `CAST(event_date AS DATE)` — same pattern as `retail_analytics/models/staging/stg_web_events.sql:18`.
 
 ---
 

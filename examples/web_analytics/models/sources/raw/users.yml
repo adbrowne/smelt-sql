@@ -1,0 +1,6 @@
+description: Web analytics users dimension (synthetic).
+columns:
+  - name: user_id
+    type: INTEGER
+  - name: signup_date
+    type: DATE

@@ -15,6 +15,14 @@
 //!    - Building the pool twice with the same explicit seed (1337) produces
 //!      identical null counts, validating the spec's determinism guarantee.
 //!
+//! 3. Source-loading test: after running `smelt-datagen`, execute
+//!    `setup_sources.sql` against a fresh DuckDB file and verify that
+//!    `raw.users`, `raw.devices`, and `raw.events` each contain > 0 rows.
+//!
+//! 4. Bronze-view test: extend the source-loading test by additionally
+//!    running `smelt build` and verifying the `raw_events` view materializes
+//!    with a row count equal to the total event rows generated.
+//!
 //! The binary-invocation tests write to a temp directory (NOT
 //! `examples/web_analytics/data/`) to avoid file-system collisions when tests
 //! run in parallel.
@@ -363,5 +371,212 @@ fn test_pool_snapshot_anonymous_fraction_and_determinism() {
         pool2.rows.len(),
         pool_size,
         "second pool build should have the same number of rows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers shared by the source-loading and bronze-view tests
+// ---------------------------------------------------------------------------
+
+/// Path to the compiled `smelt` CLI binary.
+///
+/// The smelt binary lives in the same target directory as `smelt-datagen`.
+/// `CARGO_BIN_EXE_smelt-datagen` is set by Cargo for all integration tests in
+/// this package; we strip the binary name and substitute "smelt" to locate the
+/// sibling binary built from `crates/smelt-cli`.
+fn smelt_bin() -> PathBuf {
+    let datagen = PathBuf::from(env!("CARGO_BIN_EXE_smelt-datagen"));
+    datagen
+        .parent()
+        .expect("datagen binary has a parent directory")
+        .join("smelt")
+}
+
+/// Copy a source file from the project tree into `dest`, creating parent
+/// directories as needed.
+fn copy_file(src: &Path, dest: &Path) {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|e| panic!("mkdir {parent:?}: {e}"));
+    }
+    fs::copy(src, dest).unwrap_or_else(|e| panic!("copy {src:?} → {dest:?}: {e}"));
+}
+
+/// Recursively copy a directory tree from `src` into `dest`.
+fn copy_dir_all(src: &Path, dest: &Path) {
+    fs::create_dir_all(dest).unwrap_or_else(|e| panic!("mkdir {dest:?}: {e}"));
+    for entry in fs::read_dir(src).unwrap_or_else(|e| panic!("readdir {src:?}: {e}")) {
+        let entry = entry.expect("dir entry");
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_all(&from, &to);
+        } else {
+            copy_file(&from, &to);
+        }
+    }
+}
+
+/// Rewrite `setup_sources.sql` so the relative `data/` prefix in
+/// `read_parquet(...)` calls points to the absolute paths where
+/// `smelt-datagen` actually wrote the Parquet files.
+///
+/// `setup_sources.sql` uses paths like `'data/users/data.parquet'`.
+/// `rewrite_outputs` strips the `data/` component and roots datasets directly
+/// under `output_base` (e.g. `<tmp>/users/data.parquet`), so `setup_sources.sql`
+/// must map `'data/` → `'<output_base>/` to match.
+///
+/// The single-quote is included in the substitution to anchor it to SQL string
+/// literals and avoid false positives in comments.
+fn rewrite_setup_sources_sql(src: &Path, dest: &Path, output_base: &Path) {
+    let content = fs::read_to_string(src).unwrap_or_else(|e| panic!("read {src:?}: {e}"));
+    // Map 'data/<leaf> → '<output_base>/<leaf> (rewrite_outputs strips 'data/' prefix)
+    let rewritten = content.replace("'data/", &format!("'{}/", output_base.display()));
+    fs::write(dest, &rewritten).unwrap_or_else(|e| panic!("write {dest:?}: {e}"));
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: setup_sources.sql populates raw.users / raw.devices / raw.events
+// ---------------------------------------------------------------------------
+
+/// Run `smelt-datagen` at `--scale-factor 0.01` into a temp dir, then execute
+/// `setup_sources.sql` against a fresh DuckDB file, and verify that the three
+/// source tables (`raw.users`, `raw.devices`, `raw.events`) each contain at
+/// least one row.
+#[test]
+fn test_setup_sources_sql_runs() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: run smelt-datagen to produce Parquet files in tmp_path ---
+    let src_config = repo_root().join("examples/web_analytics/datagen.yaml");
+    let dest_config = tmp_path.join("datagen.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 2: rewrite setup_sources.sql with absolute data/ paths ---
+    let src_sql = repo_root().join("examples/web_analytics/setup_sources.sql");
+    let dest_sql = tmp_path.join("setup_sources.sql");
+    rewrite_setup_sources_sql(&src_sql, &dest_sql, tmp_path);
+
+    // --- Step 3: execute the rewritten SQL against a fresh DuckDB file ---
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("open duckdb at {db_path:?}: {e}"));
+
+    let sql = fs::read_to_string(&dest_sql).unwrap_or_else(|e| panic!("read {dest_sql:?}: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources.sql: {e}\nSQL:\n{sql}"));
+
+    // --- Step 4: assert each source table has > 0 rows ---
+    for table in &["raw.users", "raw.devices", "raw.events"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM {table}: {e}"));
+        assert!(
+            count > 0,
+            "{table} has 0 rows after setup_sources.sql executed"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: bronze/raw_events view materializes via `smelt build`
+// ---------------------------------------------------------------------------
+
+/// Extend the source-loading test by additionally running `smelt build` and
+/// verifying the `raw_events` view materializes with a non-zero row count.
+///
+/// The workspace is cloned into a temp dir so the build artifacts (DuckDB
+/// file, `.smelt/` schema cache) never land in the checked-in source tree.
+/// `smelt build` is invoked with `current_dir` set to the temp workspace, so
+/// that the relative `database: target/dev.duckdb` path in `smelt.yml` points
+/// to the temp dir's `target/dev.duckdb` (the same file populated by
+/// `setup_sources.sql`).
+#[test]
+fn test_bronze_raw_events_view() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: clone the web_analytics project tree into tmp_path ---
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    // --- Step 2: run smelt-datagen with rewritten outputs into tmp_path ---
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 3: rewrite setup_sources.sql with absolute paths, execute ---
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+
+    // Count events rows for later comparison (connection must be closed before
+    // smelt build opens the same file via its own DuckDB connection).
+    let events_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM raw.events", [], |row| row.get(0))
+        .expect("count raw.events");
+    assert!(events_count > 0, "raw.events has 0 rows before smelt build");
+
+    // Close connection so smelt build can open the file exclusively.
+    drop(conn);
+
+    // --- Step 4: run `smelt build` from the temp workspace directory ---
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // --- Step 5: verify bronze_raw_events view has the expected row count ---
+    //
+    // smelt derives the DuckDB view/table name from the model's address segments
+    // joined with `_`.  The file `models/bronze/raw_events.sql` has segments
+    // `["bronze", "raw_events"]`, so the materialized name is `bronze_raw_events`.
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let view_count: i64 = conn2
+        .query_row("SELECT COUNT(*) FROM main.bronze_raw_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.bronze_raw_events: {e}"));
+
+    assert_eq!(
+        view_count, events_count,
+        "bronze_raw_events view row count ({view_count}) should equal raw.events row count ({events_count})"
     );
 }
