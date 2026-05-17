@@ -580,3 +580,127 @@ fn test_bronze_raw_events_view() {
         "bronze_raw_events view row count ({view_count}) should equal raw.events row count ({events_count})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 5: end-to-end build materializes silver/events_parsed
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.silver_events_parsed` has the same row
+/// count as `raw.events` and that the JSON-extracted `event_name` / `platform`
+/// / `url` columns are non-null for at least one row.
+///
+/// `models/silver/events_parsed.sql` address segments are `["silver",
+/// "events_parsed"]`, so smelt materializes the view as `silver_events_parsed`
+/// in the `main` schema — analogous to how `models/bronze/raw_events.sql`
+/// materializes as `bronze_raw_events`.
+#[test]
+fn test_end_to_end_smelt_build() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: clone the web_analytics project tree into tmp_path ---
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    // --- Step 2: run smelt-datagen with rewritten outputs into tmp_path ---
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 3: rewrite setup_sources.sql with absolute paths, execute ---
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+
+    // Capture total event row count for later comparison.
+    let events_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM raw.events", [], |row| row.get(0))
+        .expect("count raw.events");
+    assert!(events_count > 0, "raw.events has 0 rows before smelt build");
+
+    // Close connection so smelt build can open the file exclusively.
+    drop(conn);
+
+    // --- Step 4: run `smelt build` from the temp workspace directory ---
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // --- Step 5: verify silver_events_parsed row count matches events ---
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let silver_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_events_parsed",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_events_parsed: {e}"));
+
+    assert_eq!(
+        silver_count, events_count,
+        "silver_events_parsed row count ({silver_count}) should equal raw.events row count ({events_count})"
+    );
+
+    // --- Step 6: verify JSON-extracted fields are non-null in at least one row ---
+    // The silver model extracts event_name, platform, url from the JSON payload.
+    // We verify these columns are populated (i.e. the JSON decode worked end-to-end).
+    let (event_name, platform, url): (Option<String>, Option<String>, Option<String>) = conn2
+        .query_row(
+            "SELECT event_name, platform, url \
+             FROM main.silver_events_parsed \
+             WHERE event_name IS NOT NULL \
+               AND platform IS NOT NULL \
+               AND url IS NOT NULL \
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap_or_else(|e| {
+            panic!("failed to read event_name/platform/url from silver_events_parsed: {e}")
+        });
+
+    assert!(
+        event_name.is_some() && !event_name.as_deref().unwrap_or("").is_empty(),
+        "event_name should be non-null and non-empty, got: {event_name:?}"
+    );
+    assert!(
+        platform.is_some() && !platform.as_deref().unwrap_or("").is_empty(),
+        "platform should be non-null and non-empty, got: {platform:?}"
+    );
+    assert!(
+        url.is_some() && !url.as_deref().unwrap_or("").is_empty(),
+        "url should be non-null and non-empty, got: {url:?}"
+    );
+}

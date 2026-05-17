@@ -19,6 +19,11 @@ examples/*/target/
 examples/*/.smelt/
 examples/*/data/
 
+# Datagen output landing at the repo root when smelt-datagen is invoked
+# with a relative `output:` path from the workspace root (tests use temp
+# dirs; this catches ad-hoc CLI runs).
+/data/
+
 # UI
 ui/node_modules/
 ui/dist/
