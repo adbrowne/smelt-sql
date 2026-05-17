@@ -45,7 +45,7 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 | E1 | Records, `Map<K,V>`, YAML/JSON loaders | done | `docs/plans/20260509-meta-language-E1.md` | 2026-05-14 | b9df522 |
 | E2 | Multi-model production: `generates: models` frontmatter, `ModelDef` | done | `docs/plans/20260509-meta-language-E2.md` | 2026-05-16 | e2aa122 |
 | F | Polish: parameterised reducers, multi-arg lambdas, ternary | done | `docs/plans/20260509-meta-language-F.md` | 2026-05-17 | e1f62df0 |
-| G | LSP completeness sweep, docs-site rewrite, `/smelt-loop` tier-3 | done | `docs/plans/20260509-meta-language-G.md` | 2026-05-17 | — |
+| G | LSP completeness sweep, docs-site rewrite, `/smelt-loop` tier-3 | done | `docs/plans/20260509-meta-language-G.md` | 2026-05-17 | a77de490 |
 
 ## In scope
 
