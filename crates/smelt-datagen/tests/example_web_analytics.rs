@@ -678,7 +678,167 @@ fn test_parse_event_payload_function_compiles() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: end-to-end build materializes silver/events_parsed
+// Test 6: sessionize smelt function signature parses correctly
+// ---------------------------------------------------------------------------
+
+/// Verify the `sessionize` function file parses with no errors and declares
+/// the expected signature shape. Mirrors `test_parse_event_payload_function_compiles`
+/// but for the sessionize function, which uses window functions to assign a
+/// `session_seq` value partitioned by user/device and ordered by timestamp,
+/// with a session boundary on inactivity gap or platform change.
+///
+/// Checks: (i) no parse errors; (ii) exactly five parameters with the correct
+/// names and types; (iii) the function body is present.
+#[test]
+fn test_sessionize_function_compiles() {
+    use smelt_parser::ast::{File, Param, SmeltDefine};
+    use smelt_parser::parse;
+
+    let fn_path = repo_root().join("examples/web_analytics/functions/sessionize.sql");
+    let source = fs::read_to_string(&fn_path).unwrap_or_else(|e| panic!("read {fn_path:?}: {e}"));
+
+    let parsed = parse(&source);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors in sessionize.sql:\n{:?}",
+        parsed.errors
+    );
+
+    let file = File::cast(parsed.syntax()).expect("syntax root is a FILE");
+    let defines: Vec<SmeltDefine> = file.defines().collect();
+    assert_eq!(
+        defines.len(),
+        1,
+        "expected exactly one smelt.define in sessionize.sql"
+    );
+
+    let def = &defines[0];
+    assert_eq!(
+        def.name().as_deref(),
+        Some("sessionize"),
+        "function name should be sessionize"
+    );
+
+    // Five parameters: source, partition_col, ts_col, platform_col, gap
+    let params: Vec<Param> = def
+        .param_list()
+        .expect("function has a param list")
+        .params()
+        .collect();
+    assert_eq!(params.len(), 5, "expected exactly five parameters");
+
+    // Parameter 0: source: TableExpr
+    assert_eq!(
+        params[0].name().as_deref(),
+        Some("source"),
+        "first parameter name should be source"
+    );
+    let p0_type: String = params[0]
+        .type_ref()
+        .expect("param 0 has type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        p0_type, "TableExpr",
+        "first parameter type should be TableExpr"
+    );
+
+    // Parameter 1: partition_col: Expr<Integer>
+    assert_eq!(
+        params[1].name().as_deref(),
+        Some("partition_col"),
+        "second parameter name should be partition_col"
+    );
+    let p1_type: String = params[1]
+        .type_ref()
+        .expect("param 1 has type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        p1_type, "Expr<Integer>",
+        "second parameter type should be Expr<Integer>"
+    );
+
+    // Parameter 2: ts_col: Expr<Timestamp>
+    assert_eq!(
+        params[2].name().as_deref(),
+        Some("ts_col"),
+        "third parameter name should be ts_col"
+    );
+    let p2_type: String = params[2]
+        .type_ref()
+        .expect("param 2 has type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        p2_type, "Expr<Timestamp>",
+        "third parameter type should be Expr<Timestamp>"
+    );
+
+    // Parameter 3: platform_col: Expr<Text>
+    assert_eq!(
+        params[3].name().as_deref(),
+        Some("platform_col"),
+        "fourth parameter name should be platform_col"
+    );
+    let p3_type: String = params[3]
+        .type_ref()
+        .expect("param 3 has type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        p3_type, "Expr<Text>",
+        "fourth parameter type should be Expr<Text>"
+    );
+
+    // Parameter 4: gap: Expr<Interval> (with default)
+    assert_eq!(
+        params[4].name().as_deref(),
+        Some("gap"),
+        "fifth parameter name should be gap"
+    );
+    let p4_type: String = params[4]
+        .type_ref()
+        .expect("param 4 has type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        p4_type, "Expr<Interval>",
+        "fifth parameter type should be Expr<Interval>"
+    );
+    assert!(
+        params[4].default_value().is_some(),
+        "gap parameter must have a default value (INTERVAL '30 minutes')"
+    );
+
+    // Return type: TableExpr
+    let ret: String = def
+        .return_type()
+        .expect("function declares a return type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(ret, "TableExpr", "return type should be TableExpr");
+
+    assert!(
+        def.body().is_some(),
+        "function declaration must have a body"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: end-to-end build materializes silver/events_parsed
 // ---------------------------------------------------------------------------
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke

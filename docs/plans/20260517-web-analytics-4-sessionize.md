@@ -71,7 +71,7 @@ The overall plan's Goal items 2 and 4 require an incremental sessionization (30-
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-05-18 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
