@@ -82,7 +82,7 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 | 1 | done | `055786a5` | 2026-05-18 |
 | 2 | done | `aa053151` | 2026-05-18 |
 | 3 | done | `aaf6f696` | 2026-05-18 |
-| 4 | done | *(this commit)* | 2026-05-18 |
+| 4 | done | `84096dd1` | 2026-05-18 |
 | 5 | pending |  |  |
 
 ---
