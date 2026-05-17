@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778988758312,
+  "lastUpdate": 1778988760110,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -21866,6 +21866,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.25709139071525,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "eaf8435fc12c5fb43c7b094beebfd72f64982646",
+          "message": "docs-site: fix drawer-title specificity so smelt theme wins\n\nMaterial's .md-nav--primary .md-nav__title[for=__drawer] rule has\nspecificity (0,3,0); my previous .md-nav__title[for=__drawer] rule was\nonly (0,2,0), so the indigo background kept winning. Match the prefix\nso the ink-50 + Plex Serif treatment from the prior commit actually\napplies at the very top of the left sidebar.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:30:57+10:00",
+          "tree_id": "2052cc47ac86f38a1c8c97ddf134471c76fd4561",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/eaf8435fc12c5fb43c7b094beebfd72f64982646"
+        },
+        "date": 1778988759651,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.610417535333106,
             "unit": "MB/s"
           }
         ]
