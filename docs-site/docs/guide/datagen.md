@@ -369,7 +369,8 @@ Rules to know:
 - **`emit:`** (default `1`) is the number of pool entries one shape draw produces. `emit: 2` with `sticky: [device_id]` models a single device shared by two users.
 - **`sticky:`** lists fields that are drawn **once** per shape draw and shared across the emitted entries. Non-sticky fields are redrawn for each emitted entry.
 - **`pool_size`** is an absolute entry count, not a fraction. `--scale-factor` does not scale pools — the pool stays fixed and the larger row count just samples it more times, which is usually what you want for "vary scale without changing the user/device universe."
-- **Field type uniformity.** Every shape's `fields:` must declare the same keys, and the generator under a given key must produce the same Arrow type across shapes. A `linked_choice` column's nullability is `nullable` iff the referenced field is wrapped in `optional` in any shape.
+- **`seed:`** (optional) overrides the pool's RNG seed. Omitting it lets the toolchain derive a deterministic offset from the dataset seed, so the pool is still reproducible across runs without an explicit `seed:`. Pool seeds are isolated from row seeds, so changing `num_rows` never perturbs pool contents.
+- **Field type uniformity.** Every shape's `fields:` must declare the same keys, and the generator under a given key must produce the same Arrow type across shapes. A `linked_choice` column's nullability is `nullable` iff the **first shape's** field generator is wrapped in `optional` — the first shape is the schema-defining shape.
 - **Forbidden inside shapes.** `linked_choice` cannot itself be a field generator inside `shapes[].fields:` — pools cannot reference other pools.
 - **Row-level only.** `linked_choice` columns belong under the dataset's `columns:`, not under `entity.columns:`. Pool entries are drawn per row, not per entity.
 
