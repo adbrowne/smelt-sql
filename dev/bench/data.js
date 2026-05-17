@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778987515148,
+  "lastUpdate": 1778987517607,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -21497,6 +21497,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.68454623695368,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5cf5dc61f9cefce3489da22f191447e32144b377",
+          "message": "docs-site: vibrant syntax highlighting for dark code blocks\n\nOverride Material's --md-code-hl-* token colors so identifiers, YAML\nkeys, and SQL select-list columns stand out on the ink-900 code\nbackground. Adds distinct colors for YAML tags/attributes, function\ncalls, type names, and language constants — Material lumps these under\na single \"name\" colour by default.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:10:04+10:00",
+          "tree_id": "c58b0adaa8f25c31092d5a43022e6fccec46fa74",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5cf5dc61f9cefce3489da22f191447e32144b377"
+        },
+        "date": 1778987516831,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.79765432022468,
             "unit": "MB/s"
           }
         ]
