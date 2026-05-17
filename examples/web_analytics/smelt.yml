@@ -1,0 +1,12 @@
+name: web_analytics
+version: 1
+paths:
+  - models
+  - functions
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+default_materialization: view
+unstable_schema: true

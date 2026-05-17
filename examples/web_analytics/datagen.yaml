@@ -1,0 +1,139 @@
+seed: 42
+scale_factor: 1.0
+
+datasets:
+  # --- Dimension tables (listed first for FK resolution) ---
+
+  - name: users
+    output: data/users
+    num_rows: 50000
+    columns:
+      - name: user_id
+        generator: { type: sequential_id }
+      # signup_date ends 90 days before the event window start (2026-03-19)
+      # so every user is established before they appear in events.
+      - name: signup_date
+        generator: { type: date, start: "2025-06-01", end: "2025-12-19" }
+
+  - name: devices
+    output: data/devices
+    num_rows: 150000
+    columns:
+      - name: device_id
+        generator: { type: sequential_id }
+      - name: device_type
+        generator:
+          type: weighted_choice
+          values:
+            mobile: 0.55
+            desktop: 0.35
+            tablet: 0.10
+      - name: first_seen_date
+        generator: { type: date, start: "2025-06-01", end: "2026-03-18" }
+
+  # --- Fact table ---
+
+  - name: events
+    output: data/events
+    num_rows: 1000000
+    partition:
+      column: event_date
+      start: "2026-03-19"
+      days: 60
+
+    # The device_user pool pre-computes (device_id, user_id) tuples with
+    # realistic co-occurrence structure.  The pool seed (1337) is explicit so
+    # that pool construction is isolated from the row-level seed (42) and from
+    # scale-factor changes — the same device/user universe is produced
+    # regardless of --scale-factor.
+    #
+    # The anonymous shape is declared first because the Arrow schema for
+    # linked_choice columns is derived from the first shape's field generators
+    # (build_schema resolves LinkedChoice via shapes[0].fields).  Placing the
+    # Optional<FK> anonymous shape first ensures user_id is emitted as a
+    # nullable Int32 column.  Non-anonymous shapes use bare foreign_key (no
+    # optional wrapper): the Arrow writer accepts GenericValue::Int into a
+    # nullable Int32 column, so the schema invariant "modulo Optional wrapping"
+    # (spec §Constraints invariant 7) is satisfied at the Arrow layer.
+    linked_pools:
+      - name: device_user
+        pool_size: 100000
+        seed: 1337
+        shapes:
+          # 25 % — anonymous: device with no logged-in user (user_id always null)
+          # prob: 0.0 → optional fires null with probability 1 - 0.0 = 1.0
+          # Declared first so the Arrow schema resolves user_id as nullable Int32.
+          - weight: 0.25
+            fields:
+              device_id: { type: foreign_key, dataset: devices }
+              user_id:
+                type: optional
+                prob: 0.0
+                inner: { type: foreign_key, dataset: users }
+
+          # 60 % — single-owner: one device belongs to exactly one user
+          - weight: 0.60
+            fields:
+              device_id: { type: foreign_key, dataset: devices }
+              user_id: { type: foreign_key, dataset: users }
+
+          # 10 % — shared-device: same device_id, different user_ids (e.g. shared tablet)
+          - weight: 0.10
+            emit: 3
+            sticky: [device_id]
+            fields:
+              device_id: { type: foreign_key, dataset: devices }
+              user_id: { type: foreign_key, dataset: users }
+
+          # 5 % — multi-device user: same user_id, different device_ids (e.g. phone + laptop)
+          - weight: 0.05
+            emit: 3
+            sticky: [user_id]
+            fields:
+              device_id: { type: foreign_key, dataset: devices }
+              user_id: { type: foreign_key, dataset: users }
+
+    columns:
+      - name: event_id
+        generator: { type: sequential_id }
+
+      # device_id and user_id are drawn from the same pool tuple per row so
+      # their (device_id, user_id) pair is always a valid pool entry.
+      - name: device_id
+        generator: { type: linked_choice, pool: device_user, field: device_id }
+      - name: user_id
+        generator: { type: linked_choice, pool: device_user, field: user_id }
+
+      # Sub-day offset in seconds [0, 86399].  The silver model composes the
+      # full timestamp as event_date + (seconds_in_day * INTERVAL 1 SECOND).
+      - name: seconds_in_day
+        generator: { type: uniform_int, min: 0, max: 86399 }
+
+      # JSON-encoded event payload.  Silver extracts these fields into a typed
+      # struct via the parse_event_payload smelt function.
+      - name: payload
+        generator:
+          type: json_object
+          fields:
+            event_name:
+              type: weighted_choice
+              values:
+                page_view: 0.50
+                click: 0.30
+                purchase: 0.05
+                scroll: 0.10
+                error: 0.05
+            platform:
+              type: weighted_choice
+              values:
+                web: 0.55
+                ios: 0.25
+                android: 0.20
+            url:
+              type: weighted_choice
+              values:
+                "https://example.com/home": 0.40
+                "https://example.com/product": 0.30
+                "https://example.com/cart": 0.15
+                "https://example.com/checkout": 0.10
+                "https://example.com/account": 0.05

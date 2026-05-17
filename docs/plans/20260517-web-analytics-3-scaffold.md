@@ -79,7 +79,7 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 
 | Phase | Status | Commit | Date |
 |-------|--------|--------|------|
-| 1 | pending |  |  |
+| 1 | done | *(this commit)* | 2026-05-18 |
 | 2 | pending |  |  |
 | 3 | pending |  |  |
 | 4 | pending |  |  |
@@ -502,6 +502,17 @@ flip lands as: `chore(web-analytics-3): mark Phase 3 done in overall plan`.
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+**Phase 1: pool-snapshot test replaces row-level null-fraction check (expert-review fix).**
+The first implementer pass wrote `test_datagen_joint_distribution_within_tolerance`, which checked null-fraction ≈ 25% ± 13pp in event rows. The expected value of 25% was wrong math: with weights [0.25, 0.60, 0.10, 0.05] and emits [1, 1, 3, 3], the average emit per draw is 1.30, so the anonymous pool-entry fraction is 0.25/1.30 ≈ 19.2% (not 25%). The 25% figure conflates draw weight with pool-entry fraction when shapes have different emit counts. The old test passed vacuously because 19.2% is within [25−13, 25+13].
+
+Replaced with `test_pool_snapshot_anonymous_fraction_and_determinism`, which calls `LinkedPool::new` directly with seed 1337 (the explicit pool seed from `datagen.yaml`), counts `GenericValue::Null` entries in the `user_id` field, and asserts the fraction is 19.2% ± 3pp. A second pool build with the same seed validates the determinism guarantee. Per-category classification (single-owner vs shared-device vs multi-device-user) is not feasible from pool entries — the labels are not stored — so only the anonymous fraction is verified here; full category breakdown lives in the linked_choice plan's own tests.
+
+**Phase 1: `datagen.yaml` anonymous shape declared first (schema ordering constraint).**
+The spec says the Arrow schema for `linked_choice` columns is derived from the **first shape**'s field generators. The plan's shape ordering (60/25/10/5) placed the single-owner shape first, making `user_id` NOT NULL in the Arrow schema — meaning null values from the anonymous shape were silently coerced to `Int(0)` by the Parquet builder. Fix: the anonymous shape (which has `user_id: optional { prob: 0.0 }`) was moved to first position so the schema resolves `user_id` as OPTIONAL Int32. Shape declaration order is now 25/60/10/5 to satisfy the schema constraint. Weights in the YAML comments document the intended 60/25/10/5 distribution.
+
+**Phase 1: non-anonymous shapes use bare `foreign_key` (expert-review fix).**
+The first implementer pass wrapped non-anonymous shapes' `user_id` in `optional { prob: 1.0, inner: foreign_key }` to keep types "uniform across shapes". This is unnecessary: `build_schema` derives the Arrow type only from `shapes[0]` (spec invariant — the first shape is the type oracle), and the Parquet writer accepts `GenericValue::Int` into a nullable Int32 column without wrapping. Spec §Constraints invariant 7 says types must agree "modulo Optional wrapping", explicitly tolerating the mix. Fix: non-anonymous shapes use bare `{ type: foreign_key, dataset: users }`. The `datagen.yaml` inline comment explains the schema-ordering constraint and why the bare FK is valid at the Arrow layer.
 
 ---
 
