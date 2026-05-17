@@ -273,6 +273,51 @@ generator:
     values: [Defective, Wrong Item, Changed Mind]
 ```
 
+### Composite / structured
+
+#### `json_object`
+
+Emits a JSON-encoded object as a single `Utf8` column. Each field's value is produced by an inner sub-generator; the resulting Parquet column holds strings like `{"event_type":"page_view","logged_in":true,"referrer":null}` — one self-contained JSON object per row.
+
+This is the right shape when you want to model a real-world event-payload column: a single `Utf8` column the downstream SQL parses with `json_extract`. The example below matches the kind of `page_events.payload` you'd see in a Snowplow-style ingestion pipeline.
+
+```yaml
+- name: payload
+  generator:
+    type: json_object
+    fields:
+      event_type:
+        type: weighted_choice
+        values:
+          page_view: 0.60
+          click: 0.30
+          purchase: 0.10
+      page_url:
+        type: string_pattern
+        template: "https://example.com/p/{uniform_int:1-1000}"
+      session_seconds:
+        type: uniform_int
+        min: 0
+        max: 3600
+      logged_in:
+        type: bool
+        prob: 0.7
+      referrer:
+        type: optional
+        prob: 0.6
+        inner:
+          type: one_of
+          values: [google, direct, email]
+```
+
+Rules to know:
+
+- **Fields are always present.** When `optional` fires `null`, the field is emitted as `"<key>": null` — not omitted. Downstream `json_extract(payload, '$.referrer')` returns SQL `NULL` for both cases (missing path and explicit JSON null in DuckDB), so you don't have to disambiguate them in models.
+- **Field order is preserved.** The YAML field declaration order is the JSON output order. Reordering fields changes the seed-dependent values too, because sub-generators are invoked in declaration order.
+- **Nesting works.** A field's generator may itself be `type: json_object`; the nested object is embedded as a JSON value, not double-encoded.
+- **No arrays.** v1 does not have a `json_array` generator. For array-valued fields, either pre-shape your event schema (e.g. `item_count` + numbered columns) or post-process the JSON in a downstream model.
+- **Sticky payloads.** A `json_object` placed under `entity.columns` is generated once per entity and reused — useful for per-user feature flags or settings that don't change across an entity's events.
+
 ## Partitioning
 
 Add a `partition` block to create Hive-style date-partitioned output. Each day gets its own directory with a `data.parquet` file, and rows are distributed evenly across days.

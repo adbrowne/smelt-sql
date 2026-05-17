@@ -1,7 +1,7 @@
 ---
 feature: datagen
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-17
 owners: [andrew]
 ---
 
@@ -91,6 +91,40 @@ datasets:
 | `bool` | `prob: <float>` | Boolean; probability `prob` of `true` |
 | `optional` | `prob: <float>`, `inner: <generator>` | Produces `null` with probability `1 - prob`; otherwise delegates to `inner` |
 
+**Composite / structured:**
+
+| Type | Parameters | Description |
+|------|------------|-------------|
+| `json_object` | `fields: { <key>: <generator>, ... }` | Emits a JSON-encoded object as a single `Utf8` column. Each inner sub-generator produces one field; the resulting value is `{"<key1>": <value1>, ...}` |
+
+Example:
+
+```yaml
+- name: payload
+  generator:
+    type: json_object
+    fields:
+      event_type:
+        type: one_of
+        values: [page_view, click, purchase]
+      page_url:
+        type: string_pattern
+        template: "https://example.com/p/{uniform_int:1-1000}"
+      session_seconds:
+        type: uniform_int
+        min: 0
+        max: 3600
+      logged_in:
+        type: bool
+        prob: 0.7
+      referrer:
+        type: optional
+        prob: 0.6
+        inner:
+          type: one_of
+          values: [google, direct, email]
+```
+
 ### Output format
 
 Each dataset writes Parquet files:
@@ -130,6 +164,24 @@ When `partition:` is configured:
 - The partition column is a row-level column of type `DATE` string.
 - Sequential IDs and foreign keys are assigned globally across all partitions (not restarted per partition).
 
+### `json_object` encoding
+
+The `json_object` generator emits one `Utf8` column whose every value is a syntactically valid JSON object:
+
+- The output column's Arrow type is `Utf8`, never a Parquet `Struct`. The generator owns serialization; downstream models parse the column with JSON functions (`json_extract`, `read_json_auto`, etc.).
+- **Field iteration order**. The `fields:` mapping is parsed into an order-preserving map; the emitted JSON object lists fields in YAML declaration order. Two runs with identical seed and config produce byte-identical JSON strings, including key order.
+- **RNG consumption order**. Inner sub-generators are invoked in the same order, so reordering fields changes the seed-dependent values they observe. Reordering fields in the YAML is therefore a content change, not a no-op.
+- **Per-type encoding rules**. Each `GenericValue` produced by an inner sub-generator is encoded as follows:
+  - `Int`, `Float` — unquoted JSON number. `Float` uses Rust's standard `f64` `Display` (no scientific notation unless required); `NaN` and `Inf` are unrepresentable and must not be produced by sub-generators (callers' responsibility — `log_normal` etc. clamp to finite ranges).
+  - `Bool` — unquoted JSON `true` / `false`.
+  - `Str` — JSON-escaped string in double quotes. The escaper handles `"`, `\`, `\b`, `\f`, `\n`, `\r`, `\t`, and any control character `< 0x20` via the `\uXXXX` form. Non-ASCII characters are passed through unescaped (the output is UTF-8).
+  - `Null` (from an `optional` sub-generator that fired) — unquoted JSON `null`. **The field is always present** in the object; the value is `null`. A `json_object` does not omit fields.
+- **Nesting**. An inner sub-generator may itself be `json_object`; the nested object is serialised as an embedded JSON object value (no double-encoding). Nesting depth is not formally bounded but is in practice limited by recursion depth in `apply_spec`.
+- **Entity vs row scope**. A `json_object` declared under `entity.columns` is generated once per entity (sticky JSON payload across that entity's rows); under the dataset's `columns` it is generated independently per row.
+- **`fields:` must be non-empty.** An empty `fields:` map is a configuration error (caught at deserialization). The minimal valid `json_object` has one field.
+
+The generator participates in the same determinism guarantee as the rest of `smelt-datagen` (§Determinism above): same seed + same config + same binary version → byte-identical Parquet output.
+
 ## Design
 
 **Parquet output, not CSV.** Parquet preserves column types exactly (no string-coercion ambiguity), is natively readable by DuckDB and Spark, and compresses large datasets efficiently. The trade-off is that Parquet files are binary and not human-readable — for small fixtures, CSV seeds or inline YAML test data are more appropriate. CSV was rejected because its type information is lossy: a `DATE` column round-trips through CSV as a `VARCHAR` unless the reader applies inference rules that may disagree with smelt's. Generating large CSV fixtures that feed type-sensitive downstream models is therefore fragile.
@@ -142,6 +194,12 @@ When `partition:` is configured:
 
 **`geometric` defaults to `min: 1`.** The raw geometric distribution starts at 0, but count data (quantities, page views, purchase counts) is almost always positive. Defaulting to `min: 1` prevents callers from accidentally generating zero-count rows. Users who need the zero case must explicitly set `min: 0`.
 
+**`json_object` emits a `Utf8` column, not a Parquet `Struct`.** Real production event pipelines (Snowplow, Cloudflare logs, Segment, internal stream platforms) ship event payloads as JSON-encoded strings in a single column, and downstream models parse them with `json_extract`/`json_value`. Generating a `Struct` column would skip the parsing step that the resulting smelt example is meant to exercise — and would push the JSON-shape concern into the Arrow schema layer, where evolving the payload across versions is mechanically harder. A `Utf8` column also lets a single dataset hold heterogeneous payload shapes (different event types with different fields) under one schema, which is the realistic case. The cost — losing per-field type checking at write time — is acceptable because the model layer recovers it via `json_extract(... AS TYPE)`. A native `Struct` variant remains available as future work (see Known Divergences).
+
+**`json_object` fields are an ordered map, not a list of `{name, generator}` pairs.** The YAML reads as `event_type: { type: one_of, ... }` — the field name is the map key. This matches how engineers think about a payload schema (a record of named fields, not a sequence of column-configs) and is shorter than the alternative `fields: [ - name: event_type, generator: ... ]`. Iteration order is preserved via `serde_yaml`'s tagged-map deserialisation (`IndexMap`-style ordering), giving deterministic JSON output without a separate `order:` field.
+
+**`json_object` always emits the field, even when `optional` fires `null`.** An object with absent fields would force every downstream `json_extract` callsite to handle both "field missing" and "field present, value null". Always emitting the key (with `null` for optional sub-generators) keeps the consuming SQL simpler: the existence test collapses to a `NOT NULL` check on the extracted value. Models that genuinely care about presence-vs-null can use `optional` at the outer `json_object` boundary (entire payload optional) rather than inside.
+
 ## Constraints & Invariants
 
 1. **Foreign key datasets must precede referencing datasets.** Processing order is config order; forward references are an error at generation time.
@@ -152,6 +210,9 @@ When `partition:` is configured:
 
 ## Known Divergences / Open Questions
 
+- **`json_object` has no array / list field type.** A field whose JSON value is an array (e.g. an `items: [...]` cart payload) cannot be expressed in v1. A `json_array` companion generator is the planned extension; until then, callers needing array-valued fields must shape them as count-prefixed scalars (`item_count`, `item_0_sku`, etc.) or post-process the JSON in a model.
+- **`json_object` produces a `Utf8` column, not a Parquet `Struct`.** This is the documented design choice (see §Design), but engines that prefer typed nested data (Spark, Iceberg readers) lose the schema. A native `parquet_struct` companion generator is an open question — tracked alongside the `json_array` extension.
+- **`json_object` floats use Rust `f64` `Display`.** Cross-locale formatting (e.g. comma decimal separators) is not a concern because Rust's `f64` `Display` is locale-independent, but the exact textual form (e.g. `1.0` vs `1`, when an integer-valued float is produced by a non-integer sub-generator) is not pinned across smelt-datagen versions — the determinism guarantee covers a single binary version.
 - **`string_pattern` determinism with `{uuid}`.** UUID generation inside `string_pattern` uses the same RNG stream as other generators; the exact UUID output across smelt-datagen versions is not guaranteed stable.
 - **`log_normal` parameter semantics.** The `median` and `sigma` parameters are documented at the distribution level but the exact formula (e.g., whether sigma is the log-space standard deviation) is not stated here. See the generator source for the exact implementation.
 - **No `smelt-datagen` integration in `smelt build`.** `smelt-datagen` is a standalone CLI; it does not run as part of `smelt build`. The user must run it manually or as a separate CI step. Integration is not planned but is a known workflow gap.
