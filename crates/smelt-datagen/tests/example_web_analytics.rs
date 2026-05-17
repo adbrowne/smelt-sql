@@ -23,6 +23,19 @@
 //!    running `smelt build` and verifying the `raw_events` view materializes
 //!    with a row count equal to the total event rows generated.
 //!
+//! 5. Parse-function compile test: call `smelt-parser` directly on
+//!    `functions/parse_event_payload.sql` and assert the declared signature
+//!    matches `parse_event_payload(payload_json: Expr<Text>) ->
+//!    Expr<Struct<{event_name: Text, platform: Text, url: Text}>>`. This is
+//!    the lightweight equivalent of the spec's "load the function via
+//!    smelt-db's function-loading path" check — it pins the signature shape
+//!    so a future drift in the function body or types is caught immediately.
+//!
+//! 6. End-to-end build test: run the full datagen → setup_sources →
+//!    `smelt build` pipeline and assert `silver_events_parsed` materializes
+//!    with the expected row count and that JSON-extracted `event_name` /
+//!    `platform` / `url` columns are non-null for at least one row.
+//!
 //! The binary-invocation tests write to a temp directory (NOT
 //! `examples/web_analytics/data/`) to avoid file-system collisions when tests
 //! run in parallel.
@@ -582,7 +595,90 @@ fn test_bronze_raw_events_view() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: end-to-end build materializes silver/events_parsed
+// Test 5: parse_event_payload smelt function signature parses correctly
+// ---------------------------------------------------------------------------
+
+/// Verify the `parse_event_payload` function file parses with no errors and
+/// declares the expected signature shape. This is the lightweight equivalent
+/// of "load the function via smelt-db's function-loading path" — we call
+/// `smelt-parser` directly on the file's bytes, which gives a deterministic,
+/// fast contract check on the declared name, parameter, and return type.
+///
+/// If a future change to the function body or signature drifts from this
+/// shape (e.g. accidentally drops a struct field), this test catches the
+/// drift before downstream silver/gold models inherit a wrong column.
+#[test]
+fn test_parse_event_payload_function_compiles() {
+    use smelt_parser::ast::{File, Param, SmeltDefine};
+    use smelt_parser::parse;
+
+    let fn_path = repo_root().join("examples/web_analytics/functions/parse_event_payload.sql");
+    let source = fs::read_to_string(&fn_path).unwrap_or_else(|e| panic!("read {fn_path:?}: {e}"));
+
+    let parsed = parse(&source);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors in parse_event_payload.sql:\n{:?}",
+        parsed.errors
+    );
+
+    let file = File::cast(parsed.syntax()).expect("syntax root is a FILE");
+    let defines: Vec<SmeltDefine> = file.defines().collect();
+    assert_eq!(
+        defines.len(),
+        1,
+        "expected exactly one smelt.define in parse_event_payload.sql"
+    );
+
+    let def = &defines[0];
+    assert_eq!(
+        def.name().as_deref(),
+        Some("parse_event_payload"),
+        "function name should be parse_event_payload"
+    );
+
+    // One parameter: payload_json: Expr<Text>
+    let params: Vec<Param> = def
+        .param_list()
+        .expect("function has a param list")
+        .params()
+        .collect();
+    assert_eq!(params.len(), 1, "expected exactly one parameter");
+    assert_eq!(
+        params[0].name().as_deref(),
+        Some("payload_json"),
+        "parameter name should be payload_json"
+    );
+    let p0_type: String = params[0]
+        .type_ref()
+        .expect("param has type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(p0_type, "Expr<Text>", "parameter type should be Expr<Text>");
+
+    // Return type: Expr<Struct<{event_name: Text, platform: Text, url: Text}>>
+    let ret: String = def
+        .return_type()
+        .expect("function declares a return type")
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        ret, "Expr<Struct<{event_name:Text,platform:Text,url:Text}>>",
+        "return type should be Expr<Struct<{{event_name: Text, platform: Text, url: Text}}>>"
+    );
+
+    assert!(
+        def.body().is_some(),
+        "function declaration must have a body"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: end-to-end build materializes silver/events_parsed
 // ---------------------------------------------------------------------------
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke

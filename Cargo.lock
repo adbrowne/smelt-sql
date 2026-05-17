@@ -4161,6 +4161,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_yaml",
+ "smelt-parser",
  "tempfile",
  "uuid",
 ]
