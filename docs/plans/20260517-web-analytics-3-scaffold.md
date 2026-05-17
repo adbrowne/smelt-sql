@@ -79,7 +79,7 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 
 | Phase | Status | Commit | Date |
 |-------|--------|--------|------|
-| 1 | done | *(this commit)* | 2026-05-18 |
+| 1 | done | `055786a5` | 2026-05-18 |
 | 2 | pending |  |  |
 | 3 | pending |  |  |
 | 4 | pending |  |  |
