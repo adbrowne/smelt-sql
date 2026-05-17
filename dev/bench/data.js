@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778988549859,
+  "lastUpdate": 1778988758312,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16637,6 +16637,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.817232,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "eaf8435fc12c5fb43c7b094beebfd72f64982646",
+          "message": "docs-site: fix drawer-title specificity so smelt theme wins\n\nMaterial's .md-nav--primary .md-nav__title[for=__drawer] rule has\nspecificity (0,3,0); my previous .md-nav__title[for=__drawer] rule was\nonly (0,2,0), so the indigo background kept winning. Match the prefix\nso the ink-50 + Plex Serif treatment from the prior commit actually\napplies at the very top of the left sidebar.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:30:57+10:00",
+          "tree_id": "2052cc47ac86f38a1c8c97ddf134471c76fd4561",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/eaf8435fc12c5fb43c7b094beebfd72f64982646"
+        },
+        "date": 1778988757635,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.242653,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.825477,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6601480000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.418218,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002915,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 910.012122,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.5702730000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.351896,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.301663,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.7587619999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 932.216345,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.45087,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.22179,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.711151,
             "unit": "ms"
           }
         ]
