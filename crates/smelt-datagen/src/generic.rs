@@ -18,6 +18,13 @@ pub enum GenericValue {
     Float(f64),
     Bool(bool),
     Null,
+    /// A pre-encoded JSON value (currently always a JSON object string,
+    /// produced by `JsonObject` generators). Stored separately from `Str`
+    /// so it can be embedded into a containing `json_object` without being
+    /// re-escaped as a string literal. From the Parquet writer's
+    /// perspective `JsonRaw` is interchangeable with `Str` (both produce
+    /// a `Utf8` column).
+    JsonRaw(String),
 }
 
 /// A pool of pre-generated entity rows (for sticky attributes).
@@ -198,6 +205,75 @@ pub fn apply_spec(
         GeneratorSpec::StringPattern { template } => {
             let result = apply_string_pattern(rng, template, row_index);
             GenericValue::Str(result)
+        }
+        GeneratorSpec::JsonObject { fields } => {
+            let mut json = String::from("{");
+            let mut first = true;
+            for (key, inner_spec) in fields {
+                if !first {
+                    json.push(',');
+                }
+                first = false;
+                json.push('"');
+                escape_json_string(key, &mut json);
+                json.push_str("\":");
+                let inner_value = apply_spec(rng, inner_spec, row_index, fk_counts);
+                append_generic_value_as_json(&inner_value, &mut json);
+            }
+            json.push('}');
+            GenericValue::JsonRaw(json)
+        }
+    }
+}
+
+/// Encode a [`GenericValue`] in JSON form, appending to `out`.
+///
+/// Per `docs/specs/datagen.md` §`json_object` encoding:
+/// - `Int` / `Float` — unquoted JSON number.
+/// - `Bool` — unquoted `true` / `false`.
+/// - `Str` — JSON-escaped double-quoted string.
+/// - `JsonRaw` — embedded as-is (nested `JsonObject` output).
+/// - `Null` — unquoted `null` (an `optional` sub-generator that fired).
+fn append_generic_value_as_json(value: &GenericValue, out: &mut String) {
+    use std::fmt::Write;
+    match value {
+        GenericValue::Int(i) => {
+            let _ = write!(out, "{}", i);
+        }
+        GenericValue::Float(f) => {
+            let _ = write!(out, "{}", f);
+        }
+        GenericValue::Bool(true) => out.push_str("true"),
+        GenericValue::Bool(false) => out.push_str("false"),
+        GenericValue::Null => out.push_str("null"),
+        GenericValue::JsonRaw(s) => out.push_str(s),
+        GenericValue::Str(s) => {
+            out.push('"');
+            escape_json_string(s, out);
+            out.push('"');
+        }
+    }
+}
+
+/// JSON-escape `s` and append to `out` (no surrounding quotes — the caller
+/// owns those). Covers the JSON-standard escape set: `"`, `\`, backspace,
+/// formfeed, newline, carriage return, tab. Other control characters below
+/// 0x20 are emitted as `\u00XX`. UTF-8 above 0x7F passes through unescaped.
+fn escape_json_string(s: &str, out: &mut String) {
+    use std::fmt::Write;
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
         }
     }
 }
@@ -402,5 +478,214 @@ mod tests {
             saw_zero,
             "explicit min: 0 must allow zeros (none in 10k samples — default leaked through?)",
         );
+    }
+
+    /// Field iteration order matches YAML declaration order, and the emitted
+    /// JSON string is byte-exact (no whitespace, no key reordering).
+    #[test]
+    fn test_json_object_emits_object_with_field_order() {
+        let yaml = r#"
+type: json_object
+fields:
+  a: { type: constant, value: 1 }
+  b: { type: constant, value: "x" }
+  c: { type: bool, prob: 0.0 }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let fk = FkCounts::new();
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+            panic!("expected JsonRaw");
+        };
+        assert_eq!(json, r#"{"a":1,"b":"x","c":false}"#);
+    }
+
+    /// `optional { prob: 0.0, inner: ... }` always fires the null branch, and
+    /// the field is still present in the emitted object as `"<key>": null`.
+    /// This is the spec's "always-emit-the-field" rule.
+    #[test]
+    fn test_json_object_optional_field_emits_null_not_omitted() {
+        let yaml = r#"
+type: json_object
+fields:
+  always_null:
+    type: optional
+    prob: 0.0
+    inner: { type: constant, value: "v" }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let fk = FkCounts::new();
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+            panic!("expected JsonRaw");
+        };
+        assert_eq!(json, r#"{"always_null":null}"#);
+    }
+
+    /// A `json_object` field whose generator is itself `json_object` produces
+    /// a nested object value, not a string-of-string.
+    #[test]
+    fn test_json_object_nested() {
+        let yaml = r#"
+type: json_object
+fields:
+  outer:
+    type: json_object
+    fields:
+      inner: { type: constant, value: 1 }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let fk = FkCounts::new();
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+            panic!("expected JsonRaw");
+        };
+        assert_eq!(json, r#"{"outer":{"inner":1}}"#);
+    }
+
+    /// `optional { inner: json_object }`, when the optional fires, produces a
+    /// nested object value — not a string-encoded one. Regression test for
+    /// the embed-raw-vs-escape-string distinction.
+    #[test]
+    fn test_json_object_optional_inner_json_object_embeds_raw() {
+        let yaml = r#"
+type: json_object
+fields:
+  meta:
+    type: optional
+    prob: 1.0
+    inner:
+      type: json_object
+      fields:
+        kind: { type: constant, value: "x" }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let fk = FkCounts::new();
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+            panic!("expected JsonRaw");
+        };
+        assert_eq!(json, r#"{"meta":{"kind":"x"}}"#);
+    }
+
+    /// JSON-escape coverage: `"`, `\`, `\n`, `\r`, `\t`, `\b`, `\f`, and
+    /// control characters `< 0x20` as `\uXXXX`. Non-ASCII passes through.
+    #[test]
+    fn test_json_object_string_escapes() {
+        let mut buf = String::new();
+        escape_json_string("\"\\\n\r\t\x08\x0c", &mut buf);
+        assert_eq!(buf, r#"\"\\\n\r\t\b\f"#);
+
+        let mut buf = String::new();
+        escape_json_string("\x01\x1f", &mut buf);
+        assert_eq!(buf, r"\u0001\u001f");
+
+        let mut buf = String::new();
+        escape_json_string("café — 日本語", &mut buf);
+        assert_eq!(buf, "café — 日本語");
+    }
+
+    /// Same seed + same config + same row index → byte-identical JSON.
+    #[test]
+    fn test_json_object_deterministic() {
+        let yaml = r#"
+type: json_object
+fields:
+  a: { type: uniform_int, min: 0, max: 100 }
+  b: { type: bool, prob: 0.5 }
+  c:
+    type: optional
+    prob: 0.5
+    inner: { type: one_of, values: [x, y, z] }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let fk = FkCounts::new();
+
+        let mut rng_a = ChaCha8Rng::seed_from_u64(123);
+        let mut rng_b = ChaCha8Rng::seed_from_u64(123);
+        for i in 0..50 {
+            let GenericValue::JsonRaw(a) = apply_spec(&mut rng_a, &spec, i, &fk) else {
+                unreachable!()
+            };
+            let GenericValue::JsonRaw(b) = apply_spec(&mut rng_b, &spec, i, &fk) else {
+                unreachable!()
+            };
+            assert_eq!(a, b, "deterministic mismatch at row {i}");
+        }
+    }
+
+    /// Swapping field positions changes the emitted values, proving
+    /// sub-generators consume RNG state in YAML declaration order rather
+    /// than some unspecified order.
+    #[test]
+    fn test_json_object_rng_consumption_order() {
+        let yaml_ab = r#"
+type: json_object
+fields:
+  a: { type: uniform_int, min: 0, max: 1000 }
+  b: { type: uniform_int, min: 0, max: 1000 }
+"#;
+        let yaml_ba = r#"
+type: json_object
+fields:
+  b: { type: uniform_int, min: 0, max: 1000 }
+  a: { type: uniform_int, min: 0, max: 1000 }
+"#;
+        let spec_ab: GeneratorSpec = serde_yaml::from_str(yaml_ab).unwrap();
+        let spec_ba: GeneratorSpec = serde_yaml::from_str(yaml_ba).unwrap();
+        let fk = FkCounts::new();
+        let mut rng_ab = ChaCha8Rng::seed_from_u64(99);
+        let mut rng_ba = ChaCha8Rng::seed_from_u64(99);
+        let GenericValue::JsonRaw(ab) = apply_spec(&mut rng_ab, &spec_ab, 0, &fk) else {
+            unreachable!()
+        };
+        let GenericValue::JsonRaw(ba) = apply_spec(&mut rng_ba, &spec_ba, 0, &fk) else {
+            unreachable!()
+        };
+        // Different field order → different field-to-value assignment.
+        assert_ne!(ab, ba);
+    }
+
+    /// `Float` sub-generators emit unquoted JSON numbers.
+    #[test]
+    fn test_json_object_float_unquoted() {
+        let yaml = r#"
+type: json_object
+fields:
+  ratio: { type: uniform_float, min: 0.1, max: 0.9 }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let fk = FkCounts::new();
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+            unreachable!()
+        };
+        // The float lives between the `:` and `}`; assert it's not quoted.
+        let value_part = &json["{\"ratio\":".len()..json.len() - 1];
+        assert!(
+            !value_part.starts_with('"'),
+            "float value must be unquoted; got {json}"
+        );
+        let parsed: f64 = value_part.parse().expect("float value parses");
+        assert!((0.1..0.9).contains(&parsed));
+    }
+
+    /// Keys with JSON-special characters are properly escaped on the key
+    /// side as well as the value side. (Unusual in practice, but possible
+    /// via the YAML quoted-key syntax.)
+    #[test]
+    fn test_json_object_key_escapes() {
+        let yaml = r#"
+type: json_object
+fields:
+  "weird\"key": { type: constant, value: 1 }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let fk = FkCounts::new();
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+            unreachable!()
+        };
+        assert_eq!(json, r#"{"weird\"key":1}"#);
     }
 }

@@ -310,7 +310,7 @@ fn build_column(
             let mut builder = StringBuilder::new();
             for row in rows {
                 match &row[col_idx].1 {
-                    GenericValue::Str(s) => builder.append_value(s),
+                    GenericValue::Str(s) | GenericValue::JsonRaw(s) => builder.append_value(s),
                     GenericValue::Null if nullable => builder.append_null(),
                     GenericValue::Int(i) => builder.append_value(i.to_string()),
                     other => builder.append_value(format!("{:?}", other)),
@@ -711,6 +711,265 @@ mod tests {
             zeros, 0,
             "Optional entity column must not emit 0 as a NULL stand-in, got {zeros} zeros"
         );
+    }
+
+    #[test]
+    fn test_json_object_writes_parquet_single_file() {
+        use arrow::array::Array;
+        use indexmap::IndexMap;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "kind".to_string(),
+            GeneratorSpec::Constant {
+                value: serde_yaml::Value::String("page_view".to_string()),
+            },
+        );
+        fields.insert(
+            "count".to_string(),
+            GeneratorSpec::UniformInt { min: 1, max: 10 },
+        );
+        fields.insert("active".to_string(), GeneratorSpec::Bool { prob: 1.0 });
+
+        let config = DatasetConfig {
+            name: "test_json_object".to_string(),
+            output,
+            num_rows: 50,
+            seed: Some(42),
+            partition: None,
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "payload".to_string(),
+                generator: GeneratorSpec::JsonObject { fields },
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
+
+        let file = File::open(tmp.path().join("data.parquet")).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut total = 0usize;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("payload column must be Utf8");
+            for i in 0..arr.len() {
+                total += 1;
+                let s = arr.value(i);
+                // Every row's JSON must contain all three fields in order.
+                assert!(
+                    s.starts_with(r#"{"kind":"page_view","count":"#),
+                    "row {i}: {s}"
+                );
+                assert!(s.ends_with(r#","active":true}"#), "row {i}: {s}");
+            }
+        }
+        assert_eq!(total, 50);
+    }
+
+    #[test]
+    fn test_json_object_writes_parquet_partitioned() {
+        use crate::config::PartitionConfig;
+        use arrow::array::Array;
+        use indexmap::IndexMap;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "n".to_string(),
+            GeneratorSpec::UniformInt { min: 0, max: 100 },
+        );
+
+        let config = DatasetConfig {
+            name: "test_json_part".to_string(),
+            output: output.clone(),
+            num_rows: 30,
+            seed: Some(42),
+            partition: Some(PartitionConfig {
+                column: "event_date".to_string(),
+                start: "2024-01-01".to_string(),
+                days: 3,
+            }),
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "payload".to_string(),
+                generator: GeneratorSpec::JsonObject { fields },
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
+
+        let mut total = 0usize;
+        for entry in std::fs::read_dir(&output).unwrap() {
+            let path = entry.unwrap().path().join("data.parquet");
+            if !path.exists() {
+                continue;
+            }
+            let file = File::open(&path).unwrap();
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap();
+            for batch in reader {
+                let batch = batch.unwrap();
+                let payload = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .expect("payload column must be Utf8");
+                for i in 0..payload.len() {
+                    total += 1;
+                    let s = payload.value(i);
+                    assert!(s.starts_with(r#"{"n":"#), "row {i}: {s}");
+                    assert!(s.ends_with('}'), "row {i}: {s}");
+                }
+            }
+        }
+        assert_eq!(total, 30);
+    }
+
+    #[test]
+    fn test_json_object_entity_column_is_sticky() {
+        use crate::config::EntityConfig;
+        use arrow::array::Array;
+        use indexmap::IndexMap;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use std::collections::HashSet;
+
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "tier".to_string(),
+            GeneratorSpec::OneOf {
+                values: vec!["A".into(), "B".into(), "C".into()],
+            },
+        );
+        fields.insert(
+            "score".to_string(),
+            GeneratorSpec::UniformInt { min: 0, max: 1000 },
+        );
+
+        let config = DatasetConfig {
+            name: "test_json_entity".to_string(),
+            output,
+            num_rows: 1000,
+            seed: Some(42),
+            partition: None,
+            entity: Some(EntityConfig {
+                pool_ratio: 0.05, // 50 entities for 1000 rows
+                columns: vec![ColumnConfig {
+                    name: "user_attrs".to_string(),
+                    generator: GeneratorSpec::JsonObject { fields },
+                }],
+            }),
+            columns: vec![ColumnConfig {
+                name: "event_id".to_string(),
+                generator: GeneratorSpec::SequentialId,
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
+
+        let file = File::open(tmp.path().join("data.parquet")).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut distinct_payloads: HashSet<String> = HashSet::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("user_attrs must be Utf8");
+            for i in 0..arr.len() {
+                distinct_payloads.insert(arr.value(i).to_string());
+            }
+        }
+        // ≤ 50 distinct JSON values across 1000 rows proves the entity-column
+        // generator was evaluated once per entity, not per row. Allow some
+        // slack in case the random `tier`/`score` pair collides across
+        // entities.
+        assert!(
+            distinct_payloads.len() <= 50,
+            "entity-column json_object should be sticky; got {} distinct payloads",
+            distinct_payloads.len()
+        );
+    }
+
+    #[test]
+    fn test_json_object_deterministic_partitioned() {
+        use crate::config::PartitionConfig;
+        use indexmap::IndexMap;
+
+        let tmp1 = TempDir::new().unwrap();
+        let tmp2 = TempDir::new().unwrap();
+
+        let make_config = |output: &str| {
+            let mut fields = IndexMap::new();
+            fields.insert(
+                "k".to_string(),
+                GeneratorSpec::UniformInt { min: 0, max: 100 },
+            );
+            DatasetConfig {
+                name: "det_json".to_string(),
+                output: output.to_string(),
+                num_rows: 60,
+                seed: Some(7),
+                partition: Some(PartitionConfig {
+                    column: "event_date".to_string(),
+                    start: "2024-02-01".to_string(),
+                    days: 3,
+                }),
+                entity: None,
+                columns: vec![ColumnConfig {
+                    name: "payload".to_string(),
+                    generator: GeneratorSpec::JsonObject { fields },
+                }],
+            }
+        };
+        write_generic_dataset(
+            &make_config(tmp1.path().to_str().unwrap()),
+            7,
+            None,
+            &FkCounts::new(),
+        )
+        .unwrap();
+        write_generic_dataset(
+            &make_config(tmp2.path().to_str().unwrap()),
+            7,
+            None,
+            &FkCounts::new(),
+        )
+        .unwrap();
+
+        for entry in std::fs::read_dir(tmp1.path()).unwrap() {
+            let entry = entry.unwrap();
+            let rel = entry.file_name();
+            let p1 = entry.path().join("data.parquet");
+            let p2 = tmp2.path().join(&rel).join("data.parquet");
+            if !p1.exists() || !p2.exists() {
+                continue;
+            }
+            let b1 = std::fs::read(&p1).unwrap();
+            let b2 = std::fs::read(&p2).unwrap();
+            assert_eq!(b1, b2, "partition {:?} must be byte-identical", rel);
+        }
     }
 
     #[test]

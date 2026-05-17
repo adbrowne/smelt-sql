@@ -120,6 +120,16 @@ zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
     template: <str>       Template with `{sequential_id}`, `{uuid}`,
                           `{uniform_int:MIN-MAX}`, `{one_of:a,b,c}`
                           placeholders.
+
+  json_object
+    fields:               Ordered map of `<key>: <generator>` pairs. The
+      <key>: <generator>  emitted Utf8 column holds one JSON object per
+      ...                 row whose fields are produced by the inner
+                          generators in declaration order. Nested
+                          json_object fields are embedded as JSON objects
+                          (not double-encoded). Optional sub-generators
+                          that fire null produce `\"<key>\": null` — the
+                          field is always present.
 ";
 
 fn main() -> Result<()> {

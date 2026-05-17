@@ -116,6 +116,36 @@ pub enum GeneratorSpec {
     StringPattern {
         template: String,
     },
+    /// Emit a JSON-encoded object as a single `Utf8` column. Each field's
+    /// value is produced by an inner sub-generator; iteration order of
+    /// `fields` is the order fields appear in the emitted JSON, and the order
+    /// in which sub-generators consume RNG state. See `docs/specs/datagen.md`
+    /// §`json_object` encoding.
+    JsonObject {
+        #[serde(deserialize_with = "deserialize_non_empty_json_fields")]
+        fields: IndexMap<String, GeneratorSpec>,
+    },
+}
+
+/// Reject `json_object` specs with an empty `fields:` map.
+///
+/// The spec rule is that the minimal valid `json_object` has at least one
+/// field; an empty object provides no information and is almost always a
+/// typo or copy-paste leftover.
+fn deserialize_non_empty_json_fields<'de, D>(
+    deserializer: D,
+) -> Result<IndexMap<String, GeneratorSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let fields = IndexMap::<String, GeneratorSpec>::deserialize(deserializer)?;
+    if fields.is_empty() {
+        return Err(D::Error::custom(
+            "json_object `fields:` must contain at least one field",
+        ));
+    }
+    Ok(fields)
 }
 
 /// Default for [`GeneratorSpec::Geometric::min`] when the YAML omits it.
@@ -150,6 +180,7 @@ impl GeneratorSpec {
             GeneratorSpec::Date { .. } => DataType::Utf8,
             GeneratorSpec::Timestamp { .. } => DataType::Utf8,
             GeneratorSpec::StringPattern { .. } => DataType::Utf8,
+            GeneratorSpec::JsonObject { .. } => DataType::Utf8,
         }
     }
 
@@ -209,5 +240,106 @@ columns:
       type: uuid
 "#;
         serde_yaml::from_str::<DatasetConfig>(yaml).expect("valid config must parse");
+    }
+
+    #[test]
+    fn json_object_parses_minimal() {
+        let yaml = "type: json_object\nfields:\n  k: { type: constant, value: \"v\" }\n";
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).expect("minimal json_object parses");
+        match spec {
+            GeneratorSpec::JsonObject { fields } => {
+                assert_eq!(fields.len(), 1);
+                assert!(fields.contains_key("k"));
+            }
+            other => panic!("expected JsonObject, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn json_object_preserves_field_order() {
+        // IndexMap should preserve the YAML declaration order. HashMap would
+        // randomise per-process, making JSON output non-deterministic.
+        let yaml = r#"
+type: json_object
+fields:
+  a: { type: constant, value: 1 }
+  b: { type: constant, value: 2 }
+  c: { type: constant, value: 3 }
+  d: { type: constant, value: 4 }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).expect("ordered fields parse");
+        let GeneratorSpec::JsonObject { fields } = spec else {
+            panic!("expected JsonObject");
+        };
+        let order: Vec<&str> = fields.keys().map(String::as_str).collect();
+        assert_eq!(order, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn json_object_rejects_empty_fields() {
+        let yaml = "type: json_object\nfields: {}\n";
+        let err = serde_yaml::from_str::<GeneratorSpec>(yaml)
+            .expect_err("empty fields must be a parse error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least one field") || msg.contains("fields"),
+            "error must explain the rule; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn json_object_accepts_nested() {
+        let yaml = r#"
+type: json_object
+fields:
+  outer:
+    type: json_object
+    fields:
+      inner: { type: constant, value: 1 }
+"#;
+        let spec: GeneratorSpec = serde_yaml::from_str(yaml).expect("nested json_object parses");
+        let GeneratorSpec::JsonObject { fields } = spec else {
+            panic!("expected outer JsonObject");
+        };
+        let outer = fields.get("outer").expect("outer field present");
+        match outer {
+            GeneratorSpec::JsonObject {
+                fields: inner_fields,
+            } => {
+                assert!(inner_fields.contains_key("inner"));
+            }
+            other => panic!("expected nested JsonObject, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn json_object_arrow_type_is_utf8() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "k".to_string(),
+            GeneratorSpec::Constant {
+                value: serde_yaml::Value::String("v".to_string()),
+            },
+        );
+        let spec = GeneratorSpec::JsonObject { fields };
+        assert_eq!(spec.arrow_type(), DataType::Utf8);
+    }
+
+    #[test]
+    fn json_object_is_not_nullable() {
+        // The Utf8 column always has a value; nulls live *inside* the JSON
+        // string, not at the Parquet column level.
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "k".to_string(),
+            GeneratorSpec::Optional {
+                prob: 0.0,
+                inner: Box::new(GeneratorSpec::Constant {
+                    value: serde_yaml::Value::String("v".to_string()),
+                }),
+            },
+        );
+        let spec = GeneratorSpec::JsonObject { fields };
+        assert!(!spec.is_nullable());
     }
 }
