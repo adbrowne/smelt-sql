@@ -4,6 +4,11 @@
 -- The output schema extends `source.*` with a single `session_seq: BIGINT`
 -- column added by the explicit projection (per the TableExpr return-schema
 -- inference rule in docs/specs/functions.md).
+--
+-- The silver/sessions.sql model inlines equivalent window-function SQL directly
+-- rather than calling this function; column-reference arguments to smelt
+-- functions in model contexts are not yet supported. This declaration is the
+-- canonical signature for that future refactor.
 smelt.define sessionize(
     source: TableExpr,
     partition_col: Expr<Integer>,
