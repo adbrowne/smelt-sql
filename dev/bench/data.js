@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778988003453,
+  "lastUpdate": 1778988548024,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16543,6 +16543,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.268356,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e0995afad0a1ebbb850ef383f8672a48e464255c",
+          "message": "docs-site: theme left sidebar header (drawer title + source block)\n\nMaterial renders the top of the primary left sidebar — the drawer\ntoggle label (\"smelt\" wordmark) and the embedded GitHub source block —\non hard-wired Material indigo and deep-indigo backgrounds. Restyle both\nto use smelt ink tokens so the sidebar header sits quietly with the\nrest of the design instead of dominating it.\n\nAlso scope the existing tiny-uppercase-Plex-Mono .md-nav__title rule to\n:not([for=__drawer]) so it only targets section group headers (Getting\nStarted, Concepts, &c.) — the drawer title needs the proper Plex Serif\ndisplay treatment, not the section-label treatment.\n\nDark-mode equivalents added.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:27:43+10:00",
+          "tree_id": "84385bfb18db6177b1a0c341f12ca1ada4b2432e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e0995afad0a1ebbb850ef383f8672a48e464255c"
+        },
+        "date": 1778988547201,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.776827999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.213761000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.765089,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.444191,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0031650000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 975.065875,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.96324,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.436667,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.432541,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.84622,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 994.897329,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 10.23274,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.48869,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.817232,
             "unit": "ms"
           }
         ]
