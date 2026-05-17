@@ -59,7 +59,7 @@ pub struct ColumnConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeneratorSpec {
     Uuid,
     Constant {
@@ -284,6 +284,28 @@ fields:
         assert!(
             msg.contains("at least one field") || msg.contains("fields"),
             "error must explain the rule; got: {msg}"
+        );
+    }
+
+    /// Plan Phase 2 TDD item: `type: json_object` plus an unknown top-level
+    /// key (e.g. `extra: 1`) must fail parse. Internally-tagged serde enums
+    /// silently drop extras in variant payloads by default; the rejection
+    /// here proves the deserialiser was given the equivalent of
+    /// `deny_unknown_fields` for the `JsonObject` variant body.
+    #[test]
+    fn json_object_rejects_unknown_top_level_key() {
+        let yaml = r#"
+type: json_object
+fields:
+  k: { type: constant, value: "v" }
+extra: 1
+"#;
+        let err = serde_yaml::from_str::<GeneratorSpec>(yaml)
+            .expect_err("unknown top-level key must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("extra") || msg.contains("unknown field"),
+            "error must name the offending field; got: {msg}"
         );
     }
 

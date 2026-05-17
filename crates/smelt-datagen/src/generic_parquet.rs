@@ -912,6 +912,112 @@ mod tests {
         );
     }
 
+    /// Phase 4 TDD item: a `foreign_key` sub-generator nested inside a
+    /// **row-level** `json_object` field must resolve FK ranges correctly —
+    /// every emitted FK id must fall in `[1, referenced_dataset_row_count]`.
+    /// This exercises the row-level `apply_spec` path, where `fk_counts` is
+    /// threaded in via `generate_row`. (The companion entity-column path is
+    /// tracked separately in "Deferred during implementation" of the Phase 1
+    /// plan — entity-pool `apply_spec` invocations carry an empty `FkCounts`,
+    /// which is a pre-existing issue.)
+    #[test]
+    fn test_json_object_with_foreign_key_inner_generator() {
+        use arrow::array::Array;
+        use indexmap::IndexMap;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+
+        let mut fk = FkCounts::new();
+        fk.insert("customers".to_string(), 50);
+
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "customer_id".to_string(),
+            GeneratorSpec::ForeignKey {
+                dataset: "customers".to_string(),
+            },
+        );
+        fields.insert(
+            "label".to_string(),
+            GeneratorSpec::Constant {
+                value: serde_yaml::Value::String("x".to_string()),
+            },
+        );
+
+        let config = DatasetConfig {
+            name: "test_json_fk".to_string(),
+            output,
+            num_rows: 500,
+            seed: Some(42),
+            partition: None,
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "payload".to_string(),
+                generator: GeneratorSpec::JsonObject { fields },
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &fk).unwrap();
+
+        let file = File::open(tmp.path().join("data.parquet")).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // The FK must resolve into [1, 50]. Track the range and distinct
+        // values to prove the FK is consuming RNG (not stuck at id 1).
+        let mut total = 0usize;
+        let mut min_id = i64::MAX;
+        let mut max_id = i64::MIN;
+        let mut distinct: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("payload column must be Utf8");
+            for i in 0..arr.len() {
+                total += 1;
+                let s = arr.value(i);
+                // Pull "customer_id":N out of the prefix without dragging in
+                // a JSON dependency just for the test.
+                let prefix = r#"{"customer_id":"#;
+                assert!(
+                    s.starts_with(prefix),
+                    "row {i} must start with {prefix}: {s}"
+                );
+                let rest = &s[prefix.len()..];
+                let comma = rest.find(',').expect("delimiter after customer_id");
+                let id: i64 = rest[..comma]
+                    .parse()
+                    .unwrap_or_else(|e| panic!("non-numeric FK in row {i}: {s} ({e})"));
+                assert!(
+                    (1..=50).contains(&id),
+                    "FK out of range [1,50] in row {i}: id={id}, payload={s}"
+                );
+                min_id = min_id.min(id);
+                max_id = max_id.max(id);
+                distinct.insert(id);
+            }
+        }
+        assert_eq!(total, 500);
+        // With 50 candidate ids and 500 rows, expect broad coverage. If the
+        // FK were stuck at id 1, distinct.len() would be 1.
+        assert!(
+            distinct.len() > 10,
+            "FK appears not to consume RNG (only {} distinct ids across {} rows)",
+            distinct.len(),
+            total
+        );
+        assert!(
+            min_id >= 1 && max_id <= 50,
+            "FK range outside [1,50]: min={min_id}, max={max_id}"
+        );
+    }
+
     #[test]
     fn test_json_object_deterministic_partitioned() {
         use crate::config::PartitionConfig;
