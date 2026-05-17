@@ -75,7 +75,7 @@ The overall plan's Goal items 2 and 4 require an incremental sessionization (30-
 | 2     | done     | `49da2c78` | 2026-05-18 |
 | 3     | done     | `e98f42aa` | 2026-05-18 |
 | 4     | done     | `df3bbf66` | 2026-05-18 |
-| 5     | pending  |        |      |
+| 5     | done     | `52e507f1` | 2026-05-18 |
 
 ---
 
@@ -496,6 +496,12 @@ The `docs/specs/testing.md` spec was updated in the same commit to keep the YAML
 **Phase 4: `tests` added to `smelt.yml` `paths:`.** Mirrors the convention in `examples/per_cohort_union/smelt.yml`, `examples/retail_analytics/smelt.yml`, and `examples/timeseries/smelt.yml`. Required for the test file to be discovered by `smelt test`.
 
 **Phase 4: invariant test uses Option B (whole-model, no `target_cte`).** The plan's Phase 4 implementation shape preferred targeting the `sessionized` CTE inside `silver/sessions.sql`, but that path requires mocking `lagged` (the upstream CTE that contains the pre-computed `LAG()` columns) — awkward. The whole-model test mocks `silver_events_parsed` directly (the only `smelt.<path>` reference in the body) and asserts the aggregated session rows. Coverage is equivalent: each of the three boundary rules (gap, platform, no-boundary) is exercised by a distinct `device_id` so a failure is attributable to one rule.
+
+**Phase 5 expert review (sql-expert) flagged a partition_column / GROUP BY compliance issue.** `examples/web_analytics/models/silver/sessions.sql` originally declared `session_start_date` as the `partition_column` while computing it as `CAST(MIN(event_ts) AS DATE)` — an aggregate alias in the outer SELECT. Per `docs/specs/incremental_models.md` line 163, the partition_column must appear in both the SELECT list and the GROUP BY when grouping is present. The fix restructures the model into three CTEs (`lagged → sessionized → with_start_date`): `with_start_date` materialises `session_start_date` as a per-row deterministic column via `FIRST_VALUE(event_ts) OVER (PARTITION BY device_id, session_seq ORDER BY event_ts) :: DATE`. The outer SELECT now references it directly and includes it in the GROUP BY. Aggregated row output is unchanged; both the end-to-end integration test and the inline `.test.sql` invariant test continue to pass. Landed in commit `49a3a378`.
+
+**Phase 5 expert review (examples-curator) flagged a missing function-intent paragraph.** `examples/web_analytics/functions/sessionize.sql` documented the boundary semantics but omitted the "why not called from silver/sessions.sql" framing that the Phase-3 precedent (`parse_event_payload.sql`) carries. A four-line paragraph was appended to the header comment stating that the silver model inlines equivalent window-function SQL directly, that column-reference arguments to smelt functions in model contexts are not yet supported, and that the declaration is the canonical signature for that future refactor. Landed in commit `52e507f1`.
+
+**Phase 5 expert review:** sql-expert clean (R2), examples-curator clean (R2). No stop-the-line fired.
 
 ---
 
