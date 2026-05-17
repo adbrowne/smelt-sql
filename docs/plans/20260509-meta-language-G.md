@@ -99,7 +99,7 @@ This is the **terminal phase**. After Phase 6's acceptance gate, the meta-plan Â
 |-------|----------|--------|------|
 | 0     | done     | 5ef1a6dd | 2026-05-17 |
 | 1     | done     | c224ebde | 2026-05-17 |
-| 2     | done     |        | 2026-05-17 |
+| 2     | done     | 2cb3ca85 | 2026-05-17 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
