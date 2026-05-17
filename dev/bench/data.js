@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778987517607,
+  "lastUpdate": 1778988000952,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16449,6 +16449,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 9.870401,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "b9da833a4c202fdace8b5206a9201df0dcf9f136",
+          "message": "docs-site: theme header search, source block, tabs strip\n\nSeveral Material header controls (search icon + placeholder, repo source\nblock, mode toggle, drawer button) were wired to --md-primary-bg-color,\nwhich we leave at #ffffff for the indigo accent button — rendering them\nwhite-on-white on the light header. Override them directly to smelt\nink-500/600/700 with smelt-indigo on hover.\n\nAlso drop the transparent background on .md-tabs (let content scroll\nvisibly behind the sticky strip) in favour of the same white-translucent\ntreatment as the header, and colour the active tab smelt-indigo.\n\nDark-mode (slate) equivalents added for all of the above.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:18:15+10:00",
+          "tree_id": "991d46ce0bd7f01848896328c721915c7b3655f5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b9da833a4c202fdace8b5206a9201df0dcf9f136"
+        },
+        "date": 1778987999615,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.447666000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.959799,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.713845,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.437597,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003184,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 970.050939,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.063179999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.519671,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.3656129999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.81929,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 998.232369,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 10.91631,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.794079999999997,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.268356,
             "unit": "ms"
           }
         ]
