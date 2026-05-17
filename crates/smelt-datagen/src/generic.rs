@@ -11,6 +11,48 @@ use rand::distributions::{Distribution, WeightedIndex};
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Row-scoped state passed into `apply_spec` and `generate_row`.
+///
+/// Bundles together the per-row pool samples, the dataset-level pool map,
+/// and the row context values that were previously threaded as separate
+/// parameters (`row_index`, `fk_counts`). An empty `RowContext` (no pools,
+/// no samples) is the right thing to pass when generating entity-column
+/// values — entity columns don't see linked pools in v1.
+pub struct RowContext<'a> {
+    pub row_index: usize,
+    pub fk_counts: &'a FkCounts,
+    /// Dataset-level map of pool name → pre-built `LinkedPool`.
+    pub pools: &'a HashMap<String, Arc<LinkedPool>>,
+    /// Per-row map of pool name → the pool-entry index drawn for this row.
+    /// Populated once per row before column iteration.
+    pub pool_samples: &'a PoolSamples<'a>,
+}
+
+/// Per-row map of pool name → the selected pool-entry index for this row.
+///
+/// Built once per row before column iteration; the same index is used for
+/// every `linked_choice` column that references the same pool within that row.
+pub type PoolSamples<'a> = HashMap<&'a str, usize>;
+
+/// Build per-row pool samples: one uniform index per pool, drawn from `rng`.
+///
+/// The caller passes in the full pools map; this function returns a map of
+/// pool name → sampled index. The index is in `[0, pool.len())`.
+pub fn sample_pools<'a>(
+    rng: &mut impl RngCore,
+    pools: &'a HashMap<String, Arc<LinkedPool>>,
+) -> PoolSamples<'a> {
+    pools
+        .iter()
+        .map(|(name, pool)| {
+            let idx = (rng.next_u64() as usize) % pool.len().max(1);
+            (name.as_str(), idx)
+        })
+        .collect()
+}
 
 /// A single generated value.
 #[derive(Debug, Clone)]
@@ -38,12 +80,20 @@ pub struct EntityPool {
 impl EntityPool {
     pub fn new(seed: u64, count: usize, col_specs: &[ColumnConfig]) -> Self {
         let empty_fk = FkCounts::new();
+        let empty_pools: HashMap<String, Arc<LinkedPool>> = HashMap::new();
+        let empty_samples: PoolSamples<'_> = HashMap::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let rows = (0..count)
             .map(|i| {
+                let ctx = RowContext {
+                    row_index: i,
+                    fk_counts: &empty_fk,
+                    pools: &empty_pools,
+                    pool_samples: &empty_samples,
+                };
                 col_specs
                     .iter()
-                    .map(|c| apply_spec(&mut rng, &c.generator, i, &empty_fk))
+                    .map(|c| apply_spec(&mut rng, &c.generator, &ctx))
                     .collect()
             })
             .collect();
@@ -76,7 +126,7 @@ impl LinkedPool {
     /// Callers are responsible for deriving the seed. When `cfg.seed` is set,
     /// pass it directly; otherwise the caller derives a deterministic offset
     /// from the dataset seed (per `docs/specs/datagen.md` §Pool construction:
-    /// `dataset_seed.wrapping_add(linked_pool_index + 1)`). Pool seeding is
+    /// `dataset_seed.wrapping_add(100 + linked_pool_index)`). Pool seeding is
     /// kept separate from row generation so that changing `num_rows` does
     /// not perturb pool contents.
     pub fn new(seed: u64, cfg: &LinkedPoolConfig, fk_counts: &FkCounts) -> LinkedPool {
@@ -97,6 +147,10 @@ impl LinkedPool {
         let pool_size = cfg.pool_size;
         let mut rows: Vec<Vec<GenericValue>> = Vec::with_capacity(pool_size);
 
+        // Pool construction never samples from other linked pools (spec invariant 8).
+        let empty_pools: HashMap<String, Arc<LinkedPool>> = HashMap::new();
+        let empty_samples: PoolSamples<'_> = HashMap::new();
+
         while rows.len() < pool_size {
             // Sample a shape by weight.
             let shape_idx = shape_dist.sample(&mut rng);
@@ -110,7 +164,13 @@ impl LinkedPool {
             let mut sticky_values: IndexMap<&str, GenericValue> = IndexMap::new();
             for (field_name, spec) in &shape.fields {
                 if sticky_set.contains(field_name.as_str()) {
-                    let val = apply_spec(&mut rng, spec, rows.len(), fk_counts);
+                    let ctx = RowContext {
+                        row_index: rows.len(),
+                        fk_counts,
+                        pools: &empty_pools,
+                        pool_samples: &empty_samples,
+                    };
+                    let val = apply_spec(&mut rng, spec, &ctx);
                     sticky_values.insert(field_name.as_str(), val);
                 }
             }
@@ -124,7 +184,13 @@ impl LinkedPool {
                         sticky_values[field_name.as_str()].clone()
                     } else {
                         // Redraw for each emitted entry.
-                        apply_spec(&mut rng, spec, rows.len(), fk_counts)
+                        let ctx = RowContext {
+                            row_index: rows.len(),
+                            fk_counts,
+                            pools: &empty_pools,
+                            pool_samples: &empty_samples,
+                        };
+                        apply_spec(&mut rng, spec, &ctx)
                     };
                     tuple.push(val);
                 }
@@ -164,16 +230,14 @@ impl LinkedPool {
 /// 2. regular columns from `col_specs`
 /// 3. partition column (if provided)
 ///
-/// `row_index` is the global row index (0-based), used by `SequentialId`.
-/// `fk_counts` maps dataset names to their scaled row counts, used by `ForeignKey`.
+/// `ctx` carries the row index, FK counts, pool map, and per-row pool samples.
 pub fn generate_row(
     rng: &mut impl RngCore,
     entity_col_specs: &[ColumnConfig],
     entity_row: Option<&[GenericValue]>,
     col_specs: &[ColumnConfig],
     partition_col: Option<(&str, &str)>,
-    row_index: usize,
-    fk_counts: &FkCounts,
+    ctx: &RowContext<'_>,
 ) -> Vec<(String, GenericValue)> {
     let mut row = Vec::new();
 
@@ -186,7 +250,7 @@ pub fn generate_row(
 
     // Regular columns
     for col in col_specs {
-        let value = apply_spec(rng, &col.generator, row_index, fk_counts);
+        let value = apply_spec(rng, &col.generator, ctx);
         row.push((col.name.clone(), value));
     }
 
@@ -208,11 +272,14 @@ pub fn make_entity_pool(seed: u64, num_rows: usize, entity_cfg: &EntityConfig) -
 }
 
 /// Map a [`GeneratorSpec`] to a concrete [`GenericValue`] using `rng`.
+///
+/// `ctx` carries row-scoped state: row index, FK counts, the dataset-level
+/// linked-pool map, and per-row pool samples (drawn once before column
+/// iteration — see [`sample_pools`]).
 pub fn apply_spec(
     rng: &mut impl RngCore,
     spec: &GeneratorSpec,
-    row_index: usize,
-    fk_counts: &FkCounts,
+    ctx: &RowContext<'_>,
 ) -> GenericValue {
     match spec {
         GeneratorSpec::Uuid => {
@@ -261,14 +328,14 @@ pub fn apply_spec(
         GeneratorSpec::Optional { prob, inner } => {
             let r = (rng.next_u64() as f64) / (u64::MAX as f64);
             if r < *prob {
-                apply_spec(rng, inner, row_index, fk_counts)
+                apply_spec(rng, inner, ctx)
             } else {
                 GenericValue::Null
             }
         }
-        GeneratorSpec::SequentialId => GenericValue::Int((row_index + 1) as i32),
+        GeneratorSpec::SequentialId => GenericValue::Int((ctx.row_index + 1) as i32),
         GeneratorSpec::ForeignKey { dataset } => {
-            let count = fk_counts.get(dataset).copied().unwrap_or(1) as u64;
+            let count = ctx.fk_counts.get(dataset).copied().unwrap_or(1) as u64;
             let id = (rng.next_u64() % count) + 1;
             GenericValue::Int(id as i32)
         }
@@ -303,7 +370,7 @@ pub fn apply_spec(
             GenericValue::Str(ts.format("%Y-%m-%dT%H:%M:%S").to_string())
         }
         GeneratorSpec::StringPattern { template } => {
-            let result = apply_string_pattern(rng, template, row_index);
+            let result = apply_string_pattern(rng, template, ctx.row_index);
             GenericValue::Str(result)
         }
         GeneratorSpec::JsonObject { fields } => {
@@ -317,24 +384,29 @@ pub fn apply_spec(
                 json.push('"');
                 escape_json_string(key, &mut json);
                 json.push_str("\":");
-                let inner_value = apply_spec(rng, inner_spec, row_index, fk_counts);
+                let inner_value = apply_spec(rng, inner_spec, ctx);
                 append_generic_value_as_json(&inner_value, &mut json);
             }
             json.push('}');
             GenericValue::JsonRaw(json)
         }
-        // `LinkedChoice` resolves against a per-row pool sample threaded
-        // through a separate code path (the pool-aware row generator in
-        // `generic_parquet.rs`). Reaching `apply_spec` with a `LinkedChoice`
-        // means a caller skipped the pool-context plumbing or invoked the
-        // generator path without first running `validate_config` (which
-        // rejects any `LinkedChoice` whose pool/field cannot be resolved).
         GeneratorSpec::LinkedChoice { pool, field } => {
-            panic!(
-                "LinkedChoice {{ pool: {pool:?}, field: {field:?} }} reached apply_spec \
-                 without a pool context; ensure validate_config has run and the \
-                 pool-aware row generator is in use"
-            )
+            let idx = *ctx.pool_samples.get(pool.as_str()).unwrap_or_else(|| {
+                panic!(
+                    "linked_choice references pool {pool:?} but no sample was taken for this \
+                     row — validate_config should have rejected this configuration before \
+                     row generation"
+                )
+            });
+            let pool_ref = ctx.pools.get(pool.as_str()).unwrap_or_else(|| {
+                panic!(
+                    "linked_choice references pool {pool:?} which was not built — \
+                     validate_config should have rejected this configuration"
+                )
+            });
+            pool_ref.get(idx, field).cloned().unwrap_or_else(|| {
+                panic!("linked_choice field {field:?} missing in pool {pool:?} at index {idx}")
+            })
         }
     }
 }
@@ -499,6 +571,21 @@ mod tests {
         assert_eq!(result, "hello {unknown} world");
     }
 
+    fn empty_ctx(fk: &FkCounts) -> RowContext<'_> {
+        static EMPTY_POOLS: std::sync::OnceLock<HashMap<String, Arc<LinkedPool>>> =
+            std::sync::OnceLock::new();
+        static EMPTY_SAMPLES: std::sync::OnceLock<PoolSamples<'static>> =
+            std::sync::OnceLock::new();
+        let _ = EMPTY_POOLS.get_or_init(HashMap::new);
+        let _ = EMPTY_SAMPLES.get_or_init(HashMap::new);
+        RowContext {
+            row_index: 0,
+            fk_counts: fk,
+            pools: EMPTY_POOLS.get().unwrap(),
+            pool_samples: EMPTY_SAMPLES.get().unwrap(),
+        }
+    }
+
     #[test]
     fn test_date_generator_range() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -507,8 +594,9 @@ mod tests {
             start: "2024-01-01".to_string(),
             end: "2024-01-10".to_string(),
         };
+        let ctx = empty_ctx(&fk);
         for _ in 0..50 {
-            if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, 0, &fk) {
+            if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, &ctx) {
                 let date = NaiveDate::parse_from_str(&s, "%Y-%m-%d").unwrap();
                 let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
                 let end = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
@@ -527,7 +615,8 @@ mod tests {
             start: "2024-01-01T00:00:00".to_string(),
             end: "2024-01-02T00:00:00".to_string(),
         };
-        if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, 0, &fk) {
+        let ctx = empty_ctx(&fk);
+        if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, &ctx) {
             assert!(s.starts_with("2024-01-01T"), "got: {}", s);
         } else {
             panic!("Expected Str variant");
@@ -547,10 +636,11 @@ mod tests {
             .expect("geometric spec without min should parse");
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
+        let ctx = empty_ctx(&fk);
         let mut min_seen = i32::MAX;
         let mut zero_count = 0;
         for _ in 0..10_000 {
-            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, 0, &fk) {
+            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, &ctx) {
                 if v < min_seen {
                     min_seen = v;
                 }
@@ -578,9 +668,10 @@ mod tests {
             .expect("geometric spec with explicit min: 0 should parse");
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
+        let ctx = empty_ctx(&fk);
         let mut saw_zero = false;
         for _ in 0..10_000 {
-            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, 0, &fk) {
+            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, &ctx) {
                 if v == 0 {
                     saw_zero = true;
                     break;
@@ -607,7 +698,8 @@ fields:
         let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let fk = FkCounts::new();
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+        let ctx = empty_ctx(&fk);
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"a":1,"b":"x","c":false}"#);
@@ -629,7 +721,8 @@ fields:
         let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+        let ctx = empty_ctx(&fk);
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"always_null":null}"#);
@@ -650,7 +743,8 @@ fields:
         let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+        let ctx = empty_ctx(&fk);
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"outer":{"inner":1}}"#);
@@ -675,7 +769,8 @@ fields:
         let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+        let ctx = empty_ctx(&fk);
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"meta":{"kind":"x"}}"#);
@@ -717,10 +812,18 @@ fields:
         let mut rng_a = ChaCha8Rng::seed_from_u64(123);
         let mut rng_b = ChaCha8Rng::seed_from_u64(123);
         for i in 0..50 {
-            let GenericValue::JsonRaw(a) = apply_spec(&mut rng_a, &spec, i, &fk) else {
+            let empty_pools: HashMap<String, Arc<LinkedPool>> = HashMap::new();
+            let empty_samples: PoolSamples<'_> = HashMap::new();
+            let ctx = RowContext {
+                row_index: i,
+                fk_counts: &fk,
+                pools: &empty_pools,
+                pool_samples: &empty_samples,
+            };
+            let GenericValue::JsonRaw(a) = apply_spec(&mut rng_a, &spec, &ctx) else {
                 unreachable!()
             };
-            let GenericValue::JsonRaw(b) = apply_spec(&mut rng_b, &spec, i, &fk) else {
+            let GenericValue::JsonRaw(b) = apply_spec(&mut rng_b, &spec, &ctx) else {
                 unreachable!()
             };
             assert_eq!(a, b, "deterministic mismatch at row {i}");
@@ -747,12 +850,13 @@ fields:
         let spec_ab: GeneratorSpec = serde_yaml::from_str(yaml_ab).unwrap();
         let spec_ba: GeneratorSpec = serde_yaml::from_str(yaml_ba).unwrap();
         let fk = FkCounts::new();
+        let ctx = empty_ctx(&fk);
         let mut rng_ab = ChaCha8Rng::seed_from_u64(99);
         let mut rng_ba = ChaCha8Rng::seed_from_u64(99);
-        let GenericValue::JsonRaw(ab) = apply_spec(&mut rng_ab, &spec_ab, 0, &fk) else {
+        let GenericValue::JsonRaw(ab) = apply_spec(&mut rng_ab, &spec_ab, &ctx) else {
             unreachable!()
         };
-        let GenericValue::JsonRaw(ba) = apply_spec(&mut rng_ba, &spec_ba, 0, &fk) else {
+        let GenericValue::JsonRaw(ba) = apply_spec(&mut rng_ba, &spec_ba, &ctx) else {
             unreachable!()
         };
         // Different field order → different field-to-value assignment.
@@ -770,7 +874,8 @@ fields:
         let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let fk = FkCounts::new();
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+        let ctx = empty_ctx(&fk);
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
             unreachable!()
         };
         // The float lives between the `:` and `}`; assert it's not quoted.
@@ -796,7 +901,8 @@ fields:
         let spec: GeneratorSpec = serde_yaml::from_str(yaml).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let fk = FkCounts::new();
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, 0, &fk) else {
+        let ctx = empty_ctx(&fk);
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
             unreachable!()
         };
         assert_eq!(json, r#"{"weird\"key":1}"#);
