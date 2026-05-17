@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778988548024,
+  "lastUpdate": 1778988549859,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -21743,6 +21743,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.39835048140101,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e0995afad0a1ebbb850ef383f8672a48e464255c",
+          "message": "docs-site: theme left sidebar header (drawer title + source block)\n\nMaterial renders the top of the primary left sidebar — the drawer\ntoggle label (\"smelt\" wordmark) and the embedded GitHub source block —\non hard-wired Material indigo and deep-indigo backgrounds. Restyle both\nto use smelt ink tokens so the sidebar header sits quietly with the\nrest of the design instead of dominating it.\n\nAlso scope the existing tiny-uppercase-Plex-Mono .md-nav__title rule to\n:not([for=__drawer]) so it only targets section group headers (Getting\nStarted, Concepts, &c.) — the drawer title needs the proper Plex Serif\ndisplay treatment, not the section-label treatment.\n\nDark-mode equivalents added.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:27:43+10:00",
+          "tree_id": "84385bfb18db6177b1a0c341f12ca1ada4b2432e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e0995afad0a1ebbb850ef383f8672a48e464255c"
+        },
+        "date": 1778988549412,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.25709139071525,
             "unit": "MB/s"
           }
         ]
