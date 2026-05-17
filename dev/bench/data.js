@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778986551038,
+  "lastUpdate": 1778986554125,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -21374,6 +21374,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.068276114422858,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0dd924e30efb979adcc0c0a8cf35159eef55e6a2",
+          "message": "docs-site: apply smelt design system theme\n\nRestyle the mkdocs-material docs at smeltsql.com to the smelt design\nsystem (IBM Plex type stack, indigo brand palette, custom logo and\nfavicon, ember accent) per the design handoff package. No nav, content,\nor build/deploy changes — purely additive theming via extra.css and\nmkdocs.yml configuration.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T12:53:54+10:00",
+          "tree_id": "a0b9c5e4a7a89eabec2834ab142601555bbd5c4d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0dd924e30efb979adcc0c0a8cf35159eef55e6a2"
+        },
+        "date": 1778986553250,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.68454623695368,
             "unit": "MB/s"
           }
         ]
