@@ -126,7 +126,10 @@
 .md-nav {
   font-size: 13.5px;
 }
-.md-nav__title {
+/* Section group headers in the left sidebar (Getting Started, Concepts,
+   etc.) — small uppercase Plex Mono. Explicitly excludes the top-level
+   drawer title, which gets its own treatment further down. */
+.md-nav__title:not([for=__drawer]) {
   font-family: var(--md-code-font, "IBM Plex Mono"), monospace;
   font-size: 11px !important;
   letter-spacing: 0.1em;
@@ -617,4 +620,65 @@
 [data-md-color-scheme="slate"] .md-tabs__link--active,
 [data-md-color-scheme="slate"] .md-tabs__item--active > .md-tabs__link {
   color: #9aa1ff;
+}
+
+/* ---------- Left sidebar header (primary nav title + source) ----------
+ * Material hard-wires the top-level sidebar title (logo + "smelt") to
+ * --md-primary-fg-color and the embedded GitHub source to
+ * --md-primary-fg-color--dark — both renders as loud indigo blocks. Use
+ * smelt tokens instead so the left nav header sits quietly with the rest
+ * of the design.
+ * ----------------------------------------------------------------------- */
+.md-nav__title[for=__drawer] {
+  background: var(--smelt-ink-50);
+  color: var(--smelt-iron);
+  font-family: var(--smelt-display);
+  font-weight: 500;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  border-bottom: 1px solid var(--smelt-ink-100);
+  padding: 1rem 1rem 0.8rem;
+  height: auto;
+  line-height: 1.3;
+}
+.md-nav__title[for=__drawer] .md-nav__button.md-logo img,
+.md-nav__title[for=__drawer] .md-nav__button.md-logo svg {
+  height: 22px;
+  width: auto;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.md-nav__source {
+  background: var(--smelt-ink-50);
+  color: var(--smelt-ink-700);
+  border-bottom: 1px solid var(--smelt-ink-100);
+  padding: 0.2rem 0.4rem;
+}
+.md-nav__source .md-source,
+.md-nav__source .md-source__icon,
+.md-nav__source .md-source__repository {
+  color: var(--smelt-ink-700);
+}
+.md-nav__source:hover { background: var(--smelt-ink-100); }
+
+/* Dark-mode (slate) equivalents */
+[data-md-color-scheme="slate"] .md-nav__title[for=__drawer] {
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+[data-md-color-scheme="slate"] .md-nav__source {
+  background: rgba(255, 255, 255, 0.04);
+  color: #d8dbe1;
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+[data-md-color-scheme="slate"] .md-nav__source .md-source,
+[data-md-color-scheme="slate"] .md-nav__source .md-source__icon,
+[data-md-color-scheme="slate"] .md-nav__source .md-source__repository {
+  color: #d8dbe1;
+}
+[data-md-color-scheme="slate"] .md-nav__source:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
