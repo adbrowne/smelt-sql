@@ -53,7 +53,7 @@ To run manually: `/clear` between phases and type `continue` — the resumabilit
 | # | Phase | Status | Plan path | Date | Commit |
 |---|-------|--------|-----------|------|--------|
 | 0 | Foundation: this overall plan + meta-plan + autonomy-loop repoint | done | this file | 2026-05-17 | *(this commit)* |
-| 1 | datagen: `json_object` generator (spec + impl + docs) | pending | `docs/plans/20260517-web-analytics-1-datagen-json-object.md` | | |
+| 1 | datagen: `json_object` generator (spec + impl + docs) | done | `docs/plans/20260517-web-analytics-1-datagen-json-object.md` | 2026-05-17 | `57ce9489` |
 | 2 | datagen: `linked_choice` joint-distribution generator (spec + impl + docs) | pending | `docs/plans/20260517-web-analytics-2-datagen-linked-choice.md` | | |
 | 3 | Example scaffolding: `smelt.yml`, `datagen.yaml`, bronze view, `silver/events_parsed`, `functions/parse_event_payload.sql` | pending | `docs/plans/20260517-web-analytics-3-scaffold.md` | | |
 | 4 | Sessionization: `functions/sessionize.sql`, `silver/sessions.sql` (incremental, 7-day lookback), `silver/device_user_edges.sql` | pending | `docs/plans/20260517-web-analytics-4-sessionize.md` | | |

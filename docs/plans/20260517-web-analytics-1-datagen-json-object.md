@@ -72,12 +72,12 @@ The web-analytics example (overall plan: [`docs/plans/20260517-web-analytics-exa
 
 | Phase | Status | Commit | Date |
 |-------|--------|--------|------|
-| 1 | pending | | |
-| 2 | pending | | |
-| 3 | pending | | |
-| 4 | pending | | |
-| 5 | pending | | |
-| 6 | pending | | |
+| 1 | done | `f87df99a` | 2026-05-17 |
+| 2 | done | `3fb071d3` | 2026-05-17 |
+| 3 | done | `3fb071d3` | 2026-05-17 |
+| 4 | done | `3fb071d3` | 2026-05-17 |
+| 5 | done | `3fb071d3` | 2026-05-17 |
+| 6 | done | `57ce9489` | 2026-05-17 |
 
 ---
 
@@ -324,7 +324,18 @@ After acceptance gate: flip the overall-plan status row for Phase 1 in `docs/pla
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - **Phase 1–5 complete; Phase 6 (expert review) and full verification gate blocked on system disk-full condition (2026-05-17).** Implementation committed at `3fb071d3` (`feat(datagen): json_object generator (web-analytics Phase 1)`) and pushed. The smelt-datagen crate's full test suite (44 lib tests + 4 CLI tests, including 19 new json_object tests) passes, `cargo fmt --all -- --check` passes, and `cargo clippy --all-targets -p smelt-datagen` passes with zero warnings. The workspace-level `cargo test` cannot run because the root filesystem is at 100% capacity (only ~1G free); the linker (`rust-lld` / `cc`) fails with "ld terminated with signal 7 [Bus error]" partway through linking smelt-cli and smelt-lsp test binaries. This is an environmental issue (not a regression introduced by Phase 1) — the user needs to free disk space (e.g. `cargo clean` on sibling worktrees under `~/smelt-sql/.claude/worktrees/*/target/` or on the main `~/smelt-sql/target/` directory, the largest of which is ~467G). Once disk is available, the autonomy loop should resume Phase 6 (expert reviewer dispatch loop) and complete the verification gate.
-- **Foreign-key resolution inside `JsonObject` under `entity.columns` resolves to id `1`.** Discovered while writing the `test_json_object_entity_column_is_sticky` test. The pre-existing `EntityPool::new` (in `generic.rs`) constructs entity rows with an empty `FkCounts`, so any `ForeignKey` sub-generator nested inside a `JsonObject` (or any other generator) under `entity.columns` will always pick id 1. The pre-existing `test_optional_entity_column_emits_nulls` doesn't catch this because it only checks for nulls, not FK range. Phase 1 keeps the existing behaviour; threading `fk_counts` through `EntityPool::new` is a separate follow-up — natural to address as part of Phase 3+ when the web-analytics example wires real foreign-keyed dimensions, or as a standalone fix.
+- **Foreign-key resolution inside `JsonObject` under `entity.columns` resolves to id `1`.** Discovered while writing the `test_json_object_entity_column_is_sticky` test. The pre-existing `EntityPool::new` (in `generic.rs`) constructs entity rows with an empty `FkCounts`, so any `ForeignKey` sub-generator nested inside a `JsonObject` (or any other generator) under `entity.columns` will always pick id 1. The pre-existing `test_optional_entity_column_emits_nulls` doesn't catch this because it only checks for nulls, not FK range. Phase 1 keeps the existing behaviour; threading `fk_counts` through `EntityPool::new` is a separate follow-up — natural to address as part of Phase 3+ when the web-analytics example wires real foreign-keyed dimensions, or as a standalone fix. The row-level FK case is correct and now covered by `test_json_object_with_foreign_key_inner_generator`.
+
+## Phase 6 expert review summary
+
+Phase 6 expert review (resumed 2026-05-17 after disk-full pause): **datagen-expert clean (R2)**, **docs-reviewer clean (R1)**. No stop-the-line fired.
+
+Round 1:
+- **docs-reviewer**: no material findings — every `json_object` §Surface/§Semantics rule has a counterpart in `docs-site/docs/guide/datagen.md`; example is runnable; no timeless-oracle rule violations; no broken cross-references.
+- **datagen-expert** (2 findings): (1) `GeneratorSpec` accepted unknown top-level keys silently; missing `json_object_rejects_unknown_top_level_key` test required by Phase 2 plan. (2) Missing Phase 4 TDD item `test_json_object_with_foreign_key_inner_generator`. Addressed in commit `57ce9489` (`review(web-analytics-1): address datagen-expert feedback`) — added `#[serde(deny_unknown_fields)]` on `GeneratorSpec`, the regression test for unknown-key rejection, and a row-level FK-inside-`json_object` Parquet round-trip test that asserts range, distinct-value coverage, and not-stuck-at-id-1.
+
+Round 2:
+- **datagen-expert**: no material findings — verified `deny_unknown_fields` does not regress `Constant { value: serde_yaml::Value }` pass-through, the new tests prove the rules they claim, and no new bugs spotted.
 
 ---
 
