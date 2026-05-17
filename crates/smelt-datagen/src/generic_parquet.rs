@@ -1998,8 +1998,9 @@ mod tests {
     ///      - multi-device-user entries (user appears in ≥2 pool rows with
     ///        different devices): > 2% of the pool — same reasoning over the
     ///        5% × emit:2 shape weight.
-    ///    Single-owner is not asserted directly because it's the residual
-    ///    category and any drift in the other three implicitly bounds it.
+    ///
+    /// Single-owner is not asserted directly because it's the residual
+    /// category and any drift in the other three implicitly bounds it.
     #[test]
     fn test_linked_choice_joint_distribution_smoke() {
         let pool_size = 10_000usize;

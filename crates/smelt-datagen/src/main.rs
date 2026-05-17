@@ -130,6 +130,29 @@ zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
                           (not double-encoded). Optional sub-generators
                           that fire null produce `\"<key>\": null` — the
                           field is always present.
+
+  linked_choice
+    pool: <name>          Name of a dataset-level `linked_pools` entry.
+    field: <field_name>   Field name within that pool's shape tuple.
+                          Emits the named field of a tuple drawn once
+                          per row from the pool; multiple linked_choice
+                          columns in the same row that reference the
+                          same pool see the same tuple, producing
+                          correlated values (e.g. matched device_id /
+                          user_id pairs with realistic co-occurrence).
+
+Dataset-level (not a generator, but documented here for discoverability):
+
+  linked_pools             Pre-computed joint-distribution pools. Each
+    - name: <pool_name>    pool has a pool_size, optional per-pool seed,
+      pool_size: <int>     and a list of weighted shapes. Each shape
+      seed: <int>          declares fields (same keys across all shapes)
+      shapes:              and may set emit (entries produced per draw)
+        - weight: <float>  and sticky (fields drawn once and shared
+          emit: <int>      across emitted entries). See the linked_choice
+          sticky: [...]    generator above and the spec for full rules.
+          fields:
+            <field>: <generator>
 ";
 
 fn main() -> Result<()> {

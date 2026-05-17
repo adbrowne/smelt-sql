@@ -86,8 +86,8 @@ The web-analytics example (overall plan: [`docs/plans/20260517-web-analytics-exa
 | 1 | done | `ebe4da8a` | 2026-05-18 |
 | 2 | done | `def93feb` | 2026-05-18 |
 | 3 | done | `dfa9e587` | 2026-05-18 |
-| 4 | done | *(this commit)* | 2026-05-18 |
-| 5 | pending | | |
+| 4 | done | `1ef5a4bc` | 2026-05-18 |
+| 5 | done | *(this commit)* | 2026-05-18 |
 | 6 | pending | | |
 
 ---
