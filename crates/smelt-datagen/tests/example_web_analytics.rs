@@ -1091,3 +1091,139 @@ fn test_sessions_model_materializes() {
         "MAX(session_seq) should be >= 1, indicating at least one session boundary was detected; got {max_seq}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 9: silver/device_user_edges view materializes with aggregation invariants
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.silver_device_user_edges` materializes
+/// with at least one row, its row count matches the distinct (device_id, user_id)
+/// pairs in `events_parsed` with non-null `user_id`, every edge has a non-zero
+/// event count, and no edge has `first_seen > last_seen`.
+///
+/// `models/silver/device_user_edges.sql` address segments are
+/// `["silver", "device_user_edges"]`, so smelt materializes the view as
+/// `silver_device_user_edges` in the `main` schema.
+#[test]
+fn test_device_user_edges_view() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: clone the web_analytics project tree into tmp_path ---
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    // --- Step 2: run smelt-datagen with rewritten outputs into tmp_path ---
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 3: rewrite setup_sources.sql with absolute paths, execute ---
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+
+    // Close connection so smelt build can open the file exclusively.
+    drop(conn);
+
+    // --- Step 4: run `smelt build` from the temp workspace directory ---
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // --- Step 5: verify silver_device_user_edges has > 0 rows ---
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let edge_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_device_user_edges",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_device_user_edges: {e}"));
+
+    assert!(
+        edge_count > 0,
+        "silver_device_user_edges should have at least one row, got 0"
+    );
+
+    // --- Step 6: verify row count matches distinct (device_id, user_id) pairs ---
+    // The view should have exactly one row per distinct (device_id, user_id) pair
+    // from events_parsed where user_id is non-null.
+    let expected_edge_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (\
+                 SELECT DISTINCT device_id, user_id \
+                 FROM main.silver_events_parsed \
+                 WHERE user_id IS NOT NULL\
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("distinct (device_id, user_id) count query failed: {e}"));
+
+    assert_eq!(
+        edge_count, expected_edge_count,
+        "silver_device_user_edges row count ({edge_count}) should equal \
+         distinct (device_id, user_id) pairs in events_parsed with non-null user_id ({expected_edge_count})"
+    );
+
+    // --- Step 7: verify every edge has event_count >= 1 ---
+    let min_event_count: i64 = conn2
+        .query_row(
+            "SELECT MIN(event_count) FROM main.silver_device_user_edges",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("MIN(event_count) from silver_device_user_edges: {e}"));
+
+    assert!(
+        min_event_count >= 1,
+        "every edge must have event_count >= 1, got MIN(event_count) = {min_event_count}"
+    );
+
+    // --- Step 8: verify no edge has first_seen > last_seen ---
+    let bad_temporal_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_device_user_edges WHERE first_seen > last_seen",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("temporal ordering check on silver_device_user_edges: {e}"));
+
+    assert_eq!(
+        bad_temporal_count, 0,
+        "no edge should have first_seen > last_seen; {bad_temporal_count} rows violate this"
+    );
+}
