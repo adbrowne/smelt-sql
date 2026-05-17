@@ -84,11 +84,19 @@ fn is_meta_keyword(name: &str) -> bool {
 /// and which has a parameter named `param_name` as a binder (not shadowed by
 /// a nested lambda).
 ///
-/// Returns `(lambda_node, binder_byte_range)`.
+/// Returns `(lambda_node, param_name, binder_byte_range, cursor_token_byte_range)`.
+/// `cursor_token_byte_range` is the byte range of the specific token the cursor
+/// is on (either the binder token or the body-use token), for use by
+/// `prepare_rename_lambda_param`.
 fn find_lambda_and_binder_for_cursor(
     file: &AstFile,
     cursor_offset: usize,
-) -> Option<(smelt_parser::ast::Lambda, String, smelt_parser::TextRange)> {
+) -> Option<(
+    smelt_parser::ast::Lambda,
+    String,
+    smelt_parser::TextRange,
+    (usize, usize),
+)> {
     use smelt_parser::ast::Lambda;
 
     // Collect all LAMBDA nodes that contain the cursor, ordered from innermost
@@ -115,28 +123,42 @@ fn find_lambda_and_binder_for_cursor(
     for (lambda, _) in candidates {
         // Check each parameter of this lambda.
         for param_name in lambda.params() {
-            let binder_range = crate::hover::lambda_param_binder_range(&lambda, &param_name)?;
+            // Finding 2: use let-else + continue so a malformed LAMBDA_PARAM
+            // (missing IDENT token during error-recovery) is skipped without
+            // aborting the entire outer `candidates` loop.
+            let Some(binder_range) = crate::hover::lambda_param_binder_range(&lambda, &param_name)
+            else {
+                continue;
+            };
             let binder_start: usize = binder_range.start().into();
             let binder_end: usize = binder_range.end().into();
 
             // Is the cursor on the binder?
             let on_binder = cursor_offset >= binder_start && cursor_offset <= binder_end;
+            if on_binder {
+                return Some((lambda, param_name, binder_range, (binder_start, binder_end)));
+            }
 
             // Is the cursor on a body-use IDENT with the same name?
-            let on_body_use = lambda.body().is_some_and(|body| {
-                body.syntax()
+            if let Some(body) = lambda.body() {
+                let cursor_token_range = body
+                    .syntax()
                     .descendants_with_tokens()
                     .filter_map(|e| e.into_token())
                     .filter(|t| t.kind() == SyntaxKind::IDENT && t.text() == param_name.as_str())
-                    .any(|t| {
+                    .find(|t| {
                         let s: usize = t.text_range().start().into();
                         let e: usize = t.text_range().end().into();
                         cursor_offset >= s && cursor_offset <= e
                     })
-            });
-
-            if on_binder || on_body_use {
-                return Some((lambda, param_name, binder_range));
+                    .map(|t| {
+                        let s: usize = t.text_range().start().into();
+                        let e: usize = t.text_range().end().into();
+                        (s, e)
+                    });
+                if let Some(token_range) = cursor_token_range {
+                    return Some((lambda, param_name, binder_range, token_range));
+                }
             }
         }
     }
@@ -290,11 +312,23 @@ pub fn rename_lambda_param(
     }
 
     // Locate the lambda + param at the cursor.
-    let (lambda, param_name, binder_range) =
+    let (lambda, param_name, binder_range, _cursor_token_range) =
         match find_lambda_and_binder_for_cursor(file, cursor_offset) {
             Some(r) => r,
             None => return Ok(RenameLambdaResult::NotALambdaParam),
         };
+
+    // Finding 1: Check that new_name does not collide with a sibling parameter
+    // in the same binder list.  Renaming `b` → `a` in `fn (a, b) => ...`
+    // would produce `fn (a, a) => ...`, which silently changes semantics.
+    if lambda
+        .params()
+        .iter()
+        .filter(|p| p.as_str() != param_name.as_str())
+        .any(|p| p.as_str() == new_name)
+    {
+        return Err(RenameLambdaError::ShadowsOuterBinder(new_name.to_string()));
+    }
 
     // Check that new_name would not shadow an outer binder already referenced
     // in this lambda's body.
@@ -324,11 +358,11 @@ pub fn prepare_rename_lambda_param(
     _text: &str,
     cursor_offset: usize,
 ) -> Option<(usize, usize, String)> {
-    let (_lambda, param_name, binder_range) =
+    let (_lambda, param_name, _binder_range, (cursor_start, cursor_end)) =
         find_lambda_and_binder_for_cursor(file, cursor_offset)?;
-    let start: usize = binder_range.start().into();
-    let end: usize = binder_range.end().into();
-    Some((start, end, param_name))
+    // Finding 3: return the cursor-token's span, not always the binder's span.
+    // This ensures prepareRename highlights the token the user is hovering over.
+    Some((cursor_start, cursor_end, param_name))
 }
 
 /// Convert the byte-range edits returned by [`rename_lambda_param`] to LSP

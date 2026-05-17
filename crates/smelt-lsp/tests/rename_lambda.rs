@@ -248,6 +248,91 @@ fn prepare_rename_lambda_param_returns_range() {
     assert_eq!(&sql[start..end], "x", "text at range must be `x`");
 }
 
+/// Multi-arg lambda `fn (a, b) => a + b` — renaming `b` → `a` must be
+/// rejected because `a` is already a sibling parameter in the same binder list.
+#[test]
+fn rename_lambda_param_rejects_sibling_collision() {
+    let sql = "SELECT xs |> map(fn (a, b) => a + b)";
+    let file = parse_file(sql);
+
+    // Cursor on binder `b` (after "SELECT xs |> map(fn (a, ")
+    // that's offset 24.
+    let cursor_offset = 24usize;
+
+    let result = rename_lambda_param(&file, sql, cursor_offset, "a");
+    assert!(
+        matches!(result, Err(RenameLambdaError::ShadowsOuterBinder(_))),
+        "expected ShadowsOuterBinder error when renaming to a sibling param name, got {:?}",
+        result
+    );
+}
+
+/// `fn x => x + 1` — cursor on the body-use `x` (after `=>`) must produce
+/// the same two edits as cursor-on-binder.
+#[test]
+fn rename_lambda_param_cursor_on_body_use() {
+    let sql = "SELECT xs |> map(fn x => x + 1)";
+    let file = parse_file(sql);
+
+    // The body-use `x` is at offset 25 (after "SELECT xs |> map(fn x => ")
+    let cursor_offset = 25usize;
+
+    let result = rename_lambda_param(&file, sql, cursor_offset, "n");
+    let edits = match result {
+        Ok(RenameLambdaResult::Edits(e)) => e,
+        other => panic!("expected Edits, got {:?}", other),
+    };
+
+    assert_eq!(
+        edits.len(),
+        2,
+        "expected 2 edits (binder + one body use), got {}",
+        edits.len()
+    );
+
+    let resulting_text = apply_edits(sql, edits);
+    assert!(
+        resulting_text.contains("fn n => n + 1"),
+        "expected `fn n => n + 1`, got `{}`",
+        resulting_text
+    );
+}
+
+/// prepare-rename with cursor on a body-use token must return the cursor-token's
+/// span (not the binder's span).
+#[test]
+fn prepare_rename_lambda_param_cursor_on_body_use_returns_token_span() {
+    let sql = "SELECT xs |> map(fn x => x + 1)";
+    let file = parse_file(sql);
+
+    // Cursor on body-use `x` at offset 25 (after "SELECT xs |> map(fn x => ")
+    let body_use_offset = 25usize;
+
+    let result = prepare_rename_lambda_param(&file, sql, body_use_offset);
+    let (start, end, placeholder) = match result {
+        Some(r) => r,
+        None => panic!("expected Some, got None for cursor on body-use"),
+    };
+
+    assert_eq!(placeholder, "x", "placeholder must be the param name");
+    // The cursor-token is the body-use `x`; its byte range must be at offset 25.
+    assert_eq!(
+        start, 25,
+        "start must be at the body-use token offset, got {}",
+        start
+    );
+    assert_eq!(
+        end, 26,
+        "end must be one past the body-use token, got {}",
+        end
+    );
+    assert_eq!(
+        &sql[start..end],
+        "x",
+        "text at cursor-token range must be `x`"
+    );
+}
+
 /// prepare-rename on a non-binder token (an operator `=>`) must return None.
 /// Existing rename targets (CTE, `smelt.<path>`) continue to work via their
 /// own handlers and are not affected.
