@@ -89,7 +89,7 @@ Rename refactoring works for the following targets:
 | Column name | The column across local, upstream, and downstream files |
 | Lambda parameter | The binder and every reference to it inside the lambda body |
 
-When renaming a lambda parameter (for example the `x` in `fn x => x + 1`), the rename updates the parameter binder and every use of that parameter within the lambda's body. Inner lambdas that shadow the parameter are left untouched. The new name must be a valid identifier and must not collide with a meta-namespace keyword (`if`, `then`, `else`, `fn`, `let`).
+When renaming a lambda parameter (for example the `x` in `fn x => x + 1`), the rename updates the parameter binder and every use of that parameter within the lambda's body. Inner lambdas that shadow the parameter are left untouched. The new name must be a valid identifier, must not collide with a meta-namespace keyword (`if`, `then`, `else`, `fn`, `let`), and must not shadow an outer binder already referenced inside the lambda body.
 
 ![Rename model across project](../assets/editor-features/rename-model-across-project.gif)
 
