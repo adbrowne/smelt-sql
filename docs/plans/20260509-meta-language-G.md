@@ -101,7 +101,7 @@ This is the **terminal phase**. After Phase 6's acceptance gate, the meta-plan �
 | 1     | done     | c224ebde | 2026-05-17 |
 | 2     | done     | 2cb3ca85 | 2026-05-17 |
 | 3     | done     | 16477eb6 | 2026-05-17 |
-| 4     | pending  |        |      |
+| 4     | done     | _pending push_ | 2026-05-17 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -400,6 +400,12 @@ After Phase 6's acceptance gate is met, all eight phases A–G are `done`. The m
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - **Phase 3 audit outcome (2026-05-17):** No fixture edits required. `large/spec.md`, `large/validate.py`, and `large/seeds/raw_orders.csv` (13 lines = header + 12 rows, 3 shipped + 1 cancelled per country) are consistent with both the shipped meta-language surface and `.claude/commands/smelt-loop.md` §"Tier overview" (union table, per-country counts, generator frontmatter, configs/ YAML). `medium/spec.md` already includes Phase A meta-list lift, Phase B HOF + `smelt.config.var`, Phase C column reflection, Phase D wide reflection, and records/maps/loader extensions at lines 105–168; all diagnostic codes referenced match the spec's diagnostic tables. Harness smoke test `setup_run.sh large local /tmp/smelt-loop-smoke-G-<ts>` succeeded (wheel built, smelt 0.3.2 installed, `smelt --help` and `smelt docs list` smoke checks both passed). All four cargo CI gates green.
+
+- **Phase 4 outcome (2026-05-17):** Iteration 1 of `/smelt-loop` tier-3 ran clean (7/7 acceptance checks passed first try). Run dir: `~/.smelt-test-runs/loop-1-20260517-132128/`. Build agent surfaced substantive retro signal → reviewer ran, classified 3 SKILL_GAP / 2 DOCS_GAP / 2 TOOL_BUG findings. Skill diff (+16 lines, bringing SKILL.md to exactly 250 lines — the hard cap) applied via `git apply`. Per `smelt-loop.md` stop conditions and this plan's §Scope ("the goal is a clean run, not exhaustive coverage"), one clean iteration is sufficient; no further iterations run in this plan execution. Per-finding follow-up work for the user (TOOL_BUG and DOCS_GAP items the reviewer surfaced, see `~/.smelt-test-runs/loop-1-20260517-132128/review_notes.md`):
+  - **TOOL_BUG:** `smelt test` silently ignores `materialization: test` files with a boolean-SELECT body (no "discovered but skipped" diagnostic). Reproducer in review_notes.md §1.
+  - **TOOL_BUG:** `smelt build --show-plan <generator>.sql` is opaque — prints only the top-level `load_yaml` AST node, does not list emitted ModelDef paths. Reproducer in review_notes.md §2.
+  - **DOCS_GAP:** `docs-site/docs/guide/testing.md` does not document the `materialization: test` boolean-assertion form (the spec fixture's shape); either document it or steer users toward the `test:`/`expect:` block. Folded into the same draft docs PR a note that `.sql` discovery under `paths:` is subdirectory-agnostic.
+  - Reference doc landed: `.claude/skills/smelt-app-builder/references/20260517-meta-final.md` summarising tier-3 workflow gotchas (generator emitted-model naming `cohorts.us` → `cohorts_us`; two coexisting test layouts with silent-skip; `tests/` as a scanned directory). Cross-links to the per-phase reference docs.
 
 ## Verification
 
