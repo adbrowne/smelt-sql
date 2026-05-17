@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778711778979,
+  "lastUpdate": 1778986551038,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16261,6 +16261,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 14.033385,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0dd924e30efb979adcc0c0a8cf35159eef55e6a2",
+          "message": "docs-site: apply smelt design system theme\n\nRestyle the mkdocs-material docs at smeltsql.com to the smelt design\nsystem (IBM Plex type stack, indigo brand palette, custom logo and\nfavicon, ember accent) per the design handoff package. No nav, content,\nor build/deploy changes — purely additive theming via extra.css and\nmkdocs.yml configuration.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T12:53:54+10:00",
+          "tree_id": "a0b9c5e4a7a89eabec2834ab142601555bbd5c4d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0dd924e30efb979adcc0c0a8cf35159eef55e6a2"
+        },
+        "date": 1778986549500,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.830729,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.264367,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.765249,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.450706,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003675,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 974.378888,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.361786,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.5724609999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 3.244457,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.798989,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1002.448645,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 10.74176,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.91594,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.114521,
             "unit": "ms"
           }
         ]
