@@ -1,5 +1,7 @@
 -- Load smelt-datagen-generated parquet into DuckDB source tables.
--- Run after `smelt-datagen --config datagen.yaml` writes Parquet under data/.
+-- Run from the examples/web_analytics directory after `smelt-datagen --config
+-- datagen.yaml` writes Parquet under data/. The `data/` and `target/dev.duckdb`
+-- paths below are relative to the working directory.
 -- `smelt build` does not invoke this — it expects the raw schema to exist.
 
 CREATE SCHEMA IF NOT EXISTS raw;
