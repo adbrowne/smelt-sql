@@ -55,13 +55,13 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 - `examples/web_analytics/setup_sources.sql` — DuckDB script that creates the `raw` schema and loads three parquet inputs (`users`, `devices`, `events`) into tables. The events table uses hive partitioning. **Honest about its role**: the comment header explains this is the bootstrap step a developer runs after `smelt-datagen` writes the parquet files; `smelt build` itself does not invoke it.
 - `examples/web_analytics/models/sources/raw/users.yml` — source schema for the users dimension (columns: `user_id INTEGER`, `signup_date DATE`).
 - `examples/web_analytics/models/sources/raw/devices.yml` — source schema for the devices dimension (columns: `device_id INTEGER`, `device_type VARCHAR`, `first_seen_date DATE`).
-- `examples/web_analytics/models/sources/raw/events.yml` — source schema for the events fact (columns: `event_id BIGINT`, `device_id INTEGER`, `user_id INTEGER` *nullable*, `event_ts TIMESTAMP`, `payload VARCHAR`, `event_date DATE`).
+- `examples/web_analytics/models/sources/raw/events.yml` — source schema for the events fact (columns: `event_id BIGINT`, `device_id INTEGER`, `user_id INTEGER` *nullable*, `seconds_in_day INTEGER`, `payload VARCHAR`, `event_date DATE`). The `event_ts TIMESTAMP` does not exist on bronze — it is composed in silver from `event_date` + `seconds_in_day`.
 - `examples/web_analytics/models/bronze/raw_events.sql` — bronze view: `SELECT * FROM smelt.sources.raw.events` (the bronze layer is a passthrough; it exists so later phases can attach incremental + lineage policies to a named model rather than to the raw source).
 - `examples/web_analytics/functions/parse_event_payload.sql` — smelt function `parse_event_payload(payload_json: Expr<Text>) -> Expr<Struct<{event_name: Text, platform: Text, url: Text}>>` whose body uses DuckDB's `json_extract_string` to project the three fields into a struct.
-- `examples/web_analytics/models/silver/events_parsed.sql` — silver model: project bronze rows with the JSON payload replaced by the parsed struct. Columns: `event_id`, `device_id`, `user_id`, `event_ts`, `event_date`, `parsed: Struct<{event_name, platform, url}>`.
+- `examples/web_analytics/models/silver/events_parsed.sql` — silver model: project bronze rows with `event_ts` composed from (`event_date` + `seconds_in_day`) and the JSON payload replaced by the parsed struct. Columns: `event_id`, `device_id`, `user_id`, `event_ts`, `event_date`, `parsed: Struct<{event_name, platform, url}>`.
 - `examples/web_analytics/README.md` — stub README (a single paragraph saying "see overall plan link" + the two-line bootstrap instructions). Full README content lands in Phase 8 of the overall plan.
 - `examples/web_analytics/.gitignore` — ignores `data/`, `target/`, `.smelt/`.
-- `crates/smelt-cli/tests/example_diagnostics.rs` — extend (or rely on the existing discovery loop) to cover `examples/web_analytics/`. If the test discovers examples automatically, no edit needed; otherwise add the path.
+- `crates/smelt-cli/tests/example_diagnostics.rs` — add a new `#[test] fn web_analytics_no_diagnostics()` calling `check_workspace_no_diagnostics("examples/web_analytics")`. Each example is listed explicitly (see the existing `timeseries_no_diagnostics`, `retail_analytics_no_diagnostics`, etc. at lines 82–99).
 
 ### Explicitly deferred (scope guardrails)
 
@@ -127,14 +127,14 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
   - `devices` dataset: `num_rows: 150_000`, columns `device_id` (`sequential_id`), `device_type` (`weighted_choice` over `mobile/desktop/tablet`), `first_seen_date` (`date`, same range as users).
   - `linked_pools:` — one entry `device_user` with `pool_size: 100_000`, `seed: 1337` (explicit to make the pool independent of the dataset seed under the seed-isolation rule from spec §`linked_choice`), four shapes:
     - **single-owner** `weight: 0.60`, `emit: 1`, `fields: { device_id: foreign_key(devices), user_id: foreign_key(users) }`.
-    - **anonymous** `weight: 0.25`, `emit: 1`, `fields: { device_id: foreign_key(devices), user_id: optional(prob: 1.0, inner: foreign_key(users)) }` — note: the spec allows nullable fields via `optional`; setting `prob: 1.0` here means "always null" (the optional fires 100% of the time and the inner is never reached). **Open question:** confirm `optional` semantics in the spec — if `prob:` is the firing probability and 1.0 means "always null", that's the right config; if it means "always emit non-null", we want `prob: 0.0`. Verify against `docs/specs/datagen.md` §Surface `optional` row before implementing; if the spec is ambiguous, run `/smelt:spec datagen` to pin it down first.
+    - **anonymous** `weight: 0.25`, `emit: 1`, `fields: { device_id: foreign_key(devices), user_id: optional(prob: 0, inner: foreign_key(users)) }`. Per `docs/specs/datagen.md:102` `optional` produces `null` with probability `1 - prob`; `prob: 0` therefore means **always null** (the spec's own `linked_choice` example at line 295 uses this exact form for anonymous devices). Do not flip the sign.
     - **shared-device** `weight: 0.10`, `emit: 3`, `sticky: [device_id]`, `fields: { device_id: foreign_key(devices), user_id: foreign_key(users) }` — emits 3 pool entries with the same device_id, different user_ids.
     - **multi-device-user** `weight: 0.05`, `emit: 3`, `sticky: [user_id]`, `fields: { device_id: foreign_key(devices), user_id: foreign_key(users) }` — emits 3 entries with the same user_id, different device_ids.
-  - `events` dataset: `num_rows: 1_000_000`, partitioned by `event_date` over 60 days from `2026-03-19` to `2026-05-17`. Columns:
+  - `events` dataset: `num_rows: 1_000_000`, partitioned by `event_date` over 60 days from `2026-03-19` to `2026-05-17`. **Do not declare `event_date` in `columns:`** — the partitioned writer auto-injects the partition column per row (verified in `crates/smelt-datagen/src/generic_parquet.rs:238` which passes `Some((part_cfg.column.as_str(), date_str.as_str()))` into `write_rows_to_file`). The existing `examples/retail_analytics/datagen.yaml` follows the same convention (no `order_date` under `orders.columns`). Columns:
     - `event_id`: `sequential_id`.
     - `device_id`: `linked_choice { pool: device_user, field: device_id }`.
     - `user_id`: `linked_choice { pool: device_user, field: user_id }` (nullable — the schema's `optional` propagates through `linked_choice` per spec §`linked_choice` Arrow-type rule).
-    - `event_ts`: `timestamp` (uniform within the partition day — uses the existing `timestamp` generator's range tied to the partition column). **Open question:** if the `timestamp` generator does not interact with the partition column automatically, fall back to a `uniform_int` over `[0, 86400)` seconds + a `concat` with the partition date string — but check the existing `timeseries` example for the established pattern first. Do not invent new generators.
+    - `seconds_in_day`: `uniform_int { min: 0, max: 86399 }` — a sub-day offset. The `timestamp` generator's `start`/`end` is fixed across the dataset (it does not know which partition day a row belongs to), so a full-day-resolution `event_ts` correlated with `event_date` is composed in Phase 4's silver model as `event_date + (seconds_in_day * INTERVAL 1 SECOND)`. Do not introduce a partition-aware timestamp generator in this phase.
     - `payload`: `json_object { fields: { event_name: weighted_choice(page_view: 0.50, click: 0.30, purchase: 0.05, scroll: 0.10, error: 0.05), platform: weighted_choice(web: 0.55, ios: 0.25, android: 0.20), url: weighted_choice("https://example.com/home": 0.40, "https://example.com/product": 0.30, "https://example.com/cart": 0.15, "https://example.com/checkout": 0.10, "https://example.com/account": 0.05) } }`.
 - `examples/web_analytics/.gitignore`: `data/`, `target/`, `.smelt/`.
 - `examples/web_analytics/README.md`: one paragraph linking to the overall plan + two lines on the bootstrap (`smelt-datagen --config datagen.yaml && duckdb target/dev.duckdb < setup_sources.sql && smelt build`). Full README content lands in Phase 8 of the overall plan.
@@ -208,9 +208,9 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
     - name: device_id
       type: INTEGER
     - name: user_id
-      type: INTEGER   # nullable in data; the type system treats VARCHAR/INTEGER as nullable by default
-    - name: event_ts
-      type: TIMESTAMP
+      type: INTEGER   # nullable in data; the type system treats columns as nullable by default
+    - name: seconds_in_day
+      type: INTEGER
     - name: payload
       type: VARCHAR
     - name: event_date
@@ -242,7 +242,7 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
       event_id,
       device_id,
       user_id,
-      event_ts,
+      seconds_in_day,
       payload,
       event_date
   FROM smelt.sources.raw.events
@@ -291,20 +291,21 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 
 - `examples/web_analytics/functions/parse_event_payload.sql`:
   ```sql
-  -- Decode the raw JSON payload column from bronze.raw_events into a typed struct.
-  -- Bronze stores the payload as VARCHAR because smelt-datagen's json_object
-  -- generator emits Utf8; silver lifts that into named, typed fields.
+  -- Decode the raw JSON payload column from bronze.raw_events into a typed
+  -- struct. Bronze stores the payload as VARCHAR because smelt-datagen's
+  -- json_object generator emits Utf8; silver lifts that into named, typed
+  -- fields.
   smelt.define parse_event_payload(
       payload_json: Expr<Text>
   ) -> Expr<Struct<{event_name: Text, platform: Text, url: Text}>> AS (
       {
-          event_name: json_extract_string(payload_json, '$.event_name'),
-          platform: json_extract_string(payload_json, '$.platform'),
-          url: json_extract_string(payload_json, '$.url')
+          json_extract_string(payload_json, '$.event_name') AS event_name,
+          json_extract_string(payload_json, '$.platform') AS platform,
+          json_extract_string(payload_json, '$.url') AS url
       }
   )
   ```
-  **Caveat:** the literal struct-construction syntax `{ field: expr, ... }` may or may not be the canonical smelt surface. Verify by reading `examples/functions_demo/functions/` (especially any function that returns a struct — `enrich_order_with_as_struct.sql` is a candidate) before authoring. If the surface differs (e.g. uses `as_struct(...)` or `struct(...)`), use the canonical form. Do **not** introduce a new struct-construction syntax in this phase.
+  The struct literal uses `{<expr> AS <field>, ...}` form — verified against `examples/functions_demo/functions/with_hour.sql:7` which uses `{EXTRACT(HOUR FROM event.ts) AS hour, ..event}`. Do **not** use `{<field>: <expr>, ...}` (that is the *type* literal syntax, not the value literal syntax).
 
 **Critical files.**
 
@@ -346,19 +347,20 @@ The overall plan ([`docs/plans/20260517-web-analytics-example.md`](20260517-web-
 
 - `examples/web_analytics/models/silver/events_parsed.sql`:
   ```sql
-  -- Lift the JSON payload into a typed struct. Downstream models reference
+  -- Compose event_ts from the partition date + sub-day offset, and lift the
+  -- JSON payload into a typed struct. Downstream models reference
   -- parsed.event_name / parsed.platform / parsed.url instead of re-parsing the
   -- JSON every time.
   SELECT
       event_id,
       device_id,
       user_id,
-      event_ts,
+      event_date + (seconds_in_day * INTERVAL 1 SECOND) AS event_ts,
       event_date,
       smelt.functions.parse_event_payload(payload) AS parsed
   FROM smelt.ref('raw_events')
   ```
-  **Caveat:** the smelt function call surface in models is `smelt.functions.<name>(...)` (verified against `examples/functions_demo/models/event_with_hour.sql`). The struct projection (e.g. `parsed.event_name`) is a downstream-phase concern; silver just produces the struct column.
+  The smelt function call surface is `smelt.functions.<name>(...)` — verified against `examples/functions_demo/models/event_with_hour.sql`. The struct projection (e.g. `parsed.event_name`) is a downstream-phase concern; silver just produces the struct column.
 
 **Critical files.**
 
