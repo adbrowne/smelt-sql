@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778986554125,
+  "lastUpdate": 1778987515148,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16355,6 +16355,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.114521,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5cf5dc61f9cefce3489da22f191447e32144b377",
+          "message": "docs-site: vibrant syntax highlighting for dark code blocks\n\nOverride Material's --md-code-hl-* token colors so identifiers, YAML\nkeys, and SQL select-list columns stand out on the ink-900 code\nbackground. Adds distinct colors for YAML tags/attributes, function\ncalls, type names, and language constants — Material lumps these under\na single \"name\" colour by default.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-17T13:10:04+10:00",
+          "tree_id": "c58b0adaa8f25c31092d5a43022e6fccec46fa74",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5cf5dc61f9cefce3489da22f191447e32144b377"
+        },
+        "date": 1778987513653,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 28.113937,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 26.862863,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.63052,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.344198,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002363,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 757.079559,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.137549,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.511026,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 3.1580760000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.745949,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 778.467892,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 9.07849,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 23.96282,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 9.870401,
             "unit": "ms"
           }
         ]
