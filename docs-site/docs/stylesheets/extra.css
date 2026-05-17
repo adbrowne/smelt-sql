@@ -484,3 +484,66 @@
   padding-left: 16px;
 }
 .md-typeset img { border-radius: 6px; }
+
+/* ---------- Syntax highlighting (Pygments tokens) -----------------------
+ * Code blocks use a dark background (ink-900) in both light and dark site
+ * schemes. Material's default token palette is tuned for its lighter code
+ * surface, so identifiers (SELECT columns, YAML keys, etc.) wash out. We
+ * override the --md-code-hl-* variables for both schemes and add explicit
+ * rules for the few tokens Material lumps under a single colour (YAML
+ * tags/attributes, function names, comments).
+ * ----------------------------------------------------------------------- */
+:root,
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"] {
+  --md-code-hl-keyword-color:     #A599FF;
+  --md-code-hl-operator-color:    #A599FF;
+  --md-code-hl-string-color:      #E8B86C;
+  --md-code-hl-number-color:      #F08B6E;
+  --md-code-hl-constant-color:    #FB7185;
+  --md-code-hl-special-color:     #FB7185;
+  --md-code-hl-function-color:    #7DD3FC;
+  --md-code-hl-name-color:        #E5E7EC;
+  --md-code-hl-variable-color:    #86E3CE;
+  --md-code-hl-comment-color:     #94A3B8;
+  --md-code-hl-punctuation-color: #94A3B8;
+  --md-code-hl-generic-color:     #E5E7EC;
+}
+
+/* YAML / TOML / frontmatter keys, HTML attributes — distinct from other
+   "name" tokens (Material maps these all to --md-code-hl-name-color). */
+.md-typeset .highlight .nt,
+.md-typeset .highlight .na,
+.md-typeset .highlight .nl {
+  color: #86E3CE;
+  font-weight: 500;
+}
+
+/* Function and method calls (SUM(...), COUNT(...), pipeline functions). */
+.md-typeset .highlight .nf,
+.md-typeset .highlight .nb,
+.md-typeset .highlight .fm {
+  color: #7DD3FC;
+}
+
+/* Class / type names (PascalCase types in Python / Rust signatures). */
+.md-typeset .highlight .nc,
+.md-typeset .highlight .nn {
+  color: #FBBF77;
+}
+
+/* Built-in / language constants — NULL, TRUE, FALSE, None, self, &c. */
+.md-typeset .highlight .kc,
+.md-typeset .highlight .bp {
+  color: #FB7185;
+}
+
+/* Comments — italic for clearer hierarchy. */
+.md-typeset .highlight .c,
+.md-typeset .highlight .c1,
+.md-typeset .highlight .cm,
+.md-typeset .highlight .ch,
+.md-typeset .highlight .cs,
+.md-typeset .highlight .cp {
+  font-style: italic;
+}
