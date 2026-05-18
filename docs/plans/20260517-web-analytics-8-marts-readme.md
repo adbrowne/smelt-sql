@@ -174,13 +174,13 @@ The README polish replaces the Phase 3 stub with a proper walkthrough: what the 
 
 ## Progress tracking
 
-| Phase | Status   | Commit     | Date       |
-|-------|----------|------------|------------|
-| 1     | done     | `819e4ae9` | 2026-05-18 |
-| 2     | pending  |            |            |
-| 3     | pending  |            |            |
-| 4     | pending  |            |            |
-| 5     | pending  |            |            |
+| Phase | Status | Commit     | Date       |
+|-------|--------|------------|------------|
+| 1     | done   | `819e4ae9` | 2026-05-18 |
+| 2     | done   | `3e9ddd4c` | 2026-05-18 |
+| 3     | done   | `99286a7f` | 2026-05-18 |
+| 4     | done   | `070c85ee` | 2026-05-18 |
+| 5     | done   | `4f577206` | 2026-05-18 |
 
 ---
 

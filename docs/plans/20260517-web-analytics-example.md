@@ -60,7 +60,7 @@ To run manually: `/clear` between phases and type `continue` — the resumabilit
 | 5 | `identity_forward_only` + initial `eventstream_with_identity` (single column) | done | `docs/plans/20260517-web-analytics-5-forward-only.md` | 2026-05-18 | `9421a636` |
 | 6 | `identity_backward_fill` (extends `eventstream_with_identity`) | done | `docs/plans/20260517-web-analytics-6-backward-fill.md` | 2026-05-18 | `e97d267a` |
 | 7 | `identity_connected_components` (recursive-CTE label propagation, extends eventstream) | done | `docs/plans/20260517-web-analytics-7-connected-components.md` | 2026-05-18 | `701ff513` |
-| 8 | Marts (`daily_active_users_by_method`, `identity_method_comparison`) + README + docs-site link | pending | `docs/plans/20260517-web-analytics-8-marts-readme.md` | | |
+| 8 | Marts (`daily_active_users_by_method`, `identity_method_comparison`) + README + docs-site link | done | `docs/plans/20260517-web-analytics-8-marts-readme.md` | 2026-05-18 | `4f577206` |
 | 9 | (Deferred / optional) Replace connected-components iteration cap with true fixed-point | pending | `docs/plans/20260517-web-analytics-9-fixed-point.md` | | |
 
 ## In scope
