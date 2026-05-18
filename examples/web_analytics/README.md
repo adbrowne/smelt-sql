@@ -34,8 +34,8 @@ Cross-device clustering via union-find over the `(device, user)` co-occurrence
 graph. The cluster's representative is the smallest user_id in the cluster,
 and every event of every device in the cluster is tagged with that
 representative. Implemented as 8-iteration unrolled label propagation over
-`silver/device_user_edges` (true fixed-point convergence is the optional
-Phase 9 of the overall plan).
+`silver/device_user_edges`; true recursive-CTE fixed-point convergence is a
+possible future extension.
 
 ## Pipeline
 
@@ -137,8 +137,9 @@ ORDER BY comparison_name;
 ```
 
 Three rows, one per pair (`backward_vs_connected`, `forward_vs_backward`,
-`forward_vs_connected`), each reporting `(agree_events, disagree_events,
-only_left_identified, only_right_identified, both_null_events, total_events)`.
+`forward_vs_connected`), each reporting `(comparison_name, total_events,
+agree_events, disagree_events, only_left_identified, only_right_identified,
+both_null_events)`.
 The disjointness invariant
 `agree + disagree + only_left + only_right + both_null = total_events` holds
 on every row. The qualitative shape is dataset-dependent: with 10% shared

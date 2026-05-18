@@ -4,12 +4,15 @@ test:
   model: daily_active_users_by_method
   inputs:
     gold_eventstream_with_identity:
-      # Day 1 (2026-04-01): 4 events on 2 devices. Only device 1 has a
-      # signed-in event (user 100). Forward-only resolves only the in-session
-      # signed-in event itself (event 2); backward-fill and connected-
-      # components retroactively tag the device's other events on the day.
-      # Device 2 stays anonymous everywhere. Day 1 has no cross-device cluster,
-      # so backward-fill and connected-components produce identical output.
+      # Day 1 (2026-04-01): 4 events on 2 devices. Fixture rows reflect a
+      # partial-reach pattern: 2 of 4 events have non-null forward_only_user_id
+      # (mocking a session where the late page_view at event 3 is outside the
+      # window the upstream window function tagged), 3 of 4 have non-null
+      # backward_fill_user_id (device 1's events plus its other session),
+      # and 3 of 4 have non-null connected_components_user_id (same as
+      # backward-fill on Day 1 — no cross-device cluster). Device 2 stays
+      # anonymous everywhere. This exercises identified_events_* strict
+      # inequality on a per-day row.
       - {event_id: 1, device_id: 1, event_user_id: null, event_ts: '2026-04-01 10:00:00', event_date: '2026-04-01', event_name: 'page_view', platform: 'web', url: 'https://example.com/', session_id: 'sa', forward_only_user_id: 100, backward_fill_user_id: 100, connected_components_user_id: 100, connected_components_cluster_id: 100}
       - {event_id: 2, device_id: 1, event_user_id: 100,  event_ts: '2026-04-01 10:05:00', event_date: '2026-04-01', event_name: 'login',     platform: 'web', url: 'https://example.com/login', session_id: 'sa', forward_only_user_id: 100, backward_fill_user_id: 100, connected_components_user_id: 100, connected_components_cluster_id: 100}
       - {event_id: 3, device_id: 1, event_user_id: null, event_ts: '2026-04-01 10:08:00', event_date: '2026-04-01', event_name: 'page_view', platform: 'web', url: 'https://example.com/', session_id: 'sa', forward_only_user_id: null, backward_fill_user_id: 100, connected_components_user_id: 100, connected_components_cluster_id: 100}
