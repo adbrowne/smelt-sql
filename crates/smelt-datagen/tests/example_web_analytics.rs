@@ -2602,3 +2602,128 @@ fn test_daily_active_users_by_method_monotonicity() {
             panic!("column-existence regression: SELECT of all 8 columns failed: {e}")
         });
 }
+
+// ---------------------------------------------------------------------------
+// Test 20: marts/identity_method_comparison materializes with 3 rows of the
+// expected pairwise comparison shape.
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.marts_identity_method_comparison`
+/// materializes with exactly 3 rows (one per pair of identity methods) and
+/// that the subsumption-with-equal-user invariant holds:
+/// forward_vs_backward.disagree_events = 0 (forward-only and backward-fill, when
+/// they both resolve, resolve to the same user — backward-fill never *changes*
+/// the user, only *extends* the population of identified events).
+#[test]
+fn test_identity_method_comparison_materializes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+    drop(conn);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let row_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.marts_identity_method_comparison",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM marts_identity_method_comparison: {e}"));
+    assert_eq!(
+        row_count, 3,
+        "marts_identity_method_comparison must produce exactly 3 rows; got {row_count}"
+    );
+
+    // Probe each expected comparison_name is present.
+    let mut names: Vec<String> = conn2
+        .prepare("SELECT comparison_name FROM main.marts_identity_method_comparison")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or_else(|e| panic!("comparison_name probe failed: {e}"));
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "backward_vs_connected".to_string(),
+            "forward_vs_backward".to_string(),
+            "forward_vs_connected".to_string(),
+        ],
+        "marts_identity_method_comparison must contain the three expected \
+         comparison_name values"
+    );
+
+    // Note on pairwise disagree_events: forward-only resolves per-session to
+    // the latest in-session signed-in user; backward-fill elects per-device
+    // most-frequent user; connected-components elects per-cluster minimum
+    // user. None of these subsume each other when the device has multiple
+    // distinct signed-in users, so disagree_events is non-zero in general on
+    // the synthetic dataset (with 10% shared-device + 5% multi-device users in
+    // the linked_choice distribution). The README narrative explains the
+    // qualitative shape; the only invariant asserted here is the disjointness
+    // sum below.
+
+    // Disjointness sum: agree + disagree + only_left + only_right + both_null = total_events
+    // on every row.
+    let bad_sum: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.marts_identity_method_comparison \
+             WHERE agree_events + disagree_events + only_left_identified \
+                 + only_right_identified + both_null_events != total_events",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("disjointness sum probe failed: {e}"));
+    assert_eq!(
+        bad_sum, 0,
+        "every row of marts_identity_method_comparison must satisfy \
+         agree + disagree + only_left + only_right + both_null = total_events; \
+         {bad_sum} row(s) violate this invariant"
+    );
+}

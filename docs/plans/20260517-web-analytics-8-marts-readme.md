@@ -174,13 +174,13 @@ The README polish replaces the Phase 3 stub with a proper walkthrough: what the 
 
 ## Progress tracking
 
-| Phase | Status   | Commit | Date |
-|-------|----------|--------|------|
-| 1     | pending  |        |      |
-| 2     | pending  |        |      |
-| 3     | pending  |        |      |
-| 4     | pending  |        |      |
-| 5     | pending  |        |      |
+| Phase | Status   | Commit     | Date       |
+|-------|----------|------------|------------|
+| 1     | done     | `819e4ae9` | 2026-05-18 |
+| 2     | pending  |            |            |
+| 3     | pending  |            |            |
+| 4     | pending  |            |            |
+| 5     | pending  |            |            |
 
 ---
 
@@ -440,6 +440,10 @@ Notes:
 - [ ] Zero diagnostics for the file from `example_diagnostics`.
 
 **Commit.** `feat(examples): web_analytics identity_method_comparison mart (web-analytics Phase 8)`.
+
+**Deferred during implementation.**
+
+- The plan's predicted `forward_vs_backward.disagree_events = 0` invariant does **not** hold on the synthetic dataset (the strict-zero assertion fired at 6304 disagreements). Root cause: forward-only resolves per-session to the *latest* in-session signed-in user; backward-fill elects the per-device *most-frequent* user. On a device with two distinct signed-in users where the most-frequent user is not the latest-in-session user of a given session, the algorithms disagree on every event of that session that forward-only resolves. With 10% shared-device + 5% multi-device users in the linked_choice distribution, disagreement actually *dominates* agreement on this dataset. Resolution: dropped the strict-zero assertion entirely, kept the disjointness-sum invariant (`agree + disagree + only_left + only_right + both_null = total_events`) as the sole correctness check, and updated the mart's `forward_vs_backward` header comment to describe the actual qualitative shape (disagree_events ≥ 0; only_right_identified is the dominant non-agree bucket). The README narrative (Sub-Phase 3) must reflect this honest characterisation.
 
 ---
 
