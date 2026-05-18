@@ -208,3 +208,18 @@ fn test_round_trip_fuzz_crash_qualified_star_trailing_junk() {
     let sql = "SELECT\nTTTQ./**/*///4/*T";
     assert_round_trip(sql);
 }
+
+// Regression: fuzz crash where LIST_SPREAD nodes in the SELECT list were
+// invisible to the printer (only SELECT_ITEM nodes were iterated), causing
+// "SELECT ... Cm, ...hAY" to print as "SELECT " which fails to re-parse.
+#[test]
+fn test_round_trip_fuzz_crash_list_spread_in_select() {
+    let sql = "SELECT ... Cm, ...hAY";
+    assert_round_trip(sql);
+}
+
+#[test]
+fn test_round_trip_single_spread_in_select() {
+    let sql = "SELECT ...foo";
+    assert_round_trip(sql);
+}

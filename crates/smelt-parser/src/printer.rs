@@ -160,12 +160,22 @@ impl Display for SelectStmt {
 
 impl Display for SelectList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let items: Vec<_> = self.items().collect();
-        for (i, item) in items.iter().enumerate() {
-            if i > 0 {
+        use crate::ast::SelectEntry;
+        let mut first = true;
+        for entry in self.entries() {
+            if !first {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", item)?;
+            first = false;
+            match entry {
+                SelectEntry::Item(item) => write!(f, "{}", item)?,
+                SelectEntry::Spread(spread) => {
+                    write!(f, "...")?;
+                    if let Some(operand) = spread.operand() {
+                        write!(f, "{}", operand.text())?;
+                    }
+                }
+            }
         }
         Ok(())
     }
