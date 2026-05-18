@@ -25,9 +25,10 @@
 -- cluster diameter, far above the synthetic dataset's expected graph diameter
 -- (3-5 hops at the 60/25/10/5 co-occurrence weights). DuckDB's recursive-CTE
 -- engine does not permit aggregates (MIN, GROUP BY) in the recursive term, so
--- the iter-unrolled form is used rather than a WITH RECURSIVE CTE. Phase 9 of
--- the example's overall plan may revisit this if a DuckDB-compatible recursive
--- shape becomes available.
+-- the iter-unrolled form is used rather than a WITH RECURSIVE CTE. A future
+-- revision may replace this with a true fixed-point form if DuckDB lifts the
+-- aggregate restriction or a DuckDB-compatible recursive aggregate pattern
+-- becomes available.
 --
 -- Output columns:
 --   device_id                      - the device
