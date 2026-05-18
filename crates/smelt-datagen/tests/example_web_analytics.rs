@@ -1664,3 +1664,136 @@ fn test_forward_only_invariants_inline_pass() {
         "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 14: gold/identity_backward_fill view materializes with one row per device
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.gold_identity_backward_fill`
+/// materializes with one row per device that ever had a signed-in event, that
+/// `backward_fill_user_id` is non-null on every row, and that the chosen user
+/// matches the per-device `MAX(event_count)` (primary sort key).
+#[test]
+fn test_identity_backward_fill_materializes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+    drop(conn);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    // Step 5: row count > 0
+    let bf_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_backward_fill",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.gold_identity_backward_fill: {e}"));
+
+    assert!(
+        bf_count > 0,
+        "gold_identity_backward_fill should have at least one row, got 0"
+    );
+
+    // Step 6: one row per device that ever had a signed-in event
+    let device_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges: {e}")
+        });
+
+    assert_eq!(
+        bf_count, device_count,
+        "gold_identity_backward_fill row count ({bf_count}) must equal \
+         silver_device_user_edges distinct-device count ({device_count}) — one row per device"
+    );
+
+    // Step 7: non-null output (the model itself never yields NULL)
+    let null_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_backward_fill \
+             WHERE backward_fill_user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("null-count query failed: {e}"));
+
+    assert_eq!(
+        null_count, 0,
+        "gold_identity_backward_fill must not produce NULL user_ids; \
+         {null_count} rows violate this"
+    );
+
+    // Step 8: per-device determinism — the chosen user must own the device's MAX(event_count)
+    let violation_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_backward_fill bf
+             JOIN (
+                 SELECT device_id, MAX(event_count) AS max_count
+                 FROM main.silver_device_user_edges
+                 GROUP BY device_id
+             ) m ON bf.device_id = m.device_id
+             JOIN main.silver_device_user_edges e
+                 ON e.device_id = bf.device_id
+                AND e.user_id = bf.backward_fill_user_id
+             WHERE e.event_count != m.max_count",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("per-device determinism query failed: {e}"));
+
+    assert_eq!(
+        violation_count, 0,
+        "every chosen backward_fill_user_id must have the device's MAX(event_count); \
+         {violation_count} devices violate this"
+    );
+}
