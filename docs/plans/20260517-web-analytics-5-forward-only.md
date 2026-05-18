@@ -82,7 +82,7 @@ The within-session reduction is described in the meta-plan context as `arg_max(u
 | 1     | done     | `7669786c` | 2026-05-18 |
 | 2     | done     | `f6ee37ef` | 2026-05-18 |
 | 3     | done     | `9421a636` | 2026-05-18 |
-| 4     | done     | *(this commit)* | 2026-05-18 |
+| 4     | done     | `f6116751` | 2026-05-18 |
 
 ---
 
