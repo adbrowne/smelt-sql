@@ -1980,6 +1980,182 @@ fn test_eventstream_with_identity_includes_backward_fill() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 16a: gold/identity_connected_components view materializes
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.gold_identity_connected_components`
+/// materializes with one row per device that ever had a signed-in event.
+/// Asserts the nine TDD invariants from the per-phase plan:
+///   1. count(*) > 0
+///   2. one row per device (= distinct device count in silver_device_user_edges)
+///   3. both identity columns are non-null on every row
+///   4. cluster-id-equals-user-id (v1: both = MIN user_id in cluster)
+///   5. transitive-closure: devices sharing a user have the same cluster_id
+///   6. cluster-id-is-MIN: cluster_id = MIN(user_id) over all edges in the cluster
+#[test]
+fn test_identity_connected_components_materializes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+    drop(conn);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    // Step 1 / Step 4: row count > 0
+    let cc_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_connected_components",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("SELECT COUNT(*) FROM main.gold_identity_connected_components: {e}")
+        });
+
+    assert!(
+        cc_count > 0,
+        "gold_identity_connected_components should have at least one row, got 0"
+    );
+
+    // Step 5: one row per device that ever had a signed-in event
+    let device_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges: {e}")
+        });
+
+    assert_eq!(
+        cc_count, device_count,
+        "gold_identity_connected_components row count ({cc_count}) must equal \
+         silver_device_user_edges distinct-device count ({device_count}) — one row per device"
+    );
+
+    // Step 6: non-null output for both identity columns
+    let null_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_connected_components \
+             WHERE connected_components_user_id IS NULL \
+                OR connected_components_cluster_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("null-count query failed: {e}"));
+
+    assert_eq!(
+        null_count, 0,
+        "gold_identity_connected_components must not produce NULL identity values; \
+         {null_count} rows violate this"
+    );
+
+    // Step 7: v1 cluster-id-equals-user-id invariant
+    let uid_ne_cluster: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_connected_components \
+             WHERE connected_components_user_id != connected_components_cluster_id",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("cluster-id-equals-user-id query failed: {e}"));
+
+    assert_eq!(
+        uid_ne_cluster, 0,
+        "in v1, connected_components_user_id must equal connected_components_cluster_id \
+         on every row; {uid_ne_cluster} rows violate this"
+    );
+
+    // Step 8: transitive-closure invariant — any two devices sharing a user
+    // must have the same connected_components_cluster_id.
+    let transitive_violation: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_device_user_edges e1
+             JOIN main.silver_device_user_edges e2 ON e1.user_id = e2.user_id
+             JOIN main.gold_identity_connected_components c1 ON c1.device_id = e1.device_id
+             JOIN main.gold_identity_connected_components c2 ON c2.device_id = e2.device_id
+             WHERE c1.connected_components_cluster_id != c2.connected_components_cluster_id",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("transitive-closure invariant query failed: {e}"));
+
+    assert_eq!(
+        transitive_violation, 0,
+        "every pair of devices sharing a user must have the same cluster_id; \
+         {transitive_violation} pairs violate the transitive-closure invariant"
+    );
+
+    // Step 9: cluster-id-is-MIN invariant — for every cluster, cluster_id must
+    // equal MIN(user_id) over all edges attached to devices in that cluster.
+    let min_violation: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT c.connected_components_cluster_id, MIN(e.user_id) AS min_uid
+                 FROM main.gold_identity_connected_components c
+                 JOIN main.silver_device_user_edges e ON e.device_id = c.device_id
+                 GROUP BY c.connected_components_cluster_id
+                 HAVING MIN(e.user_id) != c.connected_components_cluster_id
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("cluster-id-is-MIN invariant query failed: {e}"));
+
+    assert_eq!(
+        min_violation, 0,
+        "for every cluster, connected_components_cluster_id must equal \
+         MIN(user_id) over all edges attached to devices in the cluster; \
+         {min_violation} clusters violate this"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 16: gold/identity_backward_fill — per-device election invariants
 // ---------------------------------------------------------------------------
 
