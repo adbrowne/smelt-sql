@@ -79,8 +79,8 @@ The within-session reduction is described in the meta-plan context as `arg_max(u
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     | *(this commit)* | 2026-05-18 |
-| 2     | pending  |        |      |
+| 1     | done     | `7669786c` | 2026-05-18 |
+| 2     | done     | *(this commit)* | 2026-05-18 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 

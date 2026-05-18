@@ -1412,3 +1412,199 @@ fn test_identity_forward_only_materializes() {
         "every session with at least one signed-in event must have a non-null forward_only_user_id; {violation_count} sessions violate this invariant"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 12: gold/eventstream_with_identity view materializes with join invariants
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.gold_eventstream_with_identity`
+/// materializes with the correct cardinality, identity column invariants, and
+/// expected column shape.
+///
+/// `models/gold/eventstream_with_identity.sql` address segments are
+/// `["gold", "eventstream_with_identity"]`, so smelt materializes the view as
+/// `gold_eventstream_with_identity` in the `main` schema.
+#[test]
+fn test_eventstream_with_identity_end_to_end() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: clone the web_analytics project tree into tmp_path ---
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    // --- Step 2: run smelt-datagen with rewritten outputs into tmp_path ---
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 3: rewrite setup_sources.sql with absolute paths, execute ---
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+
+    // Close connection so smelt build can open the file exclusively.
+    drop(conn);
+
+    // --- Step 4: run `smelt build` from the temp workspace directory ---
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // --- Step 5: verify gold_eventstream_with_identity has > 0 rows ---
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let stream_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("SELECT COUNT(*) FROM main.gold_eventstream_with_identity: {e}")
+        });
+
+    assert!(
+        stream_count > 0,
+        "gold_eventstream_with_identity should have at least one row, got 0"
+    );
+
+    // --- Step 6: event-preserving cardinality invariant ---
+    // The JOIN to sessions is one-to-one on (device_id, event_ts ∈ [session_start, session_end]);
+    // every event is in exactly one session so no row is dropped or duplicated.
+    let events_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_events_parsed",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_events_parsed: {e}"));
+
+    assert_eq!(
+        stream_count, events_count,
+        "gold_eventstream_with_identity row count ({stream_count}) must equal \
+         silver_events_parsed row count ({events_count}) — one row per event"
+    );
+
+    // --- Step 7: single-valued forward_only_user_id within session ---
+    // No session should resolve to two distinct non-null forward_only_user_id values.
+    // (NULL values are ignored by COUNT(DISTINCT ...) by default in SQL.)
+    let multi_uid_sessions: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT session_id, COUNT(DISTINCT forward_only_user_id) AS k
+                 FROM main.gold_eventstream_with_identity
+                 GROUP BY session_id
+                 HAVING k > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("single-valued forward_only_user_id invariant query failed: {e}")
+        });
+
+    assert_eq!(
+        multi_uid_sessions, 0,
+        "no session should have more than one distinct non-null forward_only_user_id; \
+         {multi_uid_sessions} sessions violate this invariant"
+    );
+
+    // --- Step 8: non-null resolution for signed-in events ---
+    // If an event row has a non-null event_user_id, its session must resolve to
+    // a non-null forward_only_user_id (the algorithm sees at least one non-null input).
+    let unresolved_signed_in: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity \
+             WHERE event_user_id IS NOT NULL AND forward_only_user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("non-null resolution for signed-in events query failed: {e}"));
+
+    assert_eq!(
+        unresolved_signed_in, 0,
+        "every event with a non-null event_user_id must have a non-null forward_only_user_id; \
+         {unresolved_signed_in} rows violate this invariant"
+    );
+
+    // --- Step 9: verify column shape ---
+    // The SELECT list must include exactly these columns in the expected positions.
+    // We query a single row and verify each named column is accessible.
+    // All numeric and date/timestamp columns are cast to TEXT for portable comparison.
+    #[allow(clippy::type_complexity)]
+    let col_check: Result<
+        (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+        _,
+    > = conn2.query_row(
+        "SELECT event_id::TEXT, device_id::TEXT, event_user_id::TEXT, event_ts::TEXT, \
+                    event_date::TEXT, event_name, platform, url, session_id::TEXT, \
+                    forward_only_user_id::TEXT \
+             FROM main.gold_eventstream_with_identity \
+             LIMIT 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?, // event_id (as text)
+                row.get::<_, Option<String>>(1)?, // device_id (as text)
+                row.get::<_, Option<String>>(2)?, // event_user_id (nullable, as text)
+                row.get::<_, Option<String>>(3)?, // event_ts (as text)
+                row.get::<_, Option<String>>(4)?, // event_date (as text)
+                row.get::<_, Option<String>>(5)?, // event_name
+                row.get::<_, Option<String>>(6)?, // platform
+                row.get::<_, Option<String>>(7)?, // url
+                row.get::<_, Option<String>>(8)?, // session_id (as text)
+                row.get::<_, Option<String>>(9)?, // forward_only_user_id (nullable, as text)
+            ))
+        },
+    );
+
+    assert!(
+        col_check.is_ok(),
+        "column shape check failed — one or more expected columns missing from \
+         gold_eventstream_with_identity: {:?}",
+        col_check.err()
+    );
+}
