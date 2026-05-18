@@ -1286,3 +1286,129 @@ fn test_sessions_invariants_inline_pass() {
         "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 11: gold/identity_forward_only view materializes with identity invariants
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.gold_identity_forward_only` materializes
+/// with at least one row, its row count matches `main.silver_sessions` (one row
+/// per session), and every session that contains at least one signed-in event
+/// has a non-null `forward_only_user_id`.
+///
+/// `models/gold/identity_forward_only.sql` address segments are
+/// `["gold", "identity_forward_only"]`, so smelt materializes the view as
+/// `gold_identity_forward_only` in the `main` schema.
+#[test]
+fn test_identity_forward_only_materializes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // --- Step 1: clone the web_analytics project tree into tmp_path ---
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    // --- Step 2: run smelt-datagen with rewritten outputs into tmp_path ---
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    // --- Step 3: rewrite setup_sources.sql with absolute paths, execute ---
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+
+    // Close connection so smelt build can open the file exclusively.
+    drop(conn);
+
+    // --- Step 4: run `smelt build` from the temp workspace directory ---
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // --- Step 5: verify gold_identity_forward_only has > 0 rows ---
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let fwd_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_forward_only",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.gold_identity_forward_only: {e}"));
+
+    assert!(
+        fwd_count > 0,
+        "gold_identity_forward_only should have at least one row, got 0"
+    );
+
+    // --- Step 6: verify one-row-per-session cardinality ---
+    // gold_identity_forward_only must have exactly as many rows as silver_sessions.
+    let session_count: i64 = conn2
+        .query_row("SELECT COUNT(*) FROM main.silver_sessions", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_sessions: {e}"));
+
+    assert_eq!(
+        fwd_count, session_count,
+        "gold_identity_forward_only row count ({fwd_count}) must equal silver_sessions row count ({session_count}) — one row per session"
+    );
+
+    // --- Step 7: population invariant ---
+    // Every session that has at least one signed-in event must have a non-null
+    // forward_only_user_id. The query counts sessions where the invariant is violated.
+    let violation_count: i64 = conn2
+        .query_row(
+            "SELECT count(*) FROM (
+               SELECT s.session_id
+               FROM main.silver_sessions s
+               JOIN main.silver_events_parsed e
+                 ON e.device_id = s.device_id
+                AND e.event_ts BETWEEN s.session_start AND s.session_end
+               WHERE e.user_id IS NOT NULL
+               GROUP BY s.session_id
+             ) sessions_with_user
+             JOIN main.gold_identity_forward_only f USING (session_id)
+             WHERE f.forward_only_user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("population invariant query failed: {e}"));
+
+    assert_eq!(
+        violation_count, 0,
+        "every session with at least one signed-in event must have a non-null forward_only_user_id; {violation_count} sessions violate this invariant"
+    );
+}

@@ -199,6 +199,14 @@ fn agg_any_value_registered() {
 }
 
 #[test]
+fn agg_arg_max_registered() {
+    assert!(
+        BuiltinRegistry::resolve("ARG_MAX").is_some(),
+        "ARG_MAX not in registry"
+    );
+}
+
+#[test]
 fn agg_approx_count_distinct_registered() {
     assert!(
         BuiltinRegistry::resolve("APPROX_COUNT_DISTINCT").is_some(),
@@ -547,6 +555,7 @@ fn agg_kinds_correct() {
         "BIT_OR",
         "BIT_XOR",
         "ANY_VALUE",
+        "ARG_MAX",
         "APPROX_COUNT_DISTINCT",
     ];
     for name in agg_names {

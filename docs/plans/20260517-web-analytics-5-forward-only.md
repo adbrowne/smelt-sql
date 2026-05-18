@@ -79,7 +79,7 @@ The within-session reduction is described in the meta-plan context as `arg_max(u
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | *(this commit)* | 2026-05-18 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -458,6 +458,8 @@ After acceptance gate: flip the overall-plan status row for Phase 5 in `docs/pla
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 1: registering `arg_max` required edits beyond `signatures.rs`.** Form 2 was selected. Adding a function to the registry meant extending three files in lockstep so the registries stayed in sync: `crates/smelt-types/src/signatures.rs` (signature entry), `crates/smelt-types/src/functions.rs` (`SqlFunction::ArgMax` variant + `ALL_FUNCTIONS` + `name()` + `is_agg()` category match), and `crates/smelt-db/src/type_inference/function_call.rs` (inference arm returning the first-arg type). The plan's "one-line registry addition" wording underestimated this; the structural complement is unavoidable because `check_types.rs` uses `SqlFunction::from_name` to surface the unrecognized-function diagnostic, and `infer_function_type` must produce a type when the function appears. `arg_min` was *not* registered (initially added as a symmetric pair, removed after sql-expert-style review flagged it as out-of-scope given no current call site).
 
 ## Verification
 

@@ -811,7 +811,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: false,
         }),
 
-        SqlFunction::AnyValue | SqlFunction::First | SqlFunction::Last => {
+        SqlFunction::AnyValue | SqlFunction::ArgMax | SqlFunction::First | SqlFunction::Last => {
             first_arg_type_or(func, ctx, DataType::Unknown, true)
         }
 
