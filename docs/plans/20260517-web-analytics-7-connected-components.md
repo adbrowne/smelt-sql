@@ -128,7 +128,7 @@ The model surfaces *two* columns rather than one because the cluster id is the a
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     |        | 2026-05-18 |
+| 1     | done     | e55b30a6 | 2026-05-18 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -643,7 +643,7 @@ After acceptance gate: flip the overall-plan status row for Phase 7 in `docs/pla
 
 - **Phase 1 — iter-unrolled form chosen over WITH RECURSIVE.** DuckDB's recursive-CTE engine prohibits aggregates (`MIN`, `GROUP BY`) inside the recursive term; the plan's primary form used both in the recursive step. Fallback: 8 explicit CTEs (`iter0`–`iter8`) each recomputing every device's label as `MIN(CASE WHEN ...)` over the one-hop neighbourhood. This is semantically equivalent and verified correct by all 6 TDD assertions (count, cardinality, non-null, cluster-id=user-id, transitive-closure, cluster-id-is-MIN). `LEAST` registration was confirmed present (`crates/smelt-types/src/signatures.rs:3635`) but `CASE WHEN` was used instead per plan instructions to avoid registry expansion.
 
-- **Phase 1 — Progress tracking update.** Phase 1 commit: (see below after commit).
+- **Phase 1 — Progress tracking update.** Phase 1 commit: `e55b30a6`.
 
 ## Verification
 
