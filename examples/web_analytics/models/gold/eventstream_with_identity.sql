@@ -1,8 +1,9 @@
 -- Per-event wide table that joins every silver/events_parsed row to its
 -- session (silver/sessions) and attaches each available identity algorithm's
--- resolved column. Carries two identity columns today (forward_only,
--- backward_fill); the wide shape is fixed so additional algorithms can be
--- added as LEFT JOIN + one column projection without restructuring the row.
+-- resolved column. Carries three identity algorithms (forward_only,
+-- backward_fill, connected_components); the wide shape is fixed so additional
+-- algorithms can be added as LEFT JOIN + column projections without
+-- restructuring the row.
 --
 -- Columns:
 --   event_id              — opaque event identifier from raw ingestion
@@ -19,6 +20,18 @@
 --   backward_fill_user_id — resolved identity via the per-device canonical-user
 --                           election (NULL for devices that never had a
 --                           signed-in event); see gold/identity_backward_fill
+--   connected_components_user_id  — resolved identity via the cross-device
+--                           bipartite-graph union-find (NULL for devices that
+--                           never had a signed-in event); see
+--                           gold/identity_connected_components
+--   connected_components_cluster_id — cluster label from the connected-components
+--                           union-find (NULL on the same condition as the
+--                           user_id column). Numerically equal to
+--                           connected_components_user_id in the v1 algorithm
+--                           (both are the smallest user_id in the cluster);
+--                           surfaced separately so a future probabilistic-
+--                           stitching alternative could decouple them without
+--                           reshuffling the eventstream.
 SELECT
     e.event_id,
     e.device_id,
@@ -30,7 +43,9 @@ SELECT
     e.url,
     s.session_id,
     f.forward_only_user_id,
-    b.backward_fill_user_id
+    b.backward_fill_user_id,
+    c.connected_components_user_id,
+    c.connected_components_cluster_id
 FROM smelt.silver.events_parsed e
 JOIN smelt.silver.sessions s
     ON e.device_id = s.device_id
@@ -40,3 +55,5 @@ LEFT JOIN smelt.gold.identity_forward_only f
     ON s.session_id = f.session_id
 LEFT JOIN smelt.gold.identity_backward_fill b
     ON e.device_id = b.device_id
+LEFT JOIN smelt.gold.identity_connected_components c
+    ON e.device_id = c.device_id

@@ -129,7 +129,7 @@ The model surfaces *two* columns rather than one because the cluster id is the a
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | e55b30a6 | 2026-05-18 |
-| 2     | pending  |        |      |
+| 2     | done     | (see below) | 2026-05-18 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 

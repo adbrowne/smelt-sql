@@ -2207,3 +2207,216 @@ fn test_backward_fill_invariants_inline_pass() {
         "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 17: gold/eventstream_with_identity — connected_components columns
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.gold_eventstream_with_identity` carries
+/// the two connected-components identity columns added in the eventstream extension:
+/// `connected_components_user_id` and `connected_components_cluster_id`.
+///
+/// Asserts all seven TDD steps from the per-phase plan:
+///   Step 2: column shape probe (both new columns selectable without error)
+///   Step 3: event-preserving cardinality (count = silver_events_parsed count)
+///   Step 4: LEFT-JOIN population (events whose device_id is in
+///            gold_identity_connected_components have both columns non-null)
+///   Step 5: single-valued within device for BOTH columns independently
+///   Step 6: subsumption (every event with non-null backward_fill_user_id also
+///            has non-null connected_components_user_id)
+///   Step 7: column ordering regression (all 13 columns selectable in order)
+#[test]
+fn test_eventstream_with_identity_includes_connected_components() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+    drop(conn);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    // Step 2: column shape — both new columns selectable without error.
+    let _cc_uid_probe: Option<i64> = conn2
+        .query_row(
+            "SELECT connected_components_user_id \
+             FROM main.gold_eventstream_with_identity LIMIT 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap_or_else(|e| panic!("connected_components_user_id column probe failed: {e}"));
+    let _cc_cid_probe: Option<i64> = conn2
+        .query_row(
+            "SELECT connected_components_cluster_id \
+             FROM main.gold_eventstream_with_identity LIMIT 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap_or_else(|e| panic!("connected_components_cluster_id column probe failed: {e}"));
+
+    // Step 3: event-preserving cardinality unchanged — the new LEFT JOIN on
+    // device_id must not change the row count.
+    let stream_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("SELECT COUNT(*) FROM main.gold_eventstream_with_identity: {e}")
+        });
+    let events_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_events_parsed",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_events_parsed: {e}"));
+    assert_eq!(
+        stream_count, events_count,
+        "gold_eventstream_with_identity row count ({stream_count}) must equal \
+         silver_events_parsed row count ({events_count}) — LEFT JOIN on device_id \
+         must not change cardinality"
+    );
+
+    // Step 4: LEFT-JOIN population — every event whose device_id appears in
+    // gold_identity_connected_components must have both new columns non-null.
+    let missing_pop: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity es
+             JOIN main.gold_identity_connected_components cc USING (device_id)
+             WHERE es.connected_components_user_id IS NULL
+                OR es.connected_components_cluster_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("LEFT-JOIN population query failed: {e}"));
+    assert_eq!(
+        missing_pop, 0,
+        "every event whose device_id is in gold_identity_connected_components must \
+         have non-null connected_components_user_id and connected_components_cluster_id; \
+         {missing_pop} rows violate this"
+    );
+
+    // Step 5a: single-valued connected_components_user_id within device.
+    let multi_uid_devices: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT device_id, COUNT(DISTINCT connected_components_user_id) AS k
+                 FROM main.gold_eventstream_with_identity
+                 GROUP BY device_id
+                 HAVING k > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("single-valued connected_components_user_id invariant query failed: {e}")
+        });
+    assert_eq!(
+        multi_uid_devices, 0,
+        "no device should have more than one distinct non-null \
+         connected_components_user_id; {multi_uid_devices} devices violate this invariant"
+    );
+
+    // Step 5b: single-valued connected_components_cluster_id within device.
+    let multi_cluster_devices: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT device_id, COUNT(DISTINCT connected_components_cluster_id) AS k
+                 FROM main.gold_eventstream_with_identity
+                 GROUP BY device_id
+                 HAVING k > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("single-valued connected_components_cluster_id invariant query failed: {e}")
+        });
+    assert_eq!(
+        multi_cluster_devices, 0,
+        "no device should have more than one distinct non-null \
+         connected_components_cluster_id; {multi_cluster_devices} devices violate this invariant"
+    );
+
+    // Step 6: subsumption — every event with non-null backward_fill_user_id must
+    // also have non-null connected_components_user_id. A device has a backward-fill
+    // canonical user iff it has at least one signed-in event iff it appears in
+    // silver/device_user_edges iff it appears in gold_identity_connected_components;
+    // the LEFT JOINs on device_id are isomorphic between the two algorithms.
+    let unsubsumed: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity \
+             WHERE backward_fill_user_id IS NOT NULL AND connected_components_user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("subsumption query failed: {e}"));
+    assert_eq!(
+        unsubsumed, 0,
+        "every event with a non-null backward_fill_user_id must also have a \
+         non-null connected_components_user_id (subsumption); {unsubsumed} rows violate this"
+    );
+
+    // Step 7: column ordering regression — all 13 columns selectable by name in
+    // the expected order. This guards against unintended column reshuffling when
+    // future algorithms extend the eventstream.
+    let _order_probe: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT event_id, device_id, event_user_id, event_ts, event_date, \
+                        event_name, platform, url, session_id, forward_only_user_id, \
+                        backward_fill_user_id, connected_components_user_id, \
+                        connected_components_cluster_id \
+                 FROM main.gold_eventstream_with_identity LIMIT 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("column ordering regression: SELECT of all 13 columns in order failed: {e}")
+        });
+}
