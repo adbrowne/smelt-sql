@@ -131,7 +131,7 @@ The model surfaces *two* columns rather than one because the cluster id is the a
 | 1     | done     | e55b30a6 | 2026-05-18 |
 | 2     | done     | (see below) | 2026-05-18 |
 | 3     | done     | 442e74aa | 2026-05-18 |
-| 4     | pending  |        |      |
+| 4     | done     | 701ff513 | 2026-05-18 |
 
 ---
 
@@ -644,6 +644,8 @@ After acceptance gate: flip the overall-plan status row for Phase 7 in `docs/pla
 - **Phase 1 — iter-unrolled form chosen over WITH RECURSIVE.** DuckDB's recursive-CTE engine prohibits aggregates (`MIN`, `GROUP BY`) inside the recursive term; the plan's primary form used both in the recursive step. Fallback: 8 explicit CTEs (`iter0`–`iter8`) each recomputing every device's label as `MIN(CASE WHEN ...)` over the one-hop neighbourhood. This is semantically equivalent and verified correct by all 6 TDD assertions (count, cardinality, non-null, cluster-id=user-id, transitive-closure, cluster-id-is-MIN). `LEAST` registration was confirmed present (`crates/smelt-types/src/signatures.rs:3635`) but `CASE WHEN` was used instead per plan instructions to avoid registry expansion.
 
 - **Phase 1 — Progress tracking update.** Phase 1 commit: `e55b30a6`.
+
+- **Phase 4 expert review: sql-expert clean (R2), examples-curator clean (R2). No stop-the-line fired.** Both round-1 reviewers independently flagged the same material finding — the SQL header comment in `examples/web_analytics/models/gold/identity_connected_components.sql` referenced "Phase 9 of the example's overall plan", violating the Timeless-oracle rule from CLAUDE.md. Although the meta-plan §7 stop-the-line clause names "two different experts flag the same systemic concern" as a trigger, the parenthetical "architectural pivot needed" makes clear it covers structural concerns; a one-line phrasing fix to a header comment does not qualify. Addressed in a single `review(web-analytics-7): address sql-expert and examples-curator feedback` commit (`701ff513`) that rephrased the offending lines as a timeless future-revision note while preserving the technical rationale (iter-unrolled vs WITH RECURSIVE, DuckDB aggregate restriction). Round 2 confirmed clean from both experts.
 
 ## Verification
 
