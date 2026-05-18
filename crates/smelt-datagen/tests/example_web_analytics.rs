@@ -1608,3 +1608,59 @@ fn test_eventstream_with_identity_end_to_end() {
         col_check.err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 13: gold/identity_forward_only — within-session resolution invariants
+// ---------------------------------------------------------------------------
+
+/// Inline `smelt test` run that exercises the three defining invariants of the
+/// within-session resolution algorithm in `gold/identity_forward_only`:
+///   1. Session with one signed-in event → resolves to that user_id.
+///   2. Session with two signed-in events at different timestamps → resolves to
+///      the LATER user_id (`arg_max(..., event_ts)` semantic).
+///   3. Session with zero signed-in events → resolves to NULL.
+#[test]
+fn test_forward_only_invariants_inline_pass() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // Clone the web_analytics project tree into tmp_path so the build artefacts
+    // (DuckDB file, .smelt/ schema cache) never land in the checked-in source.
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    // Run `smelt test --select forward_only_resolution` from the cloned project dir.
+    let test_out = Command::new(&smelt)
+        .args([
+            "test",
+            "--project-dir",
+            tmp_path.to_str().expect("tmp_path is valid UTF-8"),
+            "--select",
+            "forward_only_resolution",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt test`: {e}"));
+
+    let stdout = String::from_utf8_lossy(&test_out.stdout);
+    let stderr = String::from_utf8_lossy(&test_out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        test_out.status.success(),
+        "`smelt test --select forward_only_resolution` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        test_out.status,
+    );
+
+    // Verify the named test reported PASS in the output.
+    assert!(
+        combined.contains("PASS") || combined.contains("passed"),
+        "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
+    );
+}
