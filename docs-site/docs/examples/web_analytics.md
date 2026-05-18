@@ -40,9 +40,9 @@ implementation, but they cover the same algorithmic spectrum
 
 Within-session resolution. Each session's identifiable events are tagged with
 the latest in-session signed-in user, via `arg_max(user_id, event_ts) FILTER
-(WHERE user_id IS NOT NULL)`. No cross-session propagation, no per-device
-election, no clustering. Sessions with zero signed-in observations stay
-anonymous.
+(WHERE user_id IS NOT NULL)` grouped by `session_id`. No cross-session
+propagation, no per-device election, no clustering. Sessions with zero
+signed-in observations stay anonymous.
 
 ### Backward-fill
 
