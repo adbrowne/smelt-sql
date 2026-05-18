@@ -2473,3 +2473,132 @@ fn test_connected_components_invariants_inline_pass() {
         "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 19: marts/daily_active_users_by_method materializes and the
+// identified_events_* monotonicity invariant holds on every day in the
+// synthetic dataset (meta-plan §6 verification gate).
+// ---------------------------------------------------------------------------
+
+/// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
+/// `smelt build`, then verify that `main.marts_daily_active_users_by_method`
+/// materializes with one row per `event_date` and that on every day the
+/// identified-events counts satisfy:
+///   identified_events_forward_only
+///     ≤ identified_events_backward_fill
+///     ≤ identified_events_connected_components
+/// This is the meta-plan §6 verification gate, re-anchored to
+/// `identified_events_*` (distinct-user DAU is NOT monotonic in the same
+/// direction — connected-components clusters collapse distinct users).
+#[test]
+fn test_daily_active_users_by_method_monotonicity() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+    drop(conn);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    let mart_rows: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.marts_daily_active_users_by_method",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM marts_daily_active_users_by_method: {e}"));
+    assert!(
+        mart_rows > 0,
+        "marts_daily_active_users_by_method should have at least one row; got {mart_rows}"
+    );
+
+    let distinct_dates: i64 = conn2
+        .query_row(
+            "SELECT COUNT(DISTINCT event_date) FROM main.silver_events_parsed",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(DISTINCT event_date) FROM silver: {e}"));
+    assert_eq!(
+        mart_rows, distinct_dates,
+        "marts_daily_active_users_by_method row count ({mart_rows}) must equal the \
+         number of distinct event_date values in silver_events_parsed ({distinct_dates})"
+    );
+
+    // The meta-plan §6 verification gate, re-anchored to identified_events_*
+    // (the subsumption-monotonic quantity; DAU is not monotonic under
+    // cross-device cluster collapse).
+    let monotonicity_violations: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.marts_daily_active_users_by_method
+             WHERE identified_events_forward_only > identified_events_backward_fill
+                OR identified_events_backward_fill > identified_events_connected_components",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("monotonicity invariant query failed: {e}"));
+    assert_eq!(
+        monotonicity_violations, 0,
+        "identified_events_* monotonicity must hold on every day in the synthetic \
+         dataset; {monotonicity_violations} day(s) violate identified_events_forward_only \
+         ≤ identified_events_backward_fill ≤ identified_events_connected_components"
+    );
+
+    let _probe: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT event_date, total_events, \
+                        dau_forward_only, dau_backward_fill, dau_connected_components, \
+                        identified_events_forward_only, identified_events_backward_fill, \
+                        identified_events_connected_components \
+                 FROM main.marts_daily_active_users_by_method LIMIT 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("column-existence regression: SELECT of all 8 columns failed: {e}")
+        });
+}
