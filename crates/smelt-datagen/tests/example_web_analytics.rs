@@ -1947,3 +1947,56 @@ fn test_eventstream_with_identity_includes_backward_fill() {
          non-null backward_fill_user_id (subsumption); {unsubsumed} rows violate this"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 16: gold/identity_backward_fill — per-device election invariants
+// ---------------------------------------------------------------------------
+
+/// Inline `smelt test` run that exercises the four defining invariants of the
+/// per-device canonical-user election in `gold/identity_backward_fill`:
+///   1. Device with a clear winner on event_count → that user wins.
+///   2. Device with tied event_count → earliest first_seen wins.
+///   3. Device with a single (device, user) edge → that user wins.
+///   4. Device where primary sort dominates the secondary tiebreaker
+///      (earliest-overall first_seen does not win if its event_count loses).
+#[test]
+fn test_backward_fill_invariants_inline_pass() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let test_out = Command::new(&smelt)
+        .args([
+            "test",
+            "--project-dir",
+            tmp_path.to_str().expect("tmp_path is valid UTF-8"),
+            "--select",
+            "backward_fill_resolution",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt test`: {e}"));
+
+    let stdout = String::from_utf8_lossy(&test_out.stdout);
+    let stderr = String::from_utf8_lossy(&test_out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        test_out.status.success(),
+        "`smelt test --select backward_fill_resolution` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        test_out.status,
+    );
+
+    assert!(
+        combined.contains("PASS") || combined.contains("passed"),
+        "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
+    );
+}
