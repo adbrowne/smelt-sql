@@ -1797,3 +1797,153 @@ fn test_identity_backward_fill_materializes() {
          {violation_count} devices violate this"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 15: gold/eventstream_with_identity backward_fill_user_id column
+// ---------------------------------------------------------------------------
+
+/// Verifies the Phase-6 extension to `gold/eventstream_with_identity`:
+/// a new LEFT JOIN to `gold/identity_backward_fill` on `device_id` and a new
+/// `backward_fill_user_id` column. Asserts column existence, event-preserving
+/// cardinality (unchanged from the forward-only-only era), LEFT-JOIN
+/// population, single-valued-within-device propagation, and the subsumption
+/// invariant (every forward-only-resolved event is also backward-fill-resolved).
+#[test]
+fn test_eventstream_with_identity_includes_backward_fill() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let src_config = tmp_path.join("datagen.yaml");
+    let dest_config = tmp_path.join("datagen_rewritten.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.01);
+    assert!(ok, "smelt-datagen failed at scale-factor 0.01:\n{combined}");
+
+    let setup_sql_src = tmp_path.join("setup_sources.sql");
+    let setup_sql_abs = tmp_path.join("setup_sources_abs.sql");
+    rewrite_setup_sources_sql(&setup_sql_src, &setup_sql_abs, tmp_path);
+
+    let db_path = tmp_path.join("target/dev.duckdb");
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+
+    let conn = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("open duckdb: {e}"));
+    let sql = fs::read_to_string(&setup_sql_abs)
+        .unwrap_or_else(|e| panic!("read setup_sources_abs.sql: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
+    drop(conn);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    let build_out = Command::new(&smelt)
+        .args(["build", "--target", "dev"])
+        .current_dir(tmp_path)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
+
+    assert!(
+        build_out.status.success(),
+        "`smelt build` exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
+
+    // Step 5: column shape — backward_fill_user_id selectable
+    let _col_probe: Option<i64> = conn2
+        .query_row(
+            "SELECT backward_fill_user_id FROM main.gold_eventstream_with_identity LIMIT 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap_or_else(|e| panic!("backward_fill_user_id column probe failed: {e}"));
+
+    // Step 6: event-preserving cardinality unchanged
+    let stream_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("SELECT COUNT(*) FROM main.gold_eventstream_with_identity: {e}")
+        });
+    let events_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.silver_events_parsed",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_events_parsed: {e}"));
+    assert_eq!(
+        stream_count, events_count,
+        "gold_eventstream_with_identity row count ({stream_count}) must equal \
+         silver_events_parsed row count ({events_count}) — adding a LEFT JOIN \
+         on device_id must not change cardinality"
+    );
+
+    // Step 7: LEFT-JOIN population — every event whose device_id is in
+    // gold_identity_backward_fill must have a non-null backward_fill_user_id.
+    let missing_pop: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity es
+             JOIN main.gold_identity_backward_fill bf USING (device_id)
+             WHERE es.backward_fill_user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("LEFT-JOIN population query failed: {e}"));
+    assert_eq!(
+        missing_pop, 0,
+        "every event whose device_id is in gold_identity_backward_fill must \
+         have a non-null backward_fill_user_id; {missing_pop} rows violate this"
+    );
+
+    // Step 8: single-valued backward_fill_user_id within device
+    let multi_uid_devices: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT device_id, COUNT(DISTINCT backward_fill_user_id) AS k
+                 FROM main.gold_eventstream_with_identity
+                 GROUP BY device_id
+                 HAVING k > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!("single-valued backward_fill_user_id invariant query failed: {e}")
+        });
+    assert_eq!(
+        multi_uid_devices, 0,
+        "no device should have more than one distinct non-null backward_fill_user_id; \
+         {multi_uid_devices} devices violate this invariant"
+    );
+
+    // Step 9: subsumption — every event with non-null forward_only_user_id
+    // must also have non-null backward_fill_user_id.
+    let unsubsumed: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_eventstream_with_identity \
+             WHERE forward_only_user_id IS NOT NULL AND backward_fill_user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("subsumption query failed: {e}"));
+    assert_eq!(
+        unsubsumed, 0,
+        "every event with a non-null forward_only_user_id must also have a \
+         non-null backward_fill_user_id (subsumption); {unsubsumed} rows violate this"
+    );
+}
