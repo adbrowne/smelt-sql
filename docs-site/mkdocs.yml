@@ -96,6 +96,8 @@ nav:
     - Web UI: guide/web-ui.md
     - Editor Setup: guide/editor-setup.md
     - Editor Features: guide/editor-features.md
+  - Examples:
+    - Web Analytics: examples/web_analytics.md
   - Reference:
     - CLI Commands: reference/cli.md
     - Project Configuration: reference/smelt-yml.md
