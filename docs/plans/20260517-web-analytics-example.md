@@ -88,7 +88,7 @@ The work is **done** when:
 - `cargo test -p smelt-cli --test example_diagnostics` reports zero diagnostics for `examples/web_analytics/`.
 - `/smelt:validate datagen` reports zero drift after Phases 1 and 2.
 - Running `smelt-datagen --config examples/web_analytics/datagen.yaml --scale-factor 0.01 && smelt build --project-dir examples/web_analytics` succeeds end-to-end on a fresh checkout.
-- The mart `daily_active_users_by_method` shows the expected monotonic relationship `forward_only ≤ backward_fill ≤ connected_components` on every day in the synthetic dataset.
+- The mart `daily_active_users_by_method` shows the expected monotonic relationship `identified_events_forward_only ≤ identified_events_backward_fill ≤ identified_events_connected_components` on every day in the synthetic dataset. (Note: distinct-user DAU is NOT monotonic in the same direction — connected-components collapses cross-device clusters and can have *fewer* distinct users than backward-fill. The mart surfaces both `dau_*` and `identified_events_*` columns; the verification gate is anchored to the subsumption-monotonic `identified_events_*` columns.)
 
 ## Phase 0 — what landed in this commit
 
