@@ -481,6 +481,10 @@ After acceptance gate: flip the overall-plan status row for Phase 6 in `docs/pla
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
+- **Phase 1 resolution form decision.** Form 1 (`DISTINCT ON (device_id) ORDER BY device_id, event_count DESC, first_seen ASC`) parses cleanly on the first probe — the diagnostics gate is clean for the canonical Postgres-style form. The ROW_NUMBER fallback was not needed.
+
+- **Phase 4 expert review: sql-expert clean (R2).** Round 1 surfaced two material findings: (a) the `DISTINCT ON` ORDER BY missed a final `user_id ASC` tiebreaker — under triple-tied rows the chosen row would be storage-order-dependent; (b) the integration test's per-device determinism assertion verified only the primary sort key (`event_count`) and would have silently passed if the secondary `first_seen` tiebreaker were wrong. Both addressed in a single `review(web-analytics-6): address sql-expert feedback` commit: added `, user_id ASC` to the model's ORDER BY (with a header-comment line on the rationale) and extended `test_identity_backward_fill_materializes` with a Step 9 that asserts the chosen user's `first_seen` equals the `MIN(first_seen)` among users tied on `event_count = MAX(event_count)`. R2 returned clean. No stop-the-line fired.
+
 ## Verification
 
 How to confirm the scope is satisfied at the end of Phase 4:

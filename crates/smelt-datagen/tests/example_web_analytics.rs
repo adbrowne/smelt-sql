@@ -1796,6 +1796,37 @@ fn test_identity_backward_fill_materializes() {
         "every chosen backward_fill_user_id must have the device's MAX(event_count); \
          {violation_count} devices violate this"
     );
+
+    // Step 9: tiebreaker — among users tied on the device's MAX(event_count),
+    // the chosen user must have the MIN(first_seen). This verifies the
+    // secondary sort key in the DISTINCT ON ORDER BY.
+    let tiebreaker_violation_count: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM main.gold_identity_backward_fill bf
+             JOIN main.silver_device_user_edges chosen
+                 ON chosen.device_id = bf.device_id
+                AND chosen.user_id = bf.backward_fill_user_id
+             JOIN (
+                 SELECT e.device_id, MIN(e.first_seen) AS min_first_seen_among_max
+                 FROM main.silver_device_user_edges e
+                 JOIN (
+                     SELECT device_id, MAX(event_count) AS max_count
+                     FROM main.silver_device_user_edges
+                     GROUP BY device_id
+                 ) m ON e.device_id = m.device_id AND e.event_count = m.max_count
+                 GROUP BY e.device_id
+             ) tb ON tb.device_id = bf.device_id
+             WHERE chosen.first_seen != tb.min_first_seen_among_max",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("tiebreaker (first_seen) determinism query failed: {e}"));
+
+    assert_eq!(
+        tiebreaker_violation_count, 0,
+        "among users tied on event_count=MAX, the chosen backward_fill_user_id must have \
+         the MIN(first_seen); {tiebreaker_violation_count} devices violate this"
+    );
 }
 
 // ---------------------------------------------------------------------------
