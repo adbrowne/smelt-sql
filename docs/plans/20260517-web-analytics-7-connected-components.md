@@ -130,7 +130,7 @@ The model surfaces *two* columns rather than one because the cluster id is the a
 |-------|----------|--------|------|
 | 1     | done     | e55b30a6 | 2026-05-18 |
 | 2     | done     | (see below) | 2026-05-18 |
-| 3     | pending  |        |      |
+| 3     | done     | 442e74aa | 2026-05-18 |
 | 4     | pending  |        |      |
 
 ---
