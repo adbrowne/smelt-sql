@@ -68,8 +68,8 @@ Both blockers are documented in `examples/web_analytics/functions/{parse_event_p
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1.1   | done     | d578e530 | 2026-05-19 |
-| 1.2   | pending  |        |      |
+| 1.1   | done     | 528f3aa3 | 2026-05-19 |
+| 1.2   | done     |        | 2026-05-19 |
 | 1.3   | pending  |        |      |
 | 1.4   | pending  |        |      |
 

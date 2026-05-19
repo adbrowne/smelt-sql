@@ -964,6 +964,8 @@ impl<'a> Parser<'a> {
     /// * No trailing `(` → emits `SMELT_PATH_REF` containing one `SMELT_PATH`.
     /// * Trailing `(` → emits `SMELT_PATH_CALL` containing one `SMELT_PATH`,
     ///   one `ARG_LIST`, and zero or more trailing `PASSING_CLAUSE`s.
+    /// * Trailing `(` followed by `.*` → emits `SMELT_PATH_CALL_STAR` wrapping
+    ///   the `SMELT_PATH_CALL` plus the consumed DOT and STAR tokens.
     pub(super) fn parse_smelt_path_form(&mut self) {
         let outer_checkpoint = self.builder.checkpoint();
 
@@ -1065,11 +1067,44 @@ impl<'a> Parser<'a> {
                 self.parse_passing_clause();
             }
             self.finish_node(); // SMELT_PATH_CALL
+
+            // Struct-projection suffix: peek for `.*` after the call's closing
+            // `)`. If present, retroactively wrap the SMELT_PATH_CALL in
+            // SMELT_PATH_CALL_STAR and consume the two tokens.
+            //
+            // The PASSING-clause loop above ends with a `skip_trivia()` call,
+            // so whitespace between `)` and `.` is already consumed by the
+            // time we reach this point.  Both `call.*` and `call() .*` (with
+            // a space) are wrapped identically.
+            let dot_star = self.peek_dot_star();
+            if dot_star {
+                self.start_node_at(outer_checkpoint, SMELT_PATH_CALL_STAR);
+                self.advance(); // DOT
+                self.advance(); // STAR
+                self.finish_node(); // SMELT_PATH_CALL_STAR
+            }
         } else {
             // Value form. Wrap the path in SMELT_PATH_REF.
             self.start_node_at(outer_checkpoint, SMELT_PATH_REF);
             self.finish_node(); // SMELT_PATH_REF
         }
+    }
+
+    /// Peek for a `.` `*` token sequence after the call's closing `)`.
+    /// Whitespace between the `)` and `.` is tolerated — the caller calls
+    /// `skip_trivia()` first (inside the PASSING-clause loop), so the current
+    /// position is already past any trivia when this function is called.
+    /// Returns `true` when the very next two tokens are DOT then STAR, and
+    /// both are consumed by the caller after this returns `true`.
+    fn peek_dot_star(&self) -> bool {
+        // The first token must be DOT.
+        let first = self.tokens.get(self.pos).map(|t| t.kind);
+        if first != Some(DOT) {
+            return false;
+        }
+        // The second token must be STAR (no trivia allowed between `.` and `*`).
+        let second = self.tokens.get(self.pos + 1).map(|t| t.kind);
+        matches!(second, Some(STAR))
     }
 
     /// Parse a single `PASSING <name> AS (<body>)` clause.

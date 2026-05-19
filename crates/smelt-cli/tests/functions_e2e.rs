@@ -381,6 +381,202 @@ ORDER BY order_id
     );
 }
 
+// ─── Test 5: struct-returning fn with .* projection executes ────────────────
+
+/// A `smelt.define` whose return type is `Expr<Struct<{…}>>` and is called
+/// with `.*` projection in a SELECT list should produce `n` named columns.
+#[test]
+fn e2e_struct_returning_fn_dot_star_projection_executes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_struct_dot_star
+version: 1
+paths:
+  - models
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // CSV seed for raw_events (avoids the literal-VALUES type-inference
+    // limitation noted in docs/plans/20260422-smelt-functions.md §1281).
+    // JSON values use CSV quoting: the whole value is wrapped in double-quotes,
+    // and interior double-quotes are escaped by doubling them (`""`).
+    let raw_events_csv = "id,payload\n\
+1,\"{\"\"event_name\"\":\"\"click\"\",\"\"platform\"\":\"\"web\"\",\"\"url\"\":\"\"https://example.com\"\"}\"\n\
+2,\"{\"\"event_name\"\":\"\"view\"\",\"\"platform\"\":\"\"mobile\"\",\"\"url\"\":\"\"https://m.example.com\"\"}\"\n";
+
+    let parse_event_fn = "---
+backends: [duckdb]
+---
+smelt.define parse_event_payload(payload: Expr<Text>) -> Expr<Struct<{event_name: Text, platform: Text, url: Text}>>
+    AS ({json_extract_string(payload, '$.event_name') AS event_name, json_extract_string(payload, '$.platform') AS platform, json_extract_string(payload, '$.url') AS url})
+";
+
+    let events_parsed_sql = "---
+materialization: table
+---
+SELECT id, smelt.functions.parse_event_payload(payload).*
+FROM smelt.raw_events
+ORDER BY id
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("seeds/raw_events.csv", raw_events_csv),
+            ("functions/parse_event_payload.sql", parse_event_fn),
+            ("models/events_parsed.sql", events_parsed_sql),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+
+    // The table should have 4 columns: id, event_name, platform, url
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, event_name, platform, url \
+             FROM main.events_parsed ORDER BY id",
+        )
+        .expect("prepare events_parsed query");
+    let rows: Vec<(i64, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .expect("query events_parsed rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    assert_eq!(rows.len(), 2, "expected 2 rows, got: {rows:?}");
+    assert_eq!(rows[0].0, 1);
+    assert_eq!(rows[0].1, "click");
+    assert_eq!(rows[0].2, "web");
+    assert_eq!(rows[0].3, "https://example.com");
+    assert_eq!(rows[1].0, 2);
+    assert_eq!(rows[1].1, "view");
+    assert_eq!(rows[1].2, "mobile");
+    assert_eq!(rows[1].3, "https://m.example.com");
+}
+
+/// A struct-returning function called WITHOUT `.*` (assigned to a single
+/// aliased column via `AS`) should have its body substituted verbatim —
+/// the `SMELT_PATH_CALL_STAR` path is NOT triggered.
+///
+/// The brace-struct literal body `{expr AS name, …}` is smelt DSL, not
+/// native DuckDB struct syntax, so the build is expected to fail with a
+/// SQL parser error from DuckDB.  This test pins that the non-`.*` call site
+/// substitutes the body (rather than silently dropping it or inserting
+/// wrong SQL), so that only the `.*` projection path adds new lowering.
+#[test]
+fn e2e_struct_returning_fn_without_dot_star_passes_through() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_struct_no_star
+version: 1
+paths:
+  - models
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // Same seed and function as the .* test above.
+    // JSON values use CSV quoting: double-quoted field, interior quotes doubled.
+    let raw_events_csv = "id,payload\n\
+1,\"{\"\"event_name\"\":\"\"click\"\",\"\"platform\"\":\"\"web\"\",\"\"url\"\":\"\"https://example.com\"\"}\"\n";
+
+    let parse_event_fn = "---
+backends: [duckdb]
+---
+smelt.define parse_event_payload(payload: Expr<Text>) -> Expr<Struct<{event_name: Text, platform: Text, url: Text}>>
+    AS ({json_extract_string(payload, '$.event_name') AS event_name, json_extract_string(payload, '$.platform') AS platform, json_extract_string(payload, '$.url') AS url})
+";
+
+    // No .* suffix — the function result is aliased to a single column.
+    // The brace-struct literal body is NOT valid DuckDB SQL on its own, so
+    // the build exits non-zero.  This is the expected behaviour for a
+    // non-`.*` call site today; cross-engine struct-literal lowering (Spark,
+    // Postgres) and single-field access (.field_name) on struct-returning
+    // calls are not yet supported.
+    let events_struct_sql = "---
+materialization: table
+---
+SELECT id, smelt.functions.parse_event_payload(payload) AS payload_struct
+FROM smelt.raw_events
+ORDER BY id
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("seeds/raw_events.csv", raw_events_csv),
+            ("functions/parse_event_payload.sql", parse_event_fn),
+            ("models/events_struct.sql", events_struct_sql),
+        ],
+    );
+
+    // The build is expected to fail: the brace-struct literal `{expr AS name}`
+    // is smelt DSL syntax substituted verbatim into the SQL, and DuckDB does
+    // not accept it as a struct-construction expression.
+    let output = Command::new(smelt_bin())
+        .args([
+            "build",
+            "--project-dir",
+            proj.to_str().unwrap(),
+            "--target",
+            "dev",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("failed to spawn smelt build");
+
+    assert!(
+        !output.status.success(),
+        "expected smelt build to fail for non-.* struct call site; \
+         struct body is not valid DuckDB SQL on its own.\n\
+         stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Verify the body WAS substituted (the SQL error mentions the struct
+    // literal content, confirming the function was expanded rather than
+    // silently dropped).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("json_extract_string") || stderr.contains("event_name"),
+        "expected struct field names in error output (body was not substituted), \
+         got stderr:\n{stderr}"
+    );
+}
+
 // ─── Test 4: function call works across multiple targets ────────────────────
 
 #[test]

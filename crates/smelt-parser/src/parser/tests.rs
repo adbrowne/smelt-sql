@@ -5493,3 +5493,58 @@ fn parse_reducer_call_at_non_reduce_position_rejected() {
         "concat_with('|') must produce a FUNCTION_CALL node"
     );
 }
+
+#[test]
+fn parses_smelt_path_call_dot_star() {
+    // `smelt.functions.parse_event_payload(payload).*` — the `.*` suffix must
+    // be parsed into a SMELT_PATH_CALL_STAR node wrapping the inner
+    // SMELT_PATH_CALL.
+    let sql = "SELECT smelt.functions.parse_event_payload(payload).* FROM e";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    // The CST must contain a SMELT_PATH_CALL_STAR node.
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == SMELT_PATH_CALL_STAR),
+        "expected SMELT_PATH_CALL_STAR node in CST"
+    );
+    // The SMELT_PATH_CALL_STAR must contain a SMELT_PATH_CALL child.
+    let star_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == SMELT_PATH_CALL_STAR)
+        .expect("SMELT_PATH_CALL_STAR");
+    assert!(
+        star_node.children().any(|c| c.kind() == SMELT_PATH_CALL),
+        "SMELT_PATH_CALL_STAR must have SMELT_PATH_CALL child"
+    );
+}
+
+#[test]
+fn parses_smelt_path_call_dot_star_with_space() {
+    // `smelt.functions.parse_event_payload(payload) .*` — whitespace between
+    // `)` and `.` is tolerated: the PASSING-clause loop ends with a
+    // `skip_trivia()` call, so the space has already been consumed before
+    // `peek_dot_star` inspects the next token.  The result must be the same
+    // SMELT_PATH_CALL_STAR wrapping as for the no-space form.
+    let sql = "SELECT smelt.functions.parse_event_payload(payload) .* FROM e";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == SMELT_PATH_CALL_STAR),
+        "expected SMELT_PATH_CALL_STAR node in CST (space-before-dot form)"
+    );
+}
