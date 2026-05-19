@@ -271,6 +271,16 @@ Remove the outdated comment block in `examples/web_analytics/functions/sessioniz
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
+- **Phase 1.4 scope expansion** (2026-05-19, commit `7640fee6`). The implementer hit two blockers that the per-phase plan did not anticipate:
+  1. `crates/smelt-core/src/refs.rs::extract_refs` did not extract `smelt.<path>` references appearing inside a function-call `ARG_LIST` (e.g. `source => smelt.silver.events_parsed`), so the dependency graph missed the upstream model and build order was undefined. Fix landed in this phase.
+  2. `smelt test` did not run the function-expansion pass before handing SQL to DuckDB; any test model calling `smelt.functions.*` failed at execution. A new module `crates/smelt-cli/src/test_compiler.rs` and helper `build_fn_body_map_from_model_files` were added; `smelt test` now expands function calls when bodies are available.
+
+  Both changes are correct and necessary for the example workspace to build/test end-to-end. They should ideally have been separate phases (or surfaced as scope-creep findings to the orchestrator before merging). The post-commit reviewer assessed both as `justified-correct` against the workspace test gates.
+
+- **Code-duplication follow-up.** `build_fn_body_map` (Salsa-backed) and `build_fn_body_map_from_model_files` (non-Salsa) carry the same default-extraction logic in two places. Future bug fixes must be applied to both. A small refactor extracting a shared core helper is worth doing when the next default-handling change is required.
+
+- **Missing unit test for the `extract_refs` ARG_LIST behaviour.** The new code path is exercised indirectly by `sessions_rowset_equivalent_after_refactor`. A dedicated unit test in `crates/smelt-core/src/refs.rs::tests` asserting that a `SmeltPathRef` inside a `SmeltPathCall`'s `ARG_LIST` is extracted as a dependency would lock the behaviour in. The `.take(4)` ancestor depth limit is also untested.
+
 ## Verification
 
 How to confirm the spec is satisfied at the end:

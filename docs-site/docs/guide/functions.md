@@ -166,7 +166,7 @@ When a function declares a default value for a parameter, you can omit it at the
 smelt.define sessionize(
     source:       TableExpr,
     partition_col: Expr<Integer>,
-    ts_col:       Expr<Timestamp>,
+    ts_col:       Expr<Date>,
     platform_col: Expr<Text>,
     gap:          Expr<BigInt> = 30 * 60 * 1000000   -- 30 minutes in μs
 ) -> TableExpr AS (
