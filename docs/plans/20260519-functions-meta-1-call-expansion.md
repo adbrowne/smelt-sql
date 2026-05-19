@@ -71,7 +71,7 @@ Both blockers are documented in `examples/web_analytics/functions/{parse_event_p
 | 1.1   | done     | 528f3aa3 | 2026-05-19 |
 | 1.2   | done     | 47d7f716 | 2026-05-19 |
 | 1.3   | done     | e8c7b160 | 2026-05-19 |
-| 1.4   | done     | TBD    | 2026-05-19 |
+| 1.4   | done     | 7640fee6 | 2026-05-19 |
 
 ---
 
