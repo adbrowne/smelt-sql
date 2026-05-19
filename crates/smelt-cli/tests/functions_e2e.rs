@@ -280,17 +280,105 @@ FROM smelt.raw_orders o
     );
 }
 
-// ─── Test 3: PASSING-clause / TableExpr substitution executes ───────────────
+// ─── Test 3: PASSING-clause / named-arg substitution executes ───────────────
 
+/// Named-argument (`param => value`) calls must produce the same materialised
+/// rows as the equivalent positional call, even when args are supplied in
+/// reverse declaration order (order-independence at the lowering layer).
+///
+/// The workspace contains `safe_divide` (two positional params: `numerator`,
+/// `denominator`) and two models:
+///   - `raw_orders` — literal VALUES table with a divide-by-zero row.
+///   - `order_margin_named` — calls safe_divide with named args in reverse
+///     declaration order: `smelt.functions.safe_divide(denominator => cost, numerator => revenue)`.
+///
+/// The expected rows are identical to `e2e_safe_divide_executes_against_duckdb`
+/// which uses positional syntax.
 #[test]
-#[ignore = "Phase 57 deferred: SmeltFnExpander drops named args (compiler.rs:337 — `_named` is unused), \
-            so PASSING-clause / TableExpr substitution does not yet substitute correctly. \
-            Extending the expander is out of Phase 57's scope (would widen scope into the next \
-            functions phase). See Deferred entry in docs/plans/20260422-smelt-functions.md."]
 fn e2e_passing_clause_substitution_executes() {
-    // Intentionally empty — the deferral message above explains why this
-    // is gated. Once the expander handles named args / PASSING substitution
-    // (separate work), un-ignore this test and write the fixture.
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_named_args
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // Named args in *reverse* declaration order — verifies binding-by-name, not position.
+    let order_margin_named_sql = "---
+materialization: table
+---
+SELECT order_id, smelt.functions.safe_divide(denominator => cost, numerator => revenue) AS margin
+FROM smelt.raw_orders
+ORDER BY order_id
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("functions/safe_divide.sql", SAFE_DIVIDE_FN),
+            ("models/raw_orders.sql", RAW_ORDERS_VALUES_MODEL),
+            ("models/order_margin_named.sql", order_margin_named_sql),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    // Open the resulting DuckDB file and assert on the materialised rows.
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+    let mut stmt = conn
+        .prepare("SELECT order_id, margin FROM main.order_margin_named ORDER BY order_id")
+        .expect("prepare margin query");
+    let rows: Vec<(i32, Option<f64>)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, Option<f64>>(1)?))
+        })
+        .expect("query margin rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    // Expected (same as the positional call):
+    //   order_id=1 → revenue=100, cost=50  → 2.0
+    //   order_id=2 → revenue=200, cost=80  → 2.5
+    //   order_id=3 → revenue=300, cost=0   → NULL (CASE branch fired)
+    //   order_id=4 → revenue=400, cost=100 → 4.0
+    assert_eq!(rows.len(), 4, "expected 4 rows, got: {rows:?}");
+    assert_eq!(rows[0].0, 1);
+    assert!(
+        (rows[0].1.unwrap() - 2.0).abs() < 1e-9,
+        "row 1 (named args): {:?}",
+        rows[0]
+    );
+    assert_eq!(rows[1].0, 2);
+    assert!(
+        (rows[1].1.unwrap() - 2.5).abs() < 1e-9,
+        "row 2 (named args): {:?}",
+        rows[1]
+    );
+    assert_eq!(rows[2].0, 3);
+    assert!(
+        rows[2].1.is_none(),
+        "row 3 (cost=0, named args) should be NULL via CASE branch, got: {:?}",
+        rows[2]
+    );
+    assert_eq!(rows[3].0, 4);
+    assert!(
+        (rows[3].1.unwrap() - 4.0).abs() < 1e-9,
+        "row 4 (named args): {:?}",
+        rows[3]
+    );
 }
 
 // ─── Test 4: function call works across multiple targets ────────────────────
