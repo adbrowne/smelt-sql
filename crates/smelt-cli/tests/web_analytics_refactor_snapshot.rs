@@ -414,9 +414,8 @@ GROUP BY device_id, session_seq, session_start_date
 ";
 
 /// Refactored `sessions.sql` — delegates sessionization to
-/// `smelt.functions.sessionize` with named arguments.  An explicit `AS s`
-/// alias is required on the FROM-position function call because DuckDB
-/// requires every derived table to carry an alias.
+/// `smelt.functions.sessionize` with named arguments and an explicit `AS s`
+/// alias on the FROM-position call.
 const SESSIONS_REFACTORED: &str = "\
 ---
 materialization: table
@@ -617,5 +616,114 @@ fn sessions_rowset_equivalent_after_refactor() {
          and refactored (smelt.functions.sessionize named-arg call).\n\
          original:   {rows_original:#?}\n\
          refactored: {rows_refactored:#?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sessions.sql refactor without explicit alias snapshot
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Same workspace as the Phase 1.4 test above, but the `sessions.sql` body
+// omits the `AS s` alias on the FROM-position function call.  The compiler
+// must synthesise a derived-table alias so DuckDB accepts the query.
+// The rowset must be identical to the alias-carrying variant above.
+
+/// `sessions.sql` with the explicit `AS s` alias removed — the compiler
+/// synthesises the alias automatically.
+const SESSIONS_REFACTORED_NO_ALIAS: &str = "\
+---
+materialization: table
+---
+WITH sessionized AS (
+    SELECT *
+    FROM smelt.functions.sessionize(
+        source => smelt.silver.events_parsed,
+        partition_col => device_id,
+        ts_col => event_ts,
+        platform_col => platform
+    )
+),
+with_start_date AS (
+    SELECT
+        device_id,
+        event_ts,
+        event_date,
+        platform,
+        session_seq,
+        CAST(FIRST_VALUE(event_ts) OVER (PARTITION BY device_id, session_seq ORDER BY event_ts) AS DATE) AS session_start_date
+    FROM sessionized
+)
+SELECT
+    CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_seq AS VARCHAR), '-', CAST(MIN(event_ts) AS VARCHAR)) AS session_id,
+    device_id,
+    session_seq,
+    MIN(event_ts) AS session_start,
+    MAX(event_ts) AS session_end,
+    session_start_date,
+    COUNT(*) AS event_count,
+    ANY_VALUE(platform) AS platform
+FROM with_start_date
+GROUP BY device_id, session_seq, session_start_date
+";
+
+/// Build the *with-alias* and *without-alias* variants of `sessions.sql`
+/// side by side.  Assert that both build and execute successfully and that
+/// the resulting rowsets are identical.
+///
+/// Assert the `sessionize` call in FROM position produces an identical rowset
+/// whether the caller writes `AS s` explicitly or omits it (the printer
+/// synthesises a unique alias automatically when none is supplied).
+#[test]
+fn sessions_rowset_equivalent_without_explicit_alias() {
+    // ── Build with-alias variant (explicit `AS s`) ─────────────────────────
+    let tmp_with = TempDir::new().expect("tempdir");
+    let db_with = tmp_with.path().join("with_alias.duckdb");
+    let yml_with = smelt_yml_for_sessions("sessions_with_alias", &db_with);
+    write_workspace(
+        tmp_with.path(),
+        &[
+            ("smelt.yml", yml_with.as_str()),
+            ("seeds/raw_events.csv", SESSIONS_SEED_CSV),
+            ("functions/sessionize.sql", SESSIONIZE_FN),
+            ("models/silver/events_parsed.sql", EVENTS_PARSED_INLINE),
+            ("models/silver/sessions.sql", SESSIONS_REFACTORED),
+        ],
+    );
+    run_smelt_build(tmp_with.path(), "dev");
+    let rows_with_alias = query_sessions(&db_with);
+
+    // ── Build without-alias variant ────────────────────────────────────────
+    let tmp_no = TempDir::new().expect("tempdir");
+    let db_no = tmp_no.path().join("no_alias.duckdb");
+    let yml_no = smelt_yml_for_sessions("sessions_no_alias", &db_no);
+    write_workspace(
+        tmp_no.path(),
+        &[
+            ("smelt.yml", yml_no.as_str()),
+            ("seeds/raw_events.csv", SESSIONS_SEED_CSV),
+            ("functions/sessionize.sql", SESSIONIZE_FN),
+            ("models/silver/events_parsed.sql", EVENTS_PARSED_INLINE),
+            ("models/silver/sessions.sql", SESSIONS_REFACTORED_NO_ALIAS),
+        ],
+    );
+    run_smelt_build(tmp_no.path(), "dev");
+    let rows_no_alias = query_sessions(&db_no);
+
+    // ── Assert byte-equal row sets ─────────────────────────────────────────
+    assert_eq!(
+        rows_with_alias.len(),
+        4,
+        "with-alias: expected 4 sessions, got: {rows_with_alias:#?}"
+    );
+    assert_eq!(
+        rows_no_alias.len(),
+        4,
+        "without-alias: expected 4 sessions, got: {rows_no_alias:#?}"
+    );
+    assert_eq!(
+        rows_with_alias, rows_no_alias,
+        "Row sets differ between with-alias and without-alias variants.\n\
+         with-alias:    {rows_with_alias:#?}\n\
+         without-alias: {rows_no_alias:#?}"
     );
 }

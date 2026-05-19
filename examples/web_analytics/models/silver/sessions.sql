@@ -7,9 +7,7 @@ incremental:
   granularity: day
 ---
 -- One row per session under the 30-minute inactivity + platform-boundary rule.
--- Delegates session-counter logic to smelt.functions.sessionize; the call
--- carries an explicit alias `s` because DuckDB requires every derived table
--- in a FROM clause to have an alias.
+-- Delegates session-counter logic to smelt.functions.sessionize.
 --
 -- session_id is constructed via CONCAT rather than md5() because the smelt
 -- type-inference layer recognizes CONCAT as a standard SQL function.
@@ -25,7 +23,7 @@ WITH sessionized AS (
         partition_col => device_id,
         ts_col => event_ts,
         platform_col => platform
-    ) AS s
+    )
 ),
 with_start_date AS (
     SELECT

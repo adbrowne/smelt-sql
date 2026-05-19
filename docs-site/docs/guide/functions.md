@@ -185,12 +185,14 @@ WITH sessionized AS (
         platform_col  => platform,
         partition_col => device_id,
         ts_col        => event_ts
-    ) AS s
+    )
 ),
 -- ... downstream aggregation ...
 ```
 
 The compiler resolves each `param => value` pair against the declaration, then applies the default `30 * 60 * 1000000` for the omitted `gap`. The result is identical to writing all five arguments positionally.
+
+The alias after the closing `)` is optional — the compiler synthesises a unique alias for the derived table when none is supplied, so the target engine receives valid SQL regardless. A user-supplied alias (e.g. `FROM smelt.functions.sessionize(...) AS s`) overrides the synthesised one.
 
 ### Projecting struct-returning function outputs
 
