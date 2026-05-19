@@ -51,7 +51,7 @@ Standard smelt-plan flow (mirrors `20260517-web-analytics-example.md`):
 | # | Phase | Status | Plan path | Date | Commit |
 |---|-------|--------|-----------|------|--------|
 | 1 | Function call expansion in model contexts: named-arg substitution + struct-returning function lowering (the web_analytics blocker) | done | [`20260519-functions-meta-1-call-expansion.md`](20260519-functions-meta-1-call-expansion.md) | 2026-05-19 | 528f3aa3..7640fee6 |
-| 2 | TableExpr inlining in FROM position: synthesize derived-table aliases | pending | TBD | | |
+| 2 | TableExpr inlining in FROM position: synthesize derived-table aliases | done | [`20260519-functions-meta-2-from-alias.md`](20260519-functions-meta-2-from-alias.md) | 2026-05-19 | 4275c72a |
 | 3 | Cross-engine codegen: Spark struct-literal lowering + literal-VALUES models (Phase 57 deferred tests) | pending | TBD | | |
 | 4 | `joins:` / `provenance:` cardinality-enum mapping + validator tightening | pending | TBD | | |
 | 5 | `joins:` / `provenance:` L2 planner-rule prototype (2 representative rules) | pending | TBD | | |

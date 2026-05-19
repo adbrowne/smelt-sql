@@ -65,7 +65,7 @@ Phase 1.2 wired `<call>.*` projection for struct-returning calls in SELECT lists
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 2.1   | done     |        | 2026-05-19 |
+| 2.1   | done     | 4275c72a | 2026-05-19 |
 
 ---
 
