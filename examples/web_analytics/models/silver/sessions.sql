@@ -7,54 +7,25 @@ incremental:
   granularity: day
 ---
 -- One row per session under the 30-minute inactivity + platform-boundary rule.
--- The sessionization logic is inlined (rather than calling
--- smelt.functions.sessionize) because column-reference arguments to smelt
--- functions are not yet supported in model contexts; the function declaration
--- in functions/sessionize.sql is the canonical signature for that future
--- refactor.
---
--- Three-CTE approach: DuckDB does not allow nested window functions, so the
--- LAG calls are resolved in `lagged`, the SUM-based session counter in
--- `sessionized`, and then `with_start_date` adds session_start_date as a
--- per-row column using FIRST_VALUE before the final aggregation. This is
--- required because session_start_date is the incremental partition_column and
--- must appear in both the SELECT list and the GROUP BY — not as an aggregate
--- alias — so that the optimizer can inject the incremental filter correctly.
+-- Delegates session-counter logic to smelt.functions.sessionize; the call
+-- carries an explicit alias `s` because DuckDB requires every derived table
+-- in a FROM clause to have an alias.
 --
 -- session_id is constructed via CONCAT rather than md5() because the smelt
 -- type-inference layer recognizes CONCAT as a standard SQL function.
 --
--- The inactivity gap is expressed using epoch_us() arithmetic (microseconds)
--- rather than INTERVAL subtraction because DuckDB's TIMESTAMP arithmetic
--- produces a BIGINT (microseconds since epoch) when the upstream model derives
--- event_ts via DATE + to_seconds(), which avoids a type mismatch between the
--- BIGINT difference and an INTERVAL literal. 30 minutes = 30 * 60 * 1_000_000
--- microseconds.
-WITH lagged AS (
-    SELECT
-        device_id,
-        event_ts,
-        event_date,
-        platform,
-        LAG(epoch_us(event_ts)) OVER (PARTITION BY device_id ORDER BY event_ts) AS prev_ts_us,
-        LAG(platform) OVER (PARTITION BY device_id ORDER BY event_ts) AS prev_platform
-    FROM smelt.silver.events_parsed
-),
-sessionized AS (
-    SELECT
-        device_id,
-        event_ts,
-        event_date,
-        platform,
-        SUM(
-            CASE
-                WHEN epoch_us(event_ts) - prev_ts_us > 30 * 60 * 1000000
-                  OR prev_platform != platform
-                THEN 1
-                ELSE 0
-            END
-        ) OVER (PARTITION BY device_id ORDER BY event_ts) AS session_seq
-    FROM lagged
+-- session_start_date is the incremental partition_column and must appear in
+-- both the SELECT list and the GROUP BY as a real column (not an aggregate
+-- alias) so that the optimizer can inject the incremental filter correctly.
+-- FIRST_VALUE over the per-session event_ts ordering provides this value.
+WITH sessionized AS (
+    SELECT *
+    FROM smelt.functions.sessionize(
+        source => smelt.silver.events_parsed,
+        partition_col => device_id,
+        ts_col => event_ts,
+        platform_col => platform
+    ) AS s
 ),
 with_start_date AS (
     SELECT

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::compiler::{substitute_params_with_named, FnBodyMap};
 use smelt_parser::ast::File as AstFile;
 
 /// Information about a CTE extracted from a SQL model.
@@ -312,14 +313,124 @@ pub fn compile_cte_test(
     }
 }
 
+/// Expand `smelt.functions.*` path-call nodes in `sql` by substituting their
+/// declared bodies using `fn_bodies`.  Returns the SQL with all expandable
+/// calls replaced.
+///
+/// This is a text-level expansion applied AFTER `smelt.ref()` path-refs have
+/// already been replaced, so named-arg values (like `source => silver_events_parsed`)
+/// already contain the substituted CTE name.
+///
+/// Calls to unknown functions (not in `fn_bodies`) are left verbatim.
+fn expand_fn_calls_in_sql(sql: &str, fn_bodies: &FnBodyMap) -> String {
+    let parse = smelt_parser::parse(sql);
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return sql.to_string(),
+    };
+
+    // Collect SmeltPathCall replacements sorted descending by start offset so
+    // we can apply them right-to-left without shifting earlier offsets.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+
+    for call in file
+        .syntax()
+        .descendants()
+        .filter_map(smelt_parser::ast::SmeltPathCall::cast)
+    {
+        let segs = call.segments();
+        // Only expand smelt.functions.* calls.
+        if segs.first().map(|s| s.as_str()) != Some("functions") {
+            continue;
+        }
+        let fn_name = match segs.get(1) {
+            Some(n) => n.clone(),
+            None => continue,
+        };
+        let (params, body_sql) = match fn_bodies.get(&fn_name) {
+            Some(entry) => entry,
+            None => continue,
+        };
+
+        // Extract positional and named args as text from the already-substituted SQL.
+        let positional: Vec<String> = call
+            .arg_list()
+            .map(|al| {
+                al.positional_args()
+                    .into_iter()
+                    .map(|arg| {
+                        let r = arg.syntax().text_range();
+                        let s: usize = r.start().into();
+                        let e: usize = r.end().into();
+                        sql[s..e].to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let named: Vec<(String, String)> = call
+            .arg_list()
+            .map(|al| {
+                al.named_params()
+                    .filter_map(|np| {
+                        let name = np.name()?;
+                        let expr = np.value_expr()?;
+                        let r = expr.syntax().text_range();
+                        let s: usize = r.start().into();
+                        let e: usize = r.end().into();
+                        Some((name, sql[s..e].to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let expanded = substitute_params_with_named(body_sql, params, &positional, &named);
+        let range = call.text_range();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        replacements.push((start, end, expanded));
+    }
+
+    // Apply replacements right-to-left to preserve offsets.
+    replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
+    let mut result = sql.to_string();
+    for (start, end, replacement) in replacements {
+        result.replace_range(start..end, &replacement);
+    }
+    result
+}
+
 /// Compile a test for a whole model by mocking smelt.ref() calls.
 ///
 /// Replaces each `smelt.models.name` with the bare CTE name and prepends
 /// mock CTE definitions as a WITH clause.
+///
+/// When `fn_bodies` is provided, `smelt.functions.*` call nodes are also
+/// expanded inline using named-argument substitution.
 pub fn compile_whole_model_test(
     model_sql: &str,
     inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
     sql_body: Option<&str>,
+) -> Result<String, String> {
+    compile_whole_model_test_inner(model_sql, inputs, sql_body, None)
+}
+
+/// Like [`compile_whole_model_test`] but also expands `smelt.functions.*` call
+/// nodes using the provided function body map.
+pub fn compile_whole_model_test_with_fns(
+    model_sql: &str,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    sql_body: Option<&str>,
+    fn_bodies: &FnBodyMap,
+) -> Result<String, String> {
+    compile_whole_model_test_inner(model_sql, inputs, sql_body, Some(fn_bodies))
+}
+
+fn compile_whole_model_test_inner(
+    model_sql: &str,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    sql_body: Option<&str>,
+    fn_bodies: Option<&FnBodyMap>,
 ) -> Result<String, String> {
     let clean = smelt_parser::strip_frontmatter(model_sql);
     let parse = smelt_parser::parse(&clean);
@@ -358,6 +469,13 @@ pub fn compile_whole_model_test(
         }
     }
     ref_names.sort();
+
+    // Expand smelt.functions.* calls if a body map was provided.  This runs
+    // AFTER path-ref substitution so named-arg values like
+    // `source => silver_events_parsed` already reference the CTE name.
+    if let Some(bodies) = fn_bodies {
+        result_sql = expand_fn_calls_in_sql(&result_sql, bodies);
+    }
 
     // Build mock CTEs
     let mut mock_cte_parts: Vec<String> = Vec::new();

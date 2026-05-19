@@ -763,7 +763,10 @@ fn test_sessionize_function_compiles() {
         "second parameter type should be Expr<Integer>"
     );
 
-    // Parameter 2: ts_col: Expr<Timestamp>
+    // Parameter 2: ts_col: Expr<Date>
+    // Note: smelt infers event_ts as Date (to_seconds() is not recognized as
+    // returning INTERVAL, so CAST(date AS DATE) + to_seconds(n) infers as Date).
+    // The function signature uses Expr<Date> to match the actual argument type.
     assert_eq!(
         params[2].name().as_deref(),
         Some("ts_col"),
@@ -777,8 +780,8 @@ fn test_sessionize_function_compiles() {
         .filter(|c| !c.is_whitespace())
         .collect();
     assert_eq!(
-        p2_type, "Expr<Timestamp>",
-        "third parameter type should be Expr<Timestamp>"
+        p2_type, "Expr<Date>",
+        "third parameter type should be Expr<Date>"
     );
 
     // Parameter 3: platform_col: Expr<Text>
@@ -799,7 +802,9 @@ fn test_sessionize_function_compiles() {
         "fourth parameter type should be Expr<Text>"
     );
 
-    // Parameter 4: gap: Expr<Interval> (with default)
+    // Parameter 4: gap: Expr<BigInt> (with default 30 * 60 * 1000000 microseconds)
+    // Note: using epoch_us() arithmetic (BIGINT microseconds) instead of INTERVAL
+    // because DuckDB cannot compare DATE - DATE (which yields BIGINT) with INTERVAL.
     assert_eq!(
         params[4].name().as_deref(),
         Some("gap"),
@@ -813,12 +818,12 @@ fn test_sessionize_function_compiles() {
         .filter(|c| !c.is_whitespace())
         .collect();
     assert_eq!(
-        p4_type, "Expr<Interval>",
-        "fifth parameter type should be Expr<Interval>"
+        p4_type, "Expr<BigInt>",
+        "fifth parameter type should be Expr<BigInt>"
     );
     assert!(
         params[4].default_value().is_some(),
-        "gap parameter must have a default value (INTERVAL '30 minutes')"
+        "gap parameter must have a default value (30 * 60 * 1000000)"
     );
 
     // Return type: TableExpr

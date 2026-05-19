@@ -157,6 +157,41 @@ FROM smelt.functions.sessionize(
 
 Named arguments are bound to parameters by name, not by position. You can supply them in any order — the compiler maps each `param => value` to the matching parameter slot before running the body substitution pass.
 
+#### Multi-argument calls with default parameters
+
+When a function declares a default value for a parameter, you can omit it at the call site. Named arguments make it clear which parameters you're supplying and which rely on defaults:
+
+```sql
+-- functions/sessionize.sql
+smelt.define sessionize(
+    source:       TableExpr,
+    partition_col: Expr<Integer>,
+    ts_col:       Expr<Timestamp>,
+    platform_col: Expr<Text>,
+    gap:          Expr<BigInt> = 30 * 60 * 1000000   -- 30 minutes in μs
+) -> TableExpr AS (
+    -- ... window-function body ...
+)
+```
+
+```sql
+-- models/silver/sessions.sql
+-- Supply the four required args by name; `gap` uses the declared default.
+-- Arg order differs from the declaration order to show order-independence.
+WITH sessionized AS (
+    SELECT *
+    FROM smelt.functions.sessionize(
+        source        => smelt.silver.events_parsed,
+        platform_col  => platform,
+        partition_col => device_id,
+        ts_col        => event_ts
+    ) AS s
+),
+-- ... downstream aggregation ...
+```
+
+The compiler resolves each `param => value` pair against the declaration, then applies the default `30 * 60 * 1000000` for the omitted `gap`. The result is identical to writing all five arguments positionally.
+
 ### Projecting struct-returning function outputs
 
 A function whose return type is `Expr<Struct<{f₁: T₁, …, fₙ: Tₙ}>>` can be projected directly in a SELECT list using the `.*` suffix. The compiler lowers the call to `n` separate aliased columns, one per struct field.
