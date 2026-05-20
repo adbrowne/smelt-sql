@@ -61,7 +61,7 @@ fn web_analytics_incremental_models_classify_as_safe() {
     // Every model that declares `incremental: enabled` in this example must
     // pass the safety classifier.  Listed explicitly so that adding a new
     // incremental model without a classification check fails noisily here.
-    for model in &["sessions", "device_user_edges"] {
+    for model in &["sessions", "device_user_edges", "events_parsed"] {
         assert_incremental_and_fully_batch_safe(&output, model);
     }
 }
