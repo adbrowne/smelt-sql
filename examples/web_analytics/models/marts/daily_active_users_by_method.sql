@@ -1,3 +1,11 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
 -- Per-day distinct-amplitude_id and identified-event counts under the
 -- no-merging baseline (raw) and the three refinement algorithms surfaced in
 -- gold/eventstream_with_identity. One row per event_date. Every event in the

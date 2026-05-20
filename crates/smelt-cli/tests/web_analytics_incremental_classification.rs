@@ -66,6 +66,8 @@ fn web_analytics_incremental_models_classify_as_safe() {
         "device_user_edges",
         "events_parsed",
         "identity_forward_only",
+        "eventstream_with_identity",
+        "daily_active_users_by_method",
     ] {
         assert_incremental_and_fully_batch_safe(&output, model);
     }
