@@ -27,7 +27,7 @@ pub async fn ui(args: UiArgs) -> Result<()> {
     // Build dependency graph. `models` is `Vec<smelt_core::ModelFile>` so
     // the previous field-by-field rebuild is redundant since the type was
     // unified across CLI and core; just clone.
-    let core_models: Vec<smelt_core::ModelFile> = models.iter().cloned().collect();
+    let core_models: Vec<smelt_core::ModelFile> = models.to_vec();
     let graph = smelt_core::graph::DependencyGraph::build(core_models, sources.as_ref())
         .with_context(|| "Failed to build UI dependency graph")?;
 
