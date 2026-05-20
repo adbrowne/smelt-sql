@@ -26,17 +26,7 @@ struct PythonModelOutput {
     name: String,
     sql: String,
     #[serde(default)]
-    queries: Vec<PythonQuery>,
-}
-
-/// A query recorded by ProjectContext (for fixed-point validation).
-#[derive(Debug, Deserialize)]
-struct PythonQuery {
-    kind: String,
-    #[serde(default)]
-    tag: Option<String>,
-    #[serde(default)]
-    directory: Option<String>,
+    queries: Vec<PythonModelQuery>,
 }
 
 // Shared helpers (find_python, find_python_sdk, scan_for_model_decorators,
@@ -285,15 +275,7 @@ pub fn discover_python_models(
                     metadata: model_metadata,
                     kind: ModelKind::Python {
                         source_line,
-                        queries: output
-                            .queries
-                            .iter()
-                            .map(|q| PythonModelQuery {
-                                kind: q.kind.clone(),
-                                tag: q.tag.clone(),
-                                directory: q.directory.clone(),
-                            })
-                            .collect(),
+                        queries: output.queries.clone(),
                     },
                     model_id,
                     // Python model address_segments are computed in discover_python_models.
@@ -380,13 +362,9 @@ fn validate_fixed_point(models: &[ModelFile], config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// A query recorded during Python model execution.
-#[derive(Debug, Clone)]
-pub struct PythonModelQuery {
-    pub kind: String,
-    pub tag: Option<String>,
-    pub directory: Option<String>,
-}
+// `PythonModelQuery` is shared with `smelt-core` so the type that flows
+// through `ModelFile::kind` is the same one the PyO3 runner emits.
+pub use smelt_core::PythonModelQuery;
 
 #[cfg(test)]
 mod tests {

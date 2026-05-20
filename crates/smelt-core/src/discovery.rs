@@ -8,6 +8,22 @@ use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// A query recorded during Python model execution.
+///
+/// Pure data — lives outside the feature-gated `python_models` module so the
+/// CLI's discovery can attach it to `ModelFile::kind = ModelKind::Python {..}`
+/// without depending on PyO3. `Deserialize` is derived so the CLI's
+/// subprocess runner can decode JSON output from `smelt.runner` straight
+/// into this shape (matches the JSON shape: `{kind, tag, directory}`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct PythonModelQuery {
+    pub kind: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub directory: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelFile {
     pub name: String,
