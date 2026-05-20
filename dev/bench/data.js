@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779280081420,
+  "lastUpdate": 1779280084763,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -22481,6 +22481,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.7051923089456,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a8959555210f7595cfbf6a503b0e74b3dc7fc02c",
+          "message": "fix(ui): register function files in smelt-db so smelt.functions.* resolves\n\n`smelt ui` used `init_db` with only the SQL model files discovered from\n`config.paths`, never registering the `functions/` directory. This caused\nevery `smelt.functions.*` call site to produce an \"Unknown function\"\ndiagnostic in the model detail panel.\n\nFix: discover function files via `discovery.discover_function_files()` in\n`ui.rs` and pass them alongside models to `init_db`. Also patch the file\nwatcher's `refresh_state` to re-register function files (via\n`discover_function_file_paths`) so diagnostics stay clean after a hot\nreload.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-20T22:21:37+10:00",
+          "tree_id": "46863c1843e69a80a3d431f3cb1abd3a1b88e8cf",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a8959555210f7595cfbf6a503b0e74b3dc7fc02c"
+        },
+        "date": 1779280083933,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.934566461842735,
             "unit": "MB/s"
           }
         ]
