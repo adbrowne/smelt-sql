@@ -138,6 +138,35 @@ window catches:
 It does **not** catch signed-in events arriving ≥2 days after session start.
 Accepted limitation for the example.
 
+### Day-by-day is not equivalent to a full rebuild on the global identity columns
+
+This is the load-bearing insight of the example.
+
+`backward_fill` and `connected_components` are *global* — their per-device
+output depends on the cumulative `(device, user)` edge set across all dates.
+When day D's run materialises `gold/eventstream_with_identity` for that day,
+the LEFT JOINs to the two views see only the edges visible at the time of
+day D's run.  Day D+1 may add edges that would have changed day D's mapping,
+but day D's rows are not retroactively rewritten by DELETE+INSERT-per-
+partition.
+
+So the day-by-day pipeline produces *as-of-day-D* identity per day, while a
+single full-window rebuild produces a single global snapshot.  The two
+disagree on the global identity columns and agree exactly on the local ones:
+
+| Column                                        | Day-by-day vs full-window |
+|-----------------------------------------------|---------------------------|
+| `total_events`, `event_date`                  | always equal              |
+| `dau_raw`, `identified_events_raw`            | always equal              |
+| `dau_forward_only`, `identified_events_forward_only` | always equal       |
+| `dau_backward_fill`, `identified_events_backward_fill` | usually differ   |
+| `dau_connected_components`, `identified_events_connected_components` | usually differ |
+
+This mirrors how production streaming pipelines emit "as-of" daily metrics
+rather than retroactively backfilling history every run.  `verify_incremental_equivalence.py`
+asserts the local-column equality and prints the global-column divergence as
+a sanity check.
+
 ### One known cost: `sessions` reads all events per partition
 
 Smelt injects the partition filter on the *outermost* SELECT only. Because
@@ -185,6 +214,18 @@ Useful flags:
   (useful when iterating on model SQL after a fresh datagen run).
 
 A per-iteration timing report is written to `.last_run.json`.
+
+### Equivalence verification
+
+```bash
+python verify_incremental_equivalence.py --scale-factor 0.01 --days 5
+```
+
+Runs both pipelines (full-window single rebuild + day-by-day replay) against
+the same datagen output, then asserts the local-column equality and prints
+the expected global-column divergence.  See "Day-by-day is not equivalent to
+a full rebuild on the global identity columns" above for what each column
+means.
 
 ## Inspect the marts
 
