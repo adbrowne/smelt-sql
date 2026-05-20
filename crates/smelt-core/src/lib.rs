@@ -14,6 +14,7 @@ pub mod seeds;
 pub mod selector;
 pub mod sources;
 pub mod text;
+pub mod workspace;
 
 pub use config::{
     parse_active_backends, parse_unstable_schema_flag, BackendType, Config, ConfigError,
@@ -52,3 +53,4 @@ pub use sources::{
     SourcesError,
 };
 pub use text::{extract_snippet, text_range_to_line_col};
+pub use workspace::{load_workspace, LoadedWorkspace, WorkspaceLoadErrors};

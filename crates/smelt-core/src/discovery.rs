@@ -158,6 +158,9 @@ impl ModelDiscovery {
                 continue;
             }
 
+            // The scan root for address computation is project_root / model_path.
+            let scan_root = search_path.clone();
+
             // Recursively find all .sql files
             for entry in WalkDir::new(&search_path)
                 .follow_links(true)
@@ -167,7 +170,18 @@ impl ModelDiscovery {
                 let path = entry.path();
 
                 if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                    let parsed = self.parse_model_file(path)?;
+                    let mut parsed = self.parse_model_file(path)?;
+                    // Compute address_segments: path relative to scan_root,
+                    // parent directory components + leaf model name.
+                    let address_segments = Self::compute_address_segments(path, &scan_root);
+                    for m in &mut parsed {
+                        m.address_segments = address_segments.clone();
+                        // For multi-model files, keep the model's declared name
+                        // as the leaf segment instead of the file stem.
+                        if let Some(last) = m.address_segments.last_mut() {
+                            *last = m.name.clone();
+                        }
+                    }
                     models.extend(parsed);
                 }
             }
@@ -183,93 +197,137 @@ impl ModelDiscovery {
         Ok(models)
     }
 
-    fn parse_model_file(&self, path: &Path) -> Result<Vec<ModelFile>> {
-        // Read file content
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read model file: {:?}", path))?;
-
-        // Extract metadata from YAML frontmatter
-        let file_metadata = match extract_file_metadata(&content) {
-            Ok(fm) => Some(fm),
-            Err(e) => {
-                eprintln!("Warning: {}: {}", path.display(), e);
-                None
-            }
+    /// Compute address segments for a file at `path` with the given `scan_root`.
+    ///
+    /// For `models/staging/stg_events.sql` with `scan_root = models/`:
+    ///   dir_segments = ["staging"], leaf = file stem = "stg_events"
+    ///   → ["staging", "stg_events"]
+    pub fn compute_address_segments(path: &Path, scan_root: &Path) -> Vec<String> {
+        let Ok(rel) = path.strip_prefix(scan_root) else {
+            return Vec::new();
         };
+        let parent = rel.parent().unwrap_or(std::path::Path::new(""));
+        let mut segs: Vec<String> = parent
+            .components()
+            .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+            .collect();
+        // Leaf: file stem (will be replaced with model name for multi-model files).
+        if let Some(stem) = rel
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+        {
+            segs.push(stem);
+        }
+        segs
+    }
 
-        match file_metadata {
-            Some(FileMetadata::Multi { models }) => {
-                // Multi-model file: create one ModelFile per section
-                let mut result = Vec::with_capacity(models.len());
-                for section in models {
-                    let model_name =
-                        section.metadata.name.clone().ok_or_else(|| {
-                            anyhow!("Multi-model section missing name in {:?}", path)
-                        })?;
+    fn parse_model_file(&self, path: &Path) -> Result<Vec<ModelFile>> {
+        parse_sql_file(path)
+    }
+}
 
-                    let sql_content = &content[section.sql_range.clone()];
-                    let clean_content = smelt_parser::strip_frontmatter(sql_content);
-                    let parse = smelt_parser::parse(&clean_content);
-                    let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
-                        extract_refs(&file)
-                    } else {
-                        Vec::new()
-                    };
+/// Parse a `.sql` file into one or more `ModelFile`s.
+///
+/// Pure function — reads the file, expands multi-model frontmatter, parses
+/// each section for refs, and returns the resulting `ModelFile` entries with
+/// `address_segments = Vec::new()`. The caller is responsible for computing
+/// address segments (which require a `scan_root` context this function
+/// doesn't have).
+///
+/// Shared by `ModelDiscovery::discover_models` and by
+/// `smelt_core::workspace::load_workspace` so multi-model handling is in one
+/// place; the LSP's `register_sql_content` is the third (LSP-specific) copy
+/// that should eventually delegate here too.
+pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read model file: {:?}", path))?;
 
-                    let model_id = ModelId::multi_model(path.to_path_buf(), model_name.clone());
+    // Extract metadata from YAML frontmatter
+    let file_metadata = match extract_file_metadata(&content) {
+        Ok(fm) => Some(fm),
+        Err(e) => {
+            eprintln!("Warning: {}: {}", path.display(), e);
+            None
+        }
+    };
 
-                    result.push(ModelFile {
-                        name: model_name,
-                        path: model_id.salsa_key(),
-                        content: sql_content.to_string(),
-                        refs,
-                        parse_errors: parse.errors,
-                        metadata: Some(Box::new(section.metadata)),
-                        kind: ModelKind::Sql,
-                        model_id,
-                        address_segments: Vec::new(),
-                    });
-                }
-                Ok(result)
-            }
-            _ => {
-                // Single-model or no frontmatter: existing behavior
-                let model_metadata = match file_metadata {
-                    Some(FileMetadata::Single { metadata, .. }) => Some(metadata),
-                    _ => None,
-                };
+    match file_metadata {
+        Some(FileMetadata::Multi { models }) => {
+            // Multi-model file: create one ModelFile per section
+            let mut result = Vec::with_capacity(models.len());
+            for section in models {
+                let model_name = section
+                    .metadata
+                    .name
+                    .clone()
+                    .ok_or_else(|| anyhow!("Multi-model section missing name in {:?}", path))?;
 
-                let name = model_metadata
-                    .as_ref()
-                    .and_then(|m| m.name.clone())
-                    .or_else(|| {
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.to_string())
-                    })
-                    .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
-
-                let parse = smelt_parser::parse(&content);
+                let sql_content = &content[section.sql_range.clone()];
+                let clean_content = smelt_parser::strip_frontmatter(sql_content);
+                let parse = smelt_parser::parse(&clean_content);
                 let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
                     extract_refs(&file)
                 } else {
                     Vec::new()
                 };
 
-                let model_id = ModelId::from_path(path.to_path_buf());
+                let model_id = ModelId::multi_model(path.to_path_buf(), model_name.clone());
 
-                Ok(vec![ModelFile {
-                    name,
-                    path: path.to_path_buf(),
-                    content,
+                result.push(ModelFile {
+                    name: model_name,
+                    path: model_id.salsa_key(),
+                    content: sql_content.to_string(),
                     refs,
                     parse_errors: parse.errors,
-                    metadata: model_metadata,
+                    metadata: Some(Box::new(section.metadata)),
                     kind: ModelKind::Sql,
                     model_id,
                     address_segments: Vec::new(),
-                }])
+                });
             }
+            Ok(result)
+        }
+        _ => {
+            // Single-model or no frontmatter: existing behavior
+            let model_metadata = match file_metadata {
+                Some(FileMetadata::Single { metadata, .. }) => Some(metadata),
+                _ => None,
+            };
+
+            let name = model_metadata
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                })
+                .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+
+            // Strip frontmatter before parsing so the parser sees only SQL
+            // (matches the CLI's existing behavior; single source of truth).
+            let clean_content = smelt_parser::strip_frontmatter(&content);
+            let parse = smelt_parser::parse(&clean_content);
+            let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+                extract_refs(&file)
+            } else {
+                Vec::new()
+            };
+
+            let model_id = ModelId::from_path(path.to_path_buf());
+
+            Ok(vec![ModelFile {
+                name,
+                path: path.to_path_buf(),
+                content,
+                refs,
+                parse_errors: parse.errors,
+                metadata: model_metadata,
+                kind: ModelKind::Sql,
+                model_id,
+                address_segments: Vec::new(),
+            }])
         }
     }
 }
