@@ -511,6 +511,8 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            address_segments: Vec::new(),
         }
     }
 
@@ -646,6 +648,8 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata,
+            kind: crate::discovery::ModelKind::Sql,
+            address_segments: Vec::new(),
         }
     }
 

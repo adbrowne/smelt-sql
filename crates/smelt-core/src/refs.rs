@@ -61,15 +61,26 @@ pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
     for node in file.syntax().descendants() {
         // Unified path-form value refs (FROM smelt.models.foo).
         if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
-            // Skip path refs nested inside a SMELT_PATH_CALL — those are
-            // not "value form" refs.
-            if node
-                .ancestors()
-                .skip(1)
-                .any(|a| SmeltPathCall::cast(a).is_some())
-            {
-                continue;
+            // Check whether this path ref is nested inside a SMELT_PATH_CALL.
+            let enclosing_call = node.ancestors().skip(1).find_map(SmeltPathCall::cast);
+
+            if let Some(_call) = enclosing_call {
+                // Path refs inside a smelt.functions.* call are real model
+                // dependencies (e.g. `source => smelt.silver.events_parsed`).
+                // Include them so the logical graph can order the build correctly.
+                // Only include if the path ref is inside an ARG_LIST (argument
+                // position), not in the path prefix of the call itself.
+                let in_arg_list = node
+                    .ancestors()
+                    .skip(1)
+                    .take(4)
+                    .any(|a| a.kind() == smelt_parser::SyntaxKind::ARG_LIST);
+                if !in_arg_list {
+                    continue;
+                }
+                // Fall through: add as a dependency.
             }
+
             let segments = path_ref.segments();
             let leaf = segments.last().cloned().unwrap_or_default();
             out.push(RefInfo {

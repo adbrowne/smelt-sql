@@ -89,9 +89,10 @@ fn build_fn_body_map_extracts_safe_divide_body() {
     let entry = map
         .get("safe_divide")
         .expect("safe_divide entry missing from fn body map");
+    let param_names: Vec<&str> = entry.0.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
-        entry.0,
-        vec!["numerator".to_string(), "denominator".to_string()],
+        param_names,
+        vec!["numerator", "denominator"],
         "param names should be in source order"
     );
     assert!(
@@ -246,7 +247,8 @@ fn build_fn_body_map_skips_files_without_defines_and_handles_no_body_gracefully(
         map.keys().collect::<Vec<_>>()
     );
     let entry = map.get("identity").expect("identity entry missing");
-    assert_eq!(entry.0, vec!["x".to_string()]);
+    let param_names: Vec<&str> = entry.0.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(param_names, vec!["x"]);
     assert!(
         entry.1.contains('x'),
         "identity body should contain x; got: {:?}",

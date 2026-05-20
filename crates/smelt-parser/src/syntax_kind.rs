@@ -230,8 +230,14 @@ pub enum SyntaxKind {
     // SMELT_PATH_CALL: same path followed by `(args)` and optional PASSING
     //   clauses. Used to call parameterised entities (functions, parameterised
     //   models).
+    // SMELT_PATH_CALL_STAR: a SMELT_PATH_CALL immediately followed by `.*` in a
+    //   SELECT-list position. The child SMELT_PATH_CALL is the inner call; the
+    //   DOT and STAR tokens are also children of this node. The printer lowers
+    //   this to per-field projections when the function's body is a brace-struct
+    //   literal, or falls back to verbatim emission otherwise.
     SMELT_PATH_REF,
     SMELT_PATH_CALL,
+    SMELT_PATH_CALL_STAR,
     SMELT_PATH, // Dotted path inside a SMELT_PATH_REF / SMELT_PATH_CALL — the
     // tokens AFTER the leading `smelt.` prefix (which is also captured here).
 

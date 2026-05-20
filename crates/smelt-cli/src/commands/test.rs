@@ -27,6 +27,14 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
+    // 2b. Discover function files and build a FnBodyMap for test-time expansion.
+    // This allows test SQL that calls `smelt.functions.*` to be expanded before
+    // execution — mirroring what `smelt build` does at print time.
+    let fn_body_map = {
+        let fn_files = discovery.discover_function_files().unwrap_or_default();
+        smelt_cli::build_fn_body_map_from_model_files(&fn_files)
+    };
+
     // 3. Separate test models from regular models
     let test_models: Vec<_> = models.iter().filter(|m| m.is_test()).collect();
     let regular_models: Vec<_> = models.iter().filter(|m| !m.is_test()).collect();
@@ -130,9 +138,21 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                 }
             }
         } else {
-            // Whole-model test
-            match compile_whole_model_test(model_sql, &test_config.inputs, test_sql_body.as_deref())
-            {
+            // Whole-model test.  When function bodies are available, expand
+            // `smelt.functions.*` call nodes so the generated SQL executes
+            // cleanly in DuckDB without the `smelt` catalog present.
+            let compiled = if fn_body_map.is_empty() {
+                compile_whole_model_test(model_sql, &test_config.inputs, test_sql_body.as_deref())
+            } else {
+                use smelt_cli::compile_whole_model_test_with_fns;
+                compile_whole_model_test_with_fns(
+                    model_sql,
+                    &test_config.inputs,
+                    test_sql_body.as_deref(),
+                    &fn_body_map,
+                )
+            };
+            match compiled {
                 Ok(sql) => sql,
                 Err(e) => {
                     let result = smelt_cli::test_runner::TestResult {

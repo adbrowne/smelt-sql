@@ -1,6 +1,5 @@
 use crate::config::{BackendType, Config, Materialization, Target};
 use crate::discovery::ModelFile;
-use crate::errors::{extract_snippet, text_range_to_line_col, CliError};
 use anyhow::Result;
 use smelt_core::SourcesConfig;
 use smelt_db::type_inference::infer_select_column_types;
@@ -14,18 +13,76 @@ use smelt_types::{DataType, TypedColumn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Type for the pre-resolved function-body map: fn_name → (param_names, body_sql).
-pub type FnBodyMap = HashMap<String, (Vec<String>, String)>;
+/// Type for the pre-resolved function-body map:
+///   fn_name → (params, body_sql)
+/// where `params` is a Vec of `(param_name, optional_default_sql)` pairs in
+/// declaration order.
+pub type FnBodyMap = HashMap<String, (Vec<(String, Option<String>)>, String)>;
 
-/// Substitute `param_names` with `arg_sqls` in a function body SQL string.
+/// Build an ordered substitution vector from positional and named arguments,
+/// optionally falling back to declared default values for unfilled slots.
 ///
-/// Replaces whole-word occurrences of each parameter name with the
-/// corresponding argument SQL, skipping inside single-quoted strings.
-/// Named args (`key => value`) are not yet supported here; only positional.
-fn substitute_params(body: &str, param_names: &[String], arg_sqls: &[String]) -> String {
+/// The result is indexed by the position of each parameter.
+/// Positional arguments fill the first N slots (left-to-right); named
+/// arguments fill slots by matching parameter name.  Slots that are neither
+/// filled by a positional nor a named arg use the declared default SQL if one
+/// exists, otherwise retain the original parameter name — this keeps
+/// unfilled-slot errors visible to the downstream SQL engine (the type-checker
+/// has already emitted a diagnostic for missing required args).
+/// Unknown named-argument keys are silently ignored (also already rejected by
+/// the type-checker via `UnknownPassingParameter`).
+pub fn bind_named_args(
+    params: &[(String, Option<String>)],
+    positional: &[String],
+    named: &[(String, String)],
+) -> Vec<String> {
+    let n = params.len();
+    // Initialise every slot: use the declared default if present, otherwise the
+    // parameter name (so unfilled required-arg slots produce recognisable SQL errors).
+    let mut slots: Vec<String> = params
+        .iter()
+        .map(|(name, default)| default.clone().unwrap_or_else(|| name.clone()))
+        .collect();
+
+    // Fill positional slots first (left-to-right).
+    for (i, arg) in positional.iter().enumerate() {
+        if i < n {
+            slots[i] = arg.clone();
+        }
+    }
+
+    // Fill named slots — overwrite only the slot for a matching param name.
+    for (key, val) in named {
+        if let Some(idx) = params.iter().position(|(name, _)| name == key) {
+            slots[idx] = val.clone();
+        }
+        // Unknown keys are silently ignored (already rejected by type-checker).
+    }
+
+    slots
+}
+
+/// Substitute parameters in a function body, supporting both positional and
+/// named arguments.
+///
+/// Positional args fill the first N parameter slots (left-to-right); named
+/// args fill slots by parameter name regardless of call order.  The two forms
+/// may be mixed: positional args are assigned first, then named args fill the
+/// remaining (or overwrite — callers should not mix both for the same slot;
+/// the type-checker rejects that pattern via `TooManyArguments`).
+///
+/// Unfilled slots retain the original parameter name so the downstream SQL
+/// engine surfaces a clear error rather than producing a silent miscompile.
+pub fn substitute_params_with_named(
+    body: &str,
+    params: &[(String, Option<String>)],
+    positional: &[String],
+    named: &[(String, String)],
+) -> String {
+    let resolved = bind_named_args(params, positional, named);
     let mut result = body.to_string();
-    for (param, arg) in param_names.iter().zip(arg_sqls.iter()) {
-        result = replace_identifier(&result, param, arg);
+    for ((param_name, _default), arg) in params.iter().zip(resolved.iter()) {
+        result = replace_identifier(&result, param_name, arg);
     }
     result
 }
@@ -353,9 +410,14 @@ impl SqlCompiler {
         let fn_expander: Option<SmeltFnExpander<'static>> = self.fn_bodies.as_ref().map(|bodies| {
             let bodies = Arc::clone(bodies);
             let expander: SmeltFnExpander<'static> = Box::new(
-                move |fn_name: &str, positional: Vec<String>, _named: Vec<(String, String)>| {
-                    let (param_names, body_sql) = bodies.get(fn_name)?;
-                    Some(substitute_params(body_sql, param_names, &positional))
+                move |fn_name: &str, positional: Vec<String>, named: Vec<(String, String)>| {
+                    let (params, body_sql) = bodies.get(fn_name)?;
+                    Some(substitute_params_with_named(
+                        body_sql,
+                        params,
+                        &positional,
+                        &named,
+                    ))
                 },
             );
             expander
@@ -375,10 +437,15 @@ impl SqlCompiler {
                     let expander: SmeltPathCallExpander<'static> = Box::new(
                         move |segs: &[String],
                               positional: Vec<String>,
-                              _named: Vec<(String, String)>| {
+                              named: Vec<(String, String)>| {
                             let fn_name = segs.last()?;
-                            let (param_names, body_sql) = bodies.get(fn_name)?;
-                            Some(substitute_params(body_sql, param_names, &positional))
+                            let (params, body_sql) = bodies.get(fn_name)?;
+                            Some(substitute_params_with_named(
+                                body_sql,
+                                params,
+                                &positional,
+                                &named,
+                            ))
                         },
                     );
                     expander
@@ -484,23 +551,6 @@ impl SqlCompiler {
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
-        // ERROR if any named parameters detected
-        for ref_info in &model.refs {
-            if ref_info.has_named_params {
-                let (line, col) = text_range_to_line_col(&model.content, ref_info.range);
-                let snippet = extract_snippet(&model.content, ref_info.range, 0);
-
-                return Err(CliError::NamedParametersNotSupported {
-                    model: model.name.clone(),
-                    file: model.path.clone(),
-                    line,
-                    col,
-                    snippet,
-                }
-                .into());
-            }
-        }
-
         // Strip frontmatter to avoid parse errors from YAML metadata
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let parse = smelt_parser::parse(&clean_content);
@@ -1177,22 +1227,6 @@ impl SqlCompiler {
         schema: &str,
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
-        // Check for named params (same as compile)
-        for ref_info in &model.refs {
-            if ref_info.has_named_params {
-                let (line, col) = text_range_to_line_col(&model.content, ref_info.range);
-                let snippet = extract_snippet(&model.content, ref_info.range, 0);
-                return Err(CliError::NamedParametersNotSupported {
-                    model: model.name.clone(),
-                    file: model.path.clone(),
-                    line,
-                    col,
-                    snippet,
-                }
-                .into());
-            }
-        }
-
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let parse = smelt_parser::parse(&clean_content);
 
@@ -1365,9 +1399,87 @@ pub fn build_fn_body_map(db: &smelt_db::Database, workspace: smelt_db::Workspace
                 continue;
             }
             let body_sql = text[start..end].to_string();
-            let params: Vec<String> = define
+            let params: Vec<(String, Option<String>)> = define
                 .param_list()
-                .map(|pl| pl.params().filter_map(|p| p.name()).collect())
+                .map(|pl| {
+                    pl.params()
+                        .filter_map(|p| {
+                            let pname = p.name()?;
+                            // Extract the default value SQL text from the
+                            // DEFAULT_VALUE node's text range in the raw source.
+                            let default_sql = p.default_value().and_then(|dv| {
+                                let r = dv.text_range();
+                                let s = usize::from(r.start());
+                                let e = usize::from(r.end());
+                                if e <= text.len() && s < e {
+                                    // The DEFAULT_VALUE node spans `= <expr>`;
+                                    // strip the leading `=` and whitespace to get
+                                    // just the expression.
+                                    let raw = text[s..e].trim_start();
+                                    let expr = raw.strip_prefix('=').unwrap_or(raw).trim();
+                                    Some(expr.to_string())
+                                } else {
+                                    None
+                                }
+                            });
+                            Some((pname, default_sql))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.insert(name, (params, body_sql));
+        }
+    }
+    out
+}
+
+/// Like [`build_fn_body_map`] but operates on plain `ModelFile` slices without
+/// requiring a Salsa database.  Used by `smelt test` to expand function call
+/// nodes in test SQL without the full run-command infrastructure.
+///
+/// Text ranges are indexed into `file.content` (the raw source including
+/// frontmatter), mirroring the logic in [`build_fn_body_map`] which uses
+/// `file.text(db)` on the raw Salsa-stored text.
+pub fn build_fn_body_map_from_model_files(files: &[crate::discovery::ModelFile]) -> FnBodyMap {
+    let mut out: FnBodyMap = HashMap::new();
+    for model_file in files {
+        let text = &model_file.content;
+        let parse = smelt_parser::parse(text);
+        let Some(ast) = File::cast(parse.syntax()) else {
+            continue;
+        };
+        for define in ast.defines() {
+            let Some(name) = define.name() else { continue };
+            let Some(body) = define.body() else { continue };
+            let range = body.syntax().text_range();
+            let start = usize::from(range.start());
+            let end = usize::from(range.end());
+            if end > text.len() || start > end {
+                continue;
+            }
+            let body_sql = text[start..end].to_string();
+            let params: Vec<(String, Option<String>)> = define
+                .param_list()
+                .map(|pl| {
+                    pl.params()
+                        .filter_map(|p| {
+                            let pname = p.name()?;
+                            let default_sql = p.default_value().and_then(|dv| {
+                                let r = dv.text_range();
+                                let s = usize::from(r.start());
+                                let e = usize::from(r.end());
+                                if e <= text.len() && s < e {
+                                    let raw = text[s..e].trim_start();
+                                    let expr = raw.strip_prefix('=').unwrap_or(raw).trim();
+                                    Some(expr.to_string())
+                                } else {
+                                    None
+                                }
+                            });
+                            Some((pname, default_sql))
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             out.insert(name, (params, body_sql));
         }
@@ -1492,10 +1604,13 @@ JOIN smelt.model_b b ON a.id = b.id
     }
 
     #[test]
-    fn test_named_params_error() {
-        // After Phase 4 the legacy `smelt.ref('x', filter => ...)` parse error means
-        // named-param refs can no longer come from model SQL.  Test the compiler
-        // guard directly by constructing a RefInfo with has_named_params=true.
+    fn test_named_params_no_longer_rejected_at_compiler_layer() {
+        // Named parameters (`param => value`) are now valid on function calls
+        // (`smelt.functions.foo(param => val)`).  The compiler no longer rejects
+        // refs that carry `has_named_params: true` — the type-checker has already
+        // emitted any relevant diagnostics (UnknownPassingParameter, MissingArgument)
+        // before the lowering layer runs.  This test verifies the guard is gone:
+        // compile() succeeds even when a RefInfo carries has_named_params=true.
         use smelt_core::refs::SmeltRef;
         let sql = "SELECT user_id FROM smelt.raw_events";
 
@@ -1503,7 +1618,7 @@ JOIN smelt.model_b b ON a.id = b.id
             model_name: "raw_events".to_string(),
             has_named_params: true,
             range: rowan::TextRange::new(0.into(), 1.into()),
-            smelt_ref: SmeltRef::Path(vec!["models".to_string(), "raw_events".to_string()]),
+            smelt_ref: SmeltRef::Path(vec!["functions".to_string(), "my_fn".to_string()]),
         };
         let model = ModelFile {
             name: "filtered".to_string(),
@@ -1520,12 +1635,13 @@ JOIN smelt.model_b b ON a.id = b.id
         let config = make_test_config();
         let compiler = SqlCompiler::new(config, &make_test_target());
 
+        // Must succeed — the compiler no longer rejects has_named_params=true.
         let result = compiler.compile(&model, "main");
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("named parameters"));
-        assert!(err_msg.contains("not yet supported"));
+        assert!(
+            result.is_ok(),
+            "compile() must not reject has_named_params=true refs (function calls with named args are valid): {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2108,6 +2224,154 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             compiled.sql.contains("WITH"),
             "Ephemeral inlining must produce a WITH clause: {}",
             compiled.sql
+        );
+    }
+
+    // ===== Named-argument substitution tests =====
+
+    /// Helper: build a params vec with no defaults for use in unit tests.
+    fn params_no_defaults(names: &[&str]) -> Vec<(String, Option<String>)> {
+        names.iter().map(|n| (n.to_string(), None)).collect()
+    }
+
+    /// Helper: build a params vec where the last param has a default value.
+    fn params_with_last_default(names: &[&str], default: &str) -> Vec<(String, Option<String>)> {
+        let mut v: Vec<(String, Option<String>)> =
+            names.iter().map(|n| (n.to_string(), None)).collect();
+        if let Some(last) = v.last_mut() {
+            last.1 = Some(default.to_string());
+        }
+        v
+    }
+
+    /// Smoke test: calling `substitute_params_with_named` with a mix of
+    /// positional + named args produces the same substituted body as a pure
+    /// positional call.
+    #[test]
+    fn substitute_named_args_binds_by_param_name() {
+        // Function: safe_divide(numerator, denominator)
+        // Body: CASE WHEN denominator = 0 THEN NULL ELSE numerator / denominator END
+        let body = "CASE WHEN denominator = 0 THEN NULL ELSE numerator / denominator END";
+        let params = params_no_defaults(&["numerator", "denominator"]);
+
+        // Positional call: safe_divide(revenue, cost)
+        let positional_args = vec!["revenue".to_string(), "cost".to_string()];
+        let positional_result = substitute_params_with_named(body, &params, &positional_args, &[]);
+
+        // Named call: safe_divide(numerator => revenue, denominator => cost)
+        let named_args = vec![
+            ("numerator".to_string(), "revenue".to_string()),
+            ("denominator".to_string(), "cost".to_string()),
+        ];
+        let named_result = substitute_params_with_named(body, &params, &[], &named_args);
+
+        assert_eq!(
+            positional_result, named_result,
+            "named-arg and positional calls should produce identical substituted bodies"
+        );
+        // Both must actually substitute.
+        assert!(
+            named_result.contains("revenue") && named_result.contains("cost"),
+            "expected revenue/cost in substituted body, got: {named_result}"
+        );
+        assert!(
+            !named_result.contains("numerator") && !named_result.contains("denominator"),
+            "parameter names must be replaced, got: {named_result}"
+        );
+    }
+
+    /// Named arguments may appear in any order; binding by name must reorder them
+    /// to match the declaration order.
+    #[test]
+    fn substitute_named_args_reorders_independent_of_call_order() {
+        // 3-parameter function with params [a, b, c]
+        let body = "a + b * c";
+        let params = params_no_defaults(&["a", "b", "c"]);
+
+        // Call with args in reverse order: (c => 'C', a => 'A', b => 'B')
+        let named_args = vec![
+            ("c".to_string(), "'C'".to_string()),
+            ("a".to_string(), "'A'".to_string()),
+            ("b".to_string(), "'B'".to_string()),
+        ];
+
+        let result = substitute_params_with_named(body, &params, &[], &named_args);
+
+        assert_eq!(
+            result, "'A' + 'B' * 'C'",
+            "each param must be replaced by its named arg regardless of call order, got: {result}"
+        );
+    }
+
+    /// Positional args fill the first slots; subsequent named args fill the rest.
+    #[test]
+    fn substitute_named_args_mixes_positional_then_named() {
+        let body = "FUNC(x, y)";
+        let params = params_no_defaults(&["x", "y"]);
+
+        // Call: (pos_x, y => named_y)
+        let positional = vec!["pos_x".to_string()];
+        let named = vec![("y".to_string(), "named_y".to_string())];
+
+        let result = substitute_params_with_named(body, &params, &positional, &named);
+
+        assert_eq!(
+            result, "FUNC(pos_x, named_y)",
+            "positional fills first slot, named fills second, got: {result}"
+        );
+    }
+
+    /// An unknown named argument must not cause a panic or silent miscompile;
+    /// the unfilled slot keeps the original parameter name so the downstream
+    /// SQL engine surfaces a clear error (the type-checker has already rejected
+    /// this via `UnknownPassingParameter`).
+    #[test]
+    fn substitute_named_args_unknown_name_passes_through() {
+        let body = "numerator / denominator";
+        let params = params_no_defaults(&["numerator", "denominator"]);
+
+        // Slot for `numerator` is filled; slot for `denominator` is unknown.
+        let named_args = vec![
+            ("numerator".to_string(), "revenue".to_string()),
+            ("unknown_param".to_string(), "value".to_string()),
+        ];
+
+        let result = substitute_params_with_named(body, &params, &[], &named_args);
+
+        // `numerator` must be replaced; `denominator` must remain (unfilled slot).
+        assert!(
+            result.contains("revenue"),
+            "filled slot must be replaced, got: {result}"
+        );
+        assert!(
+            result.contains("denominator"),
+            "unfilled slot must remain as the param name so downstream SQL fails clearly, got: {result}"
+        );
+    }
+
+    /// A parameter with a declared default value must use the default when
+    /// neither positional nor named arg is supplied at the call site.
+    #[test]
+    fn substitute_named_args_uses_default_for_omitted_param() {
+        // Function: sessionize(source, gap = INTERVAL '30 minutes')
+        let body = "SELECT *, ts - LAG(ts) OVER (...) > gap FROM source";
+        let params = params_with_last_default(&["source", "gap"], "INTERVAL '30 minutes'");
+
+        // Call omitting `gap` — should use default.
+        let positional = vec!["my_table".to_string()];
+        let result = substitute_params_with_named(body, &params, &positional, &[]);
+
+        assert!(
+            result.contains("my_table"),
+            "source must be substituted, got: {result}"
+        );
+        assert!(
+            result.contains("INTERVAL '30 minutes'"),
+            "default for gap must be used when omitted, got: {result}"
+        );
+        assert!(
+            !result.contains(" gap"),
+            "gap param name must be replaced by its default, got: {result}"
         );
     }
 }

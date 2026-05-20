@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use rowan::TextRange;
-use smelt_parser::ast::{File as AstFile, Range};
+use smelt_parser::ast::{File as AstFile, Range, SmeltPathCall};
 use smelt_parser::SyntaxKind::{DOT, IDENT};
 
 use crate::{RefLocation, SourceLocation};
@@ -138,6 +138,29 @@ pub fn find_cte_references(file: &AstFile, _text: &str, cte_name: &str) -> Vec<T
         }
     }
 
+    results
+}
+
+/// Find all `smelt.functions.<name>(...)` call sites in a single file.
+///
+/// Returns the `SMELT_PATH` text range (the dotted path, e.g. the entire
+/// `smelt.functions.sessionize`) for each call whose segments equal
+/// `["functions", function_name]`. Callers map these ranges to LSP `Location`s
+/// and union across the project's files; see `architecture.md` → "Project
+/// isolation rule" for why find-references is project-scoped.
+pub fn find_function_call_sites_in_file(file: &AstFile, function_name: &str) -> Vec<TextRange> {
+    let mut results = Vec::new();
+    for node in file.syntax().descendants() {
+        let Some(call) = SmeltPathCall::cast(node) else {
+            continue;
+        };
+        let segs = call.segments();
+        if segs.len() == 2 && segs[0] == "functions" && segs[1] == function_name {
+            if let Some(range) = call.call_path_range() {
+                results.push(range);
+            }
+        }
+    }
     results
 }
 

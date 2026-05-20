@@ -1019,6 +1019,13 @@ impl SelectStmt {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SelectList(SyntaxNode);
 
+/// One entry in a SELECT list: either a regular item or a spread (`...expr`).
+#[derive(Debug, Clone)]
+pub enum SelectEntry {
+    Item(SelectItem),
+    Spread(ListSpread),
+}
+
 impl SelectList {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         if node.kind() == SELECT_LIST {
@@ -1030,6 +1037,17 @@ impl SelectList {
 
     pub fn items(&self) -> impl Iterator<Item = SelectItem> + '_ {
         self.0.children().filter_map(SelectItem::cast)
+    }
+
+    /// Iterate over all entries in declaration order, including `LIST_SPREAD` nodes.
+    pub fn entries(&self) -> impl Iterator<Item = SelectEntry> + '_ {
+        self.0.children().filter_map(|node| {
+            if let Some(item) = SelectItem::cast(node.clone()) {
+                Some(SelectEntry::Item(item))
+            } else {
+                ListSpread::cast(node).map(SelectEntry::Spread)
+            }
+        })
     }
 }
 

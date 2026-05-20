@@ -273,6 +273,107 @@ generator:
     values: [Defective, Wrong Item, Changed Mind]
 ```
 
+### Composite / structured
+
+#### `json_object`
+
+Emits a JSON-encoded object as a single `Utf8` column. Each field's value is produced by an inner sub-generator; the resulting Parquet column holds strings like `{"event_type":"page_view","logged_in":true,"referrer":null}` — one self-contained JSON object per row.
+
+This is the right shape when you want to model a real-world event-payload column: a single `Utf8` column the downstream SQL parses with `json_extract`. The example below matches the kind of `page_events.payload` you'd see in a Snowplow-style ingestion pipeline.
+
+```yaml
+- name: payload
+  generator:
+    type: json_object
+    fields:
+      event_type:
+        type: weighted_choice
+        values:
+          page_view: 0.60
+          click: 0.30
+          purchase: 0.10
+      page_url:
+        type: string_pattern
+        template: "https://example.com/p/{uniform_int:1-1000}"
+      session_seconds:
+        type: uniform_int
+        min: 0
+        max: 3600
+      logged_in:
+        type: bool
+        prob: 0.7
+      referrer:
+        type: optional
+        prob: 0.6
+        inner:
+          type: one_of
+          values: [google, direct, email]
+```
+
+Rules to know:
+
+- **Fields are always present.** When `optional` fires `null`, the field is emitted as `"<key>": null` — not omitted. Downstream `json_extract(payload, '$.referrer')` returns SQL `NULL` for both cases (missing path and explicit JSON null in DuckDB), so you don't have to disambiguate them in models.
+- **Field order is preserved.** The YAML field declaration order is the JSON output order. Reordering fields changes the seed-dependent values too, because sub-generators are invoked in declaration order.
+- **Nesting works.** A field's generator may itself be `type: json_object`; the nested object is embedded as a JSON value, not double-encoded.
+- **No arrays.** v1 does not have a `json_array` generator. For array-valued fields, either pre-shape your event schema (e.g. `item_count` + numbered columns) or post-process the JSON in a downstream model.
+- **Sticky payloads.** A `json_object` placed under `entity.columns` is generated once per entity and reused — useful for per-user feature flags or settings that don't change across an entity's events.
+
+#### `linked_choice` — correlated columns from a joint-distribution pool
+
+Use `linked_choice` when two or more columns in the same row need to be drawn **jointly**, not independently. Typical case: `(device_id, user_id)` pairs in a web-analytics events table, where most devices have one logged-in user, some devices have multiple users (shared family devices), some users have multiple devices, and some sessions are anonymous. Drawing the two columns independently gives every (device, user) pair equal probability — losing the real co-occurrence pattern.
+
+A `linked_pools:` block, declared at the dataset level, pre-builds a list of correlated tuples. Each row picks one tuple from the pool, and any `linked_choice` column in that row references the picked tuple's field by name:
+
+```yaml
+- name: events
+  output: data/events
+  num_rows: 1000000
+  linked_pools:
+    - name: device_user
+      pool_size: 200000
+      shapes:
+        - weight: 0.60                       # single-owner: 1 device → 1 user
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:   { type: foreign_key, dataset: users }
+        - weight: 0.25                       # anonymous: device with no logged-in user
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:
+              type: optional
+              prob: 0.0
+              inner: { type: foreign_key, dataset: users }
+        - weight: 0.10                       # shared device: same device, 2 users
+          emit: 2
+          sticky: [device_id]
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:   { type: foreign_key, dataset: users }
+        - weight: 0.05                       # multi-device user: same user, 2 devices
+          emit: 2
+          sticky: [user_id]
+          fields:
+            device_id: { type: foreign_key, dataset: devices }
+            user_id:   { type: foreign_key, dataset: users }
+  columns:
+    - name: device_id
+      generator: { type: linked_choice, pool: device_user, field: device_id }
+    - name: user_id
+      generator: { type: linked_choice, pool: device_user, field: user_id }
+```
+
+Rules to know:
+
+- **Same pool, same row → same tuple.** A row picks one pool entry index; every `linked_choice` column referencing that pool sees the *same* entry. Different pools sample independently.
+- **`weight`** controls each shape's probability of being drawn next during pool construction; weights are normalised.
+- **`emit:`** (default `1`) is the number of pool entries one shape draw produces. `emit: 2` with `sticky: [device_id]` models a single device shared by two users.
+- **`sticky:`** lists fields that are drawn **once** per shape draw and shared across the emitted entries. Non-sticky fields are redrawn for each emitted entry.
+- **`pool_size`** is an absolute entry count, not a fraction. `--scale-factor` does not scale pools — the pool stays fixed and the larger row count just samples it more times, which is usually what you want for "vary scale without changing the user/device universe."
+- **`seed:`** (optional) overrides the pool's RNG seed. Omitting it lets the toolchain derive a deterministic offset from the dataset seed, so the pool is still reproducible across runs without an explicit `seed:`. Pool seeds are isolated from row seeds, so changing `num_rows` never perturbs pool contents.
+- **Field type uniformity.** Every shape's `fields:` must declare the same keys, and the generator under a given key must produce the same Arrow type across shapes. A `linked_choice` column's nullability is `nullable` iff the **first shape's** field generator is wrapped in `optional` — the first shape is the schema-defining shape.
+- **Forbidden inside shapes.** `linked_choice` cannot itself be a field generator inside `shapes[].fields:` — pools cannot reference other pools.
+- **Row-level only.** `linked_choice` columns belong under the dataset's `columns:`, not under `entity.columns:`. Pool entries are drawn per row, not per entity.
+
 ## Partitioning
 
 Add a `partition` block to create Hive-style date-partitioned output. Each day gets its own directory with a `data.parquet` file, and rows are distributed evenly across days.

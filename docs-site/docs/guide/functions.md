@@ -143,9 +143,6 @@ WHERE smelt.functions.is_shipped(status)
 
 ### Named arguments
 
-!!! warning "v1 limitation — named arguments are not yet wired end-to-end"
-    The `param => value` syntax is parsed and shown in the docs as the intended v1 design, but it is **not yet enforced or dispatched** in the current release. Pass all arguments **positionally** for now. Named-arg calls may silently pass through or produce unexpected results.
-
 Pass arguments by name to improve readability or skip over defaulted parameters:
 
 ```sql
@@ -157,6 +154,90 @@ FROM smelt.functions.sessionize(
   gap      => INTERVAL '1 hour'
 )
 ```
+
+Named arguments are bound to parameters by name, not by position. You can supply them in any order — the compiler maps each `param => value` to the matching parameter slot before running the body substitution pass.
+
+#### Multi-argument calls with default parameters
+
+When a function declares a default value for a parameter, you can omit it at the call site. Named arguments make it clear which parameters you're supplying and which rely on defaults:
+
+```sql
+-- functions/sessionize.sql
+smelt.define sessionize(
+    source:       TableExpr,
+    partition_col: Expr<Integer>,
+    ts_col:       Expr<Date>,
+    platform_col: Expr<Text>,
+    gap:          Expr<BigInt> = 30 * 60 * 1000000   -- 30 minutes in μs
+) -> TableExpr AS (
+    -- ... window-function body ...
+)
+```
+
+```sql
+-- models/silver/sessions.sql
+-- Supply the four required args by name; `gap` uses the declared default.
+-- Arg order differs from the declaration order to show order-independence.
+WITH sessionized AS (
+    SELECT *
+    FROM smelt.functions.sessionize(
+        source        => smelt.silver.events_parsed,
+        platform_col  => platform,
+        partition_col => device_id,
+        ts_col        => event_ts
+    )
+),
+-- ... downstream aggregation ...
+```
+
+The compiler resolves each `param => value` pair against the declaration, then applies the default `30 * 60 * 1000000` for the omitted `gap`. The result is identical to writing all five arguments positionally.
+
+The alias after the closing `)` is optional — the compiler synthesises a unique alias for the derived table when none is supplied, so the target engine receives valid SQL regardless. A user-supplied alias (e.g. `FROM smelt.functions.sessionize(...) AS s`) overrides the synthesised one.
+
+### Projecting struct-returning function outputs
+
+A function whose return type is `Expr<Struct<{f₁: T₁, …, fₙ: Tₙ}>>` can be projected directly in a SELECT list using the `.*` suffix. The compiler lowers the call to `n` separate aliased columns, one per struct field.
+
+#### Declaration
+
+```sql
+-- functions/parse_event_payload.sql
+smelt.define parse_event_payload(
+    payload_json: Expr<Text>
+) -> Expr<Struct<{event_name: Text, platform: Text, url: Text}>> AS (
+    {
+        json_extract_string(payload_json, '$.event_name') AS event_name,
+        json_extract_string(payload_json, '$.platform') AS platform,
+        json_extract_string(payload_json, '$.url') AS url
+    }
+)
+```
+
+#### Call site with `.*` projection
+
+```sql
+-- models/silver/events_parsed.sql
+SELECT
+    event_id,
+    device_id,
+    user_id,
+    CAST(event_date AS DATE) + to_seconds(seconds_in_day) AS event_ts,
+    CAST(event_date AS DATE) AS event_date,
+    smelt.functions.parse_event_payload(payload).*
+FROM smelt.bronze.raw_events
+```
+
+The compiler expands `smelt.functions.parse_event_payload(payload).*` into:
+
+```sql
+json_extract_string(payload, '$.event_name') AS event_name,
+json_extract_string(payload, '$.platform') AS platform,
+json_extract_string(payload, '$.url') AS url
+```
+
+The resulting model exposes `event_name`, `platform`, and `url` as top-level columns — identical to writing the three calls inline, but defined once in the function and reused across any model that calls it.
+
+The declared return type is authoritative: downstream models that reference `smelt.silver.events_parsed.event_name` see `Text`, regardless of what DuckDB would infer from the raw `json_extract_string` call.
 
 ## Three tiers of annotation
 
@@ -490,4 +571,4 @@ Key rules demonstrated:
 - `functions/` is auto-discovered — no `smelt.yml` change needed.
 - Call path = `smelt.functions.<declared_name>` — the **filename stem is not included**.
 - `Expr<Boolean>` works directly in `WHERE` with no extra wrapping.
-- Arguments are positional in v1 (`param => value` named syntax is not yet wired end-to-end).
+- Arguments may be positional or named (`param => value`); the compiler binds by name.

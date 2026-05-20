@@ -73,11 +73,12 @@ WITH cleaned AS (
 | Integer (`42`) | `INTEGER` |
 | Float (`3.14`) | `DOUBLE` |
 | String `'YYYY-MM-DD'` pattern | `DATE` |
+| String `'YYYY-MM-DD HH:MM:SS'` or `'YYYY-MM-DDTHH:MM:SS'` pattern | `TIMESTAMP` |
 | Other string | `VARCHAR` |
 | Boolean (`true` / `false`) | `BOOLEAN` |
 | Null (`null`) | `NULL` |
 
-Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`. If you need a string that looks like a date, this is a known limitation — no escape mechanism exists today.
+Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`; strings whose first 19 characters match `YYYY-MM-DD HH:MM:SS` (with a space or `T` separator, and an optional fractional-seconds suffix) are cast to `TIMESTAMP`. If you need a string that looks like a date or timestamp, this is a known limitation — no escape mechanism exists today.
 
 ### Comparison behavior
 
@@ -105,6 +106,8 @@ Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`. If
 ### Whole-model tests
 
 When `target_cte` is absent, the entire model SQL is compiled with mock data substituted for every `smelt.<path>` reference named in `inputs`. Dependencies not listed in `inputs` are replaced with empty CTEs (zero rows).
+
+If the model SQL already begins with its own `WITH` clause (after any leading line comments), the mock CTEs are injected **inside** that existing `WITH` rather than prepended as a second one — `WITH <mock_ctes>, <model's existing ctes> ...` — so the compiled test SQL remains a single, well-formed query. Models without a leading `WITH` get a fresh `WITH <mock_ctes>` prefix.
 
 ### CTE-level tests
 

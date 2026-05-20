@@ -88,8 +88,20 @@ jobs:
         env:
           PROPTEST_CASES: 100
 
-      - name: Verify example workspaces have no diagnostics
+      - name: Verify example workspaces have no diagnostics (Salsa-direct path)
         run: cargo test -p smelt-cli --no-default-features --features duckdb --test example_diagnostics
+
+      - name: Run LSP integration tests
+        # All integration tests under crates/smelt-lsp/tests/ — completion,
+        # diagnostics, e2e, example_workspaces, goto_definition, hover,
+        # integration, missing_sidecar, phase48_lsp_polish, pin_schema_action,
+        # rename_lambda. The previous `cargo test --lib` step skips them
+        # because --lib filters to unit tests inside src/.
+        #
+        # example_workspaces is the standing safety net for the workspace
+        # loading parity rule (docs/specs/architecture.md). The other 10
+        # tests cover protocol-level behavior that's also LSP-specific.
+        run: cargo test -p smelt-lsp --no-default-features --tests
 
       - name: Run smelt model tests (example projects)
         run: |

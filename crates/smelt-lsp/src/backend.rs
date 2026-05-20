@@ -127,6 +127,29 @@ pub struct Backend {
     multi_model_files: Arc<Mutex<HashMap<PathBuf, MultiModelEntry>>>,
 }
 
+/// Collect every `smelt.functions.<name>(...)` call-site path range across
+/// the given files. Used by the references handler for both call-site and
+/// declaration-site cursors. `files` is expected to already be project-scoped.
+fn collect_function_call_sites(
+    db: &smelt_db::Database,
+    files: &[smelt_db::SourceFile],
+    name: &str,
+) -> Vec<(PathBuf, smelt_parser::ast::Range)> {
+    let mut out = Vec::new();
+    for f in files {
+        let parse = smelt_db::parse_file(db, *f);
+        let Some(ast) = AstFile::cast(parse.syntax()) else {
+            continue;
+        };
+        let f_text = f.text(db);
+        for trange in smelt_db::references::find_function_call_sites_in_file(&ast, name) {
+            let r = smelt_parser::ast::text_range_to_range(f_text, trange);
+            out.push((f.path(db).clone(), r));
+        }
+    }
+    out
+}
+
 impl Backend {
     pub fn new(client: Client) -> Self {
         Self {
@@ -884,103 +907,77 @@ impl LanguageServer for Backend {
 
                     all_project_roots.push(project_root.clone());
 
-                    // Load sources config for this project
-                    match find_config_file(&project_root, "sources") {
-                        Ok(Some(sources_path)) => match std::fs::read_to_string(&sources_path) {
+                    // Canonical workspace loading — single source of truth for
+                    // CLI and LSP. See docs/specs/architecture.md →
+                    // "Workspace loading parity rule (CLI ↔ LSP)".
+                    let loaded = smelt_core::load_workspace(&project_root);
+                    init_errors
+                        .workspace_errors
+                        .extend(loaded.errors.workspace_errors.iter().cloned());
+                    init_errors
+                        .source_errors
+                        .extend(loaded.errors.source_errors.iter().cloned());
+                    // The "no models found" soft warning is noise for empty /
+                    // functions-only workspaces; drop it from the LSP surface.
+                    let model_errors: Vec<String> = loaded
+                        .errors
+                        .model_errors
+                        .iter()
+                        .filter(|e| !e.starts_with("No models found"))
+                        .cloned()
+                        .collect();
+                    init_errors.model_errors.extend(model_errors);
+
+                    // Sources input + loader files (the latter was previously
+                    // missing in the LSP — smelt.config.load_yaml(...) in
+                    // generator files didn't resolve).
+                    db.set_project_input(project_root.clone(), loaded.sources_text.clone());
+                    smelt_db::workspace_ingest::register_loader_files_from_disk(
+                        &mut db,
+                        &project_root,
+                    );
+
+                    // Register SQL files via register_sql_content so the LSP's
+                    // multi-model line-offset tracking populates correctly.
+                    // Dedup by real path — multi-model files appear once per
+                    // section in loaded.sql_files but share one real file.
+                    let mut seen_real_paths: std::collections::HashSet<PathBuf> =
+                        std::collections::HashSet::new();
+                    for model in &loaded.sql_files {
+                        let real_path = model.model_id.source_path().to_path_buf();
+                        if !seen_real_paths.insert(real_path.clone()) {
+                            continue;
+                        }
+                        match std::fs::read_to_string(&real_path) {
                             Ok(content) => {
-                                db.set_project_input(project_root.clone(), content);
+                                let paths = self
+                                    .register_sql_content(
+                                        &mut db,
+                                        &real_path,
+                                        &content,
+                                        &project_root,
+                                    )
+                                    .await;
+                                all_files.extend(paths);
                             }
                             Err(e) => {
-                                init_errors.source_errors.push(format!(
+                                init_errors.model_errors.push(format!(
                                     "Failed to read {}: {}",
-                                    sources_path.display(),
+                                    real_path.display(),
                                     e
                                 ));
-                                db.set_project_input(project_root.clone(), String::new());
                             }
-                        },
-                        Ok(None) => {
-                            // No sources file - that's fine
-                            db.set_project_input(project_root.clone(), String::new());
-                        }
-                        Err(msg) => {
-                            init_errors.source_errors.push(msg);
-                            db.set_project_input(project_root.clone(), String::new());
                         }
                     }
 
-                    // Load config (defaults to a minimal config with paths = ["models"])
-                    let config = smelt_core::Config::load(&project_root).unwrap_or_else(|_| {
-                        smelt_core::Config {
-                            name: String::new(),
-                            version: 1,
-                            paths: vec!["models".to_string()],
-                            targets: std::collections::HashMap::new(),
-                            default_materialization: smelt_core::Materialization::View,
-                            models: std::collections::HashMap::new(),
-                            python: None,
-                        }
-                    });
-                    let paths = config.paths.clone();
-
-                    // Scan project paths for this project
-                    for model_path in &paths {
+                    // Python discovery — kept inline; runs python_scan with
+                    // LSP-specific state (python_cache, python_model_sources)
+                    // and emits LSP diagnostics for execution errors. Not yet
+                    // shared with the CLI's run-Python pipeline.
+                    let config = &loaded.config;
+                    for model_path in &config.paths {
                         let models_path = project_root.join(model_path);
-                        match std::fs::read_dir(&models_path) {
-                            Ok(entries) => {
-                                for entry_result in entries {
-                                    match entry_result {
-                                        Ok(entry) => {
-                                            let entry_path = entry.path();
-                                            if entry_path.extension().and_then(|s| s.to_str())
-                                                == Some("sql")
-                                            {
-                                                match std::fs::read_to_string(&entry_path) {
-                                                    Ok(content) => {
-                                                        let paths = self
-                                                            .register_sql_content(
-                                                                &mut db,
-                                                                &entry_path,
-                                                                &content,
-                                                                &project_root,
-                                                            )
-                                                            .await;
-                                                        all_files.extend(paths);
-                                                    }
-                                                    Err(e) => {
-                                                        init_errors.model_errors.push(format!(
-                                                            "Failed to read {}: {}",
-                                                            entry_path.display(),
-                                                            e
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            init_errors.model_errors.push(format!(
-                                                "Failed to read directory entry in {}: {}",
-                                                models_path.display(),
-                                                e
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                // Not an error - model directory is optional
-                            }
-                            Err(e) => {
-                                init_errors.workspace_errors.push(format!(
-                                    "Failed to read {}: {}",
-                                    models_path.display(),
-                                    e
-                                ));
-                            }
-                        }
-
-                        // Discover Python models and register their generated SQL
-                        let context_json = build_python_context(&all_files, &config);
+                        let context_json = build_python_context(&all_files, config);
                         let mut cache = self.python_cache.lock().await;
                         *cache = PythonModelCache::load(&project_root);
                         let scan_result = crate::python_scan::discover_python_models(
@@ -1088,16 +1085,26 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "smelt language server initialized")
             .await;
 
-        // Register file watchers for .py files (dynamic registration)
+        // Register file watchers (dynamic registration). We watch:
+        //   - `**/models/**/*.py` for Python model changes
+        //   - `**/functions/**/*.sql` so that external edits to function
+        //     definitions (git checkout, sed, etc.) re-trigger diagnostics
+        //     on dependent models. In-editor edits go through `did_change`.
         let registration = Registration {
-            id: "python-file-watcher".to_string(),
+            id: "smelt-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: Some(
                 serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/models/**/*.py".to_string()),
-                        kind: Some(WatchKind::all()),
-                    }],
+                    watchers: vec![
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/models/**/*.py".to_string()),
+                            kind: Some(WatchKind::all()),
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/functions/**/*.sql".to_string()),
+                            kind: Some(WatchKind::all()),
+                        },
+                    ],
                 })
                 .unwrap(),
             ),
@@ -1308,6 +1315,36 @@ impl LanguageServer for Backend {
                         self.publish_all_diagnostics().await;
                     }
                 }
+            } else if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+                // External `.sql` change (currently only `functions/**/*.sql`
+                // is watched). Re-read content into the DB and refresh all
+                // diagnostics so dependents pick up the new signature.
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let mut db = self.db.lock().await;
+                    let project_roots = self.project_roots.lock().await.clone();
+                    let project_root = project_roots
+                        .iter()
+                        .find(|root| path.starts_with(root))
+                        .cloned()
+                        .unwrap_or_default();
+                    let registered_paths = self
+                        .register_sql_content(&mut db, &path, &content, &project_root)
+                        .await;
+                    let mut tracked = self.tracked_files.lock().await;
+                    let mut changed = false;
+                    for rp in &registered_paths {
+                        if !tracked.contains(rp) {
+                            tracked.push(rp.clone());
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        Backend::sync_workspace(&mut db, &tracked, &project_roots);
+                    }
+                    drop(tracked);
+                    drop(db);
+                    self.publish_all_diagnostics().await;
+                }
             }
         }
     }
@@ -1366,6 +1403,15 @@ impl LanguageServer for Backend {
             EmittedModelRef {
                 gen_file: PathBuf,
                 name_range: Range,
+            },
+            /// Goto-def from a `smelt.functions.<name>(...)` call to the
+            /// `smelt.define <name>(...)` declaration. Lands the cursor on
+            /// the name token (precise position derived from the file's
+            /// current text via `name_range`).
+            FunctionDef {
+                target_file: PathBuf,
+                name_start: u32,
+                name_end: u32,
             },
         }
 
@@ -1535,13 +1581,57 @@ impl LanguageServer for Backend {
                         }
                         Some(SymbolAtCursor::PathRef { segments }) => {
                             // Resolve via the unified path data plane (Phase 2a).
+                            // SQL files come back via `source_file`; seeds and
+                            // sources (which aren't Salsa SourceFiles) fall
+                            // through to `resolve_seed_or_source_path` which
+                            // returns the on-disk `.csv` / `.yml` path.
                             let ws = Workspace::try_get(&db);
                             ws.and_then(|w| {
-                                smelt_db::resolve_ref_path(&db, w, segments)
-                                    .and_then(|r| r.source_file)
-                                    .map(|f| GotoTarget::RefModel(f.path(&db).clone()))
+                                if let Some(sf) =
+                                    smelt_db::resolve_ref_path(&db, w, segments.clone())
+                                        .and_then(|r| r.source_file)
+                                {
+                                    Some(GotoTarget::RefModel(sf.path(&db).clone()))
+                                } else {
+                                    smelt_db::resolve_seed_or_source_path(&db, w, segments)
+                                        .map(GotoTarget::RefModel)
+                                }
                             })
                         }
+                        Some(SymbolAtCursor::FunctionCall { segments }) => {
+                            // Route `smelt.functions.<name>(...)` calls to the
+                            // `smelt.define <name>(...)` declaration. Other call
+                            // shapes (e.g. `smelt.metrics.foo`, when that namespace
+                            // ships) fall through to None.
+                            //
+                            // Project isolation: resolve against functions
+                            // declared in the same project as the call site.
+                            // See docs/specs/architecture.md → "Project
+                            // isolation rule".
+                            if segments.len() == 2 && segments[0] == "functions" {
+                                let name = segments[1].clone();
+                                let ws = Workspace::try_get(&db);
+                                ws.and_then(|w| {
+                                    let project = file_input.and_then(|sf| {
+                                        smelt_db::find_project(
+                                            &db,
+                                            w,
+                                            &sf.project_root(&db).clone(),
+                                        )
+                                    })?;
+                                    smelt_db::resolve_function_path(&db, w, project, name).map(
+                                        |(f, name_range)| GotoTarget::FunctionDef {
+                                            target_file: f.path(&db).clone(),
+                                            name_start: name_range.start,
+                                            name_end: name_range.end,
+                                        },
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        Some(SymbolAtCursor::FunctionDefinition { .. }) => None,
                         None => None,
                     }
                     // Fall through to Phase B checks when symbol_at_cursor returned None
@@ -1842,6 +1932,34 @@ impl LanguageServer for Backend {
                     Ok(None)
                 }
             }
+            // smelt.functions.<name>(...) → smelt.define <name>(...).
+            // Convert the stored byte range to LSP line/col using the target
+            // file's current text. Done outside the AST-holding block so
+            // there's no Salsa snapshot lifetime issue.
+            Some(GotoTarget::FunctionDef {
+                target_file,
+                name_start,
+                name_end,
+            }) => {
+                let target_uri = match Url::from_file_path(&target_file) {
+                    Ok(u) => u,
+                    Err(_) => return Ok(None),
+                };
+                let target_text = std::fs::read_to_string(&target_file).unwrap_or_default();
+                // `define.name_range()` returns offsets into the
+                // frontmatter-stripped source (parse_file strips before
+                // parsing). Strip here too so byte→line/col mapping aligns.
+                let stripped = smelt_parser::strip_frontmatter(&target_text);
+                let start = smelt_parser::ast::offset_to_position(&stripped, name_start as usize);
+                let end = smelt_parser::ast::offset_to_position(&stripped, name_end as usize);
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: Range {
+                        start: Position::new(start.line, start.column),
+                        end: Position::new(end.line, end.column),
+                    },
+                })))
+            }
             None => Ok(None),
         }
     }
@@ -1889,13 +2007,29 @@ impl LanguageServer for Backend {
 
             if let Some(syntax) = syntax {
                 if let Some(file) = AstFile::cast(syntax) {
+                    // Project-scope the search per architecture.md → "Project
+                    // isolation rule": a workspace folder may contain multiple
+                    // smelt projects, and references do not cross project
+                    // boundaries. Derive the project from the cursor file.
+                    let project_files: Vec<smelt_db::SourceFile> = {
+                        let ws = Workspace::try_get(&db);
+                        match (ws, file_input) {
+                            (Some(w), Some(sf)) => {
+                                let project_root = sf.project_root(&db).clone();
+                                w.files(&db)
+                                    .iter()
+                                    .copied()
+                                    .filter(|f| f.project_root(&db) == &project_root)
+                                    .collect()
+                            }
+                            _ => Vec::new(),
+                        }
+                    };
+
                     match symbol_at_cursor(&file, &text, cursor_offset) {
                         Some(SymbolAtCursor::PathRef { segments }) => {
-                            // Find all files that contain a path ref with these segments
-                            let ws = Workspace::try_get(&db);
-                            let ws_files = ws.map(|w| w.files(&db).clone()).unwrap_or_default();
                             let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> = Vec::new();
-                            for f in &ws_files {
+                            for f in &project_files {
                                 let path_refs = smelt_db::model_path_refs(&db, *f);
                                 for loc in path_refs.iter() {
                                     if loc.path == segments {
@@ -1904,6 +2038,30 @@ impl LanguageServer for Backend {
                                 }
                             }
                             RefResult::PathRanges(all_refs)
+                        }
+                        Some(SymbolAtCursor::FunctionCall { segments }) => {
+                            // Only `smelt.functions.<name>` calls are findable
+                            // today. Other call shapes have no def to anchor on.
+                            if segments.len() == 2 && segments[0] == "functions" {
+                                RefResult::PathRanges(collect_function_call_sites(
+                                    &db,
+                                    &project_files,
+                                    &segments[1],
+                                ))
+                            } else {
+                                RefResult::Empty
+                            }
+                        }
+                        Some(SymbolAtCursor::FunctionDefinition { name }) => {
+                            // Cursor on the `<name>` token of a
+                            // `smelt.define <name>(...)` declaration — return
+                            // every `smelt.functions.<name>(...)` call site
+                            // in the same project.
+                            RefResult::PathRanges(collect_function_call_sites(
+                                &db,
+                                &project_files,
+                                &name,
+                            ))
                         }
                         Some(SymbolAtCursor::CteDefinition { name })
                         | Some(SymbolAtCursor::CteReference { name }) => {
@@ -3444,7 +3602,14 @@ impl LanguageServer for Backend {
                     let segments = call.segments();
                     let fn_name = segments.last().cloned().unwrap_or_default();
                     let ws = Workspace::try_get(&db);
-                    let sig = ws.and_then(|w| smelt_db::resolve_function(&db, w, fn_name.clone()));
+                    // Project isolation: hover resolves the same way the
+                    // diagnostic and goto-def code paths do — only against
+                    // functions declared in the cursor file's project.
+                    let project_root = file_project_root(&db, &effective_path);
+                    let project = lookup_project(&db, &project_root);
+                    let sig = ws
+                        .zip(project)
+                        .and_then(|(w, p)| smelt_db::resolve_function(&db, w, p, fn_name.clone()));
 
                     if let Some(sig) = sig {
                         // Phase 48 test 2: cursor on a PASSING clause name.
@@ -4681,9 +4846,12 @@ impl LanguageServer for Backend {
 
                 // Resolve the callee's signature to find the parameter's
                 // declared context (e.g. `SelectItems<Agg, sessionized>`).
-                if let Some(w) = ws {
-                    if let Some(sig) =
-                        smelt_db::resolve_function(&db, w, callee.clone()).map(|arc| (*arc).clone())
+                // Project isolation: resolve in the cursor file's project.
+                let project_root = file_project_root(&db, &effective_path);
+                let project = lookup_project(&db, &project_root);
+                if let (Some(w), Some(p)) = (ws, project) {
+                    if let Some(sig) = smelt_db::resolve_function(&db, w, p, callee.clone())
+                        .map(|arc| (*arc).clone())
                     {
                         // Look up the parameter by name.
                         if let Some(param) = sig.params.iter().find(|p| p.name == passing_name) {

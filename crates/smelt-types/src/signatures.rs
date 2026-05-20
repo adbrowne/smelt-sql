@@ -3945,6 +3945,17 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_kind(ExprKind::Agg),
     );
+    // arg_max(value, key) → value: return the value from the row with the maximum key.
+    // Accepts any value type T and any key type K (must be orderable at runtime).
+    insert(
+        Signature::new(
+            "ARG_MAX",
+            vec![tp("T", TypeConstraint::Any), tp("K", TypeConstraint::Any)],
+            vec![var("T"), var("K")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
     insert(
         Signature::new(
             "APPROX_COUNT_DISTINCT",

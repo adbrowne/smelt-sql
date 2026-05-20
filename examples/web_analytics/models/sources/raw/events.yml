@@ -1,0 +1,14 @@
+description: Raw web analytics events with a JSON-encoded payload.
+columns:
+  - name: event_id
+    type: BIGINT
+  - name: device_id
+    type: INTEGER
+  - name: user_id
+    type: INTEGER
+  - name: seconds_in_day
+    type: INTEGER
+  - name: payload
+    type: VARCHAR
+  - name: event_date
+    type: VARCHAR  # hive partition value; emitted as Utf8 by the partitioned writer (DuckDB casts to DATE on use)

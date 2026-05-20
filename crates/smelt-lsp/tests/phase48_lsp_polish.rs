@@ -140,7 +140,9 @@ fn lsp_hover_on_smelt_fn_call_shows_declared_return() {
     let model_path = ws.add_model("caller", model_sql);
 
     let workspace = Workspace::try_get(&ws.db).expect("workspace registered");
-    let sig = resolve_function(&ws.db, workspace, "widen_to_double".to_string())
+    let project =
+        smelt_db::find_project(&ws.db, workspace, &ws.project_root).expect("project registered");
+    let sig = resolve_function(&ws.db, workspace, project, "widen_to_double".to_string())
         .expect("widen_to_double signature must resolve");
 
     // Cursor on the `widen_to_double` segment of the call path.
@@ -188,7 +190,9 @@ fn lsp_hover_on_passing_clause_param_shows_param_signature() {
     let model_path = ws.add_model("caller", model_sql);
 
     let workspace = Workspace::try_get(&ws.db).expect("workspace registered");
-    let sig = resolve_function(&ws.db, workspace, "session_rollup".to_string())
+    let project =
+        smelt_db::find_project(&ws.db, workspace, &ws.project_root).expect("project registered");
+    let sig = resolve_function(&ws.db, workspace, project, "session_rollup".to_string())
         .expect("session_rollup signature must resolve");
 
     let file = ws.db.source_file(&model_path).unwrap();
@@ -291,7 +295,9 @@ fn lsp_completion_in_passing_body_lists_context_columns() {
     // Resolve the splice context's columns via the same Phase 47 helper
     // the LSP completion path uses.
     let workspace = Workspace::try_get(&ws.db).expect("workspace registered");
-    let sig = resolve_function(&ws.db, workspace, "session_rollup".to_string())
+    let project =
+        smelt_db::find_project(&ws.db, workspace, &ws.project_root).expect("project registered");
+    let sig = resolve_function(&ws.db, workspace, project, "session_rollup".to_string())
         .expect("session_rollup signature must resolve");
     let metrics = sig
         .params

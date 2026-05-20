@@ -114,6 +114,11 @@ fn functions_demo_no_diagnostics() {
     check_workspace_no_diagnostics("examples/functions_demo");
 }
 
+#[test]
+fn web_analytics_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/web_analytics");
+}
+
 /// Test 4 (TDD): All example SQL files must use the unified `smelt.<path>`
 /// syntax.  This test FAILS until the migration tool has been run on all
 /// example workspaces.
@@ -176,6 +181,7 @@ fn all_examples_clean_after_legacy_removal() {
         "examples/multi_engine",
         "examples/ecommerce",
         "examples/functions_demo",
+        "examples/web_analytics",
     ] {
         check_workspace_no_diagnostics(workspace);
     }
@@ -199,6 +205,7 @@ fn all_examples_have_zero_lsp_diagnostics_after_migration() {
         "examples/multi_engine",
         "examples/ecommerce",
         "examples/functions_demo",
+        "examples/web_analytics",
     ] {
         check_workspace_no_diagnostics(workspace);
     }

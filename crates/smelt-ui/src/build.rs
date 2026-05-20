@@ -548,6 +548,8 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            address_segments: Vec::new(),
         }
     }
 

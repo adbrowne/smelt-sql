@@ -46,6 +46,7 @@ pub enum SqlFunction {
     PercentileDisc,
     ApproxCountDistinct,
     AnyValue,
+    ArgMax,
     First,
     Last,
     BoolAnd,
@@ -211,6 +212,7 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::PercentileDisc,
     SqlFunction::ApproxCountDistinct,
     SqlFunction::AnyValue,
+    SqlFunction::ArgMax,
     SqlFunction::First,
     SqlFunction::Last,
     SqlFunction::BoolAnd,
@@ -385,6 +387,7 @@ impl SqlFunction {
             Self::PercentileDisc => "PERCENTILE_DISC",
             Self::ApproxCountDistinct => "APPROX_COUNT_DISTINCT",
             Self::AnyValue => "ANY_VALUE",
+            Self::ArgMax => "ARG_MAX",
             Self::First => "FIRST",
             Self::Last => "LAST",
             Self::BoolAnd => "BOOL_AND",
@@ -520,6 +523,7 @@ impl SqlFunction {
             | Self::PercentileDisc
             | Self::ApproxCountDistinct
             | Self::AnyValue
+            | Self::ArgMax
             | Self::First
             | Self::Last
             | Self::BoolAnd

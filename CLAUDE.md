@@ -210,6 +210,38 @@ This is an architectural invariant. The core type inference, schema extraction, 
 - `file_diagnostics()` orchestrates multiple Salsa queries to gather inputs before running checks
 - `type_context()` calls Salsa to resolve upstream model schemas
 
+### Workspace Loading Parity Rule (CLI ↔ LSP)
+
+**Eager init-time workspace discovery lives in exactly one place: `smelt_core::workspace::load_workspace`. Both the CLI's `init_db` and the LSP's `Backend::initialize` consume it.**
+
+This covers: SQL models under `config.paths`, function definitions under the hardcoded `functions/` directory, multi-model frontmatter expansion, and YAML/JSON/TOML loader files for `smelt.config.load_yaml`. The Salsa-ingest sequence (`set_project_input` → `set_source_file` → `register_loader_files_from_disk`) is centralised in `smelt_db::workspace_ingest::ingest_loaded_workspace`. *Lazy* discovery (seeds via `project_seeds`, per-entity sources via `project_sources`) lives inside Salsa queries keyed on `ProjectInput` — already shared by construction, doesn't need the loader.
+
+**Why this matters:** The asymmetric-discovery bug class is the load-bearing failure mode of having two parallel reimplementations of "load a smelt project from disk". Two real instances: the LSP shipping without `functions/` discovery (VSCode showed `unknown-smelt-fn` while the CLI test suite was green), and the LSP not calling `set_loader_file` (so `smelt.config.load_yaml` failed silently in the editor only). Routing every consumer through the same loader makes this class structurally impossible. See `docs/specs/architecture.md` → "Workspace loading parity rule (CLI ↔ LSP)" for the normative spec.
+
+**The rule in practice:**
+- **DO** add new eager-discovery steps to `smelt_core::workspace::load_workspace`.
+- **DO** route new lazy-discovery steps through Salsa queries keyed on `ProjectInput`.
+- **DON'T** walk the filesystem from inside `Backend::initialize` or from CLI commands directly — call `load_workspace` instead.
+- **DON'T** add a sibling discovery helper that only one side calls.
+
+The standing CI gate is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example workspace and asserts zero diagnostics. Always run this when touching LSP startup, CLI discovery, or `smelt-core::workspace`.
+
+### Project Isolation Rule
+
+**A workspace folder may contain multiple smelt projects. Each project is a closed resolution scope: a `smelt.<path>` reference inside project A resolves only against entities declared inside project A.**
+
+This is an architectural invariant. `find_smelt_projects` discovers projects recursively from any workspace folder root (the LSP loads a monorepo with `examples/web_analytics/`, `examples/functions_demo/`, etc. all in one VSCode window). Same-name collisions across projects are independent, not errors — `smelt.functions.sessionize` in `web_analytics` and `smelt.functions.sessionize` in `functions_demo` are different functions with different signatures, and each call site sees only its own project's definition.
+
+**Why this matters:** Resolvers that walk `workspace.files(db)` flat (no project filter) leak signatures between projects. The bug class first surfaced as a spurious `Missing required argument` on `examples/web_analytics/models/silver/sessions.sql` when VSCode opened the entire worktree — `resolve_function("sessionize")` returned `functions_demo`'s signature (alphabetically first), which has different parameter names. CLI test suites missed it because each `--test example_diagnostics` case ingests one project at a time. See `docs/specs/architecture.md` → "Project isolation rule" for the normative spec.
+
+**The rule in practice:**
+- **DO** thread `ProjectInput` through any Salsa query that takes `workspace: Workspace` and walks `workspace.files(db)` to resolve a name.
+- **DO** derive the project from the file under analysis: `source_file.project_root(db)` → `find_project(workspace, root)` → `ProjectInput`.
+- **DON'T** add a workspace-flat resolver helper; if you need cross-project information later, make it opt-in (future `dependencies:` declaration in `smelt.yml`).
+- **DON'T** assume a workspace folder is one project — `find_smelt_projects` may return 0..N projects.
+
+The standing CI gate is a multi-project case in `cargo test -p smelt-lsp --test example_workspaces` that opens the entire `examples/` directory as one workspace folder.
+
 ### Key Dependencies
 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)
@@ -319,9 +351,10 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 6. **Run `cargo fmt --all` to format code**
 7. **Run `cargo clippy --all-targets` and fix all warnings**
 8. Run `cargo build` and `cargo test` to ensure everything compiles and passes
-9. **Run `cargo test -p smelt-cli --test example_diagnostics`** to verify examples have no LSP diagnostics
-10. Update docs/ROADMAP.md with completion status and date
-11. **Commit** with descriptive message (includes ROADMAP.md update)
+9. **Run `cargo test -p smelt-cli --test example_diagnostics`** to verify examples have no diagnostics via the Salsa-direct path
+10. **Run `cargo test -p smelt-lsp --test example_workspaces`** to verify examples have no diagnostics via the real LSP backend (catches asymmetric-discovery bugs the Salsa-direct test misses)
+11. Update docs/ROADMAP.md with completion status and date
+12. **Commit** with descriptive message (includes ROADMAP.md update)
 
 ### Before Ending a Conversation
 

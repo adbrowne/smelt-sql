@@ -217,6 +217,8 @@ mod tests {
             parse_errors: vec![],
             metadata: None,
             model_id: smelt_core::ModelId::from_path("models/test_model.sql".into()),
+            kind: smelt_core::ModelKind::Sql,
+            address_segments: Vec::new(),
         }];
 
         let graph = DependencyGraph::build(models.clone(), None).unwrap();

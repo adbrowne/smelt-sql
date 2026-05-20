@@ -4152,6 +4152,7 @@ dependencies = [
  "arrow",
  "chrono",
  "clap",
+ "duckdb",
  "indexmap 2.14.0",
  "parquet",
  "rand 0.8.6",
@@ -4160,6 +4161,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_yaml",
+ "smelt-parser",
  "tempfile",
  "uuid",
 ]
@@ -4184,6 +4186,7 @@ dependencies = [
  "smelt-planner",
  "smelt-types",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]

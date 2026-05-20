@@ -174,10 +174,57 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                     })
                     .unwrap_or_default();
                 if let Some(expanded) = expander(&segs, positional, named) {
-                    let reparsed = smelt_parser::parse(&expanded);
-                    print_node(&reparsed.syntax(), ctx, out);
+                    // Detect FROM-position: the SMELT_PATH_CALL node's parent
+                    // must be TABLE_REF, and TABLE_REF's parent must be
+                    // FROM_CLAUSE. FROM-position only — JOIN/LATERAL positions
+                    // are not handled here.
+                    let in_from_position = node
+                        .parent()
+                        .filter(|p| p.kind() == SyntaxKind::TABLE_REF)
+                        .and_then(|table_ref| table_ref.parent())
+                        .map(|gp| gp.kind() == SyntaxKind::FROM_CLAUSE)
+                        .unwrap_or(false);
+
+                    // Detect user-supplied alias: scan TABLE_REF children that
+                    // come after this SMELT_PATH_CALL node.  An alias is present
+                    // when there is an AS_KW or a bare IDENT following the call.
+                    let has_explicit_alias = in_from_position && {
+                        node.parent()
+                            .filter(|p| p.kind() == SyntaxKind::TABLE_REF)
+                            .map(|table_ref| smelt_path_call_has_explicit_alias(&table_ref, node))
+                            .unwrap_or(false)
+                    };
+
+                    if in_from_position && !has_explicit_alias {
+                        // Synthesise `(<expanded>) AS __smelt_t<start_offset>`.
+                        // Using the source byte offset of the call makes the
+                        // alias stable per call site with no shared mutable
+                        // state — valid across all models in a project because
+                        // each model is printed independently.
+                        let offset = u32::from(node.text_range().start());
+                        let reparsed = smelt_parser::parse(&expanded);
+                        let mut body_out = String::new();
+                        print_node(&reparsed.syntax(), ctx, &mut body_out);
+                        let body_trimmed = body_out.trim_end();
+                        out.push('(');
+                        out.push_str(body_trimmed);
+                        out.push_str(&format!(") AS __smelt_t{offset}"));
+                    } else {
+                        let reparsed = smelt_parser::parse(&expanded);
+                        print_node(&reparsed.syntax(), ctx, out);
+                    }
                     return;
                 }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::SMELT_PATH_CALL_STAR => {
+            // `smelt.<path>(args).*` — lower to per-field projections when
+            // the expander provides a brace-struct literal body; fall back to
+            // verbatim otherwise.
+            if let Some(expanded) = expand_smelt_path_call_star(node, ctx) {
+                out.push_str(&expanded);
+                return;
             }
             print_children(node, ctx, out);
         }
@@ -326,6 +373,151 @@ fn print_cast_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             SyntaxElement::Node(n) => print_node(n, ctx, out),
         }
     }
+}
+
+/// Expand a `SMELT_PATH_CALL_STAR` node (`smelt.<path>(args).*`) to
+/// per-field projections `<expr> AS <name>, …`.
+///
+/// Steps:
+/// 1. Find the inner `SMELT_PATH_CALL` child and ask the expander for the body.
+/// 2. Re-parse the body and find a top-level `BRACE_STRUCT_LITERAL`.
+/// 3. Emit each `STRUCT_FIELD_ITEM` verbatim (already `<expr> AS <name>` form).
+///
+/// Returns `None` when any step fails (no expander, expander returned `None`,
+/// body has no brace-struct literal, or body has a `SPREAD_ITEM`), so the
+/// caller falls back to verbatim printing.
+fn expand_smelt_path_call_star(node: &SyntaxNode, ctx: &PrintContext) -> Option<String> {
+    let expander = ctx.smelt_path_call.as_ref()?;
+
+    // Locate the SMELT_PATH_CALL child node.
+    let call_node = node
+        .children()
+        .find(|c| c.kind() == SyntaxKind::SMELT_PATH_CALL)?;
+
+    let path_call = SmeltPathCall::cast(call_node.clone())?;
+    let segs = path_call.segments();
+    let positional: Vec<String> = path_call
+        .arg_list()
+        .map(|al| {
+            al.positional_args()
+                .into_iter()
+                .map(|arg| {
+                    let mut s = String::new();
+                    print_node(arg.syntax(), ctx, &mut s);
+                    s
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let named: Vec<(String, String)> = path_call
+        .arg_list()
+        .map(|al| {
+            al.named_params()
+                .filter_map(|np| {
+                    let name = np.name()?;
+                    let expr = np.value_expr()?;
+                    let mut s = String::new();
+                    print_node(expr.syntax(), ctx, &mut s);
+                    Some((name, s))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let body = expander(&segs, positional, named)?;
+
+    // Re-parse the body to locate a BRACE_STRUCT_LITERAL.
+    //
+    // The body is an expression fragment (e.g. `{expr AS name, …}`), not a
+    // full SQL statement.  `smelt_parser::parse` calls `parse_file`, which
+    // only recognises SELECT/WITH/smelt.define at the top level, so a bare
+    // brace-struct literal `{…}` would hit the error path and not produce a
+    // `BRACE_STRUCT_LITERAL` node.  Wrapping the body in a minimal
+    // `SELECT <body>` forces expression parsing and places the struct literal
+    // inside a `SELECT_ITEM → EXPRESSION` wrapper where the traversal below
+    // can find it.
+    let wrapper = format!("SELECT {body}");
+    let reparsed = smelt_parser::parse(&wrapper);
+    let syntax_root = reparsed.syntax();
+
+    // Walk to find the BRACE_STRUCT_LITERAL node anywhere in the tree.
+    let brace_struct = find_brace_struct_literal(&syntax_root)?;
+
+    // Reject if any SPREAD_ITEM is present — fall back to verbatim.
+    let has_spread = brace_struct
+        .children()
+        .any(|c| c.kind() == SyntaxKind::SPREAD_ITEM);
+    if has_spread {
+        return None;
+    }
+
+    // Collect STRUCT_FIELD_ITEM children and emit them as separate projections.
+    let fields: Vec<SyntaxNode> = brace_struct
+        .children()
+        .filter(|c| c.kind() == SyntaxKind::STRUCT_FIELD_ITEM)
+        .collect();
+
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    for (i, field) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        // Each STRUCT_FIELD_ITEM is `<expr> AS <name>` — print it verbatim
+        // (running it through print_node applies further expansions if needed).
+        print_node(field, ctx, &mut out);
+    }
+    Some(out)
+}
+
+/// Check whether the `TABLE_REF` parent of a `SMELT_PATH_CALL` carries a
+/// user-supplied alias.
+///
+/// The parser places a `SMELT_PATH_CALL` inside `TABLE_REF` and then, if the
+/// user wrote `AS alias` or a bare implicit alias, appends those tokens as
+/// siblings in the same `TABLE_REF` node.  We scan the children of
+/// `table_ref` and look for any `AS_KW` or `IDENT` token that appears after
+/// the `SMELT_PATH_CALL` child.
+fn smelt_path_call_has_explicit_alias(table_ref: &SyntaxNode, call_node: &SyntaxNode) -> bool {
+    let call_range = call_node.text_range();
+    let mut past_call = false;
+    for child in table_ref.children_with_tokens() {
+        match &child {
+            SyntaxElement::Node(n) => {
+                if n.text_range() == call_range {
+                    past_call = true;
+                }
+            }
+            SyntaxElement::Token(t) => {
+                if past_call && !t.kind().is_trivia() {
+                    // Any non-trivia token after the SMELT_PATH_CALL is either
+                    // AS_KW (explicit alias) or IDENT (implicit alias).  Both
+                    // indicate a user-supplied alias.
+                    if matches!(t.kind(), SyntaxKind::AS_KW | SyntaxKind::IDENT) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Recursively find the first `BRACE_STRUCT_LITERAL` node in the tree,
+/// descending through FILE and EXPRESSION wrapper nodes.
+fn find_brace_struct_literal(node: &SyntaxNode) -> Option<SyntaxNode> {
+    if node.kind() == SyntaxKind::BRACE_STRUCT_LITERAL {
+        return Some(node.clone());
+    }
+    for child in node.children() {
+        if let Some(found) = find_brace_struct_literal(&child) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Rewrite ARRAY[1,2,3] → ARRAY(1,2,3).
@@ -966,5 +1158,164 @@ mod tests {
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, sql);
+    }
+
+    // ===== struct-returning call .* projection tests =====
+
+    #[test]
+    fn struct_returning_call_dot_star_lowers_to_field_projections() {
+        let sql = "SELECT smelt.functions.parse_event_payload(payload).* FROM e";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+        // The expander returns a brace-struct literal body with three fields.
+        let body =
+            "{json_extract_string(payload, '$.event_name') AS event_name, json_extract_string(payload, '$.platform') AS platform, json_extract_string(payload, '$.url') AS url}";
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
+        };
+        let result = print(&parsed.syntax(), &ctx);
+        // Should expand to three separate aliased projections, not the struct literal
+        assert!(
+            result.contains("json_extract_string(payload, '$.event_name') AS event_name"),
+            "expected event_name projection, got: {result}"
+        );
+        assert!(
+            result.contains("json_extract_string(payload, '$.platform') AS platform"),
+            "expected platform projection, got: {result}"
+        );
+        assert!(
+            result.contains("json_extract_string(payload, '$.url') AS url"),
+            "expected url projection, got: {result}"
+        );
+        // Should NOT contain the brace-struct literal syntax (curly braces in the output)
+        assert!(
+            !result.contains('{'),
+            "output should not contain struct literal braces, got: {result}"
+        );
+        assert!(
+            !result.contains(".*"),
+            "output should not contain .*, got: {result}"
+        );
+    }
+
+    // ===== FROM-position derived-table alias synthesis tests =====
+
+    /// Parse `SELECT * FROM smelt.functions.sessionize(x)` (no explicit alias).
+    /// The printer must synthesise a `__smelt_t<N>` alias so DuckDB accepts the
+    /// derived table.  The expanded body is a SELECT statement.
+    #[test]
+    fn table_expr_call_in_from_without_alias_synthesises_one() {
+        let sql = "SELECT * FROM smelt.functions.sessionize(x)";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+        let body = "SELECT * FROM some_table WHERE x = 1";
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
+        };
+        let result = print(&parsed.syntax(), &ctx);
+        // Must contain a synthesised alias beginning with __smelt_t
+        assert!(
+            result.contains("__smelt_t"),
+            "expected synthesised __smelt_t alias, got: {result}"
+        );
+        // Expanded body must appear inside parentheses
+        assert!(
+            result.contains("(SELECT * FROM some_table WHERE x = 1)"),
+            "expected expanded body in parens, got: {result}"
+        );
+        // The alias must follow the closing paren
+        assert!(
+            result.contains(") AS __smelt_t"),
+            "expected ) AS __smelt_t<N>, got: {result}"
+        );
+    }
+
+    /// Same input but with `AS s` after the call.  The printer must use the
+    /// user's alias verbatim and must not emit a synthesised `__smelt_t` alias.
+    #[test]
+    fn table_expr_call_in_from_with_alias_passes_through() {
+        let sql = "SELECT * FROM smelt.functions.sessionize(x) AS s";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+        let body = "SELECT * FROM some_table WHERE x = 1";
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
+        };
+        let result = print(&parsed.syntax(), &ctx);
+        // Must NOT synthesise a __smelt_t alias
+        assert!(
+            !result.contains("__smelt_t"),
+            "should not synthesise alias when user supplied one, got: {result}"
+        );
+        // The expanded body must still appear
+        assert!(
+            result.contains("SELECT * FROM some_table WHERE x = 1"),
+            "expected expanded body in output, got: {result}"
+        );
+        // The user-supplied alias must appear
+        assert!(
+            result.contains("AS s"),
+            "expected user alias AS s, got: {result}"
+        );
+    }
+
+    /// A `smelt.<path>(args)` call in SELECT-list position (not FROM) must NOT
+    /// get wrapped in `(...) AS __smelt_t<N>`.  The printer should expand the
+    /// body verbatim (or the position is structurally unreachable for
+    /// TableExpr-returning calls — either way no alias synthesis occurs).
+    #[test]
+    fn table_expr_call_in_select_list_does_not_synthesise_alias() {
+        // In a SELECT list the path call is inside EXPRESSION/SELECT_ITEM, not TABLE_REF.
+        // Even if the expander returns a SELECT body, no alias wrapping should occur.
+        let sql = "SELECT smelt.functions.some_fn(x) FROM t";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+        let body = "some_expression";
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: Some(Box::new(move |_segs, _pos, _named| Some(body.to_string()))),
+        };
+        let result = print(&parsed.syntax(), &ctx);
+        // Must NOT synthesise a __smelt_t alias in SELECT list position
+        assert!(
+            !result.contains("__smelt_t"),
+            "should not synthesise alias in SELECT list position, got: {result}"
+        );
+        // The expanded body must appear verbatim
+        assert!(
+            result.contains("some_expression"),
+            "expected expanded body, got: {result}"
+        );
     }
 }

@@ -14,13 +14,16 @@ pub mod seeds;
 pub mod selector;
 pub mod sources;
 pub mod text;
+pub mod workspace;
 
 pub use config::{
     parse_active_backends, parse_unstable_schema_flag, BackendType, Config, ConfigError,
     DataLatency, Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
     Materialization, ModelConfig, Target, Weekday,
 };
-pub use discovery::{ModelDiscovery, ModelFile};
+pub use discovery::{
+    discover_function_file_paths, ModelDiscovery, ModelFile, ModelKind, PythonModelQuery,
+};
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{
     extract_file_metadata, ColumnMetadata, ColumnTest, FileMetadata, MetadataError, ModelMetadata,
@@ -50,3 +53,4 @@ pub use sources::{
     SourcesError,
 };
 pub use text::{extract_snippet, text_range_to_line_col};
+pub use workspace::{load_workspace, LoadedWorkspace, WorkspaceLoadErrors};

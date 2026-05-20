@@ -159,6 +159,54 @@ pub fn project_sources(db: &dyn salsa::Database, project: ProjectInput) -> Arc<V
     Arc::new(smelt_core::discover_source_infos(&project_root, &paths))
 }
 
+/// Resolve a `smelt.seeds.<address>` or `smelt.sources.<address>` path to
+/// the on-disk file (`.csv` for seeds, `.yml` for sources) so the LSP can
+/// goto-definition into it.
+///
+/// Iterates every project in the workspace; the first matching project
+/// wins (mirrors the order [`resolve_ref_path`] uses). Returns `None` if
+/// no seed or source matches the supplied address — which `resolve_ref_path`
+/// would also have flagged as an undefined ref via diagnostics.
+///
+/// Skipping the "seeds" / "sources" prefix: seeds match by `address_segments`
+/// directly (no prefix in the segment list; see `resolve_ref_path` for the
+/// canonical lookup), so callers should pass the FULL segment list including
+/// the leading `seeds` / `sources` segment — this helper checks both shapes
+/// (with and without the prefix) to be forgiving.
+pub fn resolve_seed_or_source_path(
+    db: &dyn salsa::Database,
+    workspace: crate::Workspace,
+    path: Vec<String>,
+) -> Option<std::path::PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    for project in workspace.projects(db).iter().copied() {
+        // Seeds: `smelt.seeds.<addr...>` → strip the leading "seeds" segment;
+        // `smelt.<addr...>` (no prefix per Phase 2 fall-through) → match directly.
+        let seed_path: Vec<String> = if path[0] == "seeds" && path.len() > 1 {
+            path[1..].to_vec()
+        } else {
+            path.clone()
+        };
+        for seed in project_seeds(db, project).iter() {
+            if seed.address_segments == seed_path {
+                return Some(seed.path.clone());
+            }
+        }
+        // Sources: `smelt.sources.<addr...>` — the leading "sources" segment
+        // is part of the address (`SourceInfo::address_segments` includes it
+        // because it's under `paths: ["models"]` / `paths: ["sources"]` in
+        // the typical layout).
+        for source in project_sources(db, project).iter() {
+            if source.address_segments == path {
+                return Some(source.path.clone());
+            }
+        }
+    }
+    None
+}
+
 #[salsa::tracked]
 pub fn sources_yaml_error(
     db: &dyn salsa::Database,

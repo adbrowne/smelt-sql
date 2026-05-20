@@ -174,11 +174,11 @@ fn as_struct_except_excludes_columns() {
 fn smelt_fn_call_expands_body() {
     // A function `safe_div` with params (a, b) and body: a / NULLIF(b, 0)
     let mut compiler = duckdb_compiler();
-    let mut fn_bodies: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    let mut fn_bodies: smelt_cli::compiler::FnBodyMap = HashMap::new();
     fn_bodies.insert(
         "safe_div".to_string(),
         (
-            vec!["a".to_string(), "b".to_string()],
+            vec![("a".to_string(), None), ("b".to_string(), None)],
             "a / NULLIF(b, 0)".to_string(),
         ),
     );

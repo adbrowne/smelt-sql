@@ -55,6 +55,7 @@ pub mod queries;
 pub mod references;
 pub mod schema;
 pub mod type_inference;
+pub mod workspace_ingest;
 pub mod yaml_edits;
 
 // ---- Re-exports for downstream crates ---------------------------------------
@@ -106,7 +107,7 @@ pub use queries::function_diagnostics::{
 };
 pub use queries::functions::{
     file_signature_inputs, function_body, function_signature, functions_in_file, resolve_function,
-    BodyRange,
+    resolve_function_path, BodyRange, NameRange,
 };
 pub use queries::loader::{
     loader_call_diagnostics_for_file, loader_call_diagnostics_for_file_with_content,
@@ -120,9 +121,10 @@ pub use queries::parse::{
 pub use queries::project::{
     all_models, emitted_model_smelt_path, emitted_models, evaluate_generator, generator_files,
     models_all, models_all_with_generators, models_with_tag, project_active_backends,
-    project_paths, project_seeds, project_sources, project_unstable_schema, smelt_yml_vars_query,
-    sources_all, sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
-    EmittedModelDef, EmittedModelsResult, EvaluatedGenerator, SourceTypeError, YamlParseError,
+    project_paths, project_seeds, project_sources, project_unstable_schema,
+    resolve_seed_or_source_path, smelt_yml_vars_query, sources_all, sources_config,
+    sources_type_errors, sources_with_tag, sources_yaml_error, EmittedModelDef,
+    EmittedModelsResult, EvaluatedGenerator, SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, available_columns, build_type_context,
@@ -1609,7 +1611,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 }
 
 /// Resolve a project root path to a `ProjectInput` via the workspace.
-pub(crate) fn find_project(
+///
+/// Public so the LSP can derive the caller's project (from the cursor
+/// file's `project_root(db)`) when threading the project isolation rule
+/// through goto-def, hover, and other features that consult function
+/// signatures. See `docs/specs/architecture.md` → "Project isolation rule".
+pub fn find_project(
     db: &dyn salsa::Database,
     workspace: Workspace,
     root: &Path,
@@ -1714,10 +1721,17 @@ pub fn logical_plan(
             let segments = call.segments();
             let fn_id = segments.last().cloned().unwrap_or_default();
 
+            // Per docs/specs/architecture.md → "Project isolation rule":
+            // resolve only against functions declared in the same project as
+            // the calling file. Multi-project workspaces (e.g. a monorepo
+            // opened in VSCode) must not see cross-project signatures.
             let sig_opt = if fn_id.is_empty() {
                 None
             } else {
-                resolve_function(db, workspace, fn_id.clone()).map(|arc| (*arc).clone())
+                find_project(db, workspace, &project_root).and_then(|project| {
+                    resolve_function(db, workspace, project, fn_id.clone())
+                        .map(|arc| (*arc).clone())
+                })
             };
 
             let transparent = sig_opt

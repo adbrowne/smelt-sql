@@ -110,14 +110,22 @@ export function activate(context: vscode.ExtensionContext) {
 
     const clientOptions: LanguageClientOptions = {
         documentSelector: [
-            { scheme: 'file', pattern: '**/models/**/*.sql' },
+            // Route any file the extension classifies as `smelt` (registered
+            // for the `.sql` extension in package.json) to the LSP. Using
+            // language-id rather than a path glob covers files outside
+            // `models/` — `functions/<name>.sql` for `smelt.define` bodies,
+            // and user-configurable `paths:` in smelt.yml (e.g. `transforms/`).
+            // Without this, LSP features like go-to-references on a
+            // `smelt.define <name>` declaration silently do nothing because
+            // VSCode never forwards the request to the server.
+            { scheme: 'file', language: 'smelt' },
             { scheme: 'file', pattern: '**/sources.yml' },
             { scheme: 'file', pattern: '**/sources.yaml' },
         ],
         synchronize: {
             fileEvents: [
-                vscode.workspace.createFileSystemWatcher('**/models/**/*.sql'),
-                vscode.workspace.createFileSystemWatcher('**/models/**/*.py'),
+                vscode.workspace.createFileSystemWatcher('**/*.sql'),
+                vscode.workspace.createFileSystemWatcher('**/*.py'),
                 vscode.workspace.createFileSystemWatcher('**/sources.{yml,yaml}'),
             ]
         },

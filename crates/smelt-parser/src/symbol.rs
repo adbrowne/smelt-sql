@@ -3,7 +3,7 @@
 //! Pure function that maps a cursor offset to the symbol under the cursor.
 //! Used by goto-definition, find-references, rename, and code actions.
 
-use crate::ast::{File as AstFile, SmeltPathRef};
+use crate::ast::{File as AstFile, SmeltPathCall, SmeltPathRef};
 use crate::syntax_kind::SyntaxKind;
 
 /// The kind of symbol found at a cursor position.
@@ -12,6 +12,16 @@ pub enum SymbolAtCursor {
     /// Cursor is on a `smelt.<path>` path ref (e.g., `smelt.models.users`).
     /// `segments` holds the path components after the leading `smelt` token.
     PathRef { segments: Vec<String> },
+    /// Cursor is on the dotted path of a `smelt.<path>(args)` call
+    /// (e.g., `smelt.functions.sessionize(...)`). `segments` holds the path
+    /// components after the leading `smelt` token — same shape as `PathRef`
+    /// but distinguished so goto-def can route function calls to function
+    /// definitions rather than to a model file.
+    FunctionCall { segments: Vec<String> },
+    /// Cursor is on the name token of a `smelt.define <name>(...)`
+    /// declaration. Carries the bare function name (no `functions.` prefix);
+    /// callers prepend the namespace when looking up call sites.
+    FunctionDefinition { name: String },
     /// Cursor is on a CTE name in a FROM/JOIN clause (reference site)
     CteReference { name: String },
     /// Cursor is on a CTE name in a WITH clause (definition site)
@@ -46,6 +56,39 @@ pub fn symbol_at_cursor(file: &AstFile, _text: &str, offset: usize) -> Option<Sy
         }
     }
 
+    // Check SmeltPathCall nodes — cursor must be on the path portion only
+    // (not arguments or PASSING clauses). Uses `call_path_range()` so the
+    // hit zone is the dotted path inside the call, not the full call expr.
+    for node in file.syntax().descendants() {
+        if node.kind() == SyntaxKind::SMELT_PATH_CALL {
+            if let Some(call) = SmeltPathCall::cast(node) {
+                if let Some(path_range) = call.call_path_range() {
+                    let start: usize = path_range.start().into();
+                    let end: usize = path_range.end().into();
+                    if offset >= start && offset <= end {
+                        let segments = call.segments();
+                        if !segments.is_empty() {
+                            return Some(SymbolAtCursor::FunctionCall { segments });
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check `smelt.define <name>` declaration name tokens — cursor on the
+    // bare function name token at the declaration site. Find-references uses
+    // this to surface every call site for the function.
+    for define in file.defines() {
+        if let (Some(name), Some(name_range)) = (define.name(), define.name_range()) {
+            let start: usize = name_range.start().into();
+            let end: usize = name_range.end().into();
+            if offset >= start && offset <= end {
+                return Some(SymbolAtCursor::FunctionDefinition { name });
+            }
+        }
+    }
     // Check CTE definitions and references
     if let Some(select_stmt) = file.select_stmt() {
         // Collect CTE definition names

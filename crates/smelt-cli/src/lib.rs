@@ -27,8 +27,9 @@ pub use backfill::{
     format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
 };
 pub use compiler::{
-    build_fn_body_map, prepend_ephemeral_ctes, resolve_refs_in_sql, CompiledModel,
-    CompilerRegistry, EphemeralResolver, FnBodyMap, SqlCompiler,
+    build_fn_body_map, build_fn_body_map_from_model_files, prepend_ephemeral_ctes,
+    resolve_refs_in_sql, CompiledModel, CompilerRegistry, EphemeralResolver, FnBodyMap,
+    SqlCompiler,
 };
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
@@ -43,7 +44,7 @@ pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
 pub use temporal::{compute_incremental_windows, IncrementalWindows};
-pub use test_compiler::{extract_ctes, CteInfo};
+pub use test_compiler::{compile_whole_model_test_with_fns, extract_ctes, CteInfo};
 pub use test_runner::TestResult;
 pub use transformer::{inject_time_filter, TimeRange, TransformError};
 
@@ -107,6 +108,11 @@ pub fn build_logical_graph(
 /// Loads sources.yml/sources.yaml, registers all model files, registers YAML
 /// loader files (for `smelt.config.load_yaml` evaluation), and returns a
 /// ready-to-query database.
+///
+/// Loader-file registration goes through
+/// `smelt_db::workspace_ingest::register_loader_files_from_disk` so the CLI
+/// and the LSP populate that input the same way — see `docs/specs/architecture.md`
+/// → "Workspace loading parity rule (CLI ↔ LSP)".
 pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
     use smelt_core::find_config_file;
 
@@ -134,57 +140,11 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
     }
     db.set_workspace(source_files, vec![project]);
 
-    // Register YAML/JSON/TOML loader files so that `smelt.config.load_yaml` calls
-    // in generator files can be evaluated during diagnostics and ref-resolution.
-    // We scan the project root recursively for data files, excluding config files
-    // (smelt.yml, sources.yml, sources.yaml) that are handled separately.
-    register_loader_files_from_disk(&mut db, project_dir);
+    // Register YAML/JSON/TOML loader files so `smelt.config.load_yaml` /
+    // `load_json` calls in generator files can evaluate. Shared helper.
+    smelt_db::workspace_ingest::register_loader_files_from_disk(&mut db, project_dir);
 
     db
-}
-
-/// Scan `project_dir` recursively for YAML/JSON/TOML data files and register
-/// each one as a `LoaderFileInput` so that `smelt.config.load_yaml` / `load_json`
-/// calls in generator files can be evaluated by the Salsa pipeline.
-///
-/// Config files (`smelt.yml`, `smelt.yaml`, `sources.yml`, `sources.yaml`) are
-/// excluded because they are handled by separate Salsa inputs.
-fn register_loader_files_from_disk(db: &mut smelt_db::Database, project_dir: &Path) {
-    use std::sync::Arc;
-    use walkdir::WalkDir;
-
-    for entry in WalkDir::new(project_dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "yaml" && ext != "yml" && ext != "json" && ext != "toml" {
-            continue;
-        }
-        // Skip the workspace config and sources config files.
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if matches!(
-            file_name,
-            "smelt.yml" | "smelt.yaml" | "sources.yml" | "sources.yaml"
-        ) {
-            continue;
-        }
-        // Compute the workspace-relative path (forward-slash separators).
-        let rel = match path.strip_prefix(project_dir) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        db.set_loader_file(Arc::from(rel.as_str()), Arc::from(text.as_str()), true);
-    }
 }
 
 /// Discover emitted-model `ModelFile` objects and their origin provenance from
@@ -235,7 +195,7 @@ pub fn discover_emitted_model_files(
 
         origins.insert(smelt_name.clone(), (gen_rel, emitted.name.clone()));
 
-        let mf = ModelFile::from_emitted_def(emitted, smelt_name);
+        let mf = crate::discovery::model_file_from_emitted_def(emitted, smelt_name);
         model_files.push(mf);
     }
 

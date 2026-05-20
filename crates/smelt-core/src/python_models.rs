@@ -16,13 +16,9 @@ pub struct PythonModelOutput {
     pub queries: Vec<PythonModelQuery>,
 }
 
-/// A query recorded by ProjectContext during model execution.
-#[derive(Debug, Clone)]
-pub struct PythonModelQuery {
-    pub kind: String,
-    pub tag: Option<String>,
-    pub directory: Option<String>,
-}
+// `PythonModelQuery` is defined in `crate::discovery` (non-feature-gated) so
+// the CLI's discovery can attach it to `ModelFile` without dragging PyO3 in.
+pub use crate::discovery::PythonModelQuery;
 
 /// Execute a Python model file in-process via PyO3.
 ///

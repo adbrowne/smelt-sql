@@ -18,6 +18,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-planner = { path = "../smelt-planner" }
 smelt-types = { path = "../smelt-types" }
+walkdir = "2"
 
 [dev-dependencies]
 duckdb = { workspace = true }

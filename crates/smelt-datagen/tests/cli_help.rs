@@ -49,3 +49,42 @@ fn list_generators_mentions_geometric_min() {
          geometric generator (FINDINGS bug #4); got:\n{combined}",
     );
 }
+
+/// `--list-generators` must surface the `json_object` generator and its
+/// `fields:` parameter, so users discover JSON-payload generation without
+/// reading the spec.
+#[test]
+fn list_generators_mentions_json_object_fields() {
+    let combined = run(&["--list-generators"]);
+    assert!(
+        combined.contains("json_object"),
+        "--list-generators output should describe the json_object generator; got:\n{combined}",
+    );
+    assert!(
+        combined.contains("fields"),
+        "--list-generators output should mention the `fields:` parameter for \
+         json_object; got:\n{combined}",
+    );
+}
+
+/// `--list-generators` must surface the `linked_choice` generator and its
+/// `pool:` / `field:` parameters so users discover joint-distribution
+/// columns without reading the spec.
+#[test]
+fn list_generators_mentions_linked_choice() {
+    let combined = run(&["--list-generators"]);
+    assert!(
+        combined.contains("linked_choice"),
+        "--list-generators output should describe the linked_choice generator; got:\n{combined}",
+    );
+    assert!(
+        combined.contains("pool:"),
+        "--list-generators output should mention the `pool:` parameter for \
+         linked_choice; got:\n{combined}",
+    );
+    assert!(
+        combined.contains("field:"),
+        "--list-generators output should mention the `field:` parameter for \
+         linked_choice; got:\n{combined}",
+    );
+}

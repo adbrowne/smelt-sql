@@ -160,10 +160,12 @@ Find References resolves the following identifier types:
 
 | Identifier | Returns |
 |------------|---------|
-| `smelt.<path>` (at definition or use) | All `smelt.<path>` references to the same entity across the workspace |
+| `smelt.<path>` (at definition or use, resolves to a model / source / seed) | All `smelt.<path>` references to the same entity across the workspace |
+| `smelt.<path>(...)` (at a call site, resolves to a function) | All `smelt.<path>(...)` call sites for the same function across the workspace, scoped to the function's project |
+| `smelt.define <name>` declaration name token | All `smelt.functions.<name>(...)` call sites in the same project |
 | CTE name (at definition or use) | All references to that CTE within the same file |
 
-Cross-file find-references for `smelt.<path>` searches all loaded workspace files.
+Cross-file find-references for `smelt.<path>` searches all loaded workspace files **within the same project** — a workspace folder may contain multiple smelt projects, and references do not cross project boundaries (see `architecture.md` → "Project isolation rule"). For CTEs, the search is intra-file by construction.
 
 ### Hover
 
@@ -259,6 +261,8 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 3. **Go-to-definition on ambiguous unqualified columns returns multiple locations.** This is the LSP `GotoDefinitionResponse::Array` form; editors render it as a picker.
 4. **Column completion includes types.** Completion items for columns include the inferred type as a detail label. If the type is unknown, the label is omitted.
 5. **Code action "Create model" generates a SQL skeleton.** The generated file is a minimal valid smelt SQL model; it does not include frontmatter beyond the defaults.
+6. **Workspace loading is shared with the CLI.** `Backend::initialize` consumes `smelt_core::workspace::load_workspace` and `smelt_db::workspace_ingest::ingest_loaded_workspace` — see `docs/specs/architecture.md` → "Workspace loading parity rule (CLI ↔ LSP)". The standing safety net is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example workspace and asserts no diagnostics.
+7. **A VSCode workspace folder may contain multiple smelt projects.** `find_smelt_projects` discovers them recursively; each project is a closed resolution scope (no cross-project `smelt.<path>` resolution). See `docs/specs/architecture.md` → "Project isolation rule".
 
 ## Known Divergences / Open Questions
 
@@ -268,7 +272,8 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 - **Source `.yml` files are not watched.** Changes to a per-entity source YAML require reopening the workspace or making a model file change to trigger re-analysis. The server does not watch source `.yml` files independently.
 - **`smelt.yml` changes require server restart.** Project configuration changes (new model paths, target changes) are not detected dynamically; the LSP server must be restarted.
 - **Hover on CTEs not implemented.** Hover resolves `smelt.<path>` references but not CTE names or column references.
-- **Find-references for columns not implemented.** Find References is implemented for model names and CTEs, but not for column names. Column rename works, but finding all uses of a column without renaming is not supported.
+- **Find-references for columns not implemented.** Find References resolves model/source/seed paths, function paths, and CTEs, but not column names. Column rename works (it walks the dependency graph), but surfacing all uses of a column without renaming is not supported.
+- **Find-references gaps for other identifier kinds.** The following kinds support go-to-definition but not find-references and are tracked for future work: table aliases (intra-file), lambda parameters (intra-lambda), Python `@model` functions (would return SQL `smelt.<path>` call sites), and `smelt.columns_of` / `smelt.models.*` / `smelt.sources.*` accessor call paths.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 - **`UnknownSmeltPath` vs. code split.** This spec says the implementation uses a single `UnknownSmeltPath` code with a kind-aware message. The actual code (`crates/smelt-db/src/lib.rs`) instead has two separate codes: `UndefinedModelRef` (unresolved model/seed reference) and `UndefinedSource` (unresolved source reference). The spec should be updated to match the split, or the codes should be consolidated. Correction needed before `diagnostics.md` lands.
 - **Six undocumented diagnostic codes.** The following codes appear in `crates/smelt-db/src/lib.rs` but are absent from this spec: `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `DeclaredCardinalityUnverifiable`, `ExternFragmentParamUnsupported`, `MissingSeedSidecar`. They should be documented here (or in `diagnostics.md`) once their semantics are stable.

@@ -18,13 +18,20 @@ use smelt_planner::logical::{FunctionProperties, LogicalNode, Provenance};
 // ---------------------------------------------------------------------------
 
 /// Build a database, register a single file, and set up the workspace.
+///
+/// Includes a `ProjectInput` for the file's project_root (`"."`) — required
+/// since the project isolation rule (`docs/specs/architecture.md`) means
+/// `logical_plan` looks up the file's project before resolving function
+/// signatures. A workspace with no projects = no resolvable functions.
 fn setup_single_file(
     path: &str,
     text: &str,
 ) -> (Database, smelt_db::SourceFile, smelt_db::Workspace) {
     let mut db = Database::default();
-    let file = db.set_source_file(PathBuf::from(path), text.to_string(), PathBuf::from("."));
-    db.set_workspace(vec![file], vec![]);
+    let project_root = PathBuf::from(".");
+    let project = db.set_project_input(project_root.clone(), String::new());
+    let file = db.set_source_file(PathBuf::from(path), text.to_string(), project_root);
+    db.set_workspace(vec![file], vec![project]);
     let ws = db.workspace();
     (db, file, ws)
 }
