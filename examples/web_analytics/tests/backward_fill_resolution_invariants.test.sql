@@ -3,7 +3,7 @@ materialization: test
 test:
   model: identity_backward_fill
   inputs:
-    silver_device_user_edges:
+    silver_device_user_edges_cumulative:
       # Device 1 — clear winner on event_count (user 100 wins: 5 > 2)
       - {device_id: 1, user_id: 100, event_count: 5, first_seen: '2026-04-01 10:00:00', last_seen: '2026-04-01 10:30:00'}
       - {device_id: 1, user_id: 101, event_count: 2, first_seen: '2026-04-01 11:00:00', last_seen: '2026-04-01 11:10:00'}

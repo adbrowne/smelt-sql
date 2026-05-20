@@ -39,7 +39,7 @@
 -- alternative can decouple them without reshuffling the eventstream schema.
 WITH edges AS (
     SELECT device_id, user_id
-    FROM smelt.silver.device_user_edges
+    FROM smelt.silver.device_user_edges_cumulative
 ),
 -- Seed: each device's initial label is the MIN user_id seen on it.
 iter0 AS (
