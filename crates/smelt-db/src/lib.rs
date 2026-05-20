@@ -1611,7 +1611,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 }
 
 /// Resolve a project root path to a `ProjectInput` via the workspace.
-pub(crate) fn find_project(
+///
+/// Public so the LSP can derive the caller's project (from the cursor
+/// file's `project_root(db)`) when threading the project isolation rule
+/// through goto-def, hover, and other features that consult function
+/// signatures. See `docs/specs/architecture.md` → "Project isolation rule".
+pub fn find_project(
     db: &dyn salsa::Database,
     workspace: Workspace,
     root: &Path,
@@ -1716,10 +1721,17 @@ pub fn logical_plan(
             let segments = call.segments();
             let fn_id = segments.last().cloned().unwrap_or_default();
 
+            // Per docs/specs/architecture.md → "Project isolation rule":
+            // resolve only against functions declared in the same project as
+            // the calling file. Multi-project workspaces (e.g. a monorepo
+            // opened in VSCode) must not see cross-project signatures.
             let sig_opt = if fn_id.is_empty() {
                 None
             } else {
-                resolve_function(db, workspace, fn_id.clone()).map(|arc| (*arc).clone())
+                find_project(db, workspace, &project_root).and_then(|project| {
+                    resolve_function(db, workspace, project, fn_id.clone())
+                        .map(|arc| (*arc).clone())
+                })
             };
 
             let transparent = sig_opt

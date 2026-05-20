@@ -167,8 +167,16 @@ pub fn function_body_diagnostics_for_file(
     let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
     files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
 
+    // Project isolation rule: function resolution is scoped to the project
+    // containing the file under analysis. See
+    // docs/specs/architecture.md → "Project isolation rule".
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
     let sig_lookup = |name: &str| -> Option<FunctionSig> {
-        resolve_function(db, workspace, name.to_string()).map(|arc| (*arc).clone())
+        project.and_then(|p| {
+            resolve_function(db, workspace, p, name.to_string()).map(|arc| (*arc).clone())
+        })
     };
 
     let builtin_lookup = |name: &str| -> Option<&'static smelt_types::signatures::Signature> {
@@ -502,11 +510,19 @@ fn body_inferred_backends(
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let ast = AstFile::cast(syntax)?;
+    // Project isolation rule: callee resolution is scoped to the project
+    // containing `file`. Cross-project function name collisions are
+    // independent (docs/specs/architecture.md → "Project isolation rule").
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
     for define in ast.defines() {
         if define.name().as_deref() == Some(name) {
             let body = define.body()?.expression()?;
             let sig_lookup = |callee_name: &str| -> Option<FunctionSig> {
-                resolve_function(db, workspace, callee_name.to_string()).map(|arc| (*arc).clone())
+                project.and_then(|p| {
+                    resolve_function(db, workspace, p, callee_name.to_string())
+                        .map(|arc| (*arc).clone())
+                })
             };
             return Some(backends::infer_body_backends(&body, &sig_lookup));
         }
@@ -935,6 +951,12 @@ pub fn missing_provenance_advisory_for_file(
 
     let mut out = Vec::new();
 
+    // Project isolation rule: function resolution scoped to the project
+    // containing the file under analysis
+    // (docs/specs/architecture.md → "Project isolation rule").
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
     // Walk all SELECT statements in the file.
     for node in ast.syntax().descendants() {
         let Some(select) = smelt_parser::ast::SelectStmt::cast(node) else {
@@ -961,7 +983,10 @@ pub fn missing_provenance_advisory_for_file(
                 continue;
             };
 
-            let Some(sig) = resolve_function(db, workspace, fn_name.clone()) else {
+            let Some(project) = project else {
+                continue;
+            };
+            let Some(sig) = resolve_function(db, workspace, project, fn_name.clone()) else {
                 continue;
             };
             // Only transparent (smelt.define) functions.
@@ -1177,13 +1202,20 @@ pub fn smelt_fn_call_diagnostics_for_file(
         }
     }
 
+    // Project isolation rule: callee resolution is scoped to the project
+    // containing `file` (docs/specs/architecture.md → "Project isolation rule").
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
     // Closures for pure checker. `sig_lookup` wraps `resolve_function`;
     // `body_lookup` re-parses the declaring file and locates the matching
     // `smelt.define` body. `builtin_lookup` dispatches to the built-in
     // registry so calls like `smelt.fn.COALESCE(...)` go through
     // `unify_call` when no user-declared function shadows the name.
     let sig_lookup = |name: &str| -> Option<FunctionSig> {
-        resolve_function(db, workspace, name.to_string()).map(|arc| (*arc).clone())
+        project.and_then(|p| {
+            resolve_function(db, workspace, p, name.to_string()).map(|arc| (*arc).clone())
+        })
     };
 
     let builtin_lookup = |name: &str| -> Option<&'static smelt_types::signatures::Signature> {
@@ -1329,7 +1361,10 @@ pub fn smelt_fn_call_diagnostics_for_file(
                             // `path.join("_")` since resolve_ref_path matches
                             // seeds by address_segments == path.
                             let key = path.join("_");
-                            let provider = SalsaRefSchemaProvider::new(db, workspace);
+                            // Seeds are project-resolved at this provider's
+                            // own iteration; project scope is informational
+                            // (the seed_columns helper iterates projects).
+                            let provider = SalsaRefSchemaProvider::new(db, workspace, project);
                             if let Some(cols) = provider.seed_columns(&key) {
                                 return Some(cols);
                             }
@@ -1442,7 +1477,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
                 let segs = path_ref.segments();
                 let model_name = segs.last().cloned().unwrap_or_default();
                 let seed_key = segs.join("_");
-                let provider = SalsaRefSchemaProvider::new(db, workspace);
+                let provider = SalsaRefSchemaProvider::new(db, workspace, project);
                 return provider
                     .resolved_columns(&model_name)
                     .or_else(|| provider.seed_columns(&seed_key));

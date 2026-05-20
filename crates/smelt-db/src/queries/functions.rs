@@ -124,16 +124,29 @@ pub fn function_body(
     None
 }
 
-/// Resolve a function name to the first matching `FunctionSig` in the
-/// workspace. Files are enumerated in sorted-by-path order for deterministic
-/// diagnostics (the first file declares; later files collide).
+/// Resolve a function name to the first matching `FunctionSig` declared
+/// **inside `project`**. Files are enumerated in sorted-by-path order for
+/// deterministic results when a project declares the same name twice.
+///
+/// Project-scoped per `docs/specs/architecture.md` → "Project isolation
+/// rule": a workspace folder may contain multiple smelt projects, and each
+/// project is a closed resolution scope. Callers thread the project
+/// through from the file under analysis
+/// (`source_file.project_root(db)` → `find_project(workspace, root)`).
 #[salsa::tracked]
 pub fn resolve_function(
     db: &dyn salsa::Database,
     workspace: Workspace,
+    project: crate::ProjectInput,
     name: String,
 ) -> Option<Arc<FunctionSig>> {
-    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
+    let project_root = project.root(db);
+    let mut files: Vec<SourceFile> = workspace
+        .files(db)
+        .iter()
+        .copied()
+        .filter(|f| f.project_root(db) == project_root)
+        .collect();
     files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
     for f in files {
         let sigs = file_signature_inputs(db, f);
@@ -155,19 +168,26 @@ pub struct NameRange {
     pub end: u32,
 }
 
-/// Resolve a function name to the file that declares it and the byte range
-/// of the name token within that file's stripped source.
+/// Resolve a function name to the file that declares it (within `project`)
+/// and the byte range of the name token within that file's stripped source.
 ///
-/// Iterates workspace files in the same sorted-by-path order as
-/// [`resolve_function`] so the same file wins on collisions. Returns
-/// `None` if no file declares `name`.
+/// Project-scoped — see [`resolve_function`] for the rationale. Iterates
+/// the project's files in the same sorted-by-path order as `resolve_function`
+/// so the same file wins on intra-project collisions.
 #[salsa::tracked]
 pub fn resolve_function_path(
     db: &dyn salsa::Database,
     workspace: Workspace,
+    project: crate::ProjectInput,
     name: String,
 ) -> Option<(SourceFile, NameRange)> {
-    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
+    let project_root = project.root(db);
+    let mut files: Vec<SourceFile> = workspace
+        .files(db)
+        .iter()
+        .copied()
+        .filter(|f| f.project_root(db) == project_root)
+        .collect();
     files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
     for f in files {
         let parse = parse_file(db, f);

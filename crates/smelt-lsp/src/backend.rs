@@ -1580,11 +1580,23 @@ impl LanguageServer for Backend {
                             // `smelt.define <name>(...)` declaration. Other call
                             // shapes (e.g. `smelt.metrics.foo`, when that namespace
                             // ships) fall through to None.
+                            //
+                            // Project isolation: resolve against functions
+                            // declared in the same project as the call site.
+                            // See docs/specs/architecture.md → "Project
+                            // isolation rule".
                             if segments.len() == 2 && segments[0] == "functions" {
                                 let name = segments[1].clone();
                                 let ws = Workspace::try_get(&db);
                                 ws.and_then(|w| {
-                                    smelt_db::resolve_function_path(&db, w, name).map(
+                                    let project = file_input.and_then(|sf| {
+                                        smelt_db::find_project(
+                                            &db,
+                                            w,
+                                            &sf.project_root(&db).clone(),
+                                        )
+                                    })?;
+                                    smelt_db::resolve_function_path(&db, w, project, name).map(
                                         |(f, name_range)| GotoTarget::FunctionDef {
                                             target_file: f.path(&db).clone(),
                                             name_start: name_range.start,
@@ -1971,13 +1983,29 @@ impl LanguageServer for Backend {
 
             if let Some(syntax) = syntax {
                 if let Some(file) = AstFile::cast(syntax) {
+                    // Project-scope the search per architecture.md → "Project
+                    // isolation rule": a workspace folder may contain multiple
+                    // smelt projects, and references do not cross project
+                    // boundaries. Derive the project from the cursor file.
+                    let project_files: Vec<smelt_db::SourceFile> = {
+                        let ws = Workspace::try_get(&db);
+                        match (ws, file_input) {
+                            (Some(w), Some(sf)) => {
+                                let project_root = sf.project_root(&db).clone();
+                                w.files(&db)
+                                    .iter()
+                                    .copied()
+                                    .filter(|f| f.project_root(&db) == &project_root)
+                                    .collect()
+                            }
+                            _ => Vec::new(),
+                        }
+                    };
+
                     match symbol_at_cursor(&file, &text, cursor_offset) {
                         Some(SymbolAtCursor::PathRef { segments }) => {
-                            // Find all files that contain a path ref with these segments
-                            let ws = Workspace::try_get(&db);
-                            let ws_files = ws.map(|w| w.files(&db).clone()).unwrap_or_default();
                             let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> = Vec::new();
-                            for f in &ws_files {
+                            for f in &project_files {
                                 let path_refs = smelt_db::model_path_refs(&db, *f);
                                 for loc in path_refs.iter() {
                                     if loc.path == segments {
@@ -1986,6 +2014,34 @@ impl LanguageServer for Backend {
                                 }
                             }
                             RefResult::PathRanges(all_refs)
+                        }
+                        Some(SymbolAtCursor::FunctionCall { segments }) => {
+                            // Only `smelt.functions.<name>` calls are findable
+                            // today. Other call shapes have no def to anchor on.
+                            if segments.len() == 2 && segments[0] == "functions" {
+                                let name = &segments[1];
+                                let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> =
+                                    Vec::new();
+                                for f in &project_files {
+                                    let parse = smelt_db::parse_file(&db, *f);
+                                    let Some(ast) = AstFile::cast(parse.syntax()) else {
+                                        continue;
+                                    };
+                                    let f_text = f.text(&db);
+                                    for trange in
+                                        smelt_db::references::find_function_call_sites_in_file(
+                                            &ast, name,
+                                        )
+                                    {
+                                        let r =
+                                            smelt_parser::ast::text_range_to_range(f_text, trange);
+                                        all_refs.push((f.path(&db).clone(), r));
+                                    }
+                                }
+                                RefResult::PathRanges(all_refs)
+                            } else {
+                                RefResult::Empty
+                            }
                         }
                         Some(SymbolAtCursor::CteDefinition { name })
                         | Some(SymbolAtCursor::CteReference { name }) => {
@@ -3526,7 +3582,14 @@ impl LanguageServer for Backend {
                     let segments = call.segments();
                     let fn_name = segments.last().cloned().unwrap_or_default();
                     let ws = Workspace::try_get(&db);
-                    let sig = ws.and_then(|w| smelt_db::resolve_function(&db, w, fn_name.clone()));
+                    // Project isolation: hover resolves the same way the
+                    // diagnostic and goto-def code paths do — only against
+                    // functions declared in the cursor file's project.
+                    let project_root = file_project_root(&db, &effective_path);
+                    let project = lookup_project(&db, &project_root);
+                    let sig = ws
+                        .zip(project)
+                        .and_then(|(w, p)| smelt_db::resolve_function(&db, w, p, fn_name.clone()));
 
                     if let Some(sig) = sig {
                         // Phase 48 test 2: cursor on a PASSING clause name.
@@ -4763,9 +4826,12 @@ impl LanguageServer for Backend {
 
                 // Resolve the callee's signature to find the parameter's
                 // declared context (e.g. `SelectItems<Agg, sessionized>`).
-                if let Some(w) = ws {
-                    if let Some(sig) =
-                        smelt_db::resolve_function(&db, w, callee.clone()).map(|arc| (*arc).clone())
+                // Project isolation: resolve in the cursor file's project.
+                let project_root = file_project_root(&db, &effective_path);
+                let project = lookup_project(&db, &project_root);
+                if let (Some(w), Some(p)) = (ws, project) {
+                    if let Some(sig) = smelt_db::resolve_function(&db, w, p, callee.clone())
+                        .map(|arc| (*arc).clone())
                     {
                         // Look up the parameter by name.
                         if let Some(param) = sig.params.iter().find(|p| p.name == passing_name) {

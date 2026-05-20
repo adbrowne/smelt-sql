@@ -240,11 +240,40 @@ pub trait RefSchemaProvider {
 pub struct SalsaRefSchemaProvider<'a> {
     db: &'a dyn salsa::Database,
     workspace: Workspace,
+    /// Project the resolver is scoped to. See
+    /// `docs/specs/architecture.md` → "Project isolation rule".
+    /// `None` only on legacy code paths that pre-date the rule; new callers
+    /// should always supply a project. When `None`, function resolution
+    /// returns `None` (no cross-project signature leak).
+    project: Option<crate::ProjectInput>,
 }
 
 impl<'a> SalsaRefSchemaProvider<'a> {
-    pub fn new(db: &'a dyn salsa::Database, workspace: Workspace) -> Self {
-        Self { db, workspace }
+    /// Construct a project-scoped provider. Use `new_for_file` or
+    /// `new_for_project` for convenience; this raw form is for callers
+    /// that already hold a `ProjectInput`.
+    pub fn new(
+        db: &'a dyn salsa::Database,
+        workspace: Workspace,
+        project: Option<crate::ProjectInput>,
+    ) -> Self {
+        Self {
+            db,
+            workspace,
+            project,
+        }
+    }
+
+    /// Construct a provider scoped to the project containing `file`. The
+    /// typical entry point — the file under analysis tells us the project.
+    pub fn new_for_file(
+        db: &'a dyn salsa::Database,
+        workspace: Workspace,
+        file: SourceFile,
+    ) -> Self {
+        let project_root = file.project_root(db).clone();
+        let project = crate::find_project(db, workspace, &project_root);
+        Self::new(db, workspace, project)
     }
 }
 
@@ -295,7 +324,10 @@ impl SalsaRefSchemaProvider<'_> {
 
         let segments = call.segments();
         let name = segments.last()?.clone();
-        let sig_arc = resolve_function(self.db, self.workspace, name)?;
+        // Project isolation rule: only consider signatures declared in the
+        // same project as the file whose schema we're computing.
+        let project = self.project?;
+        let sig_arc = resolve_function(self.db, self.workspace, project, name)?;
         let sig: &smelt_types::signatures::FunctionSig = sig_arc.as_ref();
 
         // Only `TableExpr`-returning functions contribute a FROM schema.
@@ -902,7 +934,7 @@ pub fn type_context(
         None => return Arc::new(TypeContext::new()),
     };
 
-    let provider = SalsaRefSchemaProvider::new(db, workspace);
+    let provider = SalsaRefSchemaProvider::new(db, workspace, project);
     let mut ctx = build_type_context(&ast, &legacy_sources, &provider);
 
     // Phase 6: add per-entity source columns to the TypeContext.

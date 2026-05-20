@@ -430,3 +430,79 @@ async fn per_cohort_union() {
 async fn staging_from_sources() {
     assert_example_workspace_clean("staging_from_sources").await;
 }
+
+// ---------------------------------------------------------------------------
+// Multi-project workspace case — the project isolation rule.
+// ---------------------------------------------------------------------------
+
+/// Standing CI gate for the project isolation rule
+/// (`docs/specs/architecture.md` → "Project isolation rule").
+///
+/// VSCode opens a monorepo folder once; the LSP discovers every smelt
+/// project under it via `find_smelt_projects`. Without project-scoped
+/// resolution, a function-name collision across two projects (e.g.
+/// `examples/web_analytics/functions/sessionize.sql` vs
+/// `examples/functions_demo/functions/sessionize.sql`, both named
+/// `sessionize` but with different parameter lists) lets one project's
+/// signature win for both call sites — producing a spurious
+/// `Missing required argument` on the project whose call doesn't match
+/// the winning signature.
+///
+/// This test opens the entire `examples/` directory as ONE workspace
+/// folder (matching the VSCode monorepo case) and asserts the
+/// `Missing required argument` does not appear on
+/// `web_analytics/models/silver/sessions.sql`.
+#[tokio::test]
+async fn project_isolation_in_multi_project_workspace() {
+    let examples = examples_root();
+    let target_file = examples
+        .join("web_analytics")
+        .join("models")
+        .join("silver")
+        .join("sessions.sql");
+    assert!(
+        target_file.exists(),
+        "fixture not found: {}",
+        target_file.display()
+    );
+
+    // Open `examples/` as the workspace folder. `find_smelt_projects`
+    // will discover every example workspace (web_analytics,
+    // functions_demo, timeseries, ...) inside it. Each becomes a
+    // ProjectInput in the workspace; the isolation rule says
+    // resolve_function in one project must not see another's signatures.
+    let mut client = TestClient::open_workspace(&examples).await;
+
+    // Open just the target file. We don't need to open every model in
+    // every project — opening sessions.sql triggers diagnostics for it.
+    client
+        .open_file(&target_file)
+        .await
+        .expect("open sessions.sql");
+
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    // Find the LATEST diagnostic batch for sessions.sql (subsequent
+    // publishes supersede earlier ones).
+    let target_uri_substr = "web_analytics/models/silver/sessions.sql";
+    let latest: Vec<&lsp_types::Diagnostic> = diags
+        .iter()
+        .rfind(|(uri, _)| uri.contains(target_uri_substr))
+        .map(|(_, ds)| ds.iter().collect())
+        .unwrap_or_default();
+
+    let missing_arg: Vec<&lsp_types::Diagnostic> = latest
+        .iter()
+        .copied()
+        .filter(|d| d.message.contains("Missing required argument"))
+        .collect();
+
+    assert!(
+        missing_arg.is_empty(),
+        "project isolation violated: `Missing required argument` fired on \
+         sessions.sql when examples/ was opened as a multi-project workspace. \
+         Diagnostics: {:?}",
+        missing_arg,
+    );
+}

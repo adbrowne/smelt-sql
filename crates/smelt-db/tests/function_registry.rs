@@ -16,8 +16,9 @@ use std::path::PathBuf;
 
 use salsa::Setter;
 use smelt_db::{
-    file_diagnostics, function_body, function_signature, functions_in_file, resolve_function,
-    workspace_function_diagnostics, Database, DiagnosticCode, SourceFile, Workspace,
+    file_diagnostics, find_project, function_body, function_signature, functions_in_file,
+    resolve_function, workspace_function_diagnostics, Database, DiagnosticCode, SourceFile,
+    Workspace,
 };
 
 /// Build a fresh `Database` seeded with the given `(path, contents)` files
@@ -70,8 +71,9 @@ fn function_declarations_indexed() {
         "expected Expr<Double> in return text, got {return_text:?}"
     );
 
-    // resolve_function (workspace-wide)
-    let resolved = resolve_function(&db, ws, "safe_divide".to_string());
+    // resolve_function (project-scoped per the project isolation rule).
+    let project = find_project(&db, ws, &root).expect("project registered");
+    let resolved = resolve_function(&db, ws, project, "safe_divide".to_string());
     assert!(
         resolved.is_some(),
         "resolve_function should find safe_divide"
@@ -79,7 +81,7 @@ fn function_declarations_indexed() {
     assert_eq!(resolved.unwrap().name, "safe_divide");
 
     // Missing name returns None.
-    assert!(resolve_function(&db, ws, "does_not_exist".to_string()).is_none());
+    assert!(resolve_function(&db, ws, project, "does_not_exist".to_string()).is_none());
 }
 
 #[test]
