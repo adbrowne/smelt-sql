@@ -1300,7 +1300,7 @@ fn test_sessions_invariants_inline_pass() {
 /// `smelt build`, then verify that `main.gold_identity_forward_only` materializes
 /// with at least one row, its row count matches `main.silver_sessions` (one row
 /// per session), and every session that contains at least one signed-in event
-/// has a non-null `forward_only_user_id`.
+/// has a non-null `forward_only_amplitude_id`.
 ///
 /// `models/gold/identity_forward_only.sql` address segments are
 /// `["gold", "identity_forward_only"]`, so smelt materializes the view as
@@ -1392,8 +1392,10 @@ fn test_identity_forward_only_materializes() {
     );
 
     // --- Step 7: population invariant ---
-    // Every session that has at least one signed-in event must have a non-null
-    // forward_only_user_id. The query counts sessions where the invariant is violated.
+    // Every session that has at least one signed-in event must have a
+    // 'u:'-prefixed forward_only_amplitude_id (sessions without signed-in
+    // events resolve to NULL at the model boundary, and the eventstream
+    // COALESCEs that NULL to the device-prefix amplitude_id downstream).
     let violation_count: i64 = conn2
         .query_row(
             "SELECT count(*) FROM (
@@ -1406,7 +1408,8 @@ fn test_identity_forward_only_materializes() {
                GROUP BY s.session_id
              ) sessions_with_user
              JOIN main.gold_identity_forward_only f USING (session_id)
-             WHERE f.forward_only_user_id IS NULL",
+             WHERE f.forward_only_amplitude_id IS NULL
+                OR f.forward_only_amplitude_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
@@ -1414,7 +1417,7 @@ fn test_identity_forward_only_materializes() {
 
     assert_eq!(
         violation_count, 0,
-        "every session with at least one signed-in event must have a non-null forward_only_user_id; {violation_count} sessions violate this invariant"
+        "every session with at least one signed-in event must have a 'u:'-prefixed forward_only_amplitude_id; {violation_count} sessions violate this invariant"
     );
 }
 
@@ -1522,13 +1525,15 @@ fn test_eventstream_with_identity_end_to_end() {
          silver_events_parsed row count ({events_count}) — one row per event"
     );
 
-    // --- Step 7: single-valued forward_only_user_id within session ---
-    // No session should resolve to two distinct non-null forward_only_user_id values.
-    // (NULL values are ignored by COUNT(DISTINCT ...) by default in SQL.)
+    // --- Step 7: single-valued forward_only_amplitude_id within session ---
+    // Every event in a session must carry the same forward_only_amplitude_id
+    // (the session's resolution, or the device fallback if the session had no
+    // signed-in events). Since the eventstream COALESCEs the column to 'd:' ||
+    // device_id, it is never NULL; this check covers both 'u:' and 'd:' values.
     let multi_uid_sessions: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM (
-                 SELECT session_id, COUNT(DISTINCT forward_only_user_id) AS k
+                 SELECT session_id, COUNT(DISTINCT forward_only_amplitude_id) AS k
                  FROM main.gold_eventstream_with_identity
                  GROUP BY session_id
                  HAVING k > 1
@@ -1537,30 +1542,32 @@ fn test_eventstream_with_identity_end_to_end() {
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("single-valued forward_only_user_id invariant query failed: {e}")
+            panic!("single-valued forward_only_amplitude_id invariant query failed: {e}")
         });
 
     assert_eq!(
         multi_uid_sessions, 0,
-        "no session should have more than one distinct non-null forward_only_user_id; \
+        "no session should have more than one distinct forward_only_amplitude_id; \
          {multi_uid_sessions} sessions violate this invariant"
     );
 
-    // --- Step 8: non-null resolution for signed-in events ---
-    // If an event row has a non-null event_user_id, its session must resolve to
-    // a non-null forward_only_user_id (the algorithm sees at least one non-null input).
+    // --- Step 8: signed-in events resolve to a real user ---
+    // If an event row has a non-null event_user_id, its session must resolve
+    // to a 'u:'-prefixed forward_only_amplitude_id (the algorithm sees at least
+    // one non-null input, so the model produces 'u:user_id' rather than NULL,
+    // and the eventstream COALESCE leaves it alone).
     let unresolved_signed_in: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_eventstream_with_identity \
-             WHERE event_user_id IS NOT NULL AND forward_only_user_id IS NULL",
+             WHERE event_user_id IS NOT NULL AND forward_only_amplitude_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
-        .unwrap_or_else(|e| panic!("non-null resolution for signed-in events query failed: {e}"));
+        .unwrap_or_else(|e| panic!("signed-in events resolve-to-user query failed: {e}"));
 
     assert_eq!(
         unresolved_signed_in, 0,
-        "every event with a non-null event_user_id must have a non-null forward_only_user_id; \
+        "every event with a non-null event_user_id must have a 'u:'-prefixed forward_only_amplitude_id; \
          {unresolved_signed_in} rows violate this invariant"
     );
 
@@ -1581,27 +1588,29 @@ fn test_eventstream_with_identity_end_to_end() {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
         _,
     > = conn2.query_row(
-        "SELECT event_id::TEXT, device_id::TEXT, event_user_id::TEXT, event_ts::TEXT, \
-                    event_date::TEXT, event_name, platform, url, session_id::TEXT, \
-                    forward_only_user_id::TEXT \
+        "SELECT event_id::TEXT, device_id::TEXT, event_user_id::TEXT, amplitude_id, \
+                    event_ts::TEXT, event_date::TEXT, event_name, platform, url, \
+                    session_id::TEXT, forward_only_amplitude_id \
              FROM main.gold_eventstream_with_identity \
              LIMIT 1",
         [],
         |row| {
             Ok((
-                row.get::<_, Option<String>>(0)?, // event_id (as text)
-                row.get::<_, Option<String>>(1)?, // device_id (as text)
-                row.get::<_, Option<String>>(2)?, // event_user_id (nullable, as text)
-                row.get::<_, Option<String>>(3)?, // event_ts (as text)
-                row.get::<_, Option<String>>(4)?, // event_date (as text)
-                row.get::<_, Option<String>>(5)?, // event_name
-                row.get::<_, Option<String>>(6)?, // platform
-                row.get::<_, Option<String>>(7)?, // url
-                row.get::<_, Option<String>>(8)?, // session_id (as text)
-                row.get::<_, Option<String>>(9)?, // forward_only_user_id (nullable, as text)
+                row.get::<_, Option<String>>(0)?,  // event_id (as text)
+                row.get::<_, Option<String>>(1)?,  // device_id (as text)
+                row.get::<_, Option<String>>(2)?,  // event_user_id (nullable, as text)
+                row.get::<_, Option<String>>(3)?,  // amplitude_id (always non-null)
+                row.get::<_, Option<String>>(4)?,  // event_ts (as text)
+                row.get::<_, Option<String>>(5)?,  // event_date (as text)
+                row.get::<_, Option<String>>(6)?,  // event_name
+                row.get::<_, Option<String>>(7)?,  // platform
+                row.get::<_, Option<String>>(8)?,  // url
+                row.get::<_, Option<String>>(9)?,  // session_id (as text)
+                row.get::<_, Option<String>>(10)?, // forward_only_amplitude_id (always non-null)
             ))
         },
     );
@@ -1677,7 +1686,7 @@ fn test_forward_only_invariants_inline_pass() {
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
 /// `smelt build`, then verify that `main.gold_identity_backward_fill`
 /// materializes with one row per device that ever had a signed-in event, that
-/// `backward_fill_user_id` is non-null on every row, and that the chosen user
+/// `backward_fill_amplitude_id` is non-null on every row, and that the chosen user
 /// matches the per-device `MAX(event_count)` (primary sort key).
 #[test]
 fn test_identity_backward_fill_materializes() {
@@ -1762,11 +1771,14 @@ fn test_identity_backward_fill_materializes() {
          silver_device_user_edges distinct-device count ({device_count}) — one row per device"
     );
 
-    // Step 7: non-null output (the model itself never yields NULL)
+    // Step 7: non-null output (the model itself never yields NULL —
+    // every row is 'u:' || elected user_id, never the device fallback,
+    // because the model only sees devices that appear in device_user_edges).
     let null_count: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_identity_backward_fill \
-             WHERE backward_fill_user_id IS NULL",
+             WHERE backward_fill_amplitude_id IS NULL \
+                OR backward_fill_amplitude_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
@@ -1774,11 +1786,13 @@ fn test_identity_backward_fill_materializes() {
 
     assert_eq!(
         null_count, 0,
-        "gold_identity_backward_fill must not produce NULL user_ids; \
+        "gold_identity_backward_fill must produce a 'u:'-prefixed amplitude_id on every row; \
          {null_count} rows violate this"
     );
 
-    // Step 8: per-device determinism — the chosen user must own the device's MAX(event_count)
+    // Step 8: per-device determinism — the chosen user must own the device's MAX(event_count).
+    // backward_fill_amplitude_id is 'u:' || user_id, so the comparison
+    // synthesises the prefixed form from device_user_edges.user_id.
     let violation_count: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_identity_backward_fill bf
@@ -1789,7 +1803,7 @@ fn test_identity_backward_fill_materializes() {
              ) m ON bf.device_id = m.device_id
              JOIN main.silver_device_user_edges e
                  ON e.device_id = bf.device_id
-                AND e.user_id = bf.backward_fill_user_id
+                AND 'u:' || CAST(e.user_id AS VARCHAR) = bf.backward_fill_amplitude_id
              WHERE e.event_count != m.max_count",
             [],
             |row| row.get(0),
@@ -1798,7 +1812,7 @@ fn test_identity_backward_fill_materializes() {
 
     assert_eq!(
         violation_count, 0,
-        "every chosen backward_fill_user_id must have the device's MAX(event_count); \
+        "every chosen backward_fill_amplitude_id must have the device's MAX(event_count); \
          {violation_count} devices violate this"
     );
 
@@ -1810,7 +1824,7 @@ fn test_identity_backward_fill_materializes() {
             "SELECT COUNT(*) FROM main.gold_identity_backward_fill bf
              JOIN main.silver_device_user_edges chosen
                  ON chosen.device_id = bf.device_id
-                AND chosen.user_id = bf.backward_fill_user_id
+                AND 'u:' || CAST(chosen.user_id AS VARCHAR) = bf.backward_fill_amplitude_id
              JOIN (
                  SELECT e.device_id, MIN(e.first_seen) AS min_first_seen_among_max
                  FROM main.silver_device_user_edges e
@@ -1829,18 +1843,18 @@ fn test_identity_backward_fill_materializes() {
 
     assert_eq!(
         tiebreaker_violation_count, 0,
-        "among users tied on event_count=MAX, the chosen backward_fill_user_id must have \
+        "among users tied on event_count=MAX, the chosen backward_fill_amplitude_id must have \
          the MIN(first_seen); {tiebreaker_violation_count} devices violate this"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 15: gold/eventstream_with_identity backward_fill_user_id column
+// Test 15: gold/eventstream_with_identity backward_fill_amplitude_id column
 // ---------------------------------------------------------------------------
 
 /// Verifies the Phase-6 extension to `gold/eventstream_with_identity`:
 /// a new LEFT JOIN to `gold/identity_backward_fill` on `device_id` and a new
-/// `backward_fill_user_id` column. Asserts column existence, event-preserving
+/// `backward_fill_amplitude_id` column. Asserts column existence, event-preserving
 /// cardinality (unchanged from the forward-only-only era), LEFT-JOIN
 /// population, single-valued-within-device propagation, and the subsumption
 /// invariant (every forward-only-resolved event is also backward-fill-resolved).
@@ -1896,14 +1910,14 @@ fn test_eventstream_with_identity_includes_backward_fill() {
 
     let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
 
-    // Step 5: column shape — backward_fill_user_id selectable
-    let _col_probe: Option<i64> = conn2
+    // Step 5: column shape — backward_fill_amplitude_id selectable as VARCHAR
+    let _col_probe: Option<String> = conn2
         .query_row(
-            "SELECT backward_fill_user_id FROM main.gold_eventstream_with_identity LIMIT 1",
+            "SELECT backward_fill_amplitude_id FROM main.gold_eventstream_with_identity LIMIT 1",
             [],
-            |row| row.get::<_, Option<i64>>(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .unwrap_or_else(|e| panic!("backward_fill_user_id column probe failed: {e}"));
+        .unwrap_or_else(|e| panic!("backward_fill_amplitude_id column probe failed: {e}"));
 
     // Step 6: event-preserving cardinality unchanged
     let stream_count: i64 = conn2
@@ -1930,12 +1944,15 @@ fn test_eventstream_with_identity_includes_backward_fill() {
     );
 
     // Step 7: LEFT-JOIN population — every event whose device_id is in
-    // gold_identity_backward_fill must have a non-null backward_fill_user_id.
+    // gold_identity_backward_fill must have a 'u:'-prefixed
+    // backward_fill_amplitude_id (and not the device fallback). The eventstream
+    // COALESCEs missing devices to 'd:' || device_id, so the predicate
+    // explicitly asserts the 'u:' prefix rather than just IS NOT NULL.
     let missing_pop: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_eventstream_with_identity es
              JOIN main.gold_identity_backward_fill bf USING (device_id)
-             WHERE es.backward_fill_user_id IS NULL",
+             WHERE es.backward_fill_amplitude_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
@@ -1943,14 +1960,14 @@ fn test_eventstream_with_identity_includes_backward_fill() {
     assert_eq!(
         missing_pop, 0,
         "every event whose device_id is in gold_identity_backward_fill must \
-         have a non-null backward_fill_user_id; {missing_pop} rows violate this"
+         have a 'u:'-prefixed backward_fill_amplitude_id; {missing_pop} rows violate this"
     );
 
-    // Step 8: single-valued backward_fill_user_id within device
+    // Step 8: single-valued backward_fill_amplitude_id within device
     let multi_uid_devices: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM (
-                 SELECT device_id, COUNT(DISTINCT backward_fill_user_id) AS k
+                 SELECT device_id, COUNT(DISTINCT backward_fill_amplitude_id) AS k
                  FROM main.gold_eventstream_with_identity
                  GROUP BY device_id
                  HAVING k > 1
@@ -1959,28 +1976,30 @@ fn test_eventstream_with_identity_includes_backward_fill() {
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("single-valued backward_fill_user_id invariant query failed: {e}")
+            panic!("single-valued backward_fill_amplitude_id invariant query failed: {e}")
         });
     assert_eq!(
         multi_uid_devices, 0,
-        "no device should have more than one distinct non-null backward_fill_user_id; \
+        "no device should have more than one distinct backward_fill_amplitude_id; \
          {multi_uid_devices} devices violate this invariant"
     );
 
-    // Step 9: subsumption — every event with non-null forward_only_user_id
-    // must also have non-null backward_fill_user_id.
+    // Step 9: subsumption — every event whose forward_only_amplitude_id is
+    // 'u:'-prefixed must also have a 'u:'-prefixed backward_fill_amplitude_id.
+    // Equivalently: backward_fill's set of identified events is a superset of
+    // forward_only's.
     let unsubsumed: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_eventstream_with_identity \
-             WHERE forward_only_user_id IS NOT NULL AND backward_fill_user_id IS NULL",
+             WHERE forward_only_amplitude_id LIKE 'u:%' AND backward_fill_amplitude_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
         .unwrap_or_else(|e| panic!("subsumption query failed: {e}"));
     assert_eq!(
         unsubsumed, 0,
-        "every event with a non-null forward_only_user_id must also have a \
-         non-null backward_fill_user_id (subsumption); {unsubsumed} rows violate this"
+        "every event with a 'u:'-prefixed forward_only_amplitude_id must also have a \
+         'u:'-prefixed backward_fill_amplitude_id (subsumption); {unsubsumed} rows violate this"
     );
 }
 
@@ -2083,12 +2102,17 @@ fn test_identity_connected_components_materializes() {
          silver_device_user_edges distinct-device count ({device_count}) — one row per device"
     );
 
-    // Step 6: non-null output for both identity columns
+    // Step 6: non-null output for both identity columns. The model only sees
+    // devices that appear in device_user_edges, so every row is a 'u:'-prefixed
+    // amplitude_id (the device-fallback is applied later at the eventstream
+    // COALESCE).
     let null_count: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_identity_connected_components \
-             WHERE connected_components_user_id IS NULL \
-                OR connected_components_cluster_id IS NULL",
+             WHERE connected_components_amplitude_id IS NULL \
+                OR connected_components_cluster_id IS NULL \
+                OR connected_components_amplitude_id NOT LIKE 'u:%' \
+                OR connected_components_cluster_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
@@ -2096,7 +2120,7 @@ fn test_identity_connected_components_materializes() {
 
     assert_eq!(
         null_count, 0,
-        "gold_identity_connected_components must not produce NULL identity values; \
+        "gold_identity_connected_components must produce 'u:'-prefixed identity values; \
          {null_count} rows violate this"
     );
 
@@ -2104,7 +2128,7 @@ fn test_identity_connected_components_materializes() {
     let uid_ne_cluster: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_identity_connected_components \
-             WHERE connected_components_user_id != connected_components_cluster_id",
+             WHERE connected_components_amplitude_id != connected_components_cluster_id",
             [],
             |row| row.get(0),
         )
@@ -2112,7 +2136,7 @@ fn test_identity_connected_components_materializes() {
 
     assert_eq!(
         uid_ne_cluster, 0,
-        "in v1, connected_components_user_id must equal connected_components_cluster_id \
+        "in v1, connected_components_amplitude_id must equal connected_components_cluster_id \
          on every row; {uid_ne_cluster} rows violate this"
     );
 
@@ -2137,7 +2161,8 @@ fn test_identity_connected_components_materializes() {
     );
 
     // Step 9: cluster-id-is-MIN invariant — for every cluster, cluster_id must
-    // equal MIN(user_id) over all edges attached to devices in that cluster.
+    // equal 'u:' || MIN(user_id) over all edges attached to devices in that
+    // cluster.
     let min_violation: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM (
@@ -2145,7 +2170,7 @@ fn test_identity_connected_components_materializes() {
                  FROM main.gold_identity_connected_components c
                  JOIN main.silver_device_user_edges e ON e.device_id = c.device_id
                  GROUP BY c.connected_components_cluster_id
-                 HAVING MIN(e.user_id) != c.connected_components_cluster_id
+                 HAVING 'u:' || CAST(MIN(e.user_id) AS VARCHAR) != c.connected_components_cluster_id
              )",
             [],
             |row| row.get(0),
@@ -2155,7 +2180,7 @@ fn test_identity_connected_components_materializes() {
     assert_eq!(
         min_violation, 0,
         "for every cluster, connected_components_cluster_id must equal \
-         MIN(user_id) over all edges attached to devices in the cluster; \
+         'u:' || MIN(user_id) over all edges attached to devices in the cluster; \
          {min_violation} clusters violate this"
     );
 }
@@ -2220,7 +2245,7 @@ fn test_backward_fill_invariants_inline_pass() {
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
 /// `smelt build`, then verify that `main.gold_eventstream_with_identity` carries
 /// the two connected-components identity columns added in the eventstream extension:
-/// `connected_components_user_id` and `connected_components_cluster_id`.
+/// `connected_components_amplitude_id` and `connected_components_cluster_id`.
 ///
 /// Asserts all seven TDD steps from the per-phase plan:
 ///   Step 2: column shape probe (both new columns selectable without error)
@@ -2228,8 +2253,8 @@ fn test_backward_fill_invariants_inline_pass() {
 ///   Step 4: LEFT-JOIN population (events whose device_id is in
 ///            gold_identity_connected_components have both columns non-null)
 ///   Step 5: single-valued within device for BOTH columns independently
-///   Step 6: subsumption (every event with non-null backward_fill_user_id also
-///            has non-null connected_components_user_id)
+///   Step 6: subsumption (every event with non-null backward_fill_amplitude_id also
+///            has non-null connected_components_amplitude_id)
 ///   Step 7: column ordering regression (all 13 columns selectable in order)
 #[test]
 fn test_eventstream_with_identity_includes_connected_components() {
@@ -2283,21 +2308,21 @@ fn test_eventstream_with_identity_includes_connected_components() {
 
     let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
 
-    // Step 2: column shape — both new columns selectable without error.
-    let _cc_uid_probe: Option<i64> = conn2
+    // Step 2: column shape — both new columns selectable as VARCHAR.
+    let _cc_uid_probe: Option<String> = conn2
         .query_row(
-            "SELECT connected_components_user_id \
+            "SELECT connected_components_amplitude_id \
              FROM main.gold_eventstream_with_identity LIMIT 1",
             [],
-            |row| row.get::<_, Option<i64>>(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .unwrap_or_else(|e| panic!("connected_components_user_id column probe failed: {e}"));
-    let _cc_cid_probe: Option<i64> = conn2
+        .unwrap_or_else(|e| panic!("connected_components_amplitude_id column probe failed: {e}"));
+    let _cc_cid_probe: Option<String> = conn2
         .query_row(
             "SELECT connected_components_cluster_id \
              FROM main.gold_eventstream_with_identity LIMIT 1",
             [],
-            |row| row.get::<_, Option<i64>>(0),
+            |row| row.get::<_, Option<String>>(0),
         )
         .unwrap_or_else(|e| panic!("connected_components_cluster_id column probe failed: {e}"));
 
@@ -2327,13 +2352,14 @@ fn test_eventstream_with_identity_includes_connected_components() {
     );
 
     // Step 4: LEFT-JOIN population — every event whose device_id appears in
-    // gold_identity_connected_components must have both new columns non-null.
+    // gold_identity_connected_components must have 'u:'-prefixed values on
+    // both columns (and not the device fallback).
     let missing_pop: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_eventstream_with_identity es
              JOIN main.gold_identity_connected_components cc USING (device_id)
-             WHERE es.connected_components_user_id IS NULL
-                OR es.connected_components_cluster_id IS NULL",
+             WHERE es.connected_components_amplitude_id NOT LIKE 'u:%'
+                OR es.connected_components_cluster_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
@@ -2341,15 +2367,15 @@ fn test_eventstream_with_identity_includes_connected_components() {
     assert_eq!(
         missing_pop, 0,
         "every event whose device_id is in gold_identity_connected_components must \
-         have non-null connected_components_user_id and connected_components_cluster_id; \
+         have 'u:'-prefixed connected_components_amplitude_id and connected_components_cluster_id; \
          {missing_pop} rows violate this"
     );
 
-    // Step 5a: single-valued connected_components_user_id within device.
+    // Step 5a: single-valued connected_components_amplitude_id within device.
     let multi_uid_devices: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM (
-                 SELECT device_id, COUNT(DISTINCT connected_components_user_id) AS k
+                 SELECT device_id, COUNT(DISTINCT connected_components_amplitude_id) AS k
                  FROM main.gold_eventstream_with_identity
                  GROUP BY device_id
                  HAVING k > 1
@@ -2358,12 +2384,12 @@ fn test_eventstream_with_identity_includes_connected_components() {
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("single-valued connected_components_user_id invariant query failed: {e}")
+            panic!("single-valued connected_components_amplitude_id invariant query failed: {e}")
         });
     assert_eq!(
         multi_uid_devices, 0,
         "no device should have more than one distinct non-null \
-         connected_components_user_id; {multi_uid_devices} devices violate this invariant"
+         connected_components_amplitude_id; {multi_uid_devices} devices violate this invariant"
     );
 
     // Step 5b: single-valued connected_components_cluster_id within device.
@@ -2387,34 +2413,35 @@ fn test_eventstream_with_identity_includes_connected_components() {
          connected_components_cluster_id; {multi_cluster_devices} devices violate this invariant"
     );
 
-    // Step 6: subsumption — every event with non-null backward_fill_user_id must
-    // also have non-null connected_components_user_id. A device has a backward-fill
-    // canonical user iff it has at least one signed-in event iff it appears in
+    // Step 6: subsumption — every event with a 'u:'-prefixed
+    // backward_fill_amplitude_id must also have a 'u:'-prefixed
+    // connected_components_amplitude_id. A device has a backward-fill canonical
+    // user iff it has at least one signed-in event iff it appears in
     // silver/device_user_edges iff it appears in gold_identity_connected_components;
     // the LEFT JOINs on device_id are isomorphic between the two algorithms.
     let unsubsumed: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_eventstream_with_identity \
-             WHERE backward_fill_user_id IS NOT NULL AND connected_components_user_id IS NULL",
+             WHERE backward_fill_amplitude_id LIKE 'u:%' AND connected_components_amplitude_id NOT LIKE 'u:%'",
             [],
             |row| row.get(0),
         )
         .unwrap_or_else(|e| panic!("subsumption query failed: {e}"));
     assert_eq!(
         unsubsumed, 0,
-        "every event with a non-null backward_fill_user_id must also have a \
-         non-null connected_components_user_id (subsumption); {unsubsumed} rows violate this"
+        "every event with a 'u:'-prefixed backward_fill_amplitude_id must also have a \
+         'u:'-prefixed connected_components_amplitude_id (subsumption); {unsubsumed} rows violate this"
     );
 
-    // Step 7: column ordering regression — all 13 columns selectable by name in
+    // Step 7: column ordering regression — all 14 columns selectable by name in
     // the expected order. This guards against unintended column reshuffling when
     // future algorithms extend the eventstream.
     let _order_probe: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM (
-                 SELECT event_id, device_id, event_user_id, event_ts, event_date, \
-                        event_name, platform, url, session_id, forward_only_user_id, \
-                        backward_fill_user_id, connected_components_user_id, \
+                 SELECT event_id, device_id, event_user_id, amplitude_id, event_ts, event_date, \
+                        event_name, platform, url, session_id, forward_only_amplitude_id, \
+                        backward_fill_amplitude_id, connected_components_amplitude_id, \
                         connected_components_cluster_id \
                  FROM main.gold_eventstream_with_identity LIMIT 1
              )",
@@ -2422,7 +2449,7 @@ fn test_eventstream_with_identity_includes_connected_components() {
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("column ordering regression: SELECT of all 13 columns in order failed: {e}")
+            panic!("column ordering regression: SELECT of all 14 columns in order failed: {e}")
         });
 }
 
@@ -2487,14 +2514,17 @@ fn test_connected_components_invariants_inline_pass() {
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
 /// `smelt build`, then verify that `main.marts_daily_active_users_by_method`
-/// materializes with one row per `event_date` and that on every day the
-/// identified-events counts satisfy:
-///   identified_events_forward_only
+/// materializes with one row per `event_date` and that the per-day
+/// monotonicity invariants hold on every day:
+///   identified_events_raw
+///     ≤ identified_events_forward_only
 ///     ≤ identified_events_backward_fill
 ///     ≤ identified_events_connected_components
-/// This is the meta-plan §6 verification gate, re-anchored to
-/// `identified_events_*` (distinct-user DAU is NOT monotonic in the same
-/// direction — connected-components clusters collapse distinct users).
+///   dau_backward_fill ≥ dau_connected_components
+/// DAU is otherwise non-monotonic across the four methods per day (forward_only
+/// inherits identities across day boundaries; backward_fill recovers
+/// identities forward_only loses on anon-only days). See the mart SQL comment
+/// for details.
 #[test]
 fn test_daily_active_users_by_method_monotonicity() {
     let tmp = TempDir::new().expect("tempdir");
@@ -2572,39 +2602,53 @@ fn test_daily_active_users_by_method_monotonicity() {
          number of distinct event_date values in silver_events_parsed ({distinct_dates})"
     );
 
-    // The meta-plan §6 verification gate, re-anchored to identified_events_*
-    // (the subsumption-monotonic quantity; DAU is not monotonic under
-    // cross-device cluster collapse).
+    // The per-day monotonicity invariants. With the amplitude_id space, the
+    // four methods are different partitions rather than a single chain of
+    // refinements, so per-day monotonicity is narrower than one might expect:
+    //
+    //   identified_events_raw ≤ identified_events_forward_only
+    //     ≤ identified_events_backward_fill = identified_events_connected_components
+    // (each method only ever promotes events from 'd:' to 'u:'-prefix)
+    //
+    //   dau_backward_fill ≥ dau_connected_components
+    // (cluster collapse is a strict per-device coarsening)
+    //
+    // DAU is *not* monotonic across raw ↔ forward_only ↔ backward_fill on
+    // every day, because forward_only inherits identities across day
+    // boundaries (within-session) while raw and backward_fill don't, and
+    // backward_fill can recover 'u:' identities for events whose session
+    // happens to have no signin. See the mart SQL comment for details.
     let monotonicity_violations: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.marts_daily_active_users_by_method
-             WHERE identified_events_forward_only > identified_events_backward_fill
-                OR identified_events_backward_fill > identified_events_connected_components",
+             WHERE identified_events_raw > identified_events_forward_only
+                OR identified_events_forward_only > identified_events_backward_fill
+                OR identified_events_backward_fill > identified_events_connected_components
+                OR dau_backward_fill < dau_connected_components",
             [],
             |row| row.get(0),
         )
         .unwrap_or_else(|e| panic!("monotonicity invariant query failed: {e}"));
     assert_eq!(
         monotonicity_violations, 0,
-        "identified_events_* monotonicity must hold on every day in the synthetic \
-         dataset; {monotonicity_violations} day(s) violate identified_events_forward_only \
-         ≤ identified_events_backward_fill ≤ identified_events_connected_components"
+        "per-day monotonicity must hold on every day in the synthetic \
+         dataset; {monotonicity_violations} day(s) violate the invariant"
     );
 
     let _probe: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM (
                  SELECT event_date, total_events, \
-                        dau_forward_only, dau_backward_fill, dau_connected_components, \
-                        identified_events_forward_only, identified_events_backward_fill, \
-                        identified_events_connected_components \
+                        dau_raw, dau_forward_only, dau_backward_fill, dau_connected_components, \
+                        identified_events_raw, identified_events_forward_only, \
+                        identified_events_backward_fill, identified_events_connected_components \
                  FROM main.marts_daily_active_users_by_method LIMIT 1
              )",
             [],
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("column-existence regression: SELECT of all 8 columns failed: {e}")
+            panic!("column-existence regression: SELECT of all 10 columns failed: {e}")
         });
 }
 
@@ -2616,10 +2660,12 @@ fn test_daily_active_users_by_method_monotonicity() {
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
 /// `smelt build`, then verify that `main.marts_identity_method_comparison`
 /// materializes with exactly 3 rows (one per pair of identity methods) and
-/// that the subsumption-with-equal-user invariant holds:
-/// forward_vs_backward.disagree_events = 0 (forward-only and backward-fill, when
-/// they both resolve, resolve to the same user — backward-fill never *changes*
-/// the user, only *extends* the population of identified events).
+/// that the disjointness sum holds on every row:
+/// agree_user + agree_device + disagree + only_left_user + only_right_user
+///   = total_events
+/// (the five buckets partition every event by whether each method resolved
+/// the event's amplitude_id to a real user ('u:') or fell back to the device
+/// ('d:')).
 #[test]
 fn test_identity_method_comparison_materializes() {
     let tmp = TempDir::new().expect("tempdir");
@@ -2714,13 +2760,16 @@ fn test_identity_method_comparison_materializes() {
     // qualitative shape; the only invariant asserted here is the disjointness
     // sum below.
 
-    // Disjointness sum: agree + disagree + only_left + only_right + both_null = total_events
-    // on every row.
+    // Disjointness sum: agree_user + agree_device + disagree + only_left_user
+    // + only_right_user = total_events on every row. Under the amplitude_id
+    // schema, every event has a non-null amplitude_id on every method, so the
+    // pairwise buckets partition every event by whether each side resolved to
+    // a real user ('u:') or fell back to the device ('d:').
     let bad_sum: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.marts_identity_method_comparison \
-             WHERE agree_events + disagree_events + only_left_identified \
-                 + only_right_identified + both_null_events != total_events",
+             WHERE agree_user_events + agree_device_events + disagree_events \
+                 + only_left_user + only_right_user != total_events",
             [],
             |row| row.get(0),
         )
@@ -2728,7 +2777,7 @@ fn test_identity_method_comparison_materializes() {
     assert_eq!(
         bad_sum, 0,
         "every row of marts_identity_method_comparison must satisfy \
-         agree + disagree + only_left + only_right + both_null = total_events; \
+         agree_user + agree_device + disagree + only_left_user + only_right_user = total_events; \
          {bad_sum} row(s) violate this invariant"
     );
 }

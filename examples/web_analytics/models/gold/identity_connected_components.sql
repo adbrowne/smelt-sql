@@ -3,9 +3,8 @@
 -- evidence over all signed-in events), build the bipartite graph where each
 -- edge connects one device node to one user node. Two devices are in the same
 -- component if a path of edges connects them through one or more shared users.
--- The resolved identity for every device in a component is the smallest
--- user_id in the component, which doubles as the component's cluster_id under
--- this v1 convention.
+-- The cluster representative is 'u:' || the smallest user_id in the component,
+-- which doubles as the cluster_id under this v1 convention.
 --
 -- This is the Amplitude-full identity model — it propagates identity across
 -- devices via user co-occurrence. Subsumes backward-fill on every device:
@@ -15,8 +14,8 @@
 -- definition).
 --
 -- Devices that never had a signed-in event do not appear in
--- silver/device_user_edges and therefore not in this table; their events
--- resolve to NULL in gold/eventstream_with_identity via the LEFT JOIN.
+-- silver/device_user_edges and therefore not in this table; the eventstream
+-- layer COALESCEs the NULL LEFT-JOIN result into the device-prefix amplitude_id.
 --
 -- The propagation is implemented as an iter-unrolled label-propagation over
 -- 8 explicit passes (iter0 through iter8). Each pass recomputes every device's
@@ -31,13 +30,13 @@
 -- becomes available.
 --
 -- Output columns:
---   device_id                      - the device
---   connected_components_user_id   - smallest user_id in the device's cluster
---   connected_components_cluster_id - cluster label (= user_id above in v1)
+--   device_id                       - the device
+--   connected_components_amplitude_id  - 'u:' || smallest user_id in the device's cluster
+--   connected_components_cluster_id    - cluster label (= amplitude_id above in v1)
 --
--- Both identity columns are equal in v1 (both = MIN user_id in cluster) and
--- are surfaced separately so a future probabilistic-stitching alternative can
--- decouple them without reshuffling the eventstream schema.
+-- Both identity columns are equal in v1 (both are 'u:' || MIN user_id in
+-- cluster) and are surfaced separately so a future probabilistic-stitching
+-- alternative can decouple them without reshuffling the eventstream schema.
 WITH edges AS (
     SELECT device_id, user_id
     FROM smelt.silver.device_user_edges
@@ -124,6 +123,6 @@ iter8 AS (
 )
 SELECT
     device_id,
-    label AS connected_components_user_id,
-    label AS connected_components_cluster_id
+    'u:' || CAST(label AS VARCHAR) AS connected_components_amplitude_id,
+    'u:' || CAST(label AS VARCHAR) AS connected_components_cluster_id
 FROM iter8

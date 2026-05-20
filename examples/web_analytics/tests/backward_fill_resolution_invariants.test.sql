@@ -18,8 +18,8 @@ test:
       - {device_id: 4, user_id: 401, event_count: 10, first_seen: '2026-04-01 08:00:00', last_seen: '2026-04-01 11:00:00'}
       - {device_id: 4, user_id: 402, event_count: 5,  first_seen: '2026-04-01 07:00:00', last_seen: '2026-04-01 07:30:00'}
   expect:
-    - {device_id: 1, backward_fill_user_id: 100}  # higher event_count wins
-    - {device_id: 2, backward_fill_user_id: 201}  # tie broken by earlier first_seen
-    - {device_id: 3, backward_fill_user_id: 300}  # only candidate
-    - {device_id: 4, backward_fill_user_id: 401}  # primary sort dominates: 401 wins the event_count tie
+    - {device_id: 1, backward_fill_amplitude_id: 'u:100'}  # higher event_count wins
+    - {device_id: 2, backward_fill_amplitude_id: 'u:201'}  # tie broken by earlier first_seen
+    - {device_id: 3, backward_fill_amplitude_id: 'u:300'}  # only candidate
+    - {device_id: 4, backward_fill_amplitude_id: 'u:401'}  # primary sort dominates: 401 wins the event_count tie
 ---

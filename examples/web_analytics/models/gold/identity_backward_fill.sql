@@ -12,12 +12,12 @@
 -- on the same device. Without it, DISTINCT ON's choice would depend on
 -- storage order.
 --
--- Devices that never had a signed-in event do not appear in
--- silver/device_user_edges, and therefore do not appear in this table either.
--- Their events resolve to NULL in gold/eventstream_with_identity via the LEFT
--- JOIN downstream.
+-- backward_fill_amplitude_id is 'u:' || the elected user_id. Devices that
+-- never had a signed-in event do not appear in silver/device_user_edges, and
+-- therefore do not appear in this table either. The eventstream layer
+-- COALESCEs the NULL LEFT-JOIN result into the device-prefix amplitude_id.
 SELECT DISTINCT ON (device_id)
     device_id,
-    user_id AS backward_fill_user_id
+    'u:' || CAST(user_id AS VARCHAR) AS backward_fill_amplitude_id
 FROM smelt.silver.device_user_edges
 ORDER BY device_id, event_count DESC, first_seen ASC, user_id ASC

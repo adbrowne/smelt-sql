@@ -1,9 +1,10 @@
-# Web analytics example: three-way user stitching
+# Web analytics example: amplitude_id and three refinements
 
 A self-contained smelt example demonstrating a bronze→silver→gold pipeline
-over JSON-encoded web events, with three parallel user-identity-resolution
-algorithms surfaced side-by-side in a single wide event-level table for direct
-comparison.
+over JSON-encoded web events, with an Amplitude-style always-present
+`amplitude_id` as the no-merging baseline plus three parallel refinements
+that progressively merge the identity space — all surfaced side-by-side in a
+single wide event-level table for direct comparison.
 
 The example lives at
 [`examples/web_analytics/`](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics)
@@ -18,92 +19,124 @@ in the repo.
 - Incremental sessionization with a 30-minute inactivity rule plus a
   platform-boundary split, using a 7-day rolling lookback so late-arriving
   events join to the correct session.
-- **Three parallel identity-resolution algorithms** materialised as separate
-  gold-layer models, all joined into one wide `eventstream_with_identity` row
-  per event so the algorithmic tradeoff is observable row-by-row.
+- **A never-NULL `amplitude_id`** synthesised at `silver/events_parsed`:
+  `'u:' || user_id` when the event carries a signed-in user, else
+  `'d:' || device_id`. The `'u:'` / `'d:'` prefix keeps the namespaces
+  disjoint. This is the no-merging baseline Amplitude would emit before any
+  cross-event stitching.
+- **Three parallel identity refinements** materialised as separate
+  gold-layer models, joined into the wide `eventstream_with_identity` row
+  per event with COALESCE to the device-prefix `amplitude_id` for rows
+  the refinement doesn't tag. Every method's column is non-null on every
+  event.
 - Two gold-mart views (`daily_active_users_by_method`,
   `identity_method_comparison`) that quantify the per-day and per-pair
   algorithmic differences.
 - Five inline `.test.sql` assertions covering session boundaries, each
-  identity algorithm's defining invariant, and the DAU subsumption-monotonicity
-  invariant.
+  identity algorithm's defining invariant, and the four-way amplitude_id
+  monotonicity invariant.
 
-## The three identity-resolution algorithms
+## The four methods
 
 Inspired by the
 [Amplitude track-unique-users methodology](https://amplitude.com/docs/data/sources/instrument-track-unique-users).
-The three algorithms here are not faithful reproductions of any Amplitude
+The methods here are not faithful reproductions of any Amplitude
 implementation, but they cover the same algorithmic spectrum
-(in-session → per-device → cross-device).
+(no-merging → in-session → per-device → cross-device).
+
+### amplitude_id (no-merging baseline)
+
+`'u:' || user_id` when the event is signed-in, else `'d:' || device_id`.
+Always non-null. Two events on the same anonymous device share a `'d:'`
+identity; two signed-in events from the same user on different devices share
+a `'u:'` identity.
 
 ### Forward-only
 
-Within-session resolution. Each session's identifiable events are tagged with
+Within-session refinement. Each session's identifiable events are tagged with
 the latest in-session signed-in user, via `arg_max(user_id, event_ts) FILTER
-(WHERE user_id IS NOT NULL)` grouped by `session_id`. No cross-session
-propagation, no per-device election, no clustering. Sessions with zero
-signed-in observations stay anonymous.
+(WHERE user_id IS NOT NULL)` grouped by `session_id`, prefixed with `'u:'`.
+No cross-session propagation, no per-device election, no clustering. Sessions
+with zero signed-in observations resolve to NULL at the model boundary; the
+eventstream COALESCEs that NULL to `'d:' || device_id` downstream.
 
 ### Backward-fill
 
 Per-device canonical-user election. The most-frequent signed-in user across
 all sessions on a device wins; ties are broken by first-seen, then by
 smallest user_id. Every event on that device — anonymous or signed-in,
-across every session — retroactively belongs to that user.
+across every session — retroactively belongs to that user, output as
+`'u:' || elected user_id`. Devices that never had a signed-in event fall
+back to `'d:' || device_id` at the eventstream COALESCE.
 
 ### Connected-components
 
 Cross-device clustering via union-find over the `(device, user)`
-co-occurrence graph. The cluster representative is the smallest user_id in
-the cluster, and every event of every device in the cluster is tagged with
-that representative. Implemented as 8-iteration unrolled label propagation
-over `silver/device_user_edges`.
+co-occurrence graph. The cluster representative is `'u:' || min(user_id)`
+in the cluster, and every event of every device in the cluster is tagged
+with that representative. Implemented as 8-iteration unrolled label
+propagation over `silver/device_user_edges`.
 
-## Why three?
+## Why four?
 
-The three algorithms span an algorithmic tradeoff that real-world product
-analytics teams face every day:
+The methods span an algorithmic tradeoff that real-world product analytics
+teams face every day:
 
-- **Forward-only** is the simplest: no cross-session reasoning, no shared
-  state. It identifies the smallest population of events (only those inside a
-  session with a signed-in observation) but it is the easiest to reason about
-  and the cheapest to compute. It is also the most *conservative* under
-  shared devices: it never attributes events to a user who didn't sign in
-  during that session.
-- **Backward-fill** broadens the population to every event on a device that
+- **amplitude_id** is the no-merging baseline — every event has an identity,
+  but anonymous events on the same device collapse to one device-prefix id,
+  and signed-in events that *should* belong to the same person across two
+  devices stay distinct. It costs nothing beyond a string concat at silver.
+- **Forward-only** is the simplest refinement: no cross-session reasoning,
+  no shared state. It promotes anonymous events to `'u:' || ` the latest
+  in-session signed-in user, but only inside a session that had at least one
+  signin. The most *conservative* refinement under shared devices: it never
+  attributes events to a user who didn't sign in during that session.
+- **Backward-fill** broadens the promotion to every event on a device that
   has *ever* had a signed-in user. This is the Amplitude-basic model — it
-  identifies many more events, at the cost of potentially attributing events
+  promotes many more events, at the cost of potentially attributing events
   to a user who wasn't actually present (e.g., a family-shared tablet).
 - **Connected-components** is the most aggressive: it clusters across
   devices via shared users and attributes every event in the cluster to the
-  cluster minimum. This can identify events on a device the canonical user
+  cluster minimum. This can attribute events on a device the canonical user
   never actually used (because that device shares a user with the canonical
   user's device). It can also *over-cluster* if a device is shared by
   unrelated users.
 
-The two marts make these tradeoffs concrete:
+Each refinement promotes a strict-or-equal *superset* of events from the
+device-fallback `'d:'` namespace to the `'u:'` namespace — the central
+identified-events invariant the marts encode. Per-day DAU is only
+partially monotonic because the four methods are different partitions of
+the same identity space, not a single refinement chain (see below).
+
+The two marts make the tradeoffs concrete:
 
 - `daily_active_users_by_method` reports per-day `identified_events_*` and
-  `dau_*` counts under each method. The `identified_events_*` columns
-  satisfy the subsumption invariant
-  `forward_only ≤ backward_fill ≤ connected_components` on every day; the
-  `dau_*` columns are deliberately *not* monotonic in the same direction —
-  connected-components collapses cross-device clusters and can have **fewer**
-  distinct users than backward-fill. Both shapes are intentional and the
-  README narrative explains why.
+  `dau_*` counts under each of the four methods.
+    - `identified_events_*` is fully four-way monotone per day:
+      `raw ≤ forward_only ≤ backward_fill ≤ connected_components`.
+    - `dau_*` is only partially monotone per day. The guaranteed inequality
+      is `dau_backward_fill ≥ dau_connected_components` (cluster collapse).
+      Otherwise, `dau_forward_only` can exceed `dau_raw` on days where
+      forward_only inherits identities from prior-day signins via session
+      continuation, and `dau_backward_fill` can exceed `dau_forward_only` on
+      days where many devices have only anon-only sessions but signed-in
+      events on other days.
 - `identity_method_comparison` is a pairwise event-level breakdown:
-  `(agree_events, disagree_events, only_left_identified,
-  only_right_identified, both_null_events, total_events)` for each pair of
-  methods. The disjointness invariant
-  `agree + disagree + only_left + only_right + both_null = total_events`
-  holds on every row; the qualitative shape is dataset-dependent and is the
-  primary tool for inspecting where the algorithms diverge.
+  `(agree_user_events, agree_device_events, disagree_events, only_left_user,
+  only_right_user, total_events)` for each pair of methods. The disjointness
+  invariant
+  `agree_user + agree_device + disagree + only_left_user + only_right_user
+  = total_events` holds on every row; the qualitative shape is
+  dataset-dependent and is the primary tool for inspecting where the
+  refinements diverge.
 
 The DAU monotonicity inline test
 ([`tests/dau_monotonicity_invariants.test.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/tests/dau_monotonicity_invariants.test.sql))
 and the integration-test gate in
 [`crates/smelt-datagen/tests/example_web_analytics.rs`](https://github.com/adbrowne/smelt-sql/blob/main/crates/smelt-datagen/tests/example_web_analytics.rs)
-are the correctness guards on the subsumption invariant.
+are the correctness guards on the `identified_events_*` four-way
+monotonicity and the `dau_backward_fill ≥ dau_connected_components` per-day
+inequality.
 
 ## Where to find the code
 
