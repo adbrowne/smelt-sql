@@ -259,6 +259,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 3. **Go-to-definition on ambiguous unqualified columns returns multiple locations.** This is the LSP `GotoDefinitionResponse::Array` form; editors render it as a picker.
 4. **Column completion includes types.** Completion items for columns include the inferred type as a detail label. If the type is unknown, the label is omitted.
 5. **Code action "Create model" generates a SQL skeleton.** The generated file is a minimal valid smelt SQL model; it does not include frontmatter beyond the defaults.
+6. **Workspace loading is shared with the CLI.** `Backend::initialize` consumes `smelt_core::workspace::load_workspace` and `smelt_db::workspace_ingest::ingest_loaded_workspace` — see `docs/specs/architecture.md` → "Workspace loading parity rule (CLI ↔ LSP)". The standing safety net is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example workspace and asserts no diagnostics.
 
 ## Known Divergences / Open Questions
 

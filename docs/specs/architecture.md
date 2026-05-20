@@ -283,6 +283,12 @@ For the Spark and PostgreSQL printers, additional rewrites apply (QUALIFY → su
 
 Analysis logic in `smelt-db` (type inference, schema extraction, diagnostic checks) is implemented as **pure functions** that take AST nodes and plain data structures. Salsa queries are thin wrappers that build inputs, call the pure function, and return the result. This invariant exists so a future `smelt-check` crate can do batch compilation without Salsa as a mechanical extraction.
 
+### Workspace loading parity rule (CLI ↔ LSP)
+
+Eager init-time workspace discovery — SQL models under `config.paths`, function definitions under the hardcoded `functions/` directory, multi-model frontmatter expansion, and YAML/JSON/TOML loader files for `smelt.config.load_yaml` — lives in **exactly one place**: `smelt_core::workspace::load_workspace`. Both the CLI's `init_db` and the LSP's `Backend::initialize` consume it, and the Salsa-ingest sequence (`set_project_input` → `set_source_file` → `register_loader_files_from_disk`) is centralised in `smelt_db::workspace_ingest::ingest_loaded_workspace`. New eager-discovery steps land in `load_workspace`; both sides pick them up automatically. *Lazy* discovery (seeds via `project_seeds`, per-entity sources via `project_sources`) lives inside Salsa queries keyed on `ProjectInput` and is already shared by construction — these don't need the loader.
+
+The invariant exists because the asymmetric-discovery bug class is the load-bearing failure mode of having two independent reimplementations of "load a smelt project from disk". Two real instances: (i) the LSP shipping without `functions/` discovery surfaced `unknown-smelt-fn` in VSCode while `cargo test -p smelt-cli --test example_diagnostics` stayed green because that test populates the DB via the CLI's discovery; (ii) the LSP not calling `set_loader_file` meant `smelt.config.load_yaml(...)` in generator files silently failed to resolve in the editor while the CLI's `init_db` worked fine. Routing every consumer through the same loader makes this class structurally impossible. The standing CI gate is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example.
+
 ### Planner scope
 
 The planner handles cross-model and execution-shape transforms only:
