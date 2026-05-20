@@ -88,8 +88,15 @@ jobs:
         env:
           PROPTEST_CASES: 100
 
-      - name: Verify example workspaces have no diagnostics
+      - name: Verify example workspaces have no diagnostics (Salsa-direct path)
         run: cargo test -p smelt-cli --no-default-features --features duckdb --test example_diagnostics
+
+      - name: Verify example workspaces have no diagnostics (real LSP backend)
+        # Drives `smelt_lsp::Backend` through tower-lsp against each non-broken
+        # example workspace. Catches asymmetric-discovery bugs the Salsa-direct
+        # test misses — see docs/specs/architecture.md → "Workspace loading
+        # parity rule (CLI ↔ LSP)".
+        run: cargo test -p smelt-lsp --no-default-features --test example_workspaces
 
       - name: Run smelt model tests (example projects)
         run: |
