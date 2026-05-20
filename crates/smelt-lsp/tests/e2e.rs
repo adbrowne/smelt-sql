@@ -92,6 +92,13 @@ impl TestWorkspaceDir {
         std::fs::write(&file_path, sql).unwrap();
     }
 
+    fn add_function(&self, name: &str, sql: &str) {
+        let functions_dir = self.path.join("functions");
+        std::fs::create_dir_all(&functions_dir).unwrap();
+        let file_path = functions_dir.join(format!("{}.sql", name));
+        std::fs::write(&file_path, sql).unwrap();
+    }
+
     #[allow(dead_code)]
     fn set_sources_yml(&self, content: &str) {
         std::fs::write(self.path.join("sources.yml"), content).unwrap();
@@ -810,6 +817,52 @@ async fn test_diagnostics_clear_after_fix() {
             undefined_refs
         );
     }
+
+    client.shutdown().await;
+}
+
+/// Regression test: the LSP must discover function definitions under
+/// `<project_root>/functions/` during `initialize`, matching the CLI's
+/// `Discovery::discover_function_files`. Without this, calls to
+/// `smelt.functions.*` produce `unknown-smelt-fn` diagnostics in VSCode
+/// even when the function file exists on disk.
+#[tokio::test]
+async fn test_lsp_discovers_functions_directory() {
+    let ws = TestWorkspaceDir::new();
+    ws.add_function(
+        "add_one",
+        "smelt.define add_one(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)\n",
+    );
+    let model_sql = "SELECT smelt.functions.add_one(id) AS bumped FROM (SELECT 1 AS id)";
+    ws.add_model("uses_fn", model_sql);
+
+    let mut client = TestClient::new(ws.path()).await;
+    let uri = ws.model_uri("uses_fn");
+    client.open_file(&uri, model_sql).await;
+
+    let diags = client.collect_diagnostics(2000).await;
+
+    // The bug we're guarding against: an `unknown-smelt-fn` diagnostic on
+    // the model file because the LSP failed to load `functions/add_one.sql`.
+    let unknown_fn_diags: Vec<_> = diags
+        .iter()
+        .filter(|(u, _)| u.contains("uses_fn"))
+        .flat_map(|(_, d)| d.iter())
+        .filter(|d| {
+            d.code
+                .as_ref()
+                .map(|c| matches!(c, lsp_types::NumberOrString::String(s) if s == "unknown-smelt-fn"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert!(
+        unknown_fn_diags.is_empty(),
+        "Expected no `unknown-smelt-fn` diagnostics on the model file, but got: {:?}\n\
+         All diagnostics: {:?}",
+        unknown_fn_diags,
+        diags,
+    );
 
     client.shutdown().await;
 }

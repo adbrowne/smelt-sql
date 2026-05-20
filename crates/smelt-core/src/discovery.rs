@@ -38,6 +38,37 @@ impl ModelFile {
     }
 }
 
+/// Discover `smelt.define` / `smelt.extern` files under the project-root
+/// `functions/` directory.
+///
+/// Returns the paths of every `.sql` file beneath `<project_root>/functions/`
+/// (recursive). The `functions/` directory is hardcoded and not currently
+/// configurable in `smelt.yml`; a configurable discovery policy is deferred
+/// per §21 of the smelt-functions research.
+///
+/// Returns an empty vector if `functions/` does not exist. Both the CLI's
+/// `Discovery::discover_function_files` and the LSP's `initialize` call this
+/// to keep their function-discovery behavior in sync.
+pub fn discover_function_file_paths(project_root: &Path) -> Vec<PathBuf> {
+    let search_path = project_root.join("functions");
+    if !search_path.exists() {
+        return Vec::new();
+    }
+
+    let mut paths = Vec::new();
+    for entry in WalkDir::new(&search_path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths
+}
+
 pub struct ModelDiscovery {
     project_root: PathBuf,
     paths: Vec<String>,
@@ -262,6 +293,44 @@ SELECT * FROM smelt.models.staging_events
             staging.model_id.source_path(),
             cleaned.model_id.source_path()
         );
+    }
+
+    #[test]
+    fn test_discover_function_file_paths_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = discover_function_file_paths(dir.path());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_discover_function_file_paths_finds_sql_files() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let functions_dir = dir.path().join("functions");
+        let nested_dir = functions_dir.join("nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+
+        let top = functions_dir.join("sessionize.sql");
+        std::fs::File::create(&top)
+            .unwrap()
+            .write_all(b"-- top-level fn")
+            .unwrap();
+        let nested = nested_dir.join("inner.sql");
+        std::fs::File::create(&nested)
+            .unwrap()
+            .write_all(b"-- nested fn")
+            .unwrap();
+        // Non-sql files are ignored.
+        let other = functions_dir.join("README.md");
+        std::fs::File::create(&other)
+            .unwrap()
+            .write_all(b"docs")
+            .unwrap();
+
+        let paths = discover_function_file_paths(dir.path());
+        assert_eq!(paths.len(), 2, "expected 2 .sql files, got {paths:?}");
+        assert!(paths.contains(&top));
+        assert!(paths.contains(&nested));
     }
 
     #[test]

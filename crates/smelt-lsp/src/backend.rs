@@ -1043,6 +1043,34 @@ impl LanguageServer for Backend {
                             }
                         }
                     }
+
+                    // Discover function definitions in <project_root>/functions/.
+                    // The CLI scans the same directory via
+                    // `Discovery::discover_function_files`; both share the
+                    // helper in `smelt_core::discover_function_file_paths` so
+                    // they stay in sync.
+                    for fn_path in smelt_core::discover_function_file_paths(&project_root) {
+                        match std::fs::read_to_string(&fn_path) {
+                            Ok(content) => {
+                                let paths = self
+                                    .register_sql_content(
+                                        &mut db,
+                                        &fn_path,
+                                        &content,
+                                        &project_root,
+                                    )
+                                    .await;
+                                all_files.extend(paths);
+                            }
+                            Err(e) => {
+                                init_errors.model_errors.push(format!(
+                                    "Failed to read {}: {}",
+                                    fn_path.display(),
+                                    e
+                                ));
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1088,16 +1116,26 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "smelt language server initialized")
             .await;
 
-        // Register file watchers for .py files (dynamic registration)
+        // Register file watchers (dynamic registration). We watch:
+        //   - `**/models/**/*.py` for Python model changes
+        //   - `**/functions/**/*.sql` so that external edits to function
+        //     definitions (git checkout, sed, etc.) re-trigger diagnostics
+        //     on dependent models. In-editor edits go through `did_change`.
         let registration = Registration {
-            id: "python-file-watcher".to_string(),
+            id: "smelt-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: Some(
                 serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/models/**/*.py".to_string()),
-                        kind: Some(WatchKind::all()),
-                    }],
+                    watchers: vec![
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/models/**/*.py".to_string()),
+                            kind: Some(WatchKind::all()),
+                        },
+                        FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/functions/**/*.sql".to_string()),
+                            kind: Some(WatchKind::all()),
+                        },
+                    ],
                 })
                 .unwrap(),
             ),
@@ -1307,6 +1345,36 @@ impl LanguageServer for Backend {
                         drop(db);
                         self.publish_all_diagnostics().await;
                     }
+                }
+            } else if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+                // External `.sql` change (currently only `functions/**/*.sql`
+                // is watched). Re-read content into the DB and refresh all
+                // diagnostics so dependents pick up the new signature.
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let mut db = self.db.lock().await;
+                    let project_roots = self.project_roots.lock().await.clone();
+                    let project_root = project_roots
+                        .iter()
+                        .find(|root| path.starts_with(root))
+                        .cloned()
+                        .unwrap_or_default();
+                    let registered_paths = self
+                        .register_sql_content(&mut db, &path, &content, &project_root)
+                        .await;
+                    let mut tracked = self.tracked_files.lock().await;
+                    let mut changed = false;
+                    for rp in &registered_paths {
+                        if !tracked.contains(rp) {
+                            tracked.push(rp.clone());
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        Backend::sync_workspace(&mut db, &tracked, &project_roots);
+                    }
+                    drop(tracked);
+                    drop(db);
+                    self.publish_all_diagnostics().await;
                 }
             }
         }

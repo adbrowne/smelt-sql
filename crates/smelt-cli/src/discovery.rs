@@ -256,25 +256,12 @@ impl ModelDiscovery {
     ///
     /// Function files are loaded into Salsa the same way as model files (each
     /// becomes a [`ModelFile`]) so that `smelt-db`'s `functions_in_file` query
-    /// can index their signatures. Phase 3 uses a hardcoded `functions/`
-    /// directory; a configurable discovery policy is deferred to a later
-    /// phase per §21 of the smelt-functions research.
+    /// can index their signatures. The path-discovery primitive lives in
+    /// `smelt_core::discover_function_file_paths` so the LSP can share it.
     pub fn discover_function_files(&self) -> Result<Vec<ModelFile>> {
-        let search_path = self.project_root.join("functions");
-        if !search_path.exists() {
-            return Ok(Vec::new());
-        }
-
         let mut files = Vec::new();
-        for entry in WalkDir::new(&search_path)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                files.extend(self.parse_model_file(path)?);
-            }
+        for path in smelt_core::discover_function_file_paths(&self.project_root) {
+            files.extend(self.parse_model_file(&path)?);
         }
         Ok(files)
     }
