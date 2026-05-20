@@ -207,6 +207,28 @@ impl TestClient {
         results
     }
 
+    async fn references(
+        &mut self,
+        file_uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Vec<lsp_types::Location> {
+        let result = self
+            .send_request(
+                "textDocument/references",
+                json!({
+                    "textDocument": { "uri": file_uri },
+                    "position": { "line": line, "character": character },
+                    "context": { "includeDeclaration": true }
+                }),
+            )
+            .await;
+        if result.is_null() {
+            return Vec::new();
+        }
+        serde_json::from_value(result).unwrap_or_default()
+    }
+
     async fn shutdown(&mut self) {
         let msg = json!({
             "jsonrpc": "2.0",
@@ -434,6 +456,89 @@ async fn staging_from_sources() {
 // ---------------------------------------------------------------------------
 // Multi-project workspace case — the project isolation rule.
 // ---------------------------------------------------------------------------
+
+/// Find-references on a `smelt.functions.<name>(...)` call site returns at
+/// least the call site itself. Reproduces the VSCode case the user hit:
+/// open `examples/web_analytics/` as the workspace folder and "Find All
+/// References" on the `sessionize` token inside the
+/// `smelt.functions.sessionize(...)` call in `models/silver/sessions.sql`.
+#[tokio::test]
+async fn find_references_on_function_call_in_web_analytics() {
+    let workspace = examples_root().join("web_analytics");
+    let target_file = workspace.join("models").join("silver").join("sessions.sql");
+    assert!(
+        target_file.exists(),
+        "fixture not found: {}",
+        target_file.display()
+    );
+
+    let mut client = TestClient::open_workspace(&workspace).await;
+    client
+        .open_file(&target_file)
+        .await
+        .expect("open sessions.sql");
+
+    // Drain initial diagnostics so subsequent requests don't race with them.
+    let _ = client.collect_diagnostics(1000).await;
+
+    // models/silver/sessions.sql line 21 (1-indexed):
+    //     FROM smelt.functions.sessionize(
+    // Cursor on "sessionize" word — char 28 is inside the token.
+    let file_uri = format!("file://{}", target_file.display());
+    let locations = client.references(&file_uri, 20, 28).await;
+    client.shutdown().await;
+
+    assert!(
+        !locations.is_empty(),
+        "expected at least one reference for smelt.functions.sessionize, got 0"
+    );
+    let on_target = locations
+        .iter()
+        .any(|loc| loc.uri.as_str().contains("sessions.sql"));
+    assert!(
+        on_target,
+        "expected the call site in sessions.sql among references; got: {:?}",
+        locations
+    );
+}
+
+/// Find-references on the `smelt.define <name>` declaration name token
+/// returns the call sites in the same project. This mirrors the VSCode
+/// case where the user puts the cursor on `sessionize` inside
+/// `examples/web_analytics/functions/sessionize.sql`'s
+/// `smelt.define sessionize(...)` line and asks "find all callers".
+#[tokio::test]
+async fn find_references_from_function_definition_in_web_analytics() {
+    let workspace = examples_root().join("web_analytics");
+    let target_file = workspace.join("functions").join("sessionize.sql");
+    assert!(target_file.exists());
+
+    let mut client = TestClient::open_workspace(&workspace).await;
+    client
+        .open_file(&target_file)
+        .await
+        .expect("open sessionize.sql");
+    let _ = client.collect_diagnostics(1000).await;
+
+    // Line 20 (1-indexed) = line 19 (0-indexed) is `smelt.define sessionize(`.
+    // The `sessionize` token starts at character 13.
+    let file_uri = format!("file://{}", target_file.display());
+    let locations = client.references(&file_uri, 19, 16).await;
+    client.shutdown().await;
+
+    assert!(
+        !locations.is_empty(),
+        "expected ≥1 reference for the sessionize define-name token, got 0"
+    );
+    let has_call_site = locations
+        .iter()
+        .any(|loc| loc.uri.as_str().contains("sessions.sql"));
+    assert!(
+        has_call_site,
+        "expected the sessions.sql call site among references; got: {:?}",
+        locations
+    );
+}
 
 /// Standing CI gate for the project isolation rule
 /// (`docs/specs/architecture.md` → "Project isolation rule").

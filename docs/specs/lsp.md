@@ -161,7 +161,8 @@ Find References resolves the following identifier types:
 | Identifier | Returns |
 |------------|---------|
 | `smelt.<path>` (at definition or use, resolves to a model / source / seed) | All `smelt.<path>` references to the same entity across the workspace |
-| `smelt.<path>(...)` (at definition or use, resolves to a function) | All `smelt.<path>(...)` call sites for the same function across the workspace, scoped to the function's project |
+| `smelt.<path>(...)` (at a call site, resolves to a function) | All `smelt.<path>(...)` call sites for the same function across the workspace, scoped to the function's project |
+| `smelt.define <name>` declaration name token | All `smelt.functions.<name>(...)` call sites in the same project |
 | CTE name (at definition or use) | All references to that CTE within the same file |
 
 Cross-file find-references for `smelt.<path>` searches all loaded workspace files **within the same project** — a workspace folder may contain multiple smelt projects, and references do not cross project boundaries (see `architecture.md` → "Project isolation rule"). For CTEs, the search is intra-file by construction.

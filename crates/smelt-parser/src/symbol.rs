@@ -18,6 +18,10 @@ pub enum SymbolAtCursor {
     /// but distinguished so goto-def can route function calls to function
     /// definitions rather than to a model file.
     FunctionCall { segments: Vec<String> },
+    /// Cursor is on the name token of a `smelt.define <name>(...)`
+    /// declaration. Carries the bare function name (no `functions.` prefix);
+    /// callers prepend the namespace when looking up call sites.
+    FunctionDefinition { name: String },
     /// Cursor is on a CTE name in a FROM/JOIN clause (reference site)
     CteReference { name: String },
     /// Cursor is on a CTE name in a WITH clause (definition site)
@@ -73,6 +77,18 @@ pub fn symbol_at_cursor(file: &AstFile, _text: &str, offset: usize) -> Option<Sy
         }
     }
 
+    // Check `smelt.define <name>` declaration name tokens — cursor on the
+    // bare function name token at the declaration site. Find-references uses
+    // this to surface every call site for the function.
+    for define in file.defines() {
+        if let (Some(name), Some(name_range)) = (define.name(), define.name_range()) {
+            let start: usize = name_range.start().into();
+            let end: usize = name_range.end().into();
+            if offset >= start && offset <= end {
+                return Some(SymbolAtCursor::FunctionDefinition { name });
+            }
+        }
+    }
     // Check CTE definitions and references
     if let Some(select_stmt) = file.select_stmt() {
         // Collect CTE definition names

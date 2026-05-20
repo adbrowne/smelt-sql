@@ -127,6 +127,29 @@ pub struct Backend {
     multi_model_files: Arc<Mutex<HashMap<PathBuf, MultiModelEntry>>>,
 }
 
+/// Collect every `smelt.functions.<name>(...)` call-site path range across
+/// the given files. Used by the references handler for both call-site and
+/// declaration-site cursors. `files` is expected to already be project-scoped.
+fn collect_function_call_sites(
+    db: &smelt_db::Database,
+    files: &[smelt_db::SourceFile],
+    name: &str,
+) -> Vec<(PathBuf, smelt_parser::ast::Range)> {
+    let mut out = Vec::new();
+    for f in files {
+        let parse = smelt_db::parse_file(db, *f);
+        let Some(ast) = AstFile::cast(parse.syntax()) else {
+            continue;
+        };
+        let f_text = f.text(db);
+        for trange in smelt_db::references::find_function_call_sites_in_file(&ast, name) {
+            let r = smelt_parser::ast::text_range_to_range(f_text, trange);
+            out.push((f.path(db).clone(), r));
+        }
+    }
+    out
+}
+
 impl Backend {
     pub fn new(client: Client) -> Self {
         Self {
@@ -1608,6 +1631,7 @@ impl LanguageServer for Backend {
                                 None
                             }
                         }
+                        Some(SymbolAtCursor::FunctionDefinition { .. }) => None,
                         None => None,
                     }
                     // Fall through to Phase B checks when symbol_at_cursor returned None
@@ -2019,29 +2043,25 @@ impl LanguageServer for Backend {
                             // Only `smelt.functions.<name>` calls are findable
                             // today. Other call shapes have no def to anchor on.
                             if segments.len() == 2 && segments[0] == "functions" {
-                                let name = &segments[1];
-                                let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> =
-                                    Vec::new();
-                                for f in &project_files {
-                                    let parse = smelt_db::parse_file(&db, *f);
-                                    let Some(ast) = AstFile::cast(parse.syntax()) else {
-                                        continue;
-                                    };
-                                    let f_text = f.text(&db);
-                                    for trange in
-                                        smelt_db::references::find_function_call_sites_in_file(
-                                            &ast, name,
-                                        )
-                                    {
-                                        let r =
-                                            smelt_parser::ast::text_range_to_range(f_text, trange);
-                                        all_refs.push((f.path(&db).clone(), r));
-                                    }
-                                }
-                                RefResult::PathRanges(all_refs)
+                                RefResult::PathRanges(collect_function_call_sites(
+                                    &db,
+                                    &project_files,
+                                    &segments[1],
+                                ))
                             } else {
                                 RefResult::Empty
                             }
+                        }
+                        Some(SymbolAtCursor::FunctionDefinition { name }) => {
+                            // Cursor on the `<name>` token of a
+                            // `smelt.define <name>(...)` declaration — return
+                            // every `smelt.functions.<name>(...)` call site
+                            // in the same project.
+                            RefResult::PathRanges(collect_function_call_sites(
+                                &db,
+                                &project_files,
+                                &name,
+                            ))
                         }
                         Some(SymbolAtCursor::CteDefinition { name })
                         | Some(SymbolAtCursor::CteReference { name }) => {
