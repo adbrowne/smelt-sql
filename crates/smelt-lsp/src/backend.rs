@@ -1381,6 +1381,15 @@ impl LanguageServer for Backend {
                 gen_file: PathBuf,
                 name_range: Range,
             },
+            /// Goto-def from a `smelt.functions.<name>(...)` call to the
+            /// `smelt.define <name>(...)` declaration. Lands the cursor on
+            /// the name token (precise position derived from the file's
+            /// current text via `name_range`).
+            FunctionDef {
+                target_file: PathBuf,
+                name_start: u32,
+                name_end: u32,
+            },
         }
 
         let target = {
@@ -1555,6 +1564,27 @@ impl LanguageServer for Backend {
                                     .and_then(|r| r.source_file)
                                     .map(|f| GotoTarget::RefModel(f.path(&db).clone()))
                             })
+                        }
+                        Some(SymbolAtCursor::FunctionCall { segments }) => {
+                            // Route `smelt.functions.<name>(...)` calls to the
+                            // `smelt.define <name>(...)` declaration. Other call
+                            // shapes (e.g. `smelt.metrics.foo`, when that namespace
+                            // ships) fall through to None.
+                            if segments.len() == 2 && segments[0] == "functions" {
+                                let name = segments[1].clone();
+                                let ws = Workspace::try_get(&db);
+                                ws.and_then(|w| {
+                                    smelt_db::resolve_function_path(&db, w, name).map(
+                                        |(f, name_range)| GotoTarget::FunctionDef {
+                                            target_file: f.path(&db).clone(),
+                                            name_start: name_range.start,
+                                            name_end: name_range.end,
+                                        },
+                                    )
+                                })
+                            } else {
+                                None
+                            }
                         }
                         None => None,
                     }
@@ -1855,6 +1885,34 @@ impl LanguageServer for Backend {
                 } else {
                     Ok(None)
                 }
+            }
+            // smelt.functions.<name>(...) → smelt.define <name>(...).
+            // Convert the stored byte range to LSP line/col using the target
+            // file's current text. Done outside the AST-holding block so
+            // there's no Salsa snapshot lifetime issue.
+            Some(GotoTarget::FunctionDef {
+                target_file,
+                name_start,
+                name_end,
+            }) => {
+                let target_uri = match Url::from_file_path(&target_file) {
+                    Ok(u) => u,
+                    Err(_) => return Ok(None),
+                };
+                let target_text = std::fs::read_to_string(&target_file).unwrap_or_default();
+                // `define.name_range()` returns offsets into the
+                // frontmatter-stripped source (parse_file strips before
+                // parsing). Strip here too so byte→line/col mapping aligns.
+                let stripped = smelt_parser::strip_frontmatter(&target_text);
+                let start = smelt_parser::ast::offset_to_position(&stripped, name_start as usize);
+                let end = smelt_parser::ast::offset_to_position(&stripped, name_end as usize);
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: Range {
+                        start: Position::new(start.line, start.column),
+                        end: Position::new(end.line, end.column),
+                    },
+                })))
             }
             None => Ok(None),
         }

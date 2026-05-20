@@ -866,3 +866,69 @@ async fn test_lsp_discovers_functions_directory() {
 
     client.shutdown().await;
 }
+
+/// Goto-definition on a `smelt.functions.<name>(` call jumps to the
+/// `smelt.define <name>(...)` declaration in the function file. Lands the
+/// cursor precisely on the function name token, not on the file's first line.
+#[tokio::test]
+async fn test_goto_definition_smelt_function_call() {
+    let ws = TestWorkspaceDir::new();
+    // Function: definition lives on line 1 (0-indexed) so we can assert
+    // the cursor lands on a non-zero line.
+    ws.add_function(
+        "add_one",
+        "-- bump an integer by 1\nsmelt.define add_one(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)\n",
+    );
+    let model_sql = "SELECT smelt.functions.add_one(id) AS bumped FROM (SELECT 1 AS id)";
+    ws.add_model("caller", model_sql);
+    let mut client = TestClient::new(ws.path()).await;
+
+    let caller_uri = ws.model_uri("caller");
+    client.open_file(&caller_uri, model_sql).await;
+    client.collect_diagnostics(1000).await;
+
+    // Cursor on `add_one` inside `smelt.functions.add_one(...)`.
+    // The string `smelt.functions.add_one` starts at col 7; `add_one` starts
+    // at col 23 (7 + len("smelt.functions.") = 7 + 16).
+    let result = client.goto_definition(&caller_uri, 0, 25).await;
+
+    let result_str = serde_json::to_string(&result).unwrap();
+    assert!(
+        result_str.contains("add_one.sql"),
+        "expected goto-def to land in add_one.sql, got: {result_str}",
+    );
+    // `smelt.define add_one(...)` is on line 1 of the function file
+    // (line 0 is the leading comment).
+    assert!(
+        result_str.contains("\"line\":1"),
+        "expected goto-def at line 1 (the smelt.define line), got: {result_str}",
+    );
+
+    client.shutdown().await;
+}
+
+/// Goto-definition on a plain `smelt.models.<name>` path ref still works
+/// after adding the `SmeltPathCall` cursor branch.
+#[tokio::test]
+async fn test_goto_definition_smelt_model_ref_still_works() {
+    let ws = TestWorkspaceDir::new();
+    ws.add_model("upstream", "SELECT 1 AS id");
+    let model_sql = "SELECT * FROM smelt.models.upstream";
+    ws.add_model("caller", model_sql);
+    let mut client = TestClient::new(ws.path()).await;
+
+    let caller_uri = ws.model_uri("caller");
+    client.open_file(&caller_uri, model_sql).await;
+    client.collect_diagnostics(1000).await;
+
+    // Cursor on `upstream` in `smelt.models.upstream`. Col 14 = start of
+    // `smelt`; `upstream` starts at col 27 (14 + len("smelt.models.")).
+    let result = client.goto_definition(&caller_uri, 0, 28).await;
+    let result_str = serde_json::to_string(&result).unwrap();
+    assert!(
+        result_str.contains("upstream"),
+        "expected goto-def to land in upstream.sql, got: {result_str}",
+    );
+
+    client.shutdown().await;
+}

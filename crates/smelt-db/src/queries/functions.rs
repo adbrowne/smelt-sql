@@ -143,3 +143,50 @@ pub fn resolve_function(
     }
     None
 }
+
+/// Byte range of a function's name token within the file's stripped source.
+///
+/// Powers LSP goto-definition: clicking `sessionize` in
+/// `smelt.functions.sessionize(...)` lands the cursor on the `sessionize`
+/// identifier inside `smelt.define sessionize(...)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NameRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Resolve a function name to the file that declares it and the byte range
+/// of the name token within that file's stripped source.
+///
+/// Iterates workspace files in the same sorted-by-path order as
+/// [`resolve_function`] so the same file wins on collisions. Returns
+/// `None` if no file declares `name`.
+#[salsa::tracked]
+pub fn resolve_function_path(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    name: String,
+) -> Option<(SourceFile, NameRange)> {
+    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
+    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    for f in files {
+        let parse = parse_file(db, f);
+        let Some(ast) = AstFile::cast(parse.syntax()) else {
+            continue;
+        };
+        for define in ast.defines() {
+            if define.name().as_deref() == Some(name.as_str()) {
+                if let Some(range) = define.name_range() {
+                    return Some((
+                        f,
+                        NameRange {
+                            start: u32::from(range.start()),
+                            end: u32::from(range.end()),
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
