@@ -55,6 +55,7 @@ pub mod queries;
 pub mod references;
 pub mod schema;
 pub mod type_inference;
+pub mod workspace_ingest;
 pub mod yaml_edits;
 
 // ---- Re-exports for downstream crates ---------------------------------------
