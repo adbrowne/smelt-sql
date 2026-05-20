@@ -1134,9 +1134,21 @@ pub async fn run(args: RunArgs) -> Result<()> {
             },
         );
 
-        // Update interval tracking for incremental models
+        // Update interval tracking for incremental models.
+        //
+        // `result.model_name` is the db-form (e.g. "silver_events_parsed"), but
+        // LogicalGraph::get_model keys by the leaf bare name. For nested models
+        // those forms differ, so a direct get_model lookup fails. Resolve by
+        // matching db_name across the graph as a fallback. (Flat-layout models
+        // hit the fast path because leaf == db_name.)
         if let Some(ref range) = tr {
-            let model = graph.get_model(&result.model_name)?;
+            let model = graph.get_model(&result.model_name).or_else(|_| {
+                graph
+                    .iter_models()
+                    .find(|(_, m)| m.db_name_owned() == result.model_name)
+                    .map(|(_, m)| m)
+                    .ok_or_else(|| anyhow::anyhow!("Model not found: {}", result.model_name))
+            })?;
             let model_hash = compute_model_hash(&model.content);
             let intervals = interval_store.get_or_create(&result.model_name, &model_hash);
             intervals.record_interval(&range.start, &range.end);
