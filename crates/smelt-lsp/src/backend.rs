@@ -1558,11 +1558,21 @@ impl LanguageServer for Backend {
                         }
                         Some(SymbolAtCursor::PathRef { segments }) => {
                             // Resolve via the unified path data plane (Phase 2a).
+                            // SQL files come back via `source_file`; seeds and
+                            // sources (which aren't Salsa SourceFiles) fall
+                            // through to `resolve_seed_or_source_path` which
+                            // returns the on-disk `.csv` / `.yml` path.
                             let ws = Workspace::try_get(&db);
                             ws.and_then(|w| {
-                                smelt_db::resolve_ref_path(&db, w, segments)
-                                    .and_then(|r| r.source_file)
-                                    .map(|f| GotoTarget::RefModel(f.path(&db).clone()))
+                                if let Some(sf) =
+                                    smelt_db::resolve_ref_path(&db, w, segments.clone())
+                                        .and_then(|r| r.source_file)
+                                {
+                                    Some(GotoTarget::RefModel(sf.path(&db).clone()))
+                                } else {
+                                    smelt_db::resolve_seed_or_source_path(&db, w, segments)
+                                        .map(GotoTarget::RefModel)
+                                }
                             })
                         }
                         Some(SymbolAtCursor::FunctionCall { segments }) => {

@@ -99,6 +99,14 @@ impl TestWorkspaceDir {
         std::fs::write(&file_path, sql).unwrap();
     }
 
+    /// Drop a seed CSV under `models/<name>.csv` (matches the default
+    /// `paths: ["models"]` layout `TestWorkspaceDir` ships with). The seed
+    /// becomes `smelt.<name>` per the Phase 2 prefix-free resolution rule.
+    fn add_seed(&self, name: &str, csv: &str) {
+        let p = self.path.join("models").join(format!("{}.csv", name));
+        std::fs::write(&p, csv).unwrap();
+    }
+
     #[allow(dead_code)]
     fn set_sources_yml(&self, content: &str) {
         std::fs::write(self.path.join("sources.yml"), content).unwrap();
@@ -902,6 +910,31 @@ async fn test_goto_definition_smelt_function_call() {
     assert!(
         result_str.contains("\"line\":1"),
         "expected goto-def at line 1 (the smelt.define line), got: {result_str}",
+    );
+
+    client.shutdown().await;
+}
+
+/// Goto-definition on a `smelt.<seed_name>` path ref jumps into the seed's
+/// `.csv` file. (Seeds use the prefix-free addressing scheme — Phase 2.)
+#[tokio::test]
+async fn test_goto_definition_smelt_seed_ref() {
+    let ws = TestWorkspaceDir::new();
+    ws.add_seed("raw_users", "id,name\n1,alice\n2,bob\n");
+    let model_sql = "SELECT * FROM smelt.raw_users";
+    ws.add_model("caller", model_sql);
+    let mut client = TestClient::new(ws.path()).await;
+
+    let caller_uri = ws.model_uri("caller");
+    client.open_file(&caller_uri, model_sql).await;
+    client.collect_diagnostics(1000).await;
+
+    // Cursor on `raw_users` in `smelt.raw_users`. The path starts at col 14.
+    let result = client.goto_definition(&caller_uri, 0, 22).await;
+    let result_str = serde_json::to_string(&result).unwrap();
+    assert!(
+        result_str.contains("raw_users.csv"),
+        "expected goto-def to land in raw_users.csv, got: {result_str}",
     );
 
     client.shutdown().await;
