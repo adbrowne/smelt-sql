@@ -4186,6 +4186,7 @@ dependencies = [
  "smelt-planner",
  "smelt-types",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]

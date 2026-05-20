@@ -884,103 +884,77 @@ impl LanguageServer for Backend {
 
                     all_project_roots.push(project_root.clone());
 
-                    // Load sources config for this project
-                    match find_config_file(&project_root, "sources") {
-                        Ok(Some(sources_path)) => match std::fs::read_to_string(&sources_path) {
+                    // Canonical workspace loading — single source of truth for
+                    // CLI and LSP. See docs/specs/architecture.md →
+                    // "Workspace loading parity rule (CLI ↔ LSP)".
+                    let loaded = smelt_core::load_workspace(&project_root);
+                    init_errors
+                        .workspace_errors
+                        .extend(loaded.errors.workspace_errors.iter().cloned());
+                    init_errors
+                        .source_errors
+                        .extend(loaded.errors.source_errors.iter().cloned());
+                    // The "no models found" soft warning is noise for empty /
+                    // functions-only workspaces; drop it from the LSP surface.
+                    let model_errors: Vec<String> = loaded
+                        .errors
+                        .model_errors
+                        .iter()
+                        .filter(|e| !e.starts_with("No models found"))
+                        .cloned()
+                        .collect();
+                    init_errors.model_errors.extend(model_errors);
+
+                    // Sources input + loader files (the latter was previously
+                    // missing in the LSP — smelt.config.load_yaml(...) in
+                    // generator files didn't resolve).
+                    db.set_project_input(project_root.clone(), loaded.sources_text.clone());
+                    smelt_db::workspace_ingest::register_loader_files_from_disk(
+                        &mut db,
+                        &project_root,
+                    );
+
+                    // Register SQL files via register_sql_content so the LSP's
+                    // multi-model line-offset tracking populates correctly.
+                    // Dedup by real path — multi-model files appear once per
+                    // section in loaded.sql_files but share one real file.
+                    let mut seen_real_paths: std::collections::HashSet<PathBuf> =
+                        std::collections::HashSet::new();
+                    for model in &loaded.sql_files {
+                        let real_path = model.model_id.source_path().to_path_buf();
+                        if !seen_real_paths.insert(real_path.clone()) {
+                            continue;
+                        }
+                        match std::fs::read_to_string(&real_path) {
                             Ok(content) => {
-                                db.set_project_input(project_root.clone(), content);
+                                let paths = self
+                                    .register_sql_content(
+                                        &mut db,
+                                        &real_path,
+                                        &content,
+                                        &project_root,
+                                    )
+                                    .await;
+                                all_files.extend(paths);
                             }
                             Err(e) => {
-                                init_errors.source_errors.push(format!(
+                                init_errors.model_errors.push(format!(
                                     "Failed to read {}: {}",
-                                    sources_path.display(),
+                                    real_path.display(),
                                     e
                                 ));
-                                db.set_project_input(project_root.clone(), String::new());
                             }
-                        },
-                        Ok(None) => {
-                            // No sources file - that's fine
-                            db.set_project_input(project_root.clone(), String::new());
-                        }
-                        Err(msg) => {
-                            init_errors.source_errors.push(msg);
-                            db.set_project_input(project_root.clone(), String::new());
                         }
                     }
 
-                    // Load config (defaults to a minimal config with paths = ["models"])
-                    let config = smelt_core::Config::load(&project_root).unwrap_or_else(|_| {
-                        smelt_core::Config {
-                            name: String::new(),
-                            version: 1,
-                            paths: vec!["models".to_string()],
-                            targets: std::collections::HashMap::new(),
-                            default_materialization: smelt_core::Materialization::View,
-                            models: std::collections::HashMap::new(),
-                            python: None,
-                        }
-                    });
-                    let paths = config.paths.clone();
-
-                    // Scan project paths for this project
-                    for model_path in &paths {
+                    // Python discovery — kept inline; runs python_scan with
+                    // LSP-specific state (python_cache, python_model_sources)
+                    // and emits LSP diagnostics for execution errors. Not yet
+                    // shared with the CLI's run-Python pipeline.
+                    let config = &loaded.config;
+                    for model_path in &config.paths {
                         let models_path = project_root.join(model_path);
-                        match std::fs::read_dir(&models_path) {
-                            Ok(entries) => {
-                                for entry_result in entries {
-                                    match entry_result {
-                                        Ok(entry) => {
-                                            let entry_path = entry.path();
-                                            if entry_path.extension().and_then(|s| s.to_str())
-                                                == Some("sql")
-                                            {
-                                                match std::fs::read_to_string(&entry_path) {
-                                                    Ok(content) => {
-                                                        let paths = self
-                                                            .register_sql_content(
-                                                                &mut db,
-                                                                &entry_path,
-                                                                &content,
-                                                                &project_root,
-                                                            )
-                                                            .await;
-                                                        all_files.extend(paths);
-                                                    }
-                                                    Err(e) => {
-                                                        init_errors.model_errors.push(format!(
-                                                            "Failed to read {}: {}",
-                                                            entry_path.display(),
-                                                            e
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            init_errors.model_errors.push(format!(
-                                                "Failed to read directory entry in {}: {}",
-                                                models_path.display(),
-                                                e
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                // Not an error - model directory is optional
-                            }
-                            Err(e) => {
-                                init_errors.workspace_errors.push(format!(
-                                    "Failed to read {}: {}",
-                                    models_path.display(),
-                                    e
-                                ));
-                            }
-                        }
-
-                        // Discover Python models and register their generated SQL
-                        let context_json = build_python_context(&all_files, &config);
+                        let context_json = build_python_context(&all_files, config);
                         let mut cache = self.python_cache.lock().await;
                         *cache = PythonModelCache::load(&project_root);
                         let scan_result = crate::python_scan::discover_python_models(
@@ -1039,34 +1013,6 @@ impl LanguageServer for Backend {
                                     "Python model error in {}: {}",
                                     error.source_path.display(),
                                     error.message,
-                                ));
-                            }
-                        }
-                    }
-
-                    // Discover function definitions in <project_root>/functions/.
-                    // The CLI scans the same directory via
-                    // `Discovery::discover_function_files`; both share the
-                    // helper in `smelt_core::discover_function_file_paths` so
-                    // they stay in sync.
-                    for fn_path in smelt_core::discover_function_file_paths(&project_root) {
-                        match std::fs::read_to_string(&fn_path) {
-                            Ok(content) => {
-                                let paths = self
-                                    .register_sql_content(
-                                        &mut db,
-                                        &fn_path,
-                                        &content,
-                                        &project_root,
-                                    )
-                                    .await;
-                                all_files.extend(paths);
-                            }
-                            Err(e) => {
-                                init_errors.model_errors.push(format!(
-                                    "Failed to read {}: {}",
-                                    fn_path.display(),
-                                    e
                                 ));
                             }
                         }

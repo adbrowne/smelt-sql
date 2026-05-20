@@ -72,7 +72,11 @@ pub fn ingest_loaded_workspace(db: &mut Database, loaded: &LoadedWorkspace) -> I
 /// `smelt.config.load_yaml(...)` calls in generator files don't resolve in
 /// the LSP (one of the asymmetric-discovery bug classes the parity rule
 /// addresses).
-fn register_loader_files_from_disk(db: &mut Database, project_root: &Path) {
+///
+/// Exposed (`pub`) so the LSP — which has its own per-file ingest path via
+/// `register_sql_content` for multi-model line-offset tracking — can still
+/// register loader files the same way the CLI does.
+pub fn register_loader_files_from_disk(db: &mut Database, project_root: &Path) {
     for entry in WalkDir::new(project_root)
         .follow_links(true)
         .into_iter()
