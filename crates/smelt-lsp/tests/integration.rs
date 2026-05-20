@@ -3019,6 +3019,48 @@ sources:
         });
         assert!(has_def, "Should include CTE definition site in references");
     }
+
+    #[test]
+    fn test_find_function_call_sites_in_file_single() {
+        use smelt_db::references::find_function_call_sites_in_file;
+        let sql = "SELECT smelt.functions.sessionize(events => e) AS s FROM e";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_function_call_sites_in_file(&file, "sessionize");
+        assert_eq!(refs.len(), 1, "Expected one call site for sessionize");
+        let r = refs[0];
+        let text = &sql[usize::from(r.start())..usize::from(r.end())];
+        assert_eq!(text, "smelt.functions.sessionize");
+    }
+
+    #[test]
+    fn test_find_function_call_sites_in_file_multiple() {
+        use smelt_db::references::find_function_call_sites_in_file;
+        let sql =
+            "SELECT smelt.functions.foo(x => 1) AS a, smelt.functions.foo(x => 2) AS b FROM t";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_function_call_sites_in_file(&file, "foo");
+        assert_eq!(refs.len(), 2, "Expected two call sites for foo");
+    }
+
+    #[test]
+    fn test_find_function_call_sites_ignores_other_namespaces() {
+        use smelt_db::references::find_function_call_sites_in_file;
+        // `smelt.models.foo` is a 2-segment path; the helper's filter is
+        // segments == ["functions", name], so this must not match.
+        let sql = "SELECT * FROM smelt.models.foo";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_function_call_sites_in_file(&file, "foo");
+        assert!(
+            refs.is_empty(),
+            "Path refs in the models namespace must not be returned"
+        );
+    }
 }
 
 // =============================================================================
