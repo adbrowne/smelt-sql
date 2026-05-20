@@ -20,7 +20,9 @@ pub use config::{
     DataLatency, Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
     Materialization, ModelConfig, Target, Weekday,
 };
-pub use discovery::{discover_function_file_paths, ModelDiscovery, ModelFile, PythonModelQuery};
+pub use discovery::{
+    discover_function_file_paths, ModelDiscovery, ModelFile, ModelKind, PythonModelQuery,
+};
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{
     extract_file_metadata, ColumnMetadata, ColumnTest, FileMetadata, MetadataError, ModelMetadata,

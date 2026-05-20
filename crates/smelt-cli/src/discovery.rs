@@ -1,170 +1,95 @@
 use anyhow::{anyhow, Context, Result};
 pub use smelt_core::extract_refs;
 pub use smelt_core::RefInfo;
-use smelt_core::{
-    extract_file_metadata, FileMetadata, Materialization, ModelId, ModelMetadata, TestConfig,
-};
+use smelt_core::{extract_file_metadata, FileMetadata, Materialization, ModelId, ModelMetadata};
 use smelt_db::EmittedModelDef;
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::python::PythonModelQuery;
+// `ModelFile`, `ModelKind`, and `PythonModelQuery` are the canonical
+// definitions in `smelt-core`. Re-exported here so existing CLI imports
+// (`use crate::discovery::ModelFile`) continue to work unchanged.
+pub use smelt_core::{ModelFile, ModelKind};
 
-/// Whether a model comes from a SQL file or Python generation.
-#[derive(Debug, Clone)]
-pub enum ModelKind {
-    Sql,
-    Python {
-        source_line: usize,
-        queries: Vec<PythonModelQuery>,
-    },
-}
+/// Construct a virtual `ModelFile` from an `EmittedModelDef` survivor.
+///
+/// The `smelt_name` parameter is the pre-computed smelt-path for this
+/// emitted model (e.g. `"cohorts.us_west"`), obtained from
+/// `smelt_db::emitted_model_smelt_path`. The emitted model's SQL body is
+/// used as the model content and is parsed for refs.
+///
+/// The resulting `ModelFile` has a virtual `path` derived from the
+/// generator file path (since emitted models have no physical SQL file of
+/// their own). Its `metadata` carries the materialization and tags from
+/// the `EmittedModelDef`.
+///
+/// Free function (rather than `impl ModelFile`) because `EmittedModelDef`
+/// lives in `smelt-db`, which depends on `smelt-core` — placing the
+/// constructor here keeps the dependency direction clean.
+pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String) -> ModelFile {
+    // Parse the body text for ref extraction.
+    let content = emitted.body_text.clone();
+    let parse = smelt_parser::parse(&content);
+    let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+        extract_refs(&file)
+    } else {
+        Vec::new()
+    };
 
-#[derive(Debug, Clone)]
-pub struct ModelFile {
-    pub name: String,
-    /// Path used as the Salsa query key (virtual for multi-model files).
-    pub path: PathBuf,
-    pub content: String,
-    pub refs: Vec<RefInfo>,
-    pub parse_errors: Vec<smelt_parser::ParseError>,
-    /// Metadata extracted from YAML frontmatter
-    pub metadata: Option<Box<ModelMetadata>>,
-    /// Whether this model is from a SQL file or Python generation.
-    pub kind: ModelKind,
-    /// Canonical model identifier.
-    pub model_id: ModelId,
-    /// Address segments with scan-root prefix stripped, e.g. `["staging", "stg_events"]`
-    /// for `models/staging/stg_events.sql` under `paths: ["models"]`.
-    /// Empty if the scan root couldn't be determined.
-    /// The default DB table name is `address_segments.join("_")`.
-    pub address_segments: Vec<String>,
-}
-
-impl ModelFile {
-    /// Whether this model is a test.
-    pub fn is_test(&self) -> bool {
-        self.metadata
-            .as_ref()
-            .and_then(|m| m.materialization.as_ref())
-            .map(|m| *m == Materialization::Test)
-            .unwrap_or(false)
-    }
-
-    /// Get test configuration if this is a test model.
-    pub fn test_config(&self) -> Option<&TestConfig> {
-        self.metadata.as_ref().and_then(|m| m.test.as_ref())
-    }
-
-    /// The default database table name for this model: address segments joined
-    /// with `_`.  Falls back to `self.name` if `address_segments` is empty.
-    ///
-    /// Examples:
-    ///   - `["staging", "stg_events"]` → `"staging_stg_events"`
-    ///   - `["base"]` → `"base"`
-    ///   - `[]` (fallback) → `self.name`
-    pub fn db_name(&self) -> &str {
-        // address_segments is lazily computed; fall back to name if absent.
-        // We can't join here (returns String not &str), so callers that need
-        // a String should call `self.address_segments.join("_")` directly
-        // or use `db_name_owned()`.
-        if self.address_segments.is_empty() {
-            &self.name
+    // Build minimal metadata from emitted fields.
+    // Note: "incremental" is not a Materialization variant — it's a Table
+    // with an IncrementalConfig attached.
+    let materialization = match emitted.materialization.as_str() {
+        "table" | "incremental" => Some(Materialization::Table),
+        _ => Some(Materialization::View),
+    };
+    let metadata = Box::new(ModelMetadata {
+        name: Some(smelt_name.clone()),
+        generates: None,
+        materialization,
+        incremental: emitted.incremental_config.clone(),
+        target: None,
+        tags: emitted.tags.clone(),
+        owner: None,
+        description: if emitted.description.is_empty() {
+            None
         } else {
-            // Return the last segment as a fallback for &str API.
-            // Callers needing the full joined name must call db_name_owned().
-            self.address_segments
-                .last()
-                .map(|s| s.as_str())
-                .unwrap_or(&self.name)
-        }
-    }
+            Some(emitted.description.clone())
+        },
+        columns: std::collections::HashMap::new(),
+        backend_hints: std::collections::HashMap::new(),
+        test: None,
+        schema_evolution: None,
+        format: None,
+    });
 
-    /// The default database table name as an owned String.
-    pub fn db_name_owned(&self) -> String {
-        if self.address_segments.is_empty() {
-            self.name.clone()
-        } else {
-            self.address_segments.join("_")
-        }
-    }
+    // Virtual path: generator_file path with the model name appended as
+    // a virtual component so the Salsa key is unique per emission.
+    let virtual_path = emitted.generator_file.with_file_name(format!(
+        "{}::{}",
+        emitted
+            .generator_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("gen"),
+        smelt_name
+    ));
+    let model_id = ModelId::multi_model(emitted.generator_file.clone(), smelt_name.clone());
 
-    /// Construct a virtual `ModelFile` from an `EmittedModelDef` survivor.
-    ///
-    /// The `smelt_name` parameter is the pre-computed smelt-path for this
-    /// emitted model (e.g. `"cohorts.us_west"`), obtained from
-    /// `smelt_db::emitted_model_smelt_path`.  The emitted model's SQL body
-    /// is used as the model content and is parsed for refs.
-    ///
-    /// The resulting `ModelFile` has a virtual `path` derived from the
-    /// generator file path (since emitted models have no physical SQL file of
-    /// their own).  Its `metadata` carries the materialization and tags from
-    /// the `EmittedModelDef`.
-    pub fn from_emitted_def(emitted: &EmittedModelDef, smelt_name: String) -> Self {
-        // Parse the body text for ref extraction.
-        let content = emitted.body_text.clone();
-        let parse = smelt_parser::parse(&content);
-        let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
-            extract_refs(&file)
-        } else {
-            Vec::new()
-        };
+    // Address segments: smelt_name split by '.'
+    let address_segments: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
 
-        // Build minimal metadata from emitted fields.
-        // Note: "incremental" is not a Materialization variant — it's a Table
-        // with an IncrementalConfig attached.
-        let materialization = match emitted.materialization.as_str() {
-            "table" | "incremental" => Some(Materialization::Table),
-            _ => Some(Materialization::View),
-        };
-        let metadata = Box::new(ModelMetadata {
-            name: Some(smelt_name.clone()),
-            generates: None,
-            materialization,
-            incremental: emitted.incremental_config.clone(),
-            target: None,
-            tags: emitted.tags.clone(),
-            owner: None,
-            description: if emitted.description.is_empty() {
-                None
-            } else {
-                Some(emitted.description.clone())
-            },
-            columns: std::collections::HashMap::new(),
-            backend_hints: std::collections::HashMap::new(),
-            test: None,
-            schema_evolution: None,
-            format: None,
-        });
-
-        // Virtual path: generator_file path with the model name appended as
-        // a virtual component so the Salsa key is unique per emission.
-        let virtual_path = emitted.generator_file.with_file_name(format!(
-            "{}::{}",
-            emitted
-                .generator_file
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("gen"),
-            smelt_name
-        ));
-        let model_id = ModelId::multi_model(emitted.generator_file.clone(), smelt_name.clone());
-
-        // Address segments: smelt_name split by '.'
-        let address_segments: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
-
-        Self {
-            name: smelt_name,
-            path: virtual_path,
-            content,
-            refs,
-            parse_errors: parse.errors,
-            metadata: Some(metadata),
-            kind: ModelKind::Sql,
-            model_id,
-            address_segments,
-        }
+    ModelFile {
+        name: smelt_name,
+        path: virtual_path,
+        content,
+        refs,
+        parse_errors: parse.errors,
+        metadata: Some(metadata),
+        kind: ModelKind::Sql,
+        model_id,
+        address_segments,
     }
 }
 

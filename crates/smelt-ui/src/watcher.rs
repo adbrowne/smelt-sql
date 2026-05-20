@@ -128,20 +128,11 @@ async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -
         db.set_workspace(source_files, vec![project]);
     }
 
-    // Rebuild dependency graph
+    // Rebuild dependency graph. `models` is `Vec<smelt_core::ModelFile>` so
+    // the previous field-by-field rebuild is redundant since the type was
+    // unified; just clone the slice.
     let sources = smelt_core::SourcesConfig::load(project_dir).ok();
-    let core_models: Vec<smelt_core::ModelFile> = models
-        .iter()
-        .map(|m| smelt_core::ModelFile {
-            name: m.name.clone(),
-            path: m.path.clone(),
-            content: m.content.clone(),
-            refs: m.refs.clone(),
-            parse_errors: m.parse_errors.clone(),
-            metadata: m.metadata.clone(),
-            model_id: m.model_id.clone(),
-        })
-        .collect();
+    let core_models: Vec<smelt_core::ModelFile> = models.iter().cloned().collect();
 
     if let Ok(new_graph) = DependencyGraph::build(core_models, sources.as_ref()) {
         let mut graph = state.graph.lock().await;

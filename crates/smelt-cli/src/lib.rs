@@ -236,7 +236,7 @@ pub fn discover_emitted_model_files(
 
         origins.insert(smelt_name.clone(), (gen_rel, emitted.name.clone()));
 
-        let mf = ModelFile::from_emitted_def(emitted, smelt_name);
+        let mf = crate::discovery::model_file_from_emitted_def(emitted, smelt_name);
         model_files.push(mf);
     }
 

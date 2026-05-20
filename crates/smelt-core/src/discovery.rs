@@ -24,6 +24,16 @@ pub struct PythonModelQuery {
     pub directory: Option<String>,
 }
 
+/// Whether a model comes from a SQL file or Python generation.
+#[derive(Debug, Clone)]
+pub enum ModelKind {
+    Sql,
+    Python {
+        source_line: usize,
+        queries: Vec<PythonModelQuery>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelFile {
     pub name: String,
@@ -34,8 +44,15 @@ pub struct ModelFile {
     pub parse_errors: Vec<smelt_parser::ParseError>,
     /// Metadata extracted from YAML frontmatter
     pub metadata: Option<Box<ModelMetadata>>,
+    /// Whether this model is from a SQL file or Python generation.
+    pub kind: ModelKind,
     /// Canonical model identifier.
     pub model_id: ModelId,
+    /// Address segments with scan-root prefix stripped, e.g. `["staging", "stg_events"]`
+    /// for `models/staging/stg_events.sql` under `paths: ["models"]`.
+    /// Empty if the scan root couldn't be determined.
+    /// The default DB table name is `address_segments.join("_")`.
+    pub address_segments: Vec<String>,
 }
 
 impl ModelFile {
@@ -51,6 +68,39 @@ impl ModelFile {
     /// Get test configuration if this is a test model.
     pub fn test_config(&self) -> Option<&TestConfig> {
         self.metadata.as_ref().and_then(|m| m.test.as_ref())
+    }
+
+    /// The default database table name for this model: address segments joined
+    /// with `_`. Falls back to `self.name` if `address_segments` is empty.
+    ///
+    /// Examples:
+    ///   - `["staging", "stg_events"]` → `"staging_stg_events"`
+    ///   - `["base"]` → `"base"`
+    ///   - `[]` (fallback) → `self.name`
+    pub fn db_name(&self) -> &str {
+        // address_segments is lazily computed; fall back to name if absent.
+        // We can't join here (returns String not &str), so callers that need
+        // a String should call `self.address_segments.join("_")` directly
+        // or use `db_name_owned()`.
+        if self.address_segments.is_empty() {
+            &self.name
+        } else {
+            // Return the last segment as a fallback for &str API.
+            // Callers needing the full joined name must call db_name_owned().
+            self.address_segments
+                .last()
+                .map(|s| s.as_str())
+                .unwrap_or(&self.name)
+        }
+    }
+
+    /// The default database table name as an owned String.
+    pub fn db_name_owned(&self) -> String {
+        if self.address_segments.is_empty() {
+            self.name.clone()
+        } else {
+            self.address_segments.join("_")
+        }
     }
 }
 
@@ -175,7 +225,9 @@ impl ModelDiscovery {
                         refs,
                         parse_errors: parse.errors,
                         metadata: Some(Box::new(section.metadata)),
+                        kind: ModelKind::Sql,
                         model_id,
+                        address_segments: Vec::new(),
                     });
                 }
                 Ok(result)
@@ -213,7 +265,9 @@ impl ModelDiscovery {
                     refs,
                     parse_errors: parse.errors,
                     metadata: model_metadata,
+                    kind: ModelKind::Sql,
                     model_id,
+                    address_segments: Vec::new(),
                 }])
             }
         }
