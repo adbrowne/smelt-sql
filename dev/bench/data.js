@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779277538191,
+  "lastUpdate": 1779277540961,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -22358,6 +22358,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 22.608038820409096,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3b0b0efcb15c01218bf235bb9ae9a085dae1c56a",
+          "message": "Merge pull request #121 from adbrowne/worktree-web_analytics\n\nweb_analytics example — datagen extensions + bronze/silver pipeline (Phases 1-4)",
+          "timestamp": "2026-05-20T21:42:05+10:00",
+          "tree_id": "9a62501b6ad04cfd5f83a12d565b361e77e7d383",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3b0b0efcb15c01218bf235bb9ae9a085dae1c56a"
+        },
+        "date": 1779277540245,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.7051923089456,
             "unit": "MB/s"
           }
         ]
