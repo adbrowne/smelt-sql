@@ -260,6 +260,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 4. **Column completion includes types.** Completion items for columns include the inferred type as a detail label. If the type is unknown, the label is omitted.
 5. **Code action "Create model" generates a SQL skeleton.** The generated file is a minimal valid smelt SQL model; it does not include frontmatter beyond the defaults.
 6. **Workspace loading is shared with the CLI.** `Backend::initialize` consumes `smelt_core::workspace::load_workspace` and `smelt_db::workspace_ingest::ingest_loaded_workspace` — see `docs/specs/architecture.md` → "Workspace loading parity rule (CLI ↔ LSP)". The standing safety net is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example workspace and asserts no diagnostics.
+7. **A VSCode workspace folder may contain multiple smelt projects.** `find_smelt_projects` discovers them recursively; each project is a closed resolution scope (no cross-project `smelt.<path>` resolution). See `docs/specs/architecture.md` → "Project isolation rule".
 
 ## Known Divergences / Open Questions
 

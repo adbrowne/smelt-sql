@@ -226,6 +226,22 @@ This covers: SQL models under `config.paths`, function definitions under the har
 
 The standing CI gate is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example workspace and asserts zero diagnostics. Always run this when touching LSP startup, CLI discovery, or `smelt-core::workspace`.
 
+### Project Isolation Rule
+
+**A workspace folder may contain multiple smelt projects. Each project is a closed resolution scope: a `smelt.<path>` reference inside project A resolves only against entities declared inside project A.**
+
+This is an architectural invariant. `find_smelt_projects` discovers projects recursively from any workspace folder root (the LSP loads a monorepo with `examples/web_analytics/`, `examples/functions_demo/`, etc. all in one VSCode window). Same-name collisions across projects are independent, not errors — `smelt.functions.sessionize` in `web_analytics` and `smelt.functions.sessionize` in `functions_demo` are different functions with different signatures, and each call site sees only its own project's definition.
+
+**Why this matters:** Resolvers that walk `workspace.files(db)` flat (no project filter) leak signatures between projects. The bug class first surfaced as a spurious `Missing required argument` on `examples/web_analytics/models/silver/sessions.sql` when VSCode opened the entire worktree — `resolve_function("sessionize")` returned `functions_demo`'s signature (alphabetically first), which has different parameter names. CLI test suites missed it because each `--test example_diagnostics` case ingests one project at a time. See `docs/specs/architecture.md` → "Project isolation rule" for the normative spec.
+
+**The rule in practice:**
+- **DO** thread `ProjectInput` through any Salsa query that takes `workspace: Workspace` and walks `workspace.files(db)` to resolve a name.
+- **DO** derive the project from the file under analysis: `source_file.project_root(db)` → `find_project(workspace, root)` → `ProjectInput`.
+- **DON'T** add a workspace-flat resolver helper; if you need cross-project information later, make it opt-in (future `dependencies:` declaration in `smelt.yml`).
+- **DON'T** assume a workspace folder is one project — `find_smelt_projects` may return 0..N projects.
+
+The standing CI gate is a multi-project case in `cargo test -p smelt-lsp --test example_workspaces` that opens the entire `examples/` directory as one workspace folder.
+
 ### Key Dependencies
 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)
