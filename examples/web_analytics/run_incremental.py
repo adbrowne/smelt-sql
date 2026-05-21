@@ -8,15 +8,16 @@ What this script does, in order:
   3. Materialise the raw.* source tables in target/dev.duckdb via
      setup_sources.sql (DuckDB CLI).
   4. Loop day-by-day across the datagen window, invoking
-        smelt run --event-time-start D-1 --event-time-end D+1
-     once per day.  The 2-day window honours the 1-day lookback that
-     gold/identity_forward_only and silver/sessions need to catch
-     cross-midnight sessions / late-arriving signins.
+        smelt run --event-time-start D --event-time-end D+1
+     once per day.  The driver passes a single-day window; models that
+     need a wider source read (e.g. gold/identity_forward_only, which
+     carries a Form B BETWEEN filter on event_date) have that lookback
+     derived automatically by the planner.
   5. Finish with `smelt test` so all inline invariants are exercised
      against the final cumulative state.
 
 Per-iteration output is one structured line of the shape
-    [day N/total] YYYY-MM-DD  smelt run [prev=YYYY-MM-DD next=YYYY-MM-DD]  W.Xs
+    [day N/total] YYYY-MM-DD  smelt run [start=YYYY-MM-DD end=YYYY-MM-DD]  W.Xs
 plus a final summary block.  Non-zero exit on any subprocess failure.
 
 Requires: smelt-datagen and smelt on PATH; duckdb on PATH; Python 3.9+.
@@ -177,14 +178,14 @@ def main() -> int:
     iter_reports: list[IterReport] = []
     loop_t0 = time.monotonic()
     for idx, day in enumerate(days, start=1):
-        window_start = day - timedelta(days=1)
+        window_start = day
         window_end = day + timedelta(days=1)
         t0 = time.monotonic()
         smelt_run_window(window_start, window_end)
         elapsed = time.monotonic() - t0
         print(
             f"[day {idx:>2}/{len(days)}] {day.isoformat()}  "
-            f"smelt run [prev={window_start.isoformat()} next={window_end.isoformat()}]  "
+            f"smelt run [start={window_start.isoformat()} end={window_end.isoformat()}]  "
             f"{elapsed:.1f}s"
         )
         iter_reports.append(

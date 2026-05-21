@@ -9,8 +9,9 @@ table so the algorithmic tradeoff is observable row-by-row.
 Every model that has a natural time dimension is incremental, partitioned by
 day. The pipeline is driven by `run_incremental.py`, which generates data and
 then walks the datagen window day-by-day, invoking `smelt run` per day with a
-2-day window to honour the 1-day lookback the session and forward-only models
-need.
+single-day `[D, D+1)` window. Models that need a wider source read (such as
+`gold/identity_forward_only`) declare their lookback via a Form B date filter
+in their SQL body; the planner derives the bound automatically.
 
 ## Reference
 
@@ -82,7 +83,7 @@ Source files:
   [`functions/parse_event_payload.sql`](functions/parse_event_payload.sql)
 - [`models/silver/sessions.sql`](models/silver/sessions.sql) +
   [`functions/sessionize.sql`](functions/sessionize.sql) +
-  [`functions/compute_session_start_date.sql`](functions/compute_session_start_date.sql)
+  [`functions/compute_session_start_date.sql`](functions/compute_session_start_date.sql) (see [Known divergences](#known-divergences))
 - [`models/silver/device_user_edges.sql`](models/silver/device_user_edges.sql)
 - [`models/silver/device_user_edges_cumulative.sql`](models/silver/device_user_edges_cumulative.sql)
 - [`models/gold/identity_forward_only.sql`](models/gold/identity_forward_only.sql)
@@ -123,14 +124,22 @@ re-evaluated on every query against `gold/eventstream_with_identity`.
 `marts/identity_method_comparison` is a 3-row global aggregation with no time
 dimension, so no `partition_column` exists; it stays a view too.
 
-### Why the driver runs a 2-day window
+### Why the driver passes a single-day window
 
 `gold/identity_forward_only` is incremental by `session_start_date`. A session
 that started yesterday but received its latest signed-in event today should
-have its mapping refreshed. The driver achieves this by always running
-`smelt run --event-time-start D-1 --event-time-end D+1`, so day D's iteration
-re-resolves both today's and yesterday's session-start partitions. The 2-day
-window catches:
+have its mapping refreshed. The model declares this need via an explicit Form B
+date filter on the `events_parsed` join:
+
+```sql
+WHERE e.event_date
+    BETWEEN s.session_start_date - INTERVAL '1 day'
+        AND s.session_start_date + INTERVAL '1 day'
+```
+
+The planner reads this filter and widens the `events_parsed` source read by 1
+calendar day automatically, so the driver only needs to pass `[D, D+1)` per
+iteration. The filter catches:
 
 - sessions whose latest signed-in event arrives one day after session start
 - sessions straddling midnight (the 30-minute inactivity rule still applies)
@@ -187,17 +196,19 @@ python run_incremental.py --scale-factor 0.01
 Default behaviour: wipe `target/dev.duckdb`, regenerate data via
 `smelt-datagen`, materialise the raw source tables via `setup_sources.sql`,
 then loop day-by-day across the datagen window (2026-03-19 .. 2026-05-17 by
-default, 60 days). Each iteration invokes `smelt run --event-time-start D-1
---event-time-end D+1`. After the loop the script runs `smelt test` so all
-inline invariants are checked against the final cumulative state.
+default, 60 days). Each iteration invokes `smelt run --event-time-start D
+--event-time-end D+1`; models with Form B filters (e.g.
+`gold/identity_forward_only`) have their source reads widened automatically by
+the planner. After the loop the script runs `smelt test` so all inline
+invariants are checked against the final cumulative state.
 
 Per-iteration output:
 
 ```
 [datagen] 0.2s
 [setup] 0.1s
-[day  1/60] 2026-03-19  smelt run [prev=2026-03-18 next=2026-03-20]  0.2s
-[day  2/60] 2026-03-20  smelt run [prev=2026-03-19 next=2026-03-21]  0.2s
+[day  1/60] 2026-03-19  smelt run [start=2026-03-19 end=2026-03-20]  0.2s
+[day  2/60] 2026-03-20  smelt run [start=2026-03-20 end=2026-03-21]  0.2s
 ...
 [tests] 0.1s
 
@@ -340,6 +351,29 @@ cases rather than aggregate statistics.
   (`raw ≤ forward_only ≤ backward_fill ≤ connected_components`) and the
   per-day `dau_*` shape including the cluster-collapse case where
   `dau_connected_components < dau_backward_fill` (Day 2 of the fixture).
+
+## Known divergences
+
+### `compute_session_start_date.sql` is retained
+
+`silver/sessions.sql` would ideally inline `FIRST_VALUE(event_ts) OVER
+(PARTITION BY device_id, session_seq ORDER BY event_ts) AS session_start_date`
+directly. However, the planner's batch-safety classifier admits an `OVER`
+clause only when its `PARTITION BY` list includes the model's
+`partition_column`. For `silver/sessions` the `partition_column` is
+`session_start_date`, but `session_start_date` is the *output* of the window
+function — it cannot appear in that same OVER's PARTITION BY. The inlined
+shape therefore fails the safety check and the model would be refused
+incrementality.
+
+`functions/compute_session_start_date.sql` hides the `OVER` inside a
+transparent function body, which the outer-body safety scan does not reach.
+The file exists solely to keep `silver/sessions` classified as incremental
+until the planner gains the ability to admit `OVER` clauses whose PARTITION
+BY keys *determine* the partition_column (i.e., `{device_id, session_seq}`
+is a functional determinant of `session_start_date`). That classifier
+improvement is tracked separately and does not block any other part of this
+pipeline.
 
 ## How this example was built
 

@@ -22,9 +22,14 @@ timeseries:
 -- is resolved independently from its own events.
 --
 -- session_start_date is the incremental partition_column; it appears in
--- both the SELECT list and the GROUP BY.  The 1-day driver lookback (run
--- with --event-time-start D-1 --event-time-end D+1) catches sessions whose
--- latest signed-in event arrives the day after session start.
+-- both the SELECT list and the GROUP BY.
+--
+-- Form B date filter: the WHERE clause constrains events_parsed to the
+-- 1-day window around session_start_date so the planner can derive the
+-- lookback bound automatically and the driver only needs to pass a
+-- single-day [D, D+1) window per iteration.  A signed-in event that
+-- arrives more than 1 calendar day after session_start_date is excluded
+-- by this filter; that is the accepted accuracy/simplicity trade-off.
 SELECT
     s.session_id,
     s.session_start_date,
@@ -34,4 +39,7 @@ JOIN smelt.silver.events_parsed e
     ON e.device_id = s.device_id
    AND e.event_ts >= s.session_start
    AND e.event_ts <= s.session_end
+WHERE e.event_date
+    BETWEEN s.session_start_date - INTERVAL '1 day'
+        AND s.session_start_date + INTERVAL '1 day'
 GROUP BY s.session_id, s.session_start_date
