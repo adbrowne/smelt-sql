@@ -8,17 +8,29 @@ timeseries:
   granularity: day
 ---
 -- One row per session under the 30-minute inactivity + platform-boundary rule.
--- Both window expressions (LAG for boundary detection in sessionize, FIRST_VALUE
--- for the per-session start_date in compute_session_start_date) live inside
--- transparent functions, so this model's outer body has no OVER clause.  That
--- is required for the planner to classify it as FullyBatchSafe and execute it
--- as a real incremental DELETE+INSERT per partition; an outer OVER would trip
--- the safety check and silently downgrade the model to full-rebuild.
 --
--- session_start_date is the partition_column; it must appear in both the
--- SELECT list and the GROUP BY for the optimizer to inject the time filter.
+-- session_start_date — the partition_column — is computed via GROUP BY in the
+-- session_starts CTE (one row per session with the earliest event's date) and
+-- joined back into the outer SELECT.  This expresses the safety property
+-- structurally: session_start_date is a function of (device_id, session_seq),
+-- and the outer body groups by all three so the time-filter injection works.
+-- No window function appears in the outer body; the LAG inside sessionize is
+-- hidden by function expansion.
+--
+-- An earlier shape used FIRST_VALUE OVER inside a transparent function to
+-- compute session_start_date; both forms produce identical output.  The
+-- GROUP BY form is preferred because the safety property is visible in the
+-- outer SQL.
 WITH sessionized AS (
-    SELECT *
+    -- Columns projected explicitly so the type checker resolves them on
+    -- references from outer CTEs / SELECTs; SELECT * through a TableExpr-
+    -- returning function is currently opaque to the type checker.
+    SELECT
+        device_id,
+        event_ts,
+        event_date,
+        platform,
+        session_seq
     FROM smelt.functions.sessionize(
         source => smelt.silver.events_parsed,
         partition_col => device_id,
@@ -26,29 +38,25 @@ WITH sessionized AS (
         platform_col => platform
     )
 ),
-with_start_date AS (
+session_starts AS (
     SELECT
         device_id,
-        event_ts,
-        event_date,
-        platform,
         session_seq,
-        session_start_date
-    FROM smelt.functions.compute_session_start_date(
-        source => sessionized,
-        partition_col => device_id,
-        session_seq_col => session_seq,
-        ts_col => event_ts
-    )
+        CAST(MIN(event_ts) AS DATE) AS session_start_date
+    FROM sessionized
+    GROUP BY device_id, session_seq
 )
 SELECT
-    CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_seq AS VARCHAR), '-', CAST(MIN(event_ts) AS VARCHAR)) AS session_id,
-    device_id,
-    session_seq,
-    MIN(event_ts) AS session_start,
-    MAX(event_ts) AS session_end,
-    session_start_date,
+    CONCAT(CAST(s.device_id AS VARCHAR), '-', CAST(s.session_seq AS VARCHAR), '-', CAST(MIN(s.event_ts) AS VARCHAR)) AS session_id,
+    s.device_id,
+    s.session_seq,
+    MIN(s.event_ts) AS session_start,
+    MAX(s.event_ts) AS session_end,
+    ss.session_start_date,
     COUNT(*) AS event_count,
-    ANY_VALUE(platform) AS platform
-FROM with_start_date
-GROUP BY device_id, session_seq, session_start_date
+    ANY_VALUE(s.platform) AS platform
+FROM sessionized s
+JOIN session_starts ss
+    ON s.device_id = ss.device_id
+   AND s.session_seq = ss.session_seq
+GROUP BY s.device_id, s.session_seq, ss.session_start_date
