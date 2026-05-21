@@ -1,8 +1,10 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
+use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
 use crate::analysis::{analyze_select, SelectItemKind};
-use crate::graph::ModelInfo;
+use crate::graph::{ModelGraph, ModelInfo};
 use crate::types::{Opportunity, OpportunityData, Transformation};
 
 /// Non-deterministic function names that produce different results on each run.
@@ -518,6 +520,50 @@ fn has_keyword_at_boundary(upper_sql: &str, keyword: &str) -> bool {
         }
     }
     false
+}
+
+/// Derive per-source bounds for an incremental model using the model graph.
+///
+/// Builds a `BoundContext` from the model's upstream refs (only those with
+/// `timeseries:` declared are included; lookup sources are skipped).
+/// Returns the per-source bound map from `derive_model_bounds`.
+///
+/// Also returns `Err(diagnostic)` when any bound is `NotDerivable` — that
+/// triggers the same refusal path as a failed safety check.
+pub fn derive_model_source_bounds(
+    model: &ModelInfo,
+    graph: &ModelGraph,
+) -> Result<HashMap<String, BoundResult>, String> {
+    // Build the context: map ref name → partition_column for timeseries refs.
+    let mut ctx = BoundContext::new();
+    for ref_name in &model.refs {
+        if let Some(upstream) = graph.get(ref_name) {
+            if let Some(ts) = &upstream.timeseries_config {
+                ctx.add_source(ref_name, &ts.partition_column);
+            }
+            // Lookup sources (no timeseries) are silently skipped.
+        }
+    }
+
+    let stripped = crate::types::Frontmatter::strip(&model.sql);
+    let bounds = derive_model_bounds(stripped, &ctx);
+
+    // Check for NotDerivable — refuse the model.
+    for (source_name, bound) in &bounds {
+        if *bound == BoundResult::NotDerivable {
+            return Err(format!(
+                "Model '{}': cannot derive a temporal bound for source '{}'. \
+                 The SQL contains a window function (e.g. LAG/LEAD) without an explicit \
+                 RANGE BETWEEN INTERVAL clause. Rewrite using Form A \
+                 (RANGE BETWEEN INTERVAL '...' PRECEDING) or Form B \
+                 (WHERE col BETWEEN expr - INTERVAL '...' AND expr) to make the \
+                 lookback derivable, or remove the temporal dependency.",
+                model.name, source_name
+            ));
+        }
+    }
+
+    Ok(bounds)
 }
 
 /// Produce a SetIncremental transformation for a model.

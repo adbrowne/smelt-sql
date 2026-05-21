@@ -1,3 +1,4 @@
+pub mod source_bounds;
 pub mod temporal;
 
 use serde::Serialize;

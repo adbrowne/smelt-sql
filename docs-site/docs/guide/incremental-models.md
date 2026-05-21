@@ -266,6 +266,82 @@ SUM(amount) OVER (ORDER BY event_ts) AS running_total
 
 Use `safety_overrides.allow_window_functions: true` for windows that cannot be partition-aligned and that you have verified are safe in your specific context.
 
+## Per-source lookback derivation
+
+For each upstream `smelt.<path>` reference in an incremental model body, the planner derives how far outside the run window that source must be read. This **bound** has the form `(before, after)`: read the source starting `before` seconds before the run start and ending `after` seconds after the run end.
+
+The planner recognises two standard SQL forms:
+
+### Form A — window-frame `RANGE BETWEEN INTERVAL`
+
+When a window function uses an explicit `RANGE BETWEEN INTERVAL '…' PRECEDING` clause, the interval becomes the source's lookback:
+
+```sql
+SELECT
+    device_id,
+    event_ts,
+    LAG(event_ts) OVER (
+        PARTITION BY device_id
+        ORDER BY event_ts
+        RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW
+    ) AS prev_ts
+FROM smelt.silver.events_parsed
+```
+
+The planner reads `INTERVAL '30 minutes' PRECEDING` and derives `before = PT30M` for `events_parsed`.
+
+A bare `LAG(x) OVER (PARTITION BY id ORDER BY ts)` without a `RANGE BETWEEN` clause is **not derivable** — the planner cannot determine the lookback and will refuse the model at planning time. Rewrite it with an explicit `RANGE BETWEEN INTERVAL '…' PRECEDING` clause.
+
+### Form B — explicit WHERE/JOIN interval filters
+
+When the model's WHERE clause or a JOIN condition contains an explicit `INTERVAL` offset on a source column, the interval becomes the source's bound:
+
+```sql
+-- Same-column lookback: reads 1 day before the run window
+WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1 day' AND m.partition_date
+```
+
+```sql
+-- Cross-column rebase: UTC timestamps into local-date partitions
+WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL '1 day'
+                          AND m.event_date_local + INTERVAL '1 day'
+```
+
+Both `BETWEEN` form and paired `>=` / `<` form are read:
+
+```sql
+WHERE s.event_date >= m.partition_date - INTERVAL '1 day'
+  AND s.event_date < m.partition_date
+```
+
+### Viewing derived bounds
+
+Run `smelt explain --json` to see the derived bound map for each incremental model:
+
+```bash
+smelt explain --json | jq '.models.sessions.incremental.source_bounds'
+```
+
+Example output:
+```json
+{
+  "events_parsed": {
+    "type": "bounded",
+    "partition_col": "event_date",
+    "before": "PT0S",
+    "after": "PT0S"
+  }
+}
+```
+
+Durations use ISO-8601 format: `PT30M` (30 minutes), `P1D` (1 day), `PT0S` (zero / partition-local).
+
+### When the bound is not derivable
+
+If the planner cannot derive a bound for a source — a bare window function without a `RANGE` clause, or a computed-expression join with no explicit interval filter — the model is **refused at planning time** with a diagnostic naming the offending source. Rewrite using Form A or Form B to give the planner enough information to prove the lookback.
+
+Sources without `timeseries:` declared (lookup tables, dimension tables) are always read in full and do not appear in the bound map.
+
 ## Batching
 
 When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.

@@ -159,6 +159,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         sources.as_ref(),
         &requested_range,
         &backfill_options,
+        args.allow_downgrade,
     )
     .with_context(|| "Failed to compute backbuild plans")?;
 

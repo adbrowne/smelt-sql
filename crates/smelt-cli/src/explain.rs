@@ -1,11 +1,11 @@
 use crate::discovery::ModelFile;
-use crate::logical_graph::LogicalGraph;
+use crate::logical_graph::{LogicalGraph, LogicalNode};
 use crate::physical_graph::{PhysicalGraph, PhysicalStrategy};
 use anyhow::Result;
 use serde::Serialize;
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
-use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
 use std::collections::BTreeMap;
 
 /// Top-level JSON output for `smelt explain --json`.
@@ -44,6 +44,27 @@ pub struct ExplainIncremental {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unique_key: Vec<String>,
     pub batch_safety: String,
+    /// Per-source bound map derived from the model's SQL.
+    /// Maps source name → bound result. Only timeseries sources appear;
+    /// lookup sources (no `timeseries:`) are absent.
+    /// Omitted when the model has no timeseries upstream refs.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_bounds: BTreeMap<String, SourceBoundJson>,
+}
+
+/// JSON shape for one source's bound in `smelt explain --json`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SourceBoundJson {
+    Bounded {
+        partition_col: String,
+        /// ISO-8601 duration (e.g. "P1D", "PT30M", "PT0S").
+        before: String,
+        /// ISO-8601 duration.
+        after: String,
+    },
+    Unbounded,
+    NotDerivable,
 }
 
 /// Physical execution plan section of explain output.
@@ -82,12 +103,15 @@ pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
         let incremental = match (&node.incremental, &node.timeseries) {
             (Some(inc), Some(ts)) => {
                 let batch_safety = compute_batch_safety_label(&node.name, model_file, inc, ts);
+                let source_bounds =
+                    compute_source_bounds_for_node(node, &model_file.content, graph);
                 Some(ExplainIncremental {
                     granularity: ts.granularity.clone(),
                     partition_column: ts.partition_column.clone(),
                     event_time_column: ts.event_time_column.clone(),
                     unique_key: inc.unique_key.clone(),
                     batch_safety,
+                    source_bounds,
                 })
             }
             _ => None,
@@ -186,6 +210,48 @@ pub fn build_physical_explain(physical: &PhysicalGraph, logical: &LogicalGraph) 
         ephemerals,
         transformations,
     }
+}
+
+/// Derive per-source bounds for a node's incremental model using the logical graph
+/// to resolve upstream timeseries configs.
+fn compute_source_bounds_for_node(
+    node: &LogicalNode,
+    sql: &str,
+    graph: &LogicalGraph,
+) -> BTreeMap<String, SourceBoundJson> {
+    use smelt_planner::analysis::source_bounds::derive_model_bounds;
+    use smelt_planner::Frontmatter;
+
+    let mut ctx = BoundContext::new();
+    for dep_name in &node.dependencies {
+        if let Ok(upstream) = graph.get_node(dep_name) {
+            if let Some(ts) = &upstream.timeseries {
+                ctx.add_source(dep_name, &ts.partition_column);
+            }
+        }
+    }
+
+    let stripped = Frontmatter::strip(sql);
+    let raw_bounds = derive_model_bounds(stripped, &ctx);
+
+    let mut result = BTreeMap::new();
+    for (source_name, bound) in raw_bounds {
+        let json = match bound {
+            BoundResult::Bounded {
+                source_partition_col,
+                before,
+                after,
+            } => SourceBoundJson::Bounded {
+                partition_col: source_partition_col,
+                before: before.to_iso8601(),
+                after: after.to_iso8601(),
+            },
+            BoundResult::Unbounded => SourceBoundJson::Unbounded,
+            BoundResult::NotDerivable => SourceBoundJson::NotDerivable,
+        };
+        result.insert(source_name, json);
+    }
+    result
 }
 
 fn compute_batch_safety_label(

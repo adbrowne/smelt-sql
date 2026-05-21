@@ -183,6 +183,12 @@ struct BackbuildArgs {
     /// Force per-partition execution (one query per granularity period)
     #[arg(long = "per-partition")]
     per_partition: bool,
+
+    /// Allow incremental models that fail bound derivation to fall back to
+    /// full-table refresh instead of being refused at planning time.
+    /// Use this only as a temporary escape hatch while fixing the model SQL.
+    #[arg(long = "allow-downgrade")]
+    allow_downgrade: bool,
 }
 
 #[derive(Parser)]

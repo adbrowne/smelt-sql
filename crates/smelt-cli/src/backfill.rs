@@ -9,7 +9,10 @@ use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, IncrementalConfig};
-use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
+use smelt_planner::{
+    analyze_batch_safety, derive_model_source_bounds, BatchSafety, ModelGraph, ModelInfo,
+};
+use tracing::warn;
 
 use crate::logical_graph::LogicalGraph;
 use crate::temporal::compute_incremental_windows;
@@ -60,6 +63,7 @@ pub fn compute_range_run_plans(
     sources: Option<&smelt_core::SourcesConfig>,
     requested_range: &TimeRange,
     options: &BackfillOptions,
+    allow_downgrade: bool,
 ) -> Result<Vec<ModelBackfillPlan>> {
     let mut plans = Vec::new();
 
@@ -72,17 +76,27 @@ pub fn compute_range_run_plans(
         let refs = graph.get_upstream(model_name);
         let ts_config = node.timeseries.clone();
         let plan = match (inc_config, ts_config) {
-            (Some(ref inc), Some(ref ts)) => compute_model_backfill_plan(
-                model_name,
-                &model.content,
-                refs,
-                inc,
-                ts,
-                sources,
-                model.metadata.as_ref().map(|b| b.as_ref()),
-                requested_range,
-                options,
-            )?,
+            (Some(ref inc), Some(ref ts)) => {
+                // Constraint 10: derive per-source bounds; refuse on NotDerivable.
+                check_model_source_bounds(
+                    model_name,
+                    &model.content,
+                    &refs,
+                    graph,
+                    allow_downgrade,
+                )?;
+                compute_model_backfill_plan(
+                    model_name,
+                    &model.content,
+                    refs,
+                    inc,
+                    ts,
+                    sources,
+                    model.metadata.as_ref().map(|b| b.as_ref()),
+                    requested_range,
+                    options,
+                )?
+            }
             _ => ModelBackfillPlan {
                 model_name: model_name.clone(),
                 partition_range: requested_range.clone(),
@@ -110,6 +124,7 @@ pub fn compute_backbuild_plans(
     sources: Option<&smelt_core::SourcesConfig>,
     requested_range: &TimeRange,
     options: &BackfillOptions,
+    allow_downgrade: bool,
 ) -> Result<Vec<ModelBackfillPlan>> {
     // Build model ranges: start with the target's requested range,
     // then expand upstream ranges based on temporal dependencies.
@@ -184,17 +199,27 @@ pub fn compute_backbuild_plans(
         let refs = graph.get_upstream(model_name);
         let ts_config = node.timeseries.clone();
         let plan = match (inc_config, ts_config) {
-            (Some(ref inc), Some(ref ts)) => compute_model_backfill_plan(
-                model_name,
-                &model.content,
-                refs,
-                inc,
-                ts,
-                sources,
-                model.metadata.as_ref().map(|b| b.as_ref()),
-                range,
-                options,
-            )?,
+            (Some(ref inc), Some(ref ts)) => {
+                // Constraint 10: derive per-source bounds; refuse on NotDerivable.
+                check_model_source_bounds(
+                    model_name,
+                    &model.content,
+                    &refs,
+                    graph,
+                    allow_downgrade,
+                )?;
+                compute_model_backfill_plan(
+                    model_name,
+                    &model.content,
+                    refs,
+                    inc,
+                    ts,
+                    sources,
+                    model.metadata.as_ref().map(|b| b.as_ref()),
+                    range,
+                    options,
+                )?
+            }
             _ => ModelBackfillPlan {
                 model_name: model_name.clone(),
                 partition_range: range.clone(),
@@ -209,6 +234,83 @@ pub fn compute_backbuild_plans(
     }
 
     Ok(plans)
+}
+
+/// Build a `ModelGraph` containing the given model and its direct upstream refs
+/// (with timeseries configs pulled from the `LogicalGraph`). Used to call
+/// `derive_model_source_bounds` without requiring a full planner graph.
+fn build_model_graph_for_bounds(
+    model_name: &str,
+    sql: &str,
+    refs: &[String],
+    graph: &LogicalGraph,
+) -> ModelGraph {
+    let mut opt_graph = ModelGraph::new();
+
+    // Add the model under analysis.
+    let frontmatter = smelt_planner::Frontmatter::parse(sql);
+    opt_graph.add_model(ModelInfo {
+        name: model_name.to_string(),
+        sql: sql.to_string(),
+        refs: refs.to_vec(),
+        timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
+        incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
+    });
+
+    // Add each upstream ref so derive_model_source_bounds can read their timeseries config.
+    for ref_name in refs {
+        if let Ok(upstream_node) = graph.get_node(ref_name) {
+            let upstream_fm = smelt_planner::Frontmatter::parse(&upstream_node.model_file.content);
+            opt_graph.add_model(ModelInfo {
+                name: ref_name.clone(),
+                sql: upstream_node.model_file.content.clone(),
+                refs: graph.get_upstream(ref_name),
+                timeseries_config: upstream_fm.as_ref().and_then(|f| f.timeseries.clone()),
+                incremental_config: upstream_fm.as_ref().and_then(|f| f.incremental.clone()),
+            });
+        }
+    }
+
+    opt_graph
+}
+
+/// Check per-source temporal bounds for an incremental model; return `Err` on
+/// `NotDerivable` unless `allow_downgrade` is set (in which case log a warning).
+fn check_model_source_bounds(
+    model_name: &str,
+    sql: &str,
+    refs: &[String],
+    graph: &LogicalGraph,
+    allow_downgrade: bool,
+) -> Result<()> {
+    let opt_graph = build_model_graph_for_bounds(model_name, sql, refs, graph);
+    let model_info = match opt_graph.get(model_name) {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    if model_info.incremental_config.is_none() || model_info.timeseries_config.is_none() {
+        return Ok(());
+    }
+
+    if let Err(diag) = derive_model_source_bounds(model_info, &opt_graph) {
+        if allow_downgrade {
+            warn!(
+                "Bound derivation failed (falling back to full-table refresh \
+                 because --allow-downgrade is set): {}",
+                diag
+            );
+        } else {
+            return Err(anyhow::anyhow!(
+                "Temporal bound derivation refused model '{}' — \
+                 Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n  • {}",
+                model_name,
+                diag
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Compute the backfill plan for a single model.

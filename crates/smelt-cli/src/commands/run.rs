@@ -10,7 +10,7 @@ use smelt_cli::{
     PhysicalStrategy, SourcesConfig, TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
-use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
+use smelt_planner::{derive_model_source_bounds, Frontmatter, ModelGraph, ModelInfo, Planner};
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
@@ -491,6 +491,42 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 msg.push('\n');
             }
             return Err(anyhow::anyhow!("{}", msg.trim_end()));
+        }
+    }
+
+    // Constraint 10: derive per-source temporal bounds for every incremental model.
+    // A model whose SQL contains a bare LAG/LEAD (no RANGE BETWEEN INTERVAL) over a
+    // timeseries source produces NotDerivable — refuse execution unless --allow-downgrade.
+    {
+        let mut bound_errors: Vec<String> = Vec::new();
+        for model_info in opt_graph.models() {
+            if model_info.incremental_config.is_some() && model_info.timeseries_config.is_some() {
+                if let Err(diag) = derive_model_source_bounds(model_info, &opt_graph) {
+                    bound_errors.push(diag);
+                }
+            }
+        }
+        if !bound_errors.is_empty() {
+            if args.allow_downgrade {
+                for err in &bound_errors {
+                    warn!(
+                        "Bound derivation failed (falling back to full-table refresh \
+                         because --allow-downgrade is set): {}",
+                        err
+                    );
+                }
+            } else {
+                let mut msg = String::from(
+                    "Temporal bound derivation refused the following model(s) — \
+                     Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n",
+                );
+                for err in &bound_errors {
+                    msg.push_str("  • ");
+                    msg.push_str(err);
+                    msg.push('\n');
+                }
+                return Err(anyhow::anyhow!("{}", msg.trim_end()));
+            }
         }
     }
 
