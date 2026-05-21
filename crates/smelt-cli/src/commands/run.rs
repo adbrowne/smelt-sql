@@ -3,11 +3,12 @@ use arrow::util::pretty;
 use chrono::{NaiveDate, Utc};
 use smelt_backend::PartitionSpec;
 use smelt_cli::{
-    compiler::UpstreamSchemas, compute_batches_for_model, compute_incremental_windows,
-    discover_emitted_model_files, discover_python_models, executor, find_project_root, init_db,
-    inject_time_filter, migration, parse_selector, BackendRegistry, BackfillOptions,
-    CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
-    PhysicalStrategy, SourcesConfig, TimeRange,
+    build_source_bound_map, compiler::UpstreamSchemas, compute_batches_for_model,
+    compute_incremental_windows, discover_emitted_model_files, discover_python_models, executor,
+    find_project_root, init_db, inject_source_filters, inject_time_filter, migration,
+    parse_selector, BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph,
+    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
+    TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
 use smelt_planner::{derive_model_source_bounds, Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -1013,8 +1014,36 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     }
 
                     let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+
+                    // Phase 5: Source-filter pushdown.
+                    // Inject per-reference WHERE filters for each bounded timeseries source
+                    // *before* the outer model WHERE (inject_time_filter below).
+                    // This constrains each source scan to `[run_start - before, run_end + after)`.
+                    // Constraint 5: outer-model WHERE and source-filter pushdown are independent.
+                    let source_pushed_sql = {
+                        let mut dep_timeseries: HashMap<String, (Vec<String>, String)> =
+                            HashMap::new();
+                        if let Ok(node) = graph.get_node(model_name) {
+                            for dep_name in &node.dependencies {
+                                if let Ok(dep_node) = graph.get_node(dep_name) {
+                                    if let Some(ts) = &dep_node.timeseries {
+                                        dep_timeseries.insert(
+                                            dep_name.clone(),
+                                            (
+                                                dep_node.model_file.address_segments.clone(),
+                                                ts.partition_column.clone(),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let bound_map = build_source_bound_map(&clean_sql, &dep_timeseries);
+                        inject_source_filters(&clean_sql, &bound_map, &batch.filter_range)
+                    };
+
                     let transformed_sql = inject_time_filter(
-                        &clean_sql,
+                        &source_pushed_sql,
                         &inc_ts.event_time_column,
                         &batch.filter_range,
                     )

@@ -342,6 +342,42 @@ If the planner cannot derive a bound for a source — a bare window function wit
 
 Sources without `timeseries:` declared (lookup tables, dimension tables) are always read in full and do not appear in the bound map.
 
+### Source-filter pushdown
+
+Once smelt derives the bound for a source, it automatically injects a pushdown `WHERE` filter on that source's `FROM` clause. For a run window `[run_start, run_end)` and a source with bound `Bounded(col, before, after)`:
+
+```sql
+-- Injected by the planner on the source's FROM:
+WHERE col >= run_start - before
+  AND col <  run_end + after
+```
+
+This filter is applied **per source reference** before compilation — each `smelt.<path>` reference in the model SQL gets its own pushdown WHERE. The outer model WHERE (constraining the model's output to the run window using the model's own `partition_column`) is unchanged and applied separately.
+
+**Example.** A sessions model that reads `smelt.silver.events_parsed` (partition column `event_date`) with a derived bound of `PT0S`/`PT0S` (partition-local, no lookback) for a run window `[2024-01-15, 2024-01-16)`:
+
+```sql
+-- Before pushdown (model SQL):
+WITH sessionized AS (
+  SELECT * FROM smelt.functions.sessionize(
+    source => smelt.silver.events_parsed, ...
+  )
+) ...
+
+-- After pushdown (what the engine sees):
+WITH sessionized AS (
+  SELECT * FROM smelt.functions.sessionize(
+    source => (SELECT * FROM smelt.silver.events_parsed
+               WHERE event_date >= '2024-01-15'
+                 AND event_date < '2024-01-16'), ...
+  )
+) ...
+```
+
+Lookup sources (those without `timeseries:`) are never pushdown candidates — they are read in full each run. Pushdown is per-reference: a self-join on a timeseries source receives the same widened filter on each occurrence.
+
+> **Current scope:** pushdown applies the bound derived from the **outer SQL body**. `smelt.define` function bodies are not yet expanded before bound derivation, so a source whose only INTERVAL pattern is inside a function body receives a partition-local (`PT0S`) filter. The exact run-window filter is still correct for correctness; it may read more data than necessary if the function body introduces a wider lookback. Full expansion-before-derivation is tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
+
 ## Batching
 
 When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.

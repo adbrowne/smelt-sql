@@ -19,6 +19,69 @@ use std::sync::Arc;
 /// declaration order.
 pub type FnBodyMap = HashMap<String, (Vec<(String, Option<String>)>, String)>;
 
+/// Build a source-bound map for `inject_source_filters` from a model's upstream timeseries configs.
+///
+/// For each dependency of the current model that has a `timeseries:` block, derives the
+/// per-source `(before_secs, after_secs)` bound from the model's SQL (Form A / Form B patterns).
+/// Sources without `timeseries:` (lookups) are absent from the returned map.
+///
+/// The map key is the **full smelt reference** as it appears in the model's SQL, e.g.
+/// `smelt.silver.events_parsed`. This matches what `inject_source_filters` uses to locate
+/// source references.
+///
+/// # Arguments
+/// * `model_sql` — The model SQL with frontmatter already stripped.
+/// * `model_deps` — Names of the model's upstream dependencies (e.g., `["events_parsed"]`).
+/// * `dep_timeseries` — For each dependency that has `timeseries:`, maps dep name →
+///   `(address_segments, partition_column)`. Address segments give the full smelt path
+///   (e.g., `["silver", "events_parsed"]`).
+pub fn build_source_bound_map(
+    model_sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+) -> HashMap<String, crate::transformer::SourceBound> {
+    use smelt_planner::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
+
+    if dep_timeseries.is_empty() {
+        return HashMap::new();
+    }
+
+    // Build BoundContext: dep_name → partition_col
+    let mut ctx = BoundContext::new();
+    for (dep_name, (_segs, partition_col)) in dep_timeseries {
+        ctx.add_source(dep_name, partition_col);
+    }
+
+    let raw_bounds = derive_model_bounds(model_sql, &ctx);
+
+    let mut result = HashMap::new();
+    for (dep_name, (segs, partition_col)) in dep_timeseries {
+        let bound_result = raw_bounds.get(dep_name).cloned();
+
+        let (before_secs, after_secs) = match bound_result {
+            Some(BoundResult::Bounded { before, after, .. }) => (before.0, after.0),
+            // Unbounded and NotDerivable are handled at the planning stage (Constraint 10);
+            // by the time we reach SQL compilation they have already been refused or allowed.
+            // For pushdown purposes, skip non-derivable bounds.
+            Some(BoundResult::Unbounded) | Some(BoundResult::NotDerivable) | None => continue,
+        };
+
+        // Reconstruct the full smelt ref: "smelt.<segs.join(".")>"
+        // This matches the literal text in the model SQL.
+        let smelt_ref = format!("smelt.{}", segs.join("."));
+
+        result.insert(
+            smelt_ref,
+            crate::transformer::SourceBound {
+                partition_col: partition_col.clone(),
+                before_secs,
+                after_secs,
+            },
+        );
+    }
+
+    result
+}
+
 /// Build an ordered substitution vector from positional and named arguments,
 /// optionally falling back to declared default values for unfilled slots.
 ///

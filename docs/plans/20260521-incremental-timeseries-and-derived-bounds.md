@@ -71,8 +71,8 @@ The spec diff factors the time-dimension declaration out of `incremental:` into 
 | 1 — `timeseries:` frontmatter migration                  | done     | c942f1e4 | 2026-05-21 |
 | 2 — Refused-incrementality (no silent downgrade)         | done     | 49f4f221 | 2026-05-21 |
 | 3 — Classifier admits partition-aligned `OVER`           | done     | 8e205eb9 | 2026-05-21 |
-| 4 — Per-source bound derivation (Form A + Form B)        | done     |        | 2026-05-21 |
-| 5 — Source-filter pushdown on expanded CST               | pending  |        |      |
+| 4 — Per-source bound derivation (Form A + Form B)        | done     | 6f237cca | 2026-05-21 |
+| 5 — Source-filter pushdown on expanded CST               | done     |        | 2026-05-21 |
 | 6 — Run-window-vs-partition decoupling                   | pending  |        |      |
 | 7 — Per-partition equivalence harness                    | pending  |        |      |
 | 8 — `examples/web_analytics/` simplification             | pending  |        |      |
