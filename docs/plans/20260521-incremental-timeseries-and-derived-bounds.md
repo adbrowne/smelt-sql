@@ -68,8 +68,8 @@ The spec diff factors the time-dimension declaration out of `incremental:` into 
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1 — `timeseries:` frontmatter migration                  | done     |        | 2026-05-21 |
-| 2 — Refused-incrementality (no silent downgrade)         | pending  |        |      |
+| 1 — `timeseries:` frontmatter migration                  | done     | c942f1e4 | 2026-05-21 |
+| 2 — Refused-incrementality (no silent downgrade)         | done     |        | 2026-05-21 |
 | 3 — Classifier admits partition-aligned `OVER`           | pending  |        |      |
 | 4 — Per-source bound derivation (Form A + Form B)        | pending  |        |      |
 | 5 — Source-filter pushdown on expanded CST               | pending  |        |      |

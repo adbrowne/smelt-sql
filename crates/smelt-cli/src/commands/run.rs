@@ -468,8 +468,30 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let planner = Planner::new();
     let (transformations, plan_errors) = planner.plan(&opt_graph);
 
-    for err in &plan_errors {
-        warn!("Planner error: {}", err);
+    if !plan_errors.is_empty() {
+        if args.allow_downgrade {
+            // Explicit opt-in: log and continue with full-table refresh fallback.
+            for err in &plan_errors {
+                warn!(
+                    "Incremental safety check failed (falling back to full-table refresh \
+                     because --allow-downgrade is set): {}",
+                    err
+                );
+            }
+        } else {
+            // Hard refusal: models that fail the safety classifier are not run.
+            // Use --allow-downgrade to enable full-table fallback as an escape hatch.
+            let mut msg = String::from(
+                "Incremental safety check refused the following model(s). \
+                 Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n",
+            );
+            for err in &plan_errors {
+                msg.push_str("  • ");
+                msg.push_str(err);
+                msg.push('\n');
+            }
+            return Err(anyhow::anyhow!("{}", msg.trim_end()));
+        }
     }
 
     // 10. Build physical graph (resolves strategies, ephemeral resolvers)

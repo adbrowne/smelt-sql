@@ -193,6 +193,27 @@ smelt statically analyzes your SQL for patterns that can produce incorrect resul
 | Subqueries | Subqueries may reference data outside the filtered time range. |
 | DISTINCT | `SELECT DISTINCT` on partial data may miss duplicates that span partition boundaries. |
 
+### When a model is refused
+
+If a model fails the safety classifier, `smelt run` exits non-zero and prints a diagnostic:
+
+```
+Error: Incremental safety check refused the following model(s). Fix the SQL or use
+--allow-downgrade to fall back to full-table refresh:
+  • Model 'daily_sessions': window functions (OVER clause) are not compatible with
+    incremental materialization — they may produce different results on partial data
+```
+
+**The recommended fix** is to rewrite the SQL to remove the unsafe pattern, then use `safety_overrides` if you are confident the specific usage is partition-safe.
+
+**Temporary escape hatch** — if you need to unblock a run while the fix is in progress, pass `--allow-downgrade`:
+
+```bash
+smelt run --event-time-start 2025-01-01 --event-time-end 2025-01-02 --allow-downgrade
+```
+
+With `--allow-downgrade` set, refused models fall back to a full-table refresh for this run. A warning is emitted for each downgraded model. This flag must be passed explicitly every time; it is not persisted anywhere. Using it regularly means the model is not actually running incrementally — fix the SQL instead.
+
 ### Overriding safety checks
 
 If you understand the implications and the pattern is safe in your specific case, use `safety_overrides`:

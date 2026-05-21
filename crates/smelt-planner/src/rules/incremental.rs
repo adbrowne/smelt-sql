@@ -172,16 +172,20 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         SelectItemKind::OtherAggregate { text, .. } => text.clone(),
     };
 
-    // Validate it appears in GROUP BY
-    let in_group_by = analysis
-        .group_by_exprs
-        .iter()
-        .any(|expr| expr == &partition_expr);
-    if !in_group_by {
-        return Err(format!(
-            "Model '{}': partition_column '{}' (expression: {}) not found in GROUP BY clause",
-            model.name, partition_col, partition_expr
-        ));
+    // Validate it appears in GROUP BY (only required for aggregate models that have a GROUP BY).
+    // Per-row models (no GROUP BY) are valid for incremental: the partition_column
+    // alias in the SELECT list is sufficient — rows are filtered by partition value.
+    if !analysis.group_by_exprs.is_empty() {
+        let in_group_by = analysis
+            .group_by_exprs
+            .iter()
+            .any(|expr| expr == &partition_expr);
+        if !in_group_by {
+            return Err(format!(
+                "Model '{}': partition_column '{}' (expression: {}) not found in GROUP BY clause",
+                model.name, partition_col, partition_expr
+            ));
+        }
     }
 
     // Validate event_time_column is referenced in the SQL
@@ -690,6 +694,53 @@ mod tests {
             }
             _ => panic!("Expected Incremental data"),
         }
+    }
+
+    // --- Per-row (non-aggregate) model tests ---
+
+    /// A per-row SELECT (no GROUP BY) with `partition_column` in the SELECT
+    /// list must be accepted by `detect()`.  The Phase 2 fix skips the
+    /// GROUP-BY membership check when `group_by_exprs` is empty.
+    #[test]
+    fn test_detect_per_row_model_no_group_by() {
+        let m = model_with_event_time(
+            "eventstream",
+            "SELECT event_date, user_id, amount FROM smelt.upstream WHERE event_date >= start_date",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(
+            result.is_ok(),
+            "per-row model (no GROUP BY) must not error; got: {:?}",
+            result
+        );
+        assert!(
+            result.unwrap().is_some(),
+            "per-row model (no GROUP BY) must be detected as incremental"
+        );
+    }
+
+    /// Negative companion: a per-row SELECT whose SELECT list does **not**
+    /// contain the `partition_column` alias must still return an error.
+    #[test]
+    fn test_detect_per_row_model_missing_partition_column() {
+        let m = model_with_event_time(
+            "eventstream_bad",
+            "SELECT user_id, amount FROM smelt.upstream WHERE event_date >= start_date",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(
+            result.is_err(),
+            "per-row model missing partition_column in SELECT must error; got: {:?}",
+            result
+        );
+        assert!(
+            result.unwrap_err().contains("not found as alias"),
+            "error must name the missing partition_column alias"
+        );
     }
 
     #[test]

@@ -131,6 +131,12 @@ struct RunArgs {
     /// Allow full table refresh when schema evolution requires it (e.g., unsupported type change on Spark+Parquet)
     #[arg(long = "allow-full-refresh")]
     allow_full_refresh: bool,
+
+    /// Allow incremental models that fail the safety classifier to fall back to
+    /// full-table refresh instead of being refused at planning time.
+    /// Use this only as a temporary escape hatch while fixing the model SQL.
+    #[arg(long = "allow-downgrade")]
+    allow_downgrade: bool,
 }
 
 #[derive(Parser)]
@@ -277,6 +283,12 @@ struct BuildArgs {
     /// a model file as a positional argument. No execution side effects.
     #[arg(long = "show-plan")]
     show_plan: bool,
+
+    /// Allow incremental models that fail the safety classifier to fall back to
+    /// full-table refresh instead of being refused at planning time.
+    /// Use this only as a temporary escape hatch while fixing the model SQL.
+    #[arg(long = "allow-downgrade")]
+    allow_downgrade: bool,
 }
 
 #[derive(Parser)]

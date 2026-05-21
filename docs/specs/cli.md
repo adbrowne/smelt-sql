@@ -73,6 +73,8 @@ owners: [andrew]
 
 `smelt build` also accepts the schema-evolution flags `--allow-column-removal` and `--allow-full-refresh`; see `schema_evolution.md` §"Evolution flags" for semantics. The same flags are accepted by `smelt run` (which delegates to the same evolution-handling path).
 
+`smelt run` and `smelt build` also accept `--allow-downgrade` (see below).
+
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
 
 **`smelt explain` excludes test models.** `smelt explain` (with or without `--json`) filters out all `materialization: test` models from its output via the `is_test()` predicate applied to every discovered model. Test models never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
@@ -166,6 +168,20 @@ A single `smelt build` performs these steps, in order:
 `smelt run` executes the selected models for the requested time range. Incremental models receive a DELETE+INSERT for the given `[start, end)` window.
 
 `smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
+
+### `--allow-downgrade` — incremental safety escape hatch
+
+A model that declares `incremental:` but whose SQL fails the safety classifier (contains `OVER`, `HAVING`, `LIMIT`, a subquery, or a non-deterministic function in the outer body) is **refused at planning time** by default. `smelt run` exits non-zero with a diagnostic naming the model and the construct.
+
+`--allow-downgrade` suppresses the hard refusal: the model is treated as a full-table refresh for this run, matching the legacy behaviour. This flag is an explicit opt-in — it must be set every time. It is intended as a temporary escape hatch while the model SQL is being fixed, not as a permanent configuration option.
+
+When `--allow-downgrade` is set, a `warn!` line is emitted for each downgraded model:
+
+```
+WARN Incremental safety check failed (falling back to full-table refresh because --allow-downgrade is set): Model '...': ...
+```
+
+`--allow-downgrade` has no effect on models that are not incremental, and no effect on models that pass the safety classifier.
 
 ### `--verbose` behavior
 

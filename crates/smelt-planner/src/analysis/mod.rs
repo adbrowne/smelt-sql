@@ -129,14 +129,42 @@ fn extract_distinct_argument(func: &smelt_parser::FunctionCall) -> String {
     }
 }
 
+/// Find the byte-position of the last `GROUP BY` keyword in `sql` that is not
+/// inside a line comment (`--`).  Returns `None` if no such occurrence exists.
+///
+/// We look for the *last* occurrence so that a comment earlier in the SQL (e.g.
+/// `-- … GROUP BY …`) does not shadow the real GROUP BY clause at the end.
+fn find_group_by_outside_comments(sql: &str) -> Option<usize> {
+    let upper = sql.to_uppercase();
+    let keyword = "GROUP BY";
+    let kw_len = keyword.len();
+    let mut best: Option<usize> = None;
+
+    let mut start = 0;
+    while let Some(pos) = upper[start..].find(keyword) {
+        let abs_pos = start + pos;
+
+        // Check whether this occurrence is inside a line comment by scanning
+        // back to the start of the current line.
+        let line_start = sql[..abs_pos].rfind('\n').map_or(0, |p| p + 1);
+        let line_before = &sql[line_start..abs_pos];
+        if !line_before.contains("--") {
+            // Not in a comment — record as candidate.
+            best = Some(abs_pos);
+        }
+
+        start = abs_pos + kw_len;
+    }
+
+    best
+}
+
 /// Extract GROUP BY expressions from raw SQL text, resolving ordinal references.
 ///
 /// This avoids needing access to parser internals for GROUP BY clause nodes.
 fn extract_group_by_from_text(sql: &str, select_item_exprs: &[String]) -> Vec<String> {
-    let upper = sql.to_uppercase();
-
-    // Find "GROUP BY" in the SQL
-    let group_by_pos = match upper.find("GROUP BY") {
+    // Find "GROUP BY" in the SQL, skipping occurrences inside line comments.
+    let group_by_pos = match find_group_by_outside_comments(sql) {
         Some(pos) => pos,
         None => return Vec::new(),
     };
@@ -368,5 +396,30 @@ mod tests {
         let sql = "---\nmaterialized: table\n---\nSELECT a FROM t GROUP BY 1";
         let analysis = analyze_select(sql).unwrap();
         assert_eq!(analysis.items.len(), 1);
+    }
+
+    #[test]
+    fn test_group_by_not_in_comment() {
+        // GROUP BY in a line comment must not be confused with the actual GROUP BY.
+        // Regression: models with "GROUP BY" in a comment caused extraction to grab
+        // the wrong position (comment text instead of the real clause).
+        let sql = r#"
+            -- session_start_date appears in both the SELECT list and the GROUP BY.
+            SELECT
+                s.session_id,
+                s.session_start_date,
+                'u:' || CAST(arg_max(e.user_id, e.event_ts) AS VARCHAR) AS fwd
+            FROM sessions s
+            GROUP BY s.session_id, s.session_start_date
+        "#;
+        let analysis = analyze_select(sql).unwrap();
+        // Must extract from the real GROUP BY, not the comment.
+        assert!(
+            analysis
+                .group_by_exprs
+                .contains(&"s.session_start_date".to_string()),
+            "expected s.session_start_date in group_by_exprs; got: {:?}",
+            analysis.group_by_exprs
+        );
     }
 }
