@@ -5,7 +5,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionSpec, SqlDialect};
+use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -431,21 +431,20 @@ impl Backend for DuckDbBackend {
         &self,
         schema: &str,
         name: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError> {
         let table_name = format!("{}.{}", schema, name);
 
-        // Build WHERE clause: column IN ('value1', 'value2', ...)
-        let values_list = partition
-            .values
-            .iter()
-            .map(|v| format!("'{}'", v.replace("'", "''"))) // SQL escape
-            .collect::<Vec<_>>()
-            .join(", ");
-
+        // Range-based DELETE: `column >= start AND column < end`.
+        // More efficient than an IN-list for large windows and correct for
+        // any window size.
         let delete_sql = format!(
-            "DELETE FROM {} WHERE {} IN ({})",
-            table_name, partition.column, values_list
+            "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+            table_name,
+            partition.column,
+            partition.start.replace('\'', "''"),
+            partition.column,
+            partition.end.replace('\'', "''"),
         );
 
         let connection = Arc::clone(&self.connection);
@@ -519,7 +518,7 @@ impl Backend for DuckDbBackend {
         schema: &str,
         table: &str,
         sql: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError> {
         let table_name = format!("{}.{}", schema, table);
 
@@ -726,9 +725,10 @@ mod tests {
         assert_eq!(initial_count, 4);
 
         // INSERT OVERWRITE for dt='2024-01-01' — replaces 2 rows with 1
-        let partition = smelt_backend::PartitionSpec {
+        let partition = smelt_backend::PartitionRange {
             column: "dt".to_string(),
-            values: vec!["2024-01-01".to_string()],
+            start: "2024-01-01".to_string(),
+            end: "2024-01-02".to_string(),
         };
 
         backend

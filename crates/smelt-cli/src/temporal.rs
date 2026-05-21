@@ -135,6 +135,137 @@ fn adjust_range(
     }
 }
 
+/// Validate that a run window `[start, end)` is aligned to the model's granularity.
+///
+/// The window must satisfy:
+/// 1. `end > start` (positive window).
+/// 2. Both `start` and `end` fall on granularity boundaries.
+/// 3. `(end - start)` is an integer multiple of the granularity period.
+///
+/// Returns `Err` with a diagnostic message if the window is misaligned.
+///
+/// # Alignment rules by granularity
+///
+/// | Granularity | Period | Required boundary |
+/// |-------------|--------|-------------------|
+/// | Day         | 1 day  | any date          |
+/// | Week        | 7 days | week_start day (Mon by default) |
+/// | Month       | 28–31d | 1st of the month  |
+/// | Quarter     | 91–92d | 1st of Jan/Apr/Jul/Oct |
+/// | Year        | 365–366d | Jan 1st          |
+///
+/// For `Day` granularity, any integer-day window is aligned. For `Week`,
+/// both endpoints must be a Monday (ISO week start) and the window must be
+/// a multiple of 7 days. For `Month`, both endpoints must be the first day
+/// of a month. For `Quarter`, both endpoints must be the first day of a
+/// quarter. For `Year`, both endpoints must be Jan 1st.
+pub fn validate_run_window_alignment(
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    granularity: &Granularity,
+) -> Result<(), String> {
+    use chrono::Datelike;
+
+    if end <= start {
+        return Err(format!(
+            "Run window end ({}) must be after start ({})",
+            end, start
+        ));
+    }
+
+    let total_days = (end - start).num_days();
+
+    match granularity {
+        Granularity::Hour | Granularity::Day => {
+            // Any positive-day window is aligned for daily (or sub-daily) granularity.
+            Ok(())
+        }
+        Granularity::Week => {
+            // Both endpoints must be Mondays and the window must be a multiple of 7.
+            use chrono::Weekday;
+            if start.weekday() != Weekday::Mon {
+                return Err(format!(
+                    "Run window start ({}) is not aligned to weekly granularity: \
+                     start must be a Monday, got {:?}",
+                    start,
+                    start.weekday()
+                ));
+            }
+            if end.weekday() != Weekday::Mon {
+                return Err(format!(
+                    "Run window end ({}) is not aligned to weekly granularity: \
+                     end must be a Monday, got {:?}",
+                    end,
+                    end.weekday()
+                ));
+            }
+            if total_days % 7 != 0 {
+                return Err(format!(
+                    "Run window [{}, {}) is not aligned to weekly granularity: \
+                     window spans {} days which is not a multiple of 7",
+                    start, end, total_days
+                ));
+            }
+            Ok(())
+        }
+        Granularity::Month => {
+            // Both endpoints must be the 1st of a month.
+            if start.day() != 1 {
+                return Err(format!(
+                    "Run window start ({}) is not aligned to monthly granularity: \
+                     start must be the 1st of a month",
+                    start
+                ));
+            }
+            if end.day() != 1 {
+                return Err(format!(
+                    "Run window end ({}) is not aligned to monthly granularity: \
+                     end must be the 1st of a month",
+                    end
+                ));
+            }
+            Ok(())
+        }
+        Granularity::Quarter => {
+            // Both endpoints must be the 1st of a quarter (Jan, Apr, Jul, Oct).
+            let quarter_months = [1u32, 4, 7, 10];
+            if start.day() != 1 || !quarter_months.contains(&start.month()) {
+                return Err(format!(
+                    "Run window start ({}) is not aligned to quarterly granularity: \
+                     start must be the 1st of a quarter month (Jan, Apr, Jul, Oct)",
+                    start
+                ));
+            }
+            if end.day() != 1 || !quarter_months.contains(&end.month()) {
+                return Err(format!(
+                    "Run window end ({}) is not aligned to quarterly granularity: \
+                     end must be the 1st of a quarter month (Jan, Apr, Jul, Oct)",
+                    end
+                ));
+            }
+            Ok(())
+        }
+        Granularity::Year => {
+            // Both endpoints must be Jan 1st.
+            if start.month() != 1 || start.day() != 1 {
+                return Err(format!(
+                    "Run window start ({}) is not aligned to yearly granularity: \
+                     start must be Jan 1st",
+                    start
+                ));
+            }
+            if end.month() != 1 || end.day() != 1 {
+                return Err(format!(
+                    "Run window end ({}) is not aligned to yearly granularity: \
+                     end must be Jan 1st",
+                    end
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

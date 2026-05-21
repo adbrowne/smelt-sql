@@ -8,7 +8,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionSpec};
+use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
@@ -422,15 +422,10 @@ impl RunManager {
 
                         let compiled_sql = compile_sql(&filtered_sql, schema, backend);
 
-                        let partition_values = generate_partition_values(
-                            &batch.partition_start,
-                            &batch.partition_end,
-                            &inc_plan.timeseries.granularity,
-                        );
-
-                        let partition = PartitionSpec {
+                        let partition = PartitionRange {
                             column: inc_plan.timeseries.partition_column.clone(),
-                            values: partition_values,
+                            start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                            end: batch.partition_end.format("%Y-%m-%d").to_string(),
                         };
 
                         let strategy = MaterializationStrategy::Incremental {
@@ -611,21 +606,6 @@ fn granularity_days(g: &smelt_core::Granularity) -> u32 {
         smelt_core::Granularity::Quarter => 91,
         smelt_core::Granularity::Year => 365,
     }
-}
-
-fn generate_partition_values(
-    start: &NaiveDate,
-    end: &NaiveDate,
-    granularity: &smelt_core::Granularity,
-) -> Vec<String> {
-    let mut values = Vec::new();
-    let step_days = granularity_days(granularity) as i64;
-    let mut current = *start;
-    while current < *end {
-        values.push(current.format("%Y-%m-%d").to_string());
-        current += Duration::days(step_days);
-    }
-    values
 }
 
 /// Compile SQL by resolving smelt.ref() calls to schema-qualified table names.

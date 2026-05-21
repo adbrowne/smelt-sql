@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use smelt_backend::PartitionSpec;
+use smelt_backend::PartitionRange;
 use smelt_cli::{
     compiler::UpstreamSchemas, compute_backbuild_plans, discover_python_models, executor,
     find_project_root, format_plan_summary, init_db, inject_time_filter, parse_selector,
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::helpers::{generate_partition_values, strategy_label};
+use crate::helpers::strategy_label;
 use crate::BackbuildArgs;
 
 pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
@@ -410,16 +410,10 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
                 println!("{}", compiled.sql);
             }
 
-            let partition_values = generate_partition_values(
-                &batch.partition_range.start,
-                &batch.partition_range.end,
-                &ts_config.granularity,
-                ts_config.week_start.as_ref(),
-            )?;
-
-            let partition = PartitionSpec {
+            let partition = PartitionRange {
                 column: ts_config.partition_column.clone(),
-                values: partition_values,
+                start: batch.partition_range.start.clone(),
+                end: batch.partition_range.end.clone(),
             };
 
             let result = executor::execute_model_incremental(

@@ -11,7 +11,7 @@ mod schema_evolution;
 mod strategies;
 
 use anyhow::Result;
-use smelt_backend::{Backend, IncrementalStrategy, MaterializationStrategy, PartitionSpec};
+use smelt_backend::{Backend, IncrementalStrategy, MaterializationStrategy, PartitionRange};
 use smelt_backend_duckdb::DuckDbBackend;
 use tempfile::TempDir;
 
@@ -114,10 +114,10 @@ pub async fn run_incremental_sequence(
             backend.create_table_as("main", table_name, &sql).await?;
         } else {
             // Subsequent runs: use strategy
-            let partition_values = generate_partition_dates(&range.start, &range.end);
-            let partition = PartitionSpec {
+            let partition = PartitionRange {
                 column: partition_column.to_string(),
-                values: partition_values,
+                start: range.start.clone(),
+                end: range.end.clone(),
             };
 
             let mat_strategy = MaterializationStrategy::Incremental {
@@ -197,6 +197,7 @@ pub async fn assert_row_count(
 }
 
 /// Generate date strings for partition values between start (inclusive) and end (exclusive).
+#[allow(dead_code)]
 fn generate_partition_dates(start: &str, end: &str) -> Vec<String> {
     use chrono::{Duration, NaiveDate};
 

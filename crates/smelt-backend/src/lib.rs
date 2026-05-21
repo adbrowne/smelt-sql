@@ -11,7 +11,9 @@ pub use smelt_core::config::{
     Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
-pub use types::{ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec};
+pub use types::{
+    ExecutionResult, Materialization, MaterializationStrategy, PartitionRange, PartitionSpec,
+};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -254,12 +256,17 @@ pub trait Backend: Send + Sync {
         }
     }
 
-    /// Delete rows matching partition values.
+    /// Delete rows in a half-open partition range `[start, end)`.
+    ///
+    /// Emits `DELETE FROM table WHERE column >= start AND column < end`.
+    /// This form is both more efficient than an IN-list for large windows and
+    /// is correct for any window size without enumerating individual partition
+    /// values.
     async fn delete_partitions(
         &self,
         schema: &str,
         name: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError>;
 
     /// Insert data from a SELECT query into an existing table.
@@ -290,7 +297,7 @@ pub trait Backend: Send + Sync {
         schema: &str,
         table: &str,
         sql: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError>;
 
     /// Create a materialized view from a SQL query.

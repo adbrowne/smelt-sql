@@ -3,7 +3,7 @@
 //! - `sql_*` tests: Pure SQL generation (always run, no dependencies)
 //! - `integration_*` tests: Require a Spark Connect server (gated behind env var)
 
-use smelt_backend::PartitionSpec;
+use smelt_backend::{PartitionRange, PartitionSpec};
 
 use crate::sql;
 
@@ -114,6 +114,32 @@ fn sql_delete_partitions_escapes_single_quotes() {
 }
 
 #[test]
+fn sql_delete_partitions_range() {
+    let partition = PartitionRange {
+        column: "dt".to_string(),
+        start: "2024-01-01".to_string(),
+        end: "2024-01-08".to_string(),
+    };
+    assert_eq!(
+        sql::delete_partitions_range("cat.db.tbl", &partition),
+        "DELETE FROM cat.db.tbl WHERE dt >= '2024-01-01' AND dt < '2024-01-08'"
+    );
+}
+
+#[test]
+fn sql_delete_partitions_range_escapes_quotes() {
+    let partition = PartitionRange {
+        column: "dt".to_string(),
+        start: "it's".to_string(),
+        end: "they're".to_string(),
+    };
+    assert_eq!(
+        sql::delete_partitions_range("cat.db.tbl", &partition),
+        "DELETE FROM cat.db.tbl WHERE dt >= 'it''s' AND dt < 'they''re'"
+    );
+}
+
+#[test]
 fn sql_insert_into() {
     assert_eq!(
         sql::insert_into("cat.db.tbl", "SELECT 1 AS id, 'test' AS name"),
@@ -157,9 +183,10 @@ fn sql_merge_into_composite_key() {
 
 #[test]
 fn sql_insert_overwrite() {
-    let partition = PartitionSpec {
+    let partition = PartitionRange {
         column: "dt".to_string(),
-        values: vec!["2024-01-01".to_string()],
+        start: "2024-01-01".to_string(),
+        end: "2024-01-02".to_string(),
     };
     assert_eq!(
         sql::insert_overwrite("cat.db.daily", "SELECT * FROM staging", &partition),
@@ -444,9 +471,10 @@ mod integration {
 
         assert_eq!(backend.get_row_count(schema, name).await.unwrap(), 3);
 
-        let partition = PartitionSpec {
+        let partition = PartitionRange {
             column: "dt".to_string(),
-            values: vec!["2024-01-01".to_string()],
+            start: "2024-01-01".to_string(),
+            end: "2024-01-02".to_string(),
         };
         let result = backend.delete_partitions(schema, name, &partition).await;
 

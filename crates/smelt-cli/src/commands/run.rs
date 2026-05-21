@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use arrow::util::pretty;
 use chrono::{NaiveDate, Utc};
-use smelt_backend::PartitionSpec;
+use smelt_backend::PartitionRange;
 use smelt_cli::{
     build_source_bound_map, compiler::UpstreamSchemas, compute_batches_for_model,
     compute_incremental_windows, discover_emitted_model_files, discover_python_models, executor,
@@ -893,15 +893,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     debug!("Temporal window: {}", windows.effective_window.explanation);
                 }
 
-                let partition_values = generate_partition_values(
-                    &windows.partition_range.start,
-                    &windows.partition_range.end,
-                    &inc_ts.granularity,
-                    inc_ts.week_start.as_ref(),
-                )?;
-                let partition = PartitionSpec {
+                let partition = PartitionRange {
                     column: inc_ts.partition_column.clone(),
-                    values: partition_values,
+                    start: windows.partition_range.start.clone(),
+                    end: windows.partition_range.end.clone(),
                 };
 
                 executor::execute_plan_incremental(
@@ -949,6 +944,30 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     model_latency,
                     range,
                 );
+
+                // Validate run-window alignment against the model's granularity.
+                // The window [start, end) must be a positive integer multiple of
+                // `granularity` aligned to granularity boundaries.
+                {
+                    use chrono::NaiveDate;
+                    let start_date = NaiveDate::parse_from_str(&range.start, "%Y-%m-%d")
+                        .with_context(|| format!("Invalid start date: {}", range.start))?;
+                    let end_date = NaiveDate::parse_from_str(&range.end, "%Y-%m-%d")
+                        .with_context(|| format!("Invalid end date: {}", range.end))?;
+                    smelt_cli::validate_run_window_alignment(
+                        start_date,
+                        end_date,
+                        &inc_ts.granularity,
+                    )
+                    .map_err(|msg| {
+                        anyhow::anyhow!(
+                            "Run window not aligned for model '{}' (granularity: {:?}): {}",
+                            model_name,
+                            inc_ts.granularity,
+                            msg
+                        )
+                    })?;
+                }
 
                 // Compute smart batching based on batch safety analysis
                 let (batch_safety, batches) = compute_batches_for_model(
@@ -1065,38 +1084,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         println!("{}", compiled.sql);
                     }
 
-                    let partition_values = generate_partition_values(
-                        &batch.partition_range.start,
-                        &batch.partition_range.end,
-                        &inc_ts.granularity,
-                        inc_ts.week_start.as_ref(),
-                    )?;
+                    let partition = PartitionRange {
+                        column: inc_ts.partition_column.clone(),
+                        start: batch.partition_range.start.clone(),
+                        end: batch.partition_range.end.clone(),
+                    };
 
                     if effective_batches.len() == 1 {
                         debug!(
-                            "Partitions to update: {} ({} {})",
-                            if partition_values.len() <= 3 {
-                                partition_values.join(", ")
-                            } else {
-                                format!(
-                                    "{}, ..., {}",
-                                    partition_values
-                                        .first()
-                                        .expect("partition_values is non-empty when len > 3"),
-                                    partition_values
-                                        .last()
-                                        .expect("partition_values is non-empty when len > 3")
-                                )
-                            },
-                            partition_values.len(),
+                            "Partition window: [{}, {}) ({})",
+                            partition.start,
+                            partition.end,
                             granularity_label(&inc_ts.granularity),
                         );
                     }
-
-                    let partition = PartitionSpec {
-                        column: inc_ts.partition_column.clone(),
-                        values: partition_values,
-                    };
 
                     let result = executor::execute_model_incremental(
                         backend,

@@ -43,7 +43,9 @@ pub use physical_graph::{PhysicalGraph, PhysicalGraphBuilder, PhysicalNode, Phys
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
-pub use temporal::{compute_incremental_windows, IncrementalWindows};
+pub use temporal::{
+    compute_incremental_windows, validate_run_window_alignment, IncrementalWindows,
+};
 pub use test_compiler::{compile_whole_model_test_with_fns, extract_ctes, CteInfo};
 pub use test_runner::TestResult;
 pub use transformer::{

@@ -3,7 +3,7 @@ use crate::errors::CliError;
 use anyhow::Result;
 use smelt_backend::{
     Backend, ExecutionResult, IncrementalStrategy, Materialization, MaterializationStrategy,
-    PartitionSpec,
+    PartitionRange,
 };
 use smelt_core::SourcesConfig;
 
@@ -55,7 +55,7 @@ pub async fn execute_model_incremental(
     backend: &dyn Backend,
     compiled: &CompiledModel,
     schema: &str,
-    partition: PartitionSpec,
+    partition: PartitionRange,
     inc_strategy: IncrementalStrategy,
     unique_key: Vec<String>,
     show_results: bool,
@@ -188,7 +188,7 @@ pub async fn execute_plan_incremental(
     model_name: &str,
     steps: &[smelt_planner::ExecutionStep],
     schema: &str,
-    partition: PartitionSpec,
+    partition: PartitionRange,
     event_time_column: &str,
     time_range: &crate::transformer::TimeRange,
     inc_strategy: IncrementalStrategy,

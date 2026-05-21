@@ -426,6 +426,29 @@ smelt history daily_revenue
 smelt history --limit 50
 ```
 
+## Run window vs partition granularity
+
+The `--event-time-start` / `--event-time-end` flags declare a **run window** — not a per-partition invocation. The window must be a positive integer multiple of the model's `timeseries.granularity` aligned to granularity boundaries, but inside that constraint the window size and the partition unit are independent.
+
+For a daily-partitioned model, all of the following are valid:
+
+```bash
+# One-day run
+smelt run daily_revenue --event-time-start 2025-03-01 --event-time-end 2025-03-02
+
+# One-week run — one engine query, seven partitions written
+smelt run daily_revenue --event-time-start 2025-03-01 --event-time-end 2025-03-08
+
+# 60-day backfill — one engine query, sixty partitions written
+smelt run daily_revenue --event-time-start 2025-01-01 --event-time-end 2025-03-02
+```
+
+For `FullyBatchSafe` models, the entire window runs as a single engine query covering the whole range, then a single `DELETE` over the partitions in the window followed by `INSERT`. Backfilling 60 days is one invocation, not sixty.
+
+For `BoundedSafe(n)` models, the window is auto-chunked into sub-ranges sized to `n` partitions each; each chunk is one engine query and one DELETE+INSERT transaction. `PerPartitionOnly` models still run one partition at a time, sequentially.
+
+Misaligned windows (not an integer multiple of granularity, or endpoints that aren't on granularity boundaries) are rejected at planning time with a clear diagnostic.
+
 ## Backbuilding
 
 Backbuilding rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
@@ -440,8 +463,7 @@ The `+` prefix means "include upstream dependencies." smelt will:
 2. Process each upstream model for the specified time range, in topological order.
 3. Process the target model last.
 
-!!! tip
-    Backbuilding respects the same `--batch-size` and `--per-partition` options as `smelt run`.
+Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
 ## Incremental strategies
 

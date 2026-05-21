@@ -3,7 +3,7 @@
 //! All SQL strings sent to Spark are built here, making them
 //! independently testable without a Python runtime or Spark cluster.
 
-use smelt_backend::PartitionSpec;
+use smelt_backend::{PartitionRange, PartitionSpec};
 
 /// Build a fully qualified table name: catalog.schema.table
 pub fn qualified_name(catalog: &str, schema: &str, name: &str) -> String {
@@ -41,6 +41,10 @@ pub fn select_preview(table_name: &str, limit: usize) -> String {
 }
 
 /// DELETE FROM table WHERE partition_col IN (values)
+///
+/// Kept for internal use (e.g., tests). The primary runtime path now uses
+/// `delete_partitions_range` which emits a range predicate.
+#[allow(dead_code)]
 pub fn delete_partitions(table_name: &str, partition: &PartitionSpec) -> String {
     let values_list = partition
         .values
@@ -52,6 +56,18 @@ pub fn delete_partitions(table_name: &str, partition: &PartitionSpec) -> String 
     format!(
         "DELETE FROM {} WHERE {} IN ({})",
         table_name, partition.column, values_list
+    )
+}
+
+/// DELETE FROM table WHERE partition_col >= start AND partition_col < end
+pub fn delete_partitions_range(table_name: &str, partition: &PartitionRange) -> String {
+    format!(
+        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+        table_name,
+        partition.column,
+        partition.start.replace('\'', "''"),
+        partition.column,
+        partition.end.replace('\'', "''"),
     )
 }
 
@@ -77,7 +93,7 @@ pub fn merge_into(table_name: &str, source_sql: &str, unique_key: &[String]) -> 
 }
 
 /// INSERT OVERWRITE TABLE ... PARTITION (col) (query)
-pub fn insert_overwrite(table_name: &str, query: &str, partition: &PartitionSpec) -> String {
+pub fn insert_overwrite(table_name: &str, query: &str, partition: &PartitionRange) -> String {
     format!(
         "INSERT OVERWRITE TABLE {} PARTITION ({}) {}",
         table_name, partition.column, query
