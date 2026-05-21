@@ -225,7 +225,7 @@ The equality holds for **local** columns of the output — columns whose value d
 
 The optimizer rejects an incremental model if its SQL uses constructs that break the partition-DELETE-then-INSERT contract or produce non-deterministic output:
 
-- Window functions (`OVER (...)`)
+- Window functions (`OVER (...)`), **unless** the window is partition-aligned (see below).
 - `HAVING`
 - `LIMIT`
 - Subqueries (`SELECT ... FROM (SELECT ...)`)
@@ -233,6 +233,14 @@ The optimizer rejects an incremental model if its SQL uses constructs that break
 - `DISTINCT`
 
 Each check can be individually disabled via `incremental.safety_overrides.allow_<check>: true`. Disabling is opt-in and recorded.
+
+#### Partition-aligned window functions
+
+A window function `OVER (PARTITION BY <keys>)` is admissible without a safety override when `<keys>` is a **superset** of the model's `timeseries.partition_column`. For a model with `partition_column: event_date`, both `OVER (PARTITION BY event_date)` and `OVER (PARTITION BY event_date, session_seq)` are admitted; `OVER (PARTITION BY user_id)` (which does not contain `event_date`) is rejected.
+
+The superset requirement ensures every window is evaluated within a single partition: the DELETE+INSERT contract deletes and re-inserts whole partitions, so a window whose scope crosses partition boundaries can produce different results on partial data. A partition-aligned `PARTITION BY` prevents cross-partition scope.
+
+An `OVER (...)` with **no** `PARTITION BY` clause is always rejected by this check.
 
 ### Functions inside incremental bodies
 
@@ -297,7 +305,6 @@ This section captures the load-bearing rationale behind the incremental model su
 - **Migration to `timeseries:` block pending.** The current implementation reads `event_time_column`, `partition_column`, and `granularity` from inside the `incremental:` block. Migration to the `timeseries:` block specified here (and in `timeseries.md`) is the next plan derived from `docs/research/20260521-incremental-as-planner-rule.md`. The cutover is one-shot — no transitional dual-form support.
 - **Per-source bound derivation and source-filter pushdown not yet wired.** The Semantics sections on `Per-source bound derivation`, `Source-filter pushdown`, and `Per-partition equivalence` describe the intended steady state. The current implementation computes only an outer-WHERE injection on the model's own `partition_column`; per-source pushdown WHEREs are not yet emitted. Closing this is part of the same research-driven plan.
 - **`NotDerivable` refusal pending.** Constraint 10 covers safety-classifier rejections (refused at planning time with an explanatory diagnostic). The `NotDerivable` half — models whose per-source bound derivation cannot be proven — lands with the per-source bound derivation work; tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
-- **Batch-safety classifier admits `OVER (PARTITION BY <keys>)` when `<keys>` is a superset of the partition grouping.** The current classifier rejects any outer-body `OVER`; the upgrade lets the classifier prove safety of partition-aligned window functions directly (rather than requiring authors to hide them in transparent functions). Part of the same research-driven plan.
 - **Per-column `data_latency` not implemented.** Plan calls for declaring `data_latency` on upstream sources for late-arriving data; not yet available.
 - **MERGE strategy is DuckDB-only-future.** `BackendCapabilities.supports_merge` is `true` for DuckDB / Spark / PostgreSQL, but the planner emits `DeleteInsert` for all three today. A Spark MERGE pathway is in the plan but unbuilt.
 - **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+incremental, incremental-only — Phase 1 of the incremental plan unified `IncrementalConfig` but the CLI dispatch is still tri-modal. Should converge.

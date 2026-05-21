@@ -240,6 +240,32 @@ models:
 !!! warning
     Only override safety checks when you have verified that your specific query produces correct results on partial data. For example, a window function partitioned by date is safe for daily incremental processing, but one partitioned by user is not.
 
+### Partition-aligned window functions
+
+You do not need a safety override for window functions that are **partition-aligned** — where the `PARTITION BY` keys of the window include the model's `partition_column`. The optimizer admits these directly because each window is evaluated within a single output partition: the DELETE+INSERT contract deletes and re-inserts entire partitions, and a window that cannot look across partition boundaries produces the same result on partial data as on the full table.
+
+For a model with `partition_column: event_date`, these windows are admissible without any override:
+
+```sql
+-- Admitted: PARTITION BY contains event_date (equality)
+FIRST_VALUE(user_id) OVER (PARTITION BY event_date ORDER BY event_ts) AS first_user
+
+-- Admitted: PARTITION BY contains event_date (superset — extra key is fine)
+FIRST_VALUE(user_id) OVER (PARTITION BY event_date, device_id ORDER BY event_ts) AS first_user
+```
+
+These windows are **not** admissible (and will be refused) because their `PARTITION BY` keys do not include `event_date`:
+
+```sql
+-- Refused: PARTITION BY does not contain event_date
+ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_ts) AS rn
+
+-- Refused: no PARTITION BY at all
+SUM(amount) OVER (ORDER BY event_ts) AS running_total
+```
+
+Use `safety_overrides.allow_window_functions: true` for windows that cannot be partition-aligned and that you have verified are safe in your specific context.
+
 ## Batching
 
 When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.

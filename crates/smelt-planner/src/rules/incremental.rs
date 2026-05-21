@@ -220,14 +220,24 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     // --- Safety checks ---
 
     // 2a: Window functions (OVER clause)
+    // Partition-aligned OVER is admitted: OVER (PARTITION BY <keys>) where
+    // <keys> is a superset of the model's partition_column is safe because the
+    // window is partition-local and the DELETE+INSERT contract holds.
+    // Any OVER without PARTITION BY, or whose PARTITION BY keys do not include
+    // the partition_column, is rejected unless allow_window_functions is set.
     if !overrides.allow_window_functions {
         let upper_sql = stripped_sql.to_uppercase();
         if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
-            return Err(format!(
-                "Model '{}': window functions (OVER clause) are not compatible with incremental \
-                 materialization — they may produce different results on partial data",
-                model.name
-            ));
+            // Extract every OVER clause and check its PARTITION BY keys.
+            if let Some(bad_over) = find_inadmissible_over(stripped_sql, partition_col) {
+                return Err(format!(
+                    "Model '{}': window function with OVER clause is not compatible with \
+                     incremental materialization — window partition keys ({}) do not include \
+                     the model's partition_column '{}'. Use OVER (PARTITION BY {} ...) to make \
+                     it partition-aligned, or set safety_overrides.allow_window_functions: true",
+                    model.name, bad_over, partition_col, partition_col
+                ));
+            }
         }
     }
 
@@ -314,6 +324,179 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
             granularity: ts_config.granularity.clone(),
         },
     }))
+}
+
+/// Scan `sql` for OVER clauses that are not partition-aligned with `partition_col`.
+///
+/// Returns `Some(description)` for the first OVER clause whose PARTITION BY
+/// keys do not form a superset of `{partition_col}`.
+///
+/// An OVER clause is admissible when its `PARTITION BY` list contains
+/// `partition_col` (case-insensitive, trimmed). An OVER clause with no
+/// `PARTITION BY` is inadmissible.
+///
+/// Returns `None` when every OVER clause in the SQL is admissible (or there
+/// are none).
+fn find_inadmissible_over(sql: &str, partition_col: &str) -> Option<String> {
+    let upper_sql = sql.to_uppercase();
+    let partition_col_upper = partition_col.to_uppercase();
+
+    let mut search_from = 0;
+    while let Some(over_pos) = find_over_keyword(&upper_sql, search_from) {
+        // Advance past "OVER" so we don't re-match the same position.
+        search_from = over_pos + 4;
+
+        // Skip whitespace after OVER to find the opening '('.
+        let rest = &upper_sql[search_from..];
+        let paren_offset = match rest.find('(') {
+            Some(p) => p,
+            None => continue,
+        };
+        // Ensure only whitespace between OVER and '('.
+        let between = &rest[..paren_offset];
+        if !between.trim().is_empty() {
+            continue;
+        }
+
+        let paren_start = search_from + paren_offset; // position of '(' in upper_sql
+                                                      // Extract the balanced content inside the OVER (...).
+        let over_content = match extract_balanced_parens(&upper_sql, paren_start) {
+            Some(c) => c,
+            None => continue,
+        };
+        search_from = paren_start + over_content.len() + 2; // skip '(' content ')'
+
+        // Check for PARTITION BY inside the window spec.
+        if let Some(pb_pos) = find_partition_by_in_over(&over_content) {
+            let after_pb = &over_content[pb_pos..];
+            // Keys end at ORDER BY, ROWS/RANGE/GROUPS, or end of content.
+            let keys_text = trim_to_window_clause_end(after_pb);
+            // Parse the comma-separated key identifiers.
+            let keys: Vec<String> = keys_text
+                .split(',')
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect();
+
+            // Check that partition_col is among the keys.
+            let contains_partition_col = keys.iter().any(|k| {
+                // Strip any trailing qualifiers (e.g. "t.event_date" → "event_date")
+                let bare = k.rsplit('.').next().unwrap_or(k);
+                bare.trim() == partition_col_upper
+            });
+
+            if !contains_partition_col {
+                let key_display: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+                return Some(key_display.join(", "));
+            }
+        } else {
+            // No PARTITION BY at all — inadmissible.
+            return Some("<no PARTITION BY>".to_string());
+        }
+    }
+    None
+}
+
+/// Find the next position of the OVER keyword (word boundary) at or after `from`.
+fn find_over_keyword(upper_sql: &str, from: usize) -> Option<usize> {
+    let bytes = upper_sql.as_bytes();
+    let kw = b"OVER";
+    let mut i = from;
+    while i + 4 <= bytes.len() {
+        if &bytes[i..i + 4] == kw {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after_ok = i + 4 >= bytes.len()
+                || (!bytes[i + 4].is_ascii_alphanumeric() && bytes[i + 4] != b'_');
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract the content inside a balanced `(...)` starting at `paren_pos`
+/// (which must point at a `(`). Returns the inner text (excluding outer parens).
+fn extract_balanced_parens(sql: &str, paren_pos: usize) -> Option<String> {
+    let bytes = sql.as_bytes();
+    if paren_pos >= bytes.len() || bytes[paren_pos] != b'(' {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut end = None;
+    for (i, &b) in bytes[paren_pos..].iter().enumerate() {
+        match b {
+            b'(' => {
+                depth += 1;
+                if depth == 1 {
+                    start = Some(paren_pos + i + 1);
+                }
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(paren_pos + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let s = start?;
+    let e = end?;
+    Some(sql[s..e].to_string())
+}
+
+/// Find the position (within `over_content`) just after "PARTITION BY ".
+/// Returns the offset of the first key character.
+fn find_partition_by_in_over(over_content: &str) -> Option<usize> {
+    let kw = "PARTITION BY ";
+    let upper = over_content.to_uppercase();
+    // Find at word boundary
+    let mut i = 0;
+    while let Some(pos) = upper[i..].find(kw) {
+        let abs = i + pos;
+        let before_ok = abs == 0 || !upper.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        if before_ok {
+            return Some(abs + kw.len());
+        }
+        i = abs + 1;
+    }
+    // Also try without trailing space (for "PARTITION BY\n")
+    let kw2 = "PARTITION BY";
+    let mut i = 0;
+    while let Some(pos) = upper[i..].find(kw2) {
+        let abs = i + pos;
+        let before_ok = abs == 0 || !upper.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let after_pos = abs + kw2.len();
+        let after_ok =
+            after_pos >= upper.len() || !upper.as_bytes()[after_pos].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            // Skip trailing whitespace
+            let skip = upper[after_pos..].len() - upper[after_pos..].trim_start().len();
+            return Some(after_pos + skip);
+        }
+        i = abs + 1;
+    }
+    None
+}
+
+/// Trim a PARTITION BY key list to just the key portion, stopping before
+/// ORDER BY, ROWS, RANGE, GROUPS, or end of text.
+fn trim_to_window_clause_end(text: &str) -> &str {
+    let upper = text.to_uppercase();
+    let terminators = ["ORDER BY", "ROWS ", "RANGE ", "GROUPS "];
+    let mut end = text.len();
+    for term in &terminators {
+        if let Some(pos) = upper.find(term) {
+            if pos < end {
+                end = pos;
+            }
+        }
+    }
+    &text[..end]
 }
 
 /// Check if a keyword appears at a word boundary in uppercase text.
@@ -531,7 +714,7 @@ mod tests {
         );
         let result = detect(&m);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("window functions"));
+        assert!(result.unwrap_err().contains("window function"));
     }
 
     #[test]
@@ -863,5 +1046,88 @@ mod tests {
         };
         let safety = analyze_batch_safety(&m);
         assert_eq!(safety, BatchSafety::FullyBatchSafe);
+    }
+
+    // --- Partition-aligned OVER admissibility tests (Phase 3) ---
+
+    /// A window function OVER (PARTITION BY device_id, session_seq) on a model
+    /// whose partition_column is `device_id` should be admissible (superset rule).
+    /// `{device_id, session_seq} ⊇ {device_id}` → admitted.
+    #[test]
+    fn test_admissible_over_partition_by_superset() {
+        // partition_column = device_id; OVER uses (device_id, session_seq) — superset
+        // Per-row model (no GROUP BY) so we just need partition_col in SELECT.
+        let m = model_with_event_time(
+            "sessions",
+            "SELECT device_id, session_seq, event_date, \
+             FIRST_VALUE(event_date) OVER (PARTITION BY device_id, session_seq ORDER BY event_ts) AS session_start_date \
+             FROM smelt.silver.events_parsed WHERE event_date >= start_date",
+            "device_id",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(
+            result.is_ok(),
+            "partition-aligned OVER (superset) must not be rejected; got: {:?}",
+            result
+        );
+        assert!(
+            result.unwrap().is_some(),
+            "partition-aligned OVER (superset) model must classify as incremental"
+        );
+    }
+
+    /// A window function OVER (PARTITION BY user_id) on a model whose
+    /// partition_column is `device_id` should be rejected — the PARTITION BY
+    /// keys `{user_id}` do not contain `device_id`.
+    #[test]
+    fn test_inadmissible_over_partition_by_disjoint() {
+        // partition_column = device_id; OVER uses (user_id) — disjoint
+        let m = model_with_event_time(
+            "wrong_window",
+            "SELECT device_id, event_date, \
+             ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_ts) AS rn \
+             FROM smelt.silver.events_parsed WHERE event_date >= start_date",
+            "device_id",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(
+            result.is_err(),
+            "OVER with disjoint PARTITION BY must be rejected; got: {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("window function"),
+            "error must mention window function; got: {}",
+            err
+        );
+    }
+
+    /// A window function OVER (PARTITION BY event_date) on a model whose
+    /// partition_column is `event_date` should be admissible — equality is a
+    /// superset too: `{event_date} ⊇ {event_date}`.
+    #[test]
+    fn test_admissible_over_partition_by_equals() {
+        // partition_column = event_date; OVER uses (event_date) — exact equality
+        let m = model_with_event_time(
+            "daily_windowed",
+            "SELECT event_date, user_id, \
+             FIRST_VALUE(user_id) OVER (PARTITION BY event_date ORDER BY event_ts) AS first_user \
+             FROM smelt.silver.events_parsed WHERE event_date >= start_date",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(
+            result.is_ok(),
+            "partition-aligned OVER (equality) must not be rejected; got: {:?}",
+            result
+        );
+        assert!(
+            result.unwrap().is_some(),
+            "partition-aligned OVER (equality) model must classify as incremental"
+        );
     }
 }
