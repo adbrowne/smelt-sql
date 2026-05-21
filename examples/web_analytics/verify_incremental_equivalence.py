@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# NOTE: This script is superseded as the authoritative CI gate by the Rust
+# integration test at crates/smelt-cli/tests/per_partition_equivalence.rs,
+# which runs automatically under `cargo test -p smelt-cli`.  This script is
+# retained for human convenience (configurable --days / --scale-factor flags)
+# but is no longer required for CI.
 """Verify the incremental and full-rebuild pipelines agree on the local-only
 columns, and document the expected as-of-day-D divergence on the global
 identity columns.

@@ -207,15 +207,22 @@ fn wrap_source_ref_with_filter(
     // Replace all occurrences of `smelt_ref` that appear as standalone identifiers
     // (bounded by whitespace, '(', ')', ',', or start/end of string).
     let mut result = String::with_capacity(sql.len() + replacement.len());
-    let ref_len = smelt_ref.len();
+    // smelt_ref is always an ASCII path like "smelt.silver.events_parsed", so
+    // byte-level comparison is correct.  We must not index into `sql` as a
+    // char-indexed string because `sql` may contain multi-byte UTF-8 sequences
+    // (e.g. em-dashes in SQL comments) and Rust's `&str[byte..byte]` panics
+    // when the indices are not on char boundaries.
+    let ref_bytes = smelt_ref.as_bytes();
+    let ref_len = ref_bytes.len();
     let bytes = sql.as_bytes();
     let n = bytes.len();
     let mut i = 0;
 
     while i < n {
-        // Check if `smelt_ref` starts at position i
-        if i + ref_len <= n && &sql[i..i + ref_len] == smelt_ref {
-            // Check word boundaries
+        // Check if `smelt_ref` starts at position i (byte comparison is safe
+        // because smelt_ref is ASCII).
+        if i + ref_len <= n && &bytes[i..i + ref_len] == ref_bytes {
+            // Check word boundaries using the surrounding bytes.
             let before_ok = i == 0 || !is_smelt_path_char(bytes[i - 1]);
             let after_ok = i + ref_len >= n || !is_smelt_path_char(bytes[i + ref_len]);
 
@@ -225,8 +232,12 @@ fn wrap_source_ref_with_filter(
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        // Advance by one complete UTF-8 character (which may be 1–4 bytes).
+        // This avoids splitting multi-byte sequences when the current position
+        // does not match `smelt_ref`.
+        let ch = sql[i..].chars().next().expect("non-empty suffix");
+        result.push(ch);
+        i += ch.len_utf8();
     }
 
     result

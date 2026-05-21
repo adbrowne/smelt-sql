@@ -73,8 +73,8 @@ The spec diff factors the time-dimension declaration out of `incremental:` into 
 | 3 — Classifier admits partition-aligned `OVER`           | done     | 8e205eb9 | 2026-05-21 |
 | 4 — Per-source bound derivation (Form A + Form B)        | done     | 6f237cca | 2026-05-21 |
 | 5 — Source-filter pushdown on expanded CST               | done     | 6408dea8 | 2026-05-21 |
-| 6 — Run-window-vs-partition decoupling                   | done     |        | 2026-05-22 |
-| 7 — Per-partition equivalence harness                    | pending  |        |      |
+| 6 — Run-window-vs-partition decoupling                   | done     | aec23af7 | 2026-05-22 |
+| 7 — Per-partition equivalence harness                    | done     |        | 2026-05-22 |
 | 8 — `examples/web_analytics/` simplification             | pending  |        |      |
 
 ---
