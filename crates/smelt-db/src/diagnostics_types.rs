@@ -588,6 +588,16 @@ pub enum DiagnosticCode {
     /// Anchored at the `smelt.models.*` call site.
     /// Message: "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references"
     GeneratorBodyForbidsModelReflection,
+
+    // ── Timeseries diagnostic codes ──────────────────────────────────────────
+    /// A model declares `incremental:` without a sibling `timeseries:` block.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "TimeseriesRequiredForIncremental: model declares `incremental:` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
+    TimeseriesRequiredForIncremental,
+    /// The `timeseries:` block parses but violates a structural rule.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "MalformedTimeseries: {message}"
+    MalformedTimeseries,
 }
 
 /// Structured metadata attached to diagnostics for code actions

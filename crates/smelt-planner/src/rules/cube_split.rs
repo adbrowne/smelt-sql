@@ -240,6 +240,7 @@ mod tests {
             name: name.to_string(),
             sql: sql.to_string(),
             refs: vec![],
+            timeseries_config: None,
             incremental_config: None,
         }
     }

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::discovery::ModelFile;
 use anyhow::{anyhow, Result};
-use smelt_core::config::{IncrementalConfig, Materialization};
+use smelt_core::config::{IncrementalConfig, Materialization, TimeseriesConfig};
 use smelt_core::selector::{SelectionMethod, Selector};
 use smelt_core::{GraphError, SeedInfo, SourcesConfig};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -12,6 +12,7 @@ pub struct LogicalNode {
     pub model_file: ModelFile,
     pub dependencies: Vec<String>,
     pub materialization: Materialization,
+    pub timeseries: Option<TimeseriesConfig>,
     pub incremental: Option<IncrementalConfig>,
     pub target: String,
     pub tags: Vec<String>,
@@ -124,6 +125,9 @@ impl LogicalGraph {
 
             let materialization = config.get_materialization_with_metadata(&model.name, metadata);
             let target = config.get_target(&model.name, metadata, default_target);
+            let timeseries = config
+                .get_timeseries_with_metadata(&model.name, metadata)
+                .cloned();
             let incremental = config
                 .get_incremental_with_metadata(&model.name, metadata)
                 .cloned();
@@ -152,6 +156,7 @@ impl LogicalGraph {
                     // Placeholder — filled in during pass 2.
                     dependencies: Vec::new(),
                     materialization,
+                    timeseries,
                     incremental,
                     target,
                     tags,
@@ -705,6 +710,7 @@ mod tests {
             "A".to_string(),
             ModelConfig {
                 materialization: Some(Materialization::Table),
+                timeseries: None,
                 incremental: None,
                 tags: vec!["core".to_string()],
                 target: None,
@@ -761,6 +767,7 @@ mod tests {
             "upstream".to_string(),
             ModelConfig {
                 materialization: None,
+                timeseries: None,
                 incremental: None,
                 tags: vec![],
                 target: Some("spark_prod".to_string()),

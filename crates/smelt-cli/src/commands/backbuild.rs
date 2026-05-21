@@ -348,9 +348,17 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .cloned()
             .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
-        let inc_config = match inc_config {
-            Some(c) => c,
-            None => continue,
+        let ts_config = config
+            .get_timeseries_with_metadata(
+                &plan.model_name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
+            )
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.timeseries.clone()));
+
+        let (inc_config, ts_config) = match (inc_config, ts_config) {
+            (Some(i), Some(t)) => (i, t),
+            _ => continue,
         };
 
         let resolved_strategy = backend.resolve_strategy(&inc_config);
@@ -384,7 +392,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             let clean_sql = smelt_parser::strip_frontmatter(&model.content);
             let transformed_sql = inject_time_filter(
                 &clean_sql,
-                &inc_config.event_time_column,
+                &ts_config.event_time_column,
                 &batch.filter_range,
             )
             .with_context(|| format!("Failed to transform SQL for model: {}", plan.model_name))?;
@@ -404,11 +412,12 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             let partition_values = generate_partition_values(
                 &batch.partition_range.start,
                 &batch.partition_range.end,
-                &inc_config.granularity,
+                &ts_config.granularity,
+                ts_config.week_start.as_ref(),
             )?;
 
             let partition = PartitionSpec {
-                column: inc_config.partition_column.clone(),
+                column: ts_config.partition_column.clone(),
                 values: partition_values,
             };
 

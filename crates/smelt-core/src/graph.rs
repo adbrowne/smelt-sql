@@ -662,6 +662,7 @@ mod tests {
                 name.to_string(),
                 ModelConfig {
                     materialization: None,
+                    timeseries: None,
                     incremental: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,

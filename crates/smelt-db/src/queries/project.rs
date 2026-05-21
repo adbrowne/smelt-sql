@@ -24,6 +24,7 @@ use crate::{DiagnosticCode, LoaderFileInput, Model, ProjectInput, SourceFile, Wo
 
 pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
+use smelt_core::config::TimeseriesConfig;
 use smelt_core::{IncrementalConfig, SeedInfo, SourceInfo, SourcesConfig};
 
 /// YAML parse error with location information
@@ -341,6 +342,10 @@ pub struct EmittedModelDef {
     /// emissions from that generator; per-`ModelDef` overrides are not supported
     /// in v1.
     pub incremental_config: Option<IncrementalConfig>,
+    /// Inherited `timeseries:` block from the generator file's frontmatter,
+    /// when `materialization == "incremental"`.  `None` for non-incremental
+    /// emissions or when the generator's frontmatter has no `timeseries:` block.
+    pub timeseries_config: Option<TimeseriesConfig>,
 }
 
 /// The result of evaluating a single generator file.
@@ -456,6 +461,7 @@ fn materialise_emitted_model_def(
     literal: &RecordLiteral,
     frontmatter_tags: &[String],
     frontmatter_incremental: Option<&IncrementalConfig>,
+    frontmatter_timeseries: Option<&TimeseriesConfig>,
 ) -> Option<EmittedModelDef> {
     let (name, name_span) = extract_modeldef_field_text(literal, "name")?;
     if name.is_empty() {
@@ -546,11 +552,16 @@ fn materialise_emitted_model_def(
         .map(|(v, _)| v)
         .unwrap_or_default();
 
-    // Inherit the `incremental:` block only when materialization == "incremental".
+    // Inherit the `incremental:` and `timeseries:` blocks only when materialization == "incremental".
     // Per `incremental_models.md` §"Generator-emitted incremental models", non-incremental
     // emissions silently ignore the generator's frontmatter `incremental:` block.
     let incremental_config = if materialization == "incremental" {
         frontmatter_incremental.cloned()
+    } else {
+        None
+    };
+    let timeseries_config = if materialization == "incremental" {
+        frontmatter_timeseries.cloned()
     } else {
         None
     };
@@ -565,6 +576,7 @@ fn materialise_emitted_model_def(
         tags,
         description,
         incremental_config,
+        timeseries_config,
     })
 }
 
@@ -580,12 +592,14 @@ fn materialise_emitted_model_def(
 ///
 /// Returns the list of materialised models (may be empty) plus any emission-level
 /// diagnostics (e.g. body type error from generator-body inference).
+#[allow(clippy::too_many_arguments)]
 fn evaluate_body_emissions(
     generator_file: &Path,
     file_text: &str,
     body_expr: &Expr,
     frontmatter_tags: &[String],
     frontmatter_incremental: Option<&IncrementalConfig>,
+    frontmatter_timeseries: Option<&TimeseriesConfig>,
     loader_values: &[(String, crate::loader::MetaValue)],
     ctx: &TypeContext,
 ) -> (Vec<EmittedModelDef>, Vec<crate::Diagnostic>) {
@@ -651,6 +665,7 @@ fn evaluate_body_emissions(
                         &record_lit,
                         frontmatter_tags,
                         frontmatter_incremental,
+                        frontmatter_timeseries,
                     ) {
                         emissions.push(emitted);
                     }
@@ -706,6 +721,7 @@ fn evaluate_body_emissions(
                                         record_val,
                                         frontmatter_tags,
                                         frontmatter_incremental,
+                                        frontmatter_timeseries,
                                     ) {
                                         emissions.push(emitted);
                                     }
@@ -778,6 +794,7 @@ fn materialise_modeldef_from_lambda_body(
     record_val: &crate::loader::MetaValue,
     frontmatter_tags: &[String],
     frontmatter_incremental: Option<&IncrementalConfig>,
+    frontmatter_timeseries: Option<&TimeseriesConfig>,
 ) -> Option<EmittedModelDef> {
     let record_fields = match record_val {
         crate::loader::MetaValue::Record(fields) => fields,
@@ -830,9 +847,14 @@ fn materialise_modeldef_from_lambda_body(
         }
     }
 
-    // Inherit the `incremental:` block only when materialization == "incremental".
+    // Inherit the `incremental:` and `timeseries:` blocks only when materialization == "incremental".
     let incremental_config = if materialization == "incremental" {
         frontmatter_incremental.cloned()
+    } else {
+        None
+    };
+    let timeseries_config = if materialization == "incremental" {
+        frontmatter_timeseries.cloned()
     } else {
         None
     };
@@ -847,6 +869,7 @@ fn materialise_modeldef_from_lambda_body(
         tags,
         description,
         incremental_config,
+        timeseries_config,
     })
 }
 
@@ -1091,6 +1114,7 @@ pub fn evaluate_generator(
     let (metadata, _body_offset) = gen_meta;
     let frontmatter_tags = metadata.tags.clone();
     let frontmatter_incremental = metadata.incremental.clone();
+    let frontmatter_timeseries = metadata.timeseries.clone();
     let gen_file_path = file.path(db).to_path_buf();
 
     // Parse the file body (already cached by Salsa via `parse_file`).
@@ -1136,6 +1160,7 @@ pub fn evaluate_generator(
         &body_expr,
         &frontmatter_tags,
         frontmatter_incremental.as_ref(),
+        frontmatter_timeseries.as_ref(),
         &loader_values,
         &ctx,
     );
@@ -2531,17 +2556,19 @@ mod tests {
 
     // ─── Test Phase 5 (E2): incremental frontmatter inheritance ─────────────
 
-    /// A generator file whose frontmatter declares `incremental:` and emits a
+    /// A generator file whose frontmatter declares `incremental:` and `timeseries:` and emits a
     /// `ModelDef { materialization: 'incremental' }` — the resulting emission
-    /// carries `materialization == "incremental"` and its `incremental_config()`
-    /// reflects the generator file's frontmatter block.
+    /// carries `materialization == "incremental"` and its `timeseries_config`
+    /// reflects the generator file's frontmatter `timeseries:` block.
     #[test]
     fn emitted_incremental_model_inherits_frontmatter_incremental_block() {
-        // Generator file with incremental frontmatter.
+        // Generator file with incremental + timeseries frontmatter.
         let generator = concat!(
             "---\n",
             "generates: models\n",
             "incremental:\n",
+            "  unique_key: [dt]\n",
+            "timeseries:\n",
             "  event_time_column: dt\n",
             "  partition_column: dt\n",
             "  granularity: day\n",
@@ -2567,29 +2594,31 @@ mod tests {
             emission.materialization, "incremental",
             "emitted model must have materialization=incremental"
         );
-        // The emission should carry the inherited incremental config.
-        let inc = emission.incremental_config.as_ref().expect(
-            "emitted incremental model must carry the inherited incremental_config from frontmatter"
+        // The emission should carry the inherited timeseries config.
+        let ts = emission.timeseries_config.as_ref().expect(
+            "emitted incremental model must carry the inherited timeseries_config from frontmatter",
         );
         assert_eq!(
-            inc.partition_column, "dt",
+            ts.partition_column, "dt",
             "inherited partition_column must be 'dt'"
         );
         assert_eq!(
-            inc.event_time_column, "dt",
+            ts.event_time_column, "dt",
             "inherited event_time_column must be 'dt'"
         );
     }
 
-    /// A generator file with an `incremental:` frontmatter block that emits a
+    /// A generator file with `incremental:` and `timeseries:` frontmatter blocks that emits a
     /// `ModelDef { materialization: 'view' }` — the emitted model is a view
-    /// and must NOT inherit the incremental config (it is silently ignored).
+    /// and must NOT inherit the incremental or timeseries config (silently ignored).
     #[test]
     fn emitted_non_incremental_model_does_not_inherit_incremental_block() {
         let generator = concat!(
             "---\n",
             "generates: models\n",
             "incremental:\n",
+            "  unique_key: [dt]\n",
+            "timeseries:\n",
             "  event_time_column: dt\n",
             "  partition_column: dt\n",
             "  granularity: day\n",
@@ -2609,11 +2638,16 @@ mod tests {
             emission.materialization, "view",
             "emitted model without explicit materialization must be 'view'"
         );
-        // View emissions must not inherit the incremental block.
+        // View emissions must not inherit the incremental or timeseries block.
         assert!(
             emission.incremental_config.is_none(),
             "non-incremental emitted model must not carry incremental_config; got: {:?}",
             emission.incremental_config
+        );
+        assert!(
+            emission.timeseries_config.is_none(),
+            "non-incremental emitted model must not carry timeseries_config; got: {:?}",
+            emission.timeseries_config
         );
     }
 }

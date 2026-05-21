@@ -743,6 +743,7 @@ def combined(project):
             "page_views".to_string(),
             crate::config::ModelConfig {
                 materialization: None,
+                timeseries: None,
                 incremental: None,
                 tags: vec!["event_source".to_string()],
                 target: None,
@@ -752,6 +753,7 @@ def combined(project):
             "clicks".to_string(),
             crate::config::ModelConfig {
                 materialization: None,
+                timeseries: None,
                 incremental: None,
                 tags: vec!["event_source".to_string()],
                 target: None,
@@ -828,6 +830,7 @@ def circular_model(project):
             "circular_model".to_string(),
             crate::config::ModelConfig {
                 materialization: None,
+                timeseries: None,
                 incremental: None,
                 tags: vec!["generated".to_string()],
                 target: None,

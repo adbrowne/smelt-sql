@@ -3,6 +3,7 @@
 //! Integrates AST-based temporal dependency analysis with upstream data latency
 //! to compute the effective filter window for incremental model execution.
 
+use smelt_core::config::TimeseriesConfig;
 use smelt_core::{DataLatency, Granularity, IncrementalConfig, SourcesConfig};
 use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days,
@@ -32,7 +33,8 @@ pub struct IncrementalWindows {
 /// Returns wider filter range and original partition range.
 pub fn compute_incremental_windows(
     sql: &str,
-    config: &IncrementalConfig,
+    _config: &IncrementalConfig,
+    timeseries: &TimeseriesConfig,
     sources: Option<&SourcesConfig>,
     model_metadata_latency: Option<&DataLatency>,
     requested_range: &TimeRange,
@@ -41,11 +43,14 @@ pub fn compute_incremental_windows(
     let temporal_dep = analyze_temporal_dependencies(sql);
 
     // 2. Resolve data latency
-    let data_latency_days =
-        resolve_data_latency(&config.event_time_column, sources, model_metadata_latency);
+    let data_latency_days = resolve_data_latency(
+        &timeseries.event_time_column,
+        sources,
+        model_metadata_latency,
+    );
 
     // 3. Compute effective window
-    let period_days = granularity_period_days(&config.granularity);
+    let period_days = granularity_period_days(&timeseries.granularity);
     let effective_window = compute_effective_window(&temporal_dep, data_latency_days, period_days);
 
     // 4. Compute filter range by adjusting the requested range
@@ -58,7 +63,7 @@ pub fn compute_incremental_windows(
             requested_range,
             effective_window.lookback_days,
             effective_window.lookahead_days,
-            &config.granularity,
+            &timeseries.granularity,
         )
     };
 
@@ -178,23 +183,34 @@ mod tests {
         assert_eq!(result.end, "2026-03-23");
     }
 
+    fn make_ts(event_time_column: &str, partition_column: &str) -> TimeseriesConfig {
+        TimeseriesConfig {
+            event_time_column: event_time_column.into(),
+            partition_column: partition_column.into(),
+            granularity: Granularity::Day,
+            week_start: None,
+        }
+    }
+
+    fn make_inc() -> IncrementalConfig {
+        IncrementalConfig {
+            enabled: true,
+            unique_key: vec![],
+            safety_overrides: Default::default(),
+        }
+    }
+
     #[test]
     fn test_compute_windows_simple_group_by() {
         let sql = "SELECT date_trunc('day', event_time) as d, SUM(amount) FROM events GROUP BY 1";
-        let config = IncrementalConfig {
-            enabled: true,
-            event_time_column: "event_time".into(),
-            partition_column: "d".into(),
-            granularity: Granularity::Day,
-            unique_key: vec![],
-            safety_overrides: Default::default(),
-        };
+        let config = make_inc();
+        let ts = make_ts("event_time", "d");
         let range = TimeRange {
             start: "2026-03-20".into(),
             end: "2026-03-22".into(),
         };
 
-        let windows = compute_incremental_windows(sql, &config, None, None, &range);
+        let windows = compute_incremental_windows(sql, &config, &ts, None, None, &range);
 
         // No temporal dependency, no latency → filter range = partition range
         assert_eq!(windows.filter_range.start, "2026-03-20");
@@ -206,20 +222,14 @@ mod tests {
     #[test]
     fn test_compute_windows_with_lag() {
         let sql = "SELECT user_id, day, LAG(amount, 3) OVER (ORDER BY day) as prev FROM events";
-        let config = IncrementalConfig {
-            enabled: true,
-            event_time_column: "event_time".into(),
-            partition_column: "day".into(),
-            granularity: Granularity::Day,
-            unique_key: vec![],
-            safety_overrides: Default::default(),
-        };
+        let config = make_inc();
+        let ts = make_ts("event_time", "day");
         let range = TimeRange {
             start: "2026-03-20".into(),
             end: "2026-03-22".into(),
         };
 
-        let windows = compute_incremental_windows(sql, &config, None, None, &range);
+        let windows = compute_incremental_windows(sql, &config, &ts, None, None, &range);
 
         // LAG(col, 3) → 3 periods lookback → filter starts 3 days earlier
         assert_eq!(windows.filter_range.start, "2026-03-17");
@@ -232,21 +242,15 @@ mod tests {
     #[test]
     fn test_compute_windows_with_data_latency() {
         let sql = "SELECT date_trunc('day', event_time) as d, SUM(amount) FROM events GROUP BY 1";
-        let config = IncrementalConfig {
-            enabled: true,
-            event_time_column: "event_time".into(),
-            partition_column: "d".into(),
-            granularity: Granularity::Day,
-            unique_key: vec![],
-            safety_overrides: Default::default(),
-        };
+        let config = make_inc();
+        let ts = make_ts("event_time", "d");
         let range = TimeRange {
             start: "2026-03-20".into(),
             end: "2026-03-22".into(),
         };
         let latency = DataLatency::parse("3 days").unwrap();
 
-        let windows = compute_incremental_windows(sql, &config, None, Some(&latency), &range);
+        let windows = compute_incremental_windows(sql, &config, &ts, None, Some(&latency), &range);
 
         // No temporal dep, but 3-day latency → filter starts 3 days earlier
         assert_eq!(windows.filter_range.start, "2026-03-17");

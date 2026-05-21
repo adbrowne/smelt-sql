@@ -348,6 +348,9 @@ impl Backend {
                 DbCode::GeneratorBodyForbidsModelReflection => {
                     "generator-body-forbids-model-reflection"
                 }
+                // Timeseries frontmatter validation diagnostic codes.
+                DbCode::TimeseriesRequiredForIncremental => "timeseries-required-for-incremental",
+                DbCode::MalformedTimeseries => "malformed-timeseries",
             };
             NumberOrString::String(code_str.to_string())
         });

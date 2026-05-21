@@ -3,6 +3,7 @@ use crate::logical_graph::LogicalGraph;
 use crate::physical_graph::{PhysicalGraph, PhysicalStrategy};
 use anyhow::Result;
 use serde::Serialize;
+use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
 use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
 use std::collections::BTreeMap;
@@ -78,16 +79,19 @@ pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
         let model_file = &node.model_file;
         let metadata = model_file.metadata.as_deref();
 
-        let incremental = node.incremental.as_ref().map(|inc| {
-            let batch_safety = compute_batch_safety_label(&node.name, model_file, inc);
-            ExplainIncremental {
-                granularity: inc.granularity.clone(),
-                partition_column: inc.partition_column.clone(),
-                event_time_column: inc.event_time_column.clone(),
-                unique_key: inc.unique_key.clone(),
-                batch_safety,
+        let incremental = match (&node.incremental, &node.timeseries) {
+            (Some(inc), Some(ts)) => {
+                let batch_safety = compute_batch_safety_label(&node.name, model_file, inc, ts);
+                Some(ExplainIncremental {
+                    granularity: ts.granularity.clone(),
+                    partition_column: ts.partition_column.clone(),
+                    event_time_column: ts.event_time_column.clone(),
+                    unique_key: inc.unique_key.clone(),
+                    batch_safety,
+                })
             }
-        });
+            _ => None,
+        };
 
         let owner = metadata.and_then(|m| m.owner.clone());
         let dependencies = graph.get_upstream(&node.name);
@@ -131,12 +135,14 @@ pub fn build_physical_explain(physical: &PhysicalGraph, logical: &LogicalGraph) 
                 format!("cube_split ({} steps)", steps.len())
             }
             PhysicalStrategy::Incremental {
-                config, plan_steps, ..
+                timeseries,
+                plan_steps,
+                ..
             } => {
                 let base = format!(
                     "incremental (partition: {}, granularity: {})",
-                    config.partition_column,
-                    serde_json::to_value(&config.granularity)
+                    timeseries.partition_column,
+                    serde_json::to_value(&timeseries.granularity)
                         .ok()
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                         .unwrap_or_else(|| "?".to_string()),
@@ -186,6 +192,7 @@ fn compute_batch_safety_label(
     name: &str,
     model_file: &ModelFile,
     inc: &IncrementalConfig,
+    ts: &TimeseriesConfig,
 ) -> String {
     let model_info = ModelInfo {
         name: name.to_string(),
@@ -196,6 +203,7 @@ fn compute_batch_safety_label(
             .map(|r| r.model_name.clone())
             .collect(),
         incremental_config: Some(inc.clone()),
+        timeseries_config: Some(ts.clone()),
     };
     match analyze_batch_safety(&model_info) {
         BatchSafety::FullyBatchSafe => "fully_batch_safe".to_string(),
@@ -310,6 +318,7 @@ mod tests {
 
     #[test]
     fn test_explain_with_incremental() {
+        use smelt_core::config::TimeseriesConfig;
         use smelt_core::{Granularity, IncrementalConfig};
 
         let models = vec![
@@ -324,11 +333,14 @@ mod tests {
             "daily_revenue",
             ModelConfig {
                 materialization: Some(Materialization::Table),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                timeseries: Some(TimeseriesConfig {
                     event_time_column: "created_at".to_string(),
                     partition_column: "order_date".to_string(),
                     granularity: Granularity::Day,
+                    week_start: None,
+                }),
+                incremental: Some(IncrementalConfig {
+                    enabled: true,
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),
@@ -417,6 +429,7 @@ mod tests {
             "staging",
             ModelConfig {
                 materialization: Some(Materialization::Ephemeral),
+                timeseries: None,
                 incremental: None,
                 tags: vec![],
                 target: None,
@@ -428,6 +441,7 @@ mod tests {
             .entry("mart".to_string())
             .or_insert(ModelConfig {
                 materialization: Some(Materialization::Table),
+                timeseries: None,
                 incremental: None,
                 tags: vec![],
                 target: None,

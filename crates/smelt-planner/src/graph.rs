@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::IncrementalConfig;
+pub use smelt_core::config::TimeseriesConfig;
 
 /// Information about a single model for the optimizer.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -10,6 +11,8 @@ pub struct ModelInfo {
     pub sql: String,
     /// Model names this model references via smelt.ref().
     pub refs: Vec<String>,
+    /// Time-dimension declaration (event_time_column, partition_column, granularity).
+    pub timeseries_config: Option<TimeseriesConfig>,
     /// Incremental configuration parsed from frontmatter, if any.
     pub incremental_config: Option<IncrementalConfig>,
 }

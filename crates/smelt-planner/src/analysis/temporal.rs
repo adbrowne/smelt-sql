@@ -539,7 +539,7 @@ pub fn granularity_period_days(granularity: &smelt_core::Granularity) -> u32 {
     match granularity {
         smelt_core::Granularity::Hour => 1, // sub-day: 1 day per period for conservative estimate
         smelt_core::Granularity::Day => 1,
-        smelt_core::Granularity::Week { .. } => 7,
+        smelt_core::Granularity::Week => 7,
         smelt_core::Granularity::Month => 30,
         smelt_core::Granularity::Quarter => 91,
         smelt_core::Granularity::Year => 365,

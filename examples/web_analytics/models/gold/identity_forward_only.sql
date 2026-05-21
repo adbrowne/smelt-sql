@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: session_start_date
   partition_column: session_start_date
   granularity: day

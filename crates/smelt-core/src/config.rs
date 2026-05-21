@@ -184,6 +184,8 @@ pub struct ModelConfig {
     #[serde(default)]
     pub materialization: Option<Materialization>,
     #[serde(default)]
+    pub timeseries: Option<TimeseriesConfig>,
+    #[serde(default)]
     pub incremental: Option<IncrementalConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -278,12 +280,15 @@ impl<'de> Deserialize<'de> for DataLatency {
 }
 
 /// Granularity for incremental partition generation.
+///
+/// A closed enum of supported time-unit boundaries. `week_start` for weekly
+/// partitions lives in `TimeseriesConfig.week_start`, not in this variant.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Granularity {
     Hour,
     Day,
-    Week { week_start: Weekday },
+    Week,
     Month,
     Quarter,
     Year,
@@ -326,16 +331,30 @@ fn default_enabled() -> bool {
     true
 }
 
+/// Time-dimension declaration for a model or source output.
+///
+/// Factored out of `IncrementalConfig` so that views, non-incremental tables,
+/// and external sources can declare a time dimension without opting into
+/// incremental execution. `incremental:` consumes this block; any model
+/// declaring `incremental:` must also declare `timeseries:`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TimeseriesConfig {
+    /// Source-of-truth time column (timestamp or date).
+    pub event_time_column: String,
+    /// Column the engine prunes on (date or integer).
+    pub partition_column: String,
+    /// Partition granularity.
+    pub granularity: Granularity,
+    /// Day of week for weekly partitions (only valid when `granularity` is `week`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_start: Option<Weekday>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct IncrementalConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Column in source data to filter on (for WHERE injection)
-    pub event_time_column: String,
-    /// Column in output to delete by (for DELETE+INSERT)
-    pub partition_column: String,
-    /// Partition granularity (hour, day, week, month, quarter, year)
-    pub granularity: Granularity,
     /// Columns that uniquely identify a row (backend uses presence to choose strategy)
     #[serde(default)]
     pub unique_key: Vec<String>,
@@ -519,6 +538,33 @@ impl Config {
 
         // Fall back to default (CLI --target)
         default_target.to_string()
+    }
+
+    /// Get timeseries config for a model if set
+    ///
+    /// **Precedence**: smelt.yml only (for now)
+    pub fn get_timeseries(&self, model_name: &str) -> Option<&TimeseriesConfig> {
+        self.models
+            .get(model_name)
+            .and_then(|m| m.timeseries.as_ref())
+    }
+
+    /// Get timeseries config with SQL metadata precedence
+    ///
+    /// **Precedence**: SQL file metadata > smelt.yml model config
+    pub fn get_timeseries_with_metadata<'a>(
+        &'a self,
+        model_name: &str,
+        sql_metadata: Option<&'a ModelMetadata>,
+    ) -> Option<&'a TimeseriesConfig> {
+        // Check SQL metadata first
+        if let Some(metadata) = sql_metadata {
+            if let Some(ref ts) = metadata.timeseries {
+                return Some(ts);
+            }
+        }
+        // Fall back to smelt.yml
+        self.get_timeseries(model_name)
     }
 
     /// Get incremental config with SQL metadata precedence
@@ -739,9 +785,8 @@ targets:
             partition_column: dt
             granularity: quarter
         "#;
-        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: TimeseriesConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.granularity, Granularity::Quarter);
-        assert!(config.enabled); // default_enabled = true
     }
 
     #[test]
@@ -751,16 +796,14 @@ targets:
             partition_column: dt
             granularity: year
         "#;
-        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: TimeseriesConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.granularity, Granularity::Year);
     }
 
     #[test]
     fn test_safety_overrides_default_when_absent() {
         let yaml = r#"
-            event_time_column: ts
-            partition_column: dt
-            granularity: day
+            enabled: true
         "#;
         let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
@@ -773,9 +816,7 @@ targets:
     #[test]
     fn test_unique_key_defaults_empty() {
         let yaml = r#"
-            event_time_column: ts
-            partition_column: dt
-            granularity: day
+            enabled: true
         "#;
         let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.unique_key.is_empty());
@@ -784,9 +825,7 @@ targets:
     #[test]
     fn test_unique_key_deserialization() {
         let yaml = r#"
-            event_time_column: ts
-            partition_column: dt
-            granularity: day
+            enabled: true
             unique_key:
               - id
               - source
@@ -965,9 +1004,6 @@ models:
                 materialization: Some(Materialization::Ephemeral),
                 incremental: Some(IncrementalConfig {
                     enabled: true,
-                    event_time_column: "ts".to_string(),
-                    partition_column: "dt".to_string(),
-                    granularity: Granularity::Day,
                     unique_key: vec![],
                     safety_overrides: IncrementalSafetyOverrides::default(),
                 }),
@@ -1115,9 +1151,6 @@ targets:
                 materialization: Some(Materialization::Table),
                 incremental: Some(IncrementalConfig {
                     enabled: true,
-                    event_time_column: "ts".to_string(),
-                    partition_column: "dt".to_string(),
-                    granularity: Granularity::Day,
                     unique_key: vec![],
                     safety_overrides: IncrementalSafetyOverrides::default(),
                 }),

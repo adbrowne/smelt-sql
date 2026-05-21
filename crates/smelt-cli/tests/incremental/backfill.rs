@@ -7,6 +7,7 @@
 
 use super::*;
 use smelt_cli::{compute_batches_for_model, BackfillOptions, TimeRange};
+use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, IncrementalConfig};
 use smelt_planner::BatchSafety;
 
@@ -39,11 +40,17 @@ fn batch_safe_filtered(start: &str, end: &str) -> String {
 fn inc_config() -> IncrementalConfig {
     IncrementalConfig {
         enabled: true,
+        unique_key: vec![],
+        safety_overrides: Default::default(),
+    }
+}
+
+fn ts_config() -> TimeseriesConfig {
+    TimeseriesConfig {
         event_time_column: "transaction_timestamp".into(),
         partition_column: "revenue_date".into(),
         granularity: Granularity::Day,
-        unique_key: vec![],
-        safety_overrides: Default::default(),
+        week_start: None,
     }
 }
 
@@ -130,9 +137,16 @@ fn test_compute_batches_fully_safe_single_batch() {
         end: "2024-12-30".into(),
     };
 
-    let (safety, batches) =
-        compute_batches_for_model(BATCH_SAFE_SQL, &config, &range, &range, &Default::default())
-            .unwrap();
+    let ts = ts_config();
+    let (safety, batches) = compute_batches_for_model(
+        BATCH_SAFE_SQL,
+        &config,
+        &ts,
+        &range,
+        &range,
+        &Default::default(),
+    )
+    .unwrap();
 
     assert!(matches!(safety, BatchSafety::FullyBatchSafe));
     // Fully batch safe → single batch for entire range
@@ -153,8 +167,9 @@ fn test_compute_batches_per_partition_override() {
         batch_size_days: None,
     };
 
+    let ts = ts_config();
     let (_safety, batches) =
-        compute_batches_for_model(BATCH_SAFE_SQL, &config, &range, &range, &options).unwrap();
+        compute_batches_for_model(BATCH_SAFE_SQL, &config, &ts, &range, &range, &options).unwrap();
 
     // Per-partition forced → one batch per day
     assert_eq!(batches.len(), 3);
@@ -176,8 +191,9 @@ fn test_compute_batches_custom_batch_size() {
         per_partition: false,
     };
 
+    let ts = ts_config();
     let (_safety, batches) =
-        compute_batches_for_model(BATCH_SAFE_SQL, &config, &range, &range, &options).unwrap();
+        compute_batches_for_model(BATCH_SAFE_SQL, &config, &ts, &range, &range, &options).unwrap();
 
     // 31 days / 7 = 4 full + 1 partial = 5 batches
     assert_eq!(batches.len(), 5);
@@ -204,8 +220,9 @@ async fn test_backfill_batches_produce_same_result_as_full() -> Result<()> {
         per_partition: false,
     };
 
+    let ts = ts_config();
     let (_safety, batches) =
-        compute_batches_for_model(BATCH_SAFE_SQL, &config, &range, &range, &options)?;
+        compute_batches_for_model(BATCH_SAFE_SQL, &config, &ts, &range, &range, &options)?;
 
     let test_ranges: Vec<TestTimeRange> = batches
         .iter()

@@ -159,55 +159,61 @@ pub fn build_model_details(
             .collect();
 
         // Build incremental info from config
-        let inc_config = config.get_incremental(name).or_else(|| {
-            metadata
-                .and_then(|m| m.incremental.as_ref())
-                .and_then(|_| config.get_incremental(name))
-        });
+        let inc_config = config
+            .get_incremental(name)
+            .or_else(|| metadata.and_then(|m| m.incremental.as_ref()));
+        let ts_config = config
+            .get_timeseries_with_metadata(name, metadata)
+            .or_else(|| metadata.and_then(|m| m.timeseries.as_ref()));
 
-        let incremental = inc_config.map(|inc| IncrementalInfo {
-            granularity: format!("{:?}", inc.granularity).to_lowercase(),
-            partition_column: inc.partition_column.clone(),
-            event_time_column: inc.event_time_column.clone(),
-            unique_key: inc.unique_key.clone(),
+        let incremental = inc_config.and_then(|inc| {
+            ts_config.map(|ts| IncrementalInfo {
+                granularity: format!("{:?}", ts.granularity).to_lowercase(),
+                partition_column: ts.partition_column.clone(),
+                event_time_column: ts.event_time_column.clone(),
+                unique_key: inc.unique_key.clone(),
+            })
         });
 
         // Build batch safety info
-        let batch_safety = inc_config.map(|inc| {
-            use smelt_planner::analyze_batch_safety;
-            use smelt_planner::ModelInfo;
+        let batch_safety = inc_config.and_then(|inc| {
+            ts_config.map(|ts| {
+                use smelt_planner::analyze_batch_safety;
+                use smelt_planner::ModelInfo;
 
-            let model_info = ModelInfo {
-                name: name.to_string(),
-                sql: model.content.clone(),
-                refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
-                incremental_config: Some(inc.clone()),
-            };
-            let safety = analyze_batch_safety(&model_info);
-            match safety {
-                smelt_planner::BatchSafety::FullyBatchSafe => BatchSafetyInfo {
-                    level: "fully_batch_safe".to_string(),
-                    max_chunk_days: None,
-                    context_days: None,
-                    reason: None,
-                },
-                smelt_planner::BatchSafety::BoundedSafe {
-                    max_chunk_days,
-                    context_days,
-                    reason,
-                } => BatchSafetyInfo {
-                    level: "bounded_safe".to_string(),
-                    max_chunk_days: Some(max_chunk_days),
-                    context_days: Some(context_days),
-                    reason: Some(reason),
-                },
-                smelt_planner::BatchSafety::PerPartitionOnly { reason } => BatchSafetyInfo {
-                    level: "per_partition_only".to_string(),
-                    max_chunk_days: None,
-                    context_days: None,
-                    reason: Some(reason),
-                },
-            }
+                let model_info = ModelInfo {
+                    name: name.to_string(),
+                    sql: model.content.clone(),
+                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    timeseries_config: Some(ts.clone()),
+                    incremental_config: Some(inc.clone()),
+                };
+                let safety = analyze_batch_safety(&model_info);
+                match safety {
+                    smelt_planner::BatchSafety::FullyBatchSafe => BatchSafetyInfo {
+                        level: "fully_batch_safe".to_string(),
+                        max_chunk_days: None,
+                        context_days: None,
+                        reason: None,
+                    },
+                    smelt_planner::BatchSafety::BoundedSafe {
+                        max_chunk_days,
+                        context_days,
+                        reason,
+                    } => BatchSafetyInfo {
+                        level: "bounded_safe".to_string(),
+                        max_chunk_days: Some(max_chunk_days),
+                        context_days: Some(context_days),
+                        reason: Some(reason),
+                    },
+                    smelt_planner::BatchSafety::PerPartitionOnly { reason } => BatchSafetyInfo {
+                        level: "per_partition_only".to_string(),
+                        max_chunk_days: None,
+                        context_days: None,
+                        reason: Some(reason),
+                    },
+                }
+            }) // close ts_config.map
         });
 
         // Build diagnostics
@@ -366,12 +372,18 @@ pub fn build_run_plan(
             .cloned()
             .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
-        match inc_config {
-            Some(inc) => {
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+
+        match (inc_config, ts_config) {
+            (Some(inc), Some(ts)) => {
                 let model_info = ModelInfo {
                     name: model_name.clone(),
                     sql: model.content.clone(),
                     refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
                 };
                 let safety = analyze_batch_safety(&model_info);
@@ -403,7 +415,7 @@ pub fn build_run_plan(
 
                 // Generate batches
                 let (batch_days, context_days) = if request.per_partition {
-                    (granularity_days(&inc.granularity), 0)
+                    (granularity_days(&ts.granularity), 0)
                 } else if let Some(override_days) = request.batch_size_days {
                     let ctx = match &safety {
                         BatchSafety::BoundedSafe { context_days, .. } => *context_days,
@@ -419,7 +431,7 @@ pub fn build_run_plan(
                             ..
                         } => (*max_chunk_days, *context_days),
                         BatchSafety::PerPartitionOnly { .. } => {
-                            (granularity_days(&inc.granularity), 0)
+                            (granularity_days(&ts.granularity), 0)
                         }
                     }
                 };
@@ -458,8 +470,8 @@ pub fn build_run_plan(
                     batches,
                 });
             }
-            None => {
-                // Non-incremental model — full refresh
+            _ => {
+                // Non-incremental model (or incremental without timeseries) — full refresh
                 plan_models.push(crate::types::PlanModel {
                     name: model_name.clone(),
                     is_incremental: false,
@@ -508,7 +520,7 @@ fn granularity_days(g: &smelt_core::Granularity) -> u32 {
     match g {
         smelt_core::Granularity::Hour => 1,
         smelt_core::Granularity::Day => 1,
-        smelt_core::Granularity::Week { .. } => 7,
+        smelt_core::Granularity::Week => 7,
         smelt_core::Granularity::Month => 30,
         smelt_core::Granularity::Quarter => 91,
         smelt_core::Granularity::Year => 365,

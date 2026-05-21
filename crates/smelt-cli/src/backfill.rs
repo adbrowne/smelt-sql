@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};
+use smelt_core::config::TimeseriesConfig;
 use smelt_core::{Granularity, IncrementalConfig};
 use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
 
@@ -69,18 +70,20 @@ pub fn compute_range_run_plans(
         let inc_config = node.incremental.clone();
 
         let refs = graph.get_upstream(model_name);
-        let plan = match inc_config {
-            Some(ref inc) => compute_model_backfill_plan(
+        let ts_config = node.timeseries.clone();
+        let plan = match (inc_config, ts_config) {
+            (Some(ref inc), Some(ref ts)) => compute_model_backfill_plan(
                 model_name,
                 &model.content,
                 refs,
                 inc,
+                ts,
                 sources,
                 model.metadata.as_ref().map(|b| b.as_ref()),
                 requested_range,
                 options,
             )?,
-            None => ModelBackfillPlan {
+            _ => ModelBackfillPlan {
                 model_name: model_name.clone(),
                 partition_range: requested_range.clone(),
                 filter_range: requested_range.clone(),
@@ -127,16 +130,22 @@ pub fn compute_backbuild_plans(
 
         let inc_config = node.incremental.clone();
 
-        if let Some(ref inc) = inc_config {
+        if let (Some(inc), Some(ts)) = (inc_config.as_ref(), node.timeseries.as_ref()) {
             // Compute the effective window for this model
             let model_latency = model
                 .metadata
                 .as_ref()
-                .and_then(|m| m.columns.get(&inc.event_time_column))
+                .and_then(|m| m.columns.get(&ts.event_time_column))
                 .and_then(|c| c.data_latency.as_ref());
 
-            let windows =
-                compute_incremental_windows(&model.content, inc, sources, model_latency, &range);
+            let windows = compute_incremental_windows(
+                &model.content,
+                inc,
+                ts,
+                sources,
+                model_latency,
+                &range,
+            );
 
             // Each upstream must provide data for this model's filter range
             let upstream_range = &windows.filter_range;
@@ -150,9 +159,8 @@ pub fn compute_backbuild_plans(
                 model_ranges.insert(upstream_name, expanded);
             }
         } else {
-            // Non-incremental: upstreams still need to be included
-            // (they'll get full refresh), use the same range for any
-            // upstream that is incremental
+            // Non-incremental (or missing timeseries): upstreams still need to be included
+            // (they'll get full refresh), use the same range for any upstream that is incremental
             for upstream_name in graph.get_upstream(model_name) {
                 model_ranges.entry(upstream_name).or_insert(range.clone());
             }
@@ -174,18 +182,20 @@ pub fn compute_backbuild_plans(
         let inc_config = node.incremental.clone();
 
         let refs = graph.get_upstream(model_name);
-        let plan = match inc_config {
-            Some(ref inc) => compute_model_backfill_plan(
+        let ts_config = node.timeseries.clone();
+        let plan = match (inc_config, ts_config) {
+            (Some(ref inc), Some(ref ts)) => compute_model_backfill_plan(
                 model_name,
                 &model.content,
                 refs,
                 inc,
+                ts,
                 sources,
                 model.metadata.as_ref().map(|b| b.as_ref()),
                 range,
                 options,
             )?,
-            None => ModelBackfillPlan {
+            _ => ModelBackfillPlan {
                 model_name: model_name.clone(),
                 partition_range: range.clone(),
                 filter_range: range.clone(),
@@ -208,6 +218,7 @@ fn compute_model_backfill_plan(
     sql: &str,
     refs: Vec<String>,
     inc_config: &IncrementalConfig,
+    ts_config: &TimeseriesConfig,
     sources: Option<&smelt_core::SourcesConfig>,
     model_metadata: Option<&crate::metadata::ModelMetadata>,
     requested_range: &TimeRange,
@@ -219,22 +230,29 @@ fn compute_model_backfill_plan(
         sql: sql.to_string(),
         refs,
         incremental_config: Some(inc_config.clone()),
+        timeseries_config: Some(ts_config.clone()),
     };
     let batch_safety = analyze_batch_safety(&model_info);
 
     // Compute effective window
     let model_latency = model_metadata
-        .and_then(|m| m.columns.get(&inc_config.event_time_column))
+        .and_then(|m| m.columns.get(&ts_config.event_time_column))
         .and_then(|c| c.data_latency.as_ref());
-    let windows =
-        compute_incremental_windows(sql, inc_config, sources, model_latency, requested_range);
+    let windows = compute_incremental_windows(
+        sql,
+        inc_config,
+        ts_config,
+        sources,
+        model_latency,
+        requested_range,
+    );
 
     // Determine batch strategy
     let batches = generate_batches(
         requested_range,
         &windows.filter_range,
         &batch_safety,
-        &inc_config.granularity,
+        &ts_config.granularity,
         options,
     )?;
 
@@ -255,6 +273,7 @@ fn compute_model_backfill_plan(
 pub fn compute_batches_for_model(
     sql: &str,
     inc_config: &IncrementalConfig,
+    ts_config: &TimeseriesConfig,
     requested_range: &TimeRange,
     filter_range: &TimeRange,
     options: &BackfillOptions,
@@ -264,6 +283,7 @@ pub fn compute_batches_for_model(
         sql: sql.to_string(),
         refs: vec![],
         incremental_config: Some(inc_config.clone()),
+        timeseries_config: Some(ts_config.clone()),
     };
     let batch_safety = analyze_batch_safety(&model_info);
 
@@ -271,7 +291,7 @@ pub fn compute_batches_for_model(
         requested_range,
         filter_range,
         &batch_safety,
-        &inc_config.granularity,
+        &ts_config.granularity,
         options,
     )?;
 
@@ -380,7 +400,7 @@ fn granularity_days(g: &Granularity) -> u32 {
     match g {
         Granularity::Hour => 1, // Sub-day: batch at day boundaries
         Granularity::Day => 1,
-        Granularity::Week { .. } => 7,
+        Granularity::Week => 7,
         Granularity::Month => 30,
         Granularity::Quarter => 91,
         Granularity::Year => 365,

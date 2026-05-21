@@ -102,6 +102,7 @@ fn test_logical_graph_cross_engine_edges() {
         "upstream_model".to_string(),
         ModelConfig {
             materialization: None,
+            timeseries: None,
             incremental: None,
             tags: vec![],
             target: Some("spark_local".to_string()),

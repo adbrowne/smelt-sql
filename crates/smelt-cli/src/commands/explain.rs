@@ -92,6 +92,7 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
             name: model.name.clone(),
             sql: model.content.clone(),
             refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
             incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
         });
     }

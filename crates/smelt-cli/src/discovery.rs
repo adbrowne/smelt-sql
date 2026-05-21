@@ -48,6 +48,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         name: Some(smelt_name.clone()),
         generates: None,
         materialization,
+        timeseries: emitted.timeseries_config.clone(),
         incremental: emitted.incremental_config.clone(),
         target: None,
         tags: emitted.tags.clone(),

@@ -460,6 +460,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             name: model.name.clone(),
             sql: model.content.clone(),
             refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
             incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
         });
     }
@@ -801,6 +802,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let result = match effective_strategy {
             PhysicalStrategy::Incremental {
                 config: inc_config,
+                timeseries: inc_ts,
                 time_range: range,
                 plan_steps: Some(steps),
             } => {
@@ -815,11 +817,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let model_latency = model
                     .metadata
                     .as_ref()
-                    .and_then(|m| m.columns.get(&inc_config.event_time_column))
+                    .and_then(|m| m.columns.get(&inc_ts.event_time_column))
                     .and_then(|c| c.data_latency.as_ref());
                 let windows = compute_incremental_windows(
                     &model.content,
                     inc_config,
+                    inc_ts,
                     sources.as_ref(),
                     model_latency,
                     range,
@@ -834,10 +837,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let partition_values = generate_partition_values(
                     &windows.partition_range.start,
                     &windows.partition_range.end,
-                    &inc_config.granularity,
+                    &inc_ts.granularity,
+                    inc_ts.week_start.as_ref(),
                 )?;
                 let partition = PartitionSpec {
-                    column: inc_config.partition_column.clone(),
+                    column: inc_ts.partition_column.clone(),
                     values: partition_values,
                 };
 
@@ -847,7 +851,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     steps,
                     schema,
                     partition,
-                    &inc_config.event_time_column,
+                    &inc_ts.event_time_column,
                     &windows.filter_range,
                     resolved_strategy,
                     inc_config.unique_key.clone(),
@@ -866,6 +870,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
             PhysicalStrategy::Incremental {
                 config: inc_config,
+                timeseries: inc_ts,
                 time_range: range,
                 plan_steps: None,
             } => {
@@ -875,11 +880,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let model_latency = model
                     .metadata
                     .as_ref()
-                    .and_then(|m| m.columns.get(&inc_config.event_time_column))
+                    .and_then(|m| m.columns.get(&inc_ts.event_time_column))
                     .and_then(|c| c.data_latency.as_ref());
                 let windows = compute_incremental_windows(
                     &model.content,
                     inc_config,
+                    inc_ts,
                     sources.as_ref(),
                     model_latency,
                     range,
@@ -889,6 +895,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let (batch_safety, batches) = compute_batches_for_model(
                     &model.content,
                     inc_config,
+                    inc_ts,
                     range,
                     &windows.filter_range,
                     &backfill_options,
@@ -950,7 +957,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     let clean_sql = smelt_parser::strip_frontmatter(&model.content);
                     let transformed_sql = inject_time_filter(
                         &clean_sql,
-                        &inc_config.event_time_column,
+                        &inc_ts.event_time_column,
                         &batch.filter_range,
                     )
                     .with_context(|| {
@@ -974,7 +981,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     let partition_values = generate_partition_values(
                         &batch.partition_range.start,
                         &batch.partition_range.end,
-                        &inc_config.granularity,
+                        &inc_ts.granularity,
+                        inc_ts.week_start.as_ref(),
                     )?;
 
                     if effective_batches.len() == 1 {
@@ -994,12 +1002,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
                                 )
                             },
                             partition_values.len(),
-                            granularity_label(&inc_config.granularity),
+                            granularity_label(&inc_ts.granularity),
                         );
                     }
 
                     let partition = PartitionSpec {
-                        column: inc_config.partition_column.clone(),
+                        column: inc_ts.partition_column.clone(),
                         values: partition_values,
                     };
 
@@ -1101,6 +1109,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let (strategy_name, tr, partitions, batch_safety_label) = match strategy {
             PhysicalStrategy::Incremental {
                 config: inc,
+                timeseries: inc_ts,
                 time_range: range,
                 ..
             } => {
@@ -1113,8 +1122,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         start: range.start.clone(),
                         end: range.end.clone(),
                     }),
-                    generate_partition_values(&range.start, &range.end, &inc.granularity)
-                        .unwrap_or_default(),
+                    generate_partition_values(
+                        &range.start,
+                        &range.end,
+                        &inc_ts.granularity,
+                        inc_ts.week_start.as_ref(),
+                    )
+                    .unwrap_or_default(),
                     Some("incremental".to_string()),
                 )
             }

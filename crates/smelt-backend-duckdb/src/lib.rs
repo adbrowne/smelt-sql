@@ -764,7 +764,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_strategy_with_unique_key() {
         use smelt_backend::IncrementalConfig;
-        use smelt_backend::{Granularity, IncrementalSafetyOverrides};
+        use smelt_backend::IncrementalSafetyOverrides;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.duckdb");
@@ -772,9 +772,6 @@ mod tests {
 
         let config = IncrementalConfig {
             enabled: true,
-            event_time_column: "ts".to_string(),
-            partition_column: "dt".to_string(),
-            granularity: Granularity::Day,
             unique_key: vec!["id".to_string()],
             safety_overrides: IncrementalSafetyOverrides::default(),
         };
@@ -786,7 +783,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_strategy_without_unique_key() {
         use smelt_backend::IncrementalConfig;
-        use smelt_backend::{Granularity, IncrementalSafetyOverrides};
+        use smelt_backend::IncrementalSafetyOverrides;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.duckdb");
@@ -794,9 +791,6 @@ mod tests {
 
         let config = IncrementalConfig {
             enabled: true,
-            event_time_column: "ts".to_string(),
-            partition_column: "dt".to_string(),
-            granularity: Granularity::Day,
             unique_key: vec![],
             safety_overrides: IncrementalSafetyOverrides::default(),
         };

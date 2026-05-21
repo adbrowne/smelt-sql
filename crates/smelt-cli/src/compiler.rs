@@ -1663,6 +1663,7 @@ JOIN smelt.model_b b ON a.id = b.id
             "test_model".to_string(),
             ModelConfig {
                 materialization: Some(Materialization::Table),
+                timeseries: None,
                 incremental: None,
                 tags: Vec::new(),
                 target: None,

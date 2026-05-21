@@ -3,7 +3,7 @@ use crate::discovery::{ModelFile, ModelKind};
 use crate::logical_graph::LogicalGraph;
 use crate::transformer::TimeRange;
 use anyhow::{anyhow, Result};
-use smelt_core::config::{IncrementalConfig, Materialization};
+use smelt_core::config::{IncrementalConfig, Materialization, TimeseriesConfig};
 use smelt_core::{ModelId, RefInfo};
 use smelt_planner::{ExecutionStep, Transformation};
 use std::collections::{HashMap, HashSet};
@@ -18,6 +18,7 @@ pub enum PhysicalStrategy {
     /// Incremental processing (with optional cube split steps).
     Incremental {
         config: IncrementalConfig,
+        timeseries: TimeseriesConfig,
         time_range: TimeRange,
         plan_steps: Option<Vec<ExecutionStep>>,
     },
@@ -126,10 +127,10 @@ impl PhysicalGraph {
                 PhysicalStrategy::CubeSplit { .. } => {
                     summary.push((node.name.clone(), "cube split".to_string()));
                 }
-                PhysicalStrategy::Incremental { config, .. } => {
+                PhysicalStrategy::Incremental { timeseries, .. } => {
                     summary.push((
                         node.name.clone(),
-                        format!("incremental (partition: {})", config.partition_column),
+                        format!("incremental (partition: {})", timeseries.partition_column),
                     ));
                 }
                 PhysicalStrategy::FullRefresh => {}
@@ -385,6 +386,7 @@ impl<'a> PhysicalGraphBuilder<'a> {
                 model_name,
                 &incremental_overrides,
                 node.incremental.as_ref(),
+                node.timeseries.as_ref(),
                 plan_steps,
             );
 
@@ -506,21 +508,25 @@ impl<'a> PhysicalGraphBuilder<'a> {
         model_name: &str,
         incremental_overrides: &HashMap<String, (String, String, smelt_core::Granularity)>,
         config_incremental: Option<&IncrementalConfig>,
+        config_timeseries: Option<&TimeseriesConfig>,
         plan_steps: Option<Vec<ExecutionStep>>,
     ) -> PhysicalStrategy {
         if let Some((event_time_col, partition_col, granularity)) =
             incremental_overrides.get(model_name)
         {
-            // Planner detected incremental — requires time_range
+            // Planner detected incremental — build a synthetic TimeseriesConfig from override data
             if let Some(ref time_range) = self.time_range {
                 PhysicalStrategy::Incremental {
                     config: IncrementalConfig {
                         enabled: true,
+                        unique_key: vec![],
+                        safety_overrides: Default::default(),
+                    },
+                    timeseries: TimeseriesConfig {
                         event_time_column: event_time_col.clone(),
                         partition_column: partition_col.clone(),
                         granularity: granularity.clone(),
-                        unique_key: vec![],
-                        safety_overrides: Default::default(),
+                        week_start: None,
                     },
                     time_range: time_range.clone(),
                     plan_steps,
@@ -530,10 +536,14 @@ impl<'a> PhysicalGraphBuilder<'a> {
             } else {
                 PhysicalStrategy::FullRefresh
             }
-        } else if let Some(inc) = config_incremental.filter(|_| self.time_range.is_some()) {
+        } else if let (Some(inc), Some(ts)) = (
+            config_incremental.filter(|_| self.time_range.is_some()),
+            config_timeseries.filter(|_| self.time_range.is_some()),
+        ) {
             // Config-based incremental (smelt.yml or frontmatter)
             PhysicalStrategy::Incremental {
                 config: inc.clone(),
+                timeseries: ts.clone(),
                 time_range: self
                     .time_range
                     .as_ref()
@@ -626,7 +636,7 @@ mod tests {
     use crate::config::Config;
     use crate::discovery::ModelKind;
     use rowan::TextRange;
-    use smelt_core::config::{Granularity, ModelConfig, Target};
+    use smelt_core::config::{Granularity, ModelConfig, Target, TimeseriesConfig};
     use smelt_core::ModelId;
     use smelt_core::RefInfo;
     use std::collections::HashMap;
@@ -731,6 +741,7 @@ mod tests {
             "staging".to_string(),
             ModelConfig {
                 materialization: Some(Materialization::Ephemeral),
+                timeseries: None,
                 incremental: None,
                 tags: vec![],
                 target: None,
@@ -755,11 +766,14 @@ mod tests {
             "events".to_string(),
             ModelConfig {
                 materialization: Some(Materialization::Table),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                timeseries: Some(TimeseriesConfig {
                     event_time_column: "ts".to_string(),
                     partition_column: "dt".to_string(),
                     granularity: Granularity::Day,
+                    week_start: None,
+                }),
+                incremental: Some(IncrementalConfig {
+                    enabled: true,
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),
@@ -793,11 +807,14 @@ mod tests {
             "events".to_string(),
             ModelConfig {
                 materialization: Some(Materialization::Table),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                timeseries: Some(TimeseriesConfig {
                     event_time_column: "ts".to_string(),
                     partition_column: "dt".to_string(),
                     granularity: Granularity::Day,
+                    week_start: None,
+                }),
+                incremental: Some(IncrementalConfig {
+                    enabled: true,
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),
@@ -886,6 +903,7 @@ mod tests {
             "staging".to_string(),
             ModelConfig {
                 materialization: Some(Materialization::Ephemeral),
+                timeseries: None,
                 incremental: None,
                 tags: vec![],
                 target: None,

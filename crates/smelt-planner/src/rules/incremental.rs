@@ -56,7 +56,7 @@ pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety {
 
     // Determine granularity period for converting Periods→Days
     let period_days = model
-        .incremental_config
+        .timeseries_config
         .as_ref()
         .map(|c| crate::analysis::temporal::granularity_period_days(&c.granularity))
         .unwrap_or(1);
@@ -132,6 +132,14 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         None => return Ok(None),
     };
 
+    // timeseries: is required when incremental: is present
+    let ts_config = model.timeseries_config.as_ref().ok_or_else(|| {
+        format!(
+            "Model '{}': has incremental config but no timeseries config",
+            model.name
+        )
+    })?;
+
     let analysis = analyze_select(&model.sql).ok_or_else(|| {
         format!(
             "Model '{}': has incremental config but SQL could not be parsed",
@@ -139,8 +147,8 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         )
     })?;
 
-    let partition_col = &inc_config.partition_column;
-    let event_time_column = &inc_config.event_time_column;
+    let partition_col = &ts_config.partition_column;
+    let event_time_column = &ts_config.event_time_column;
     let overrides = &inc_config.safety_overrides;
 
     // Validate partition_column alias exists in SELECT list
@@ -294,12 +302,12 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         model: model.name.clone(),
         description: format!(
             "Incremental materialization on partition column '{}' (source: '{}', granularity: {:?})",
-            partition_col, event_time_column, inc_config.granularity,
+            partition_col, event_time_column, ts_config.granularity,
         ),
         data: OpportunityData::Incremental {
             event_time_column: event_time_column.clone(),
             partition_column: partition_col.clone(),
-            granularity: inc_config.granularity.clone(),
+            granularity: ts_config.granularity.clone(),
         },
     }))
 }
@@ -349,7 +357,8 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Granularity, IncrementalConfig, IncrementalSafetyOverrides, Weekday};
+    use crate::graph::TimeseriesConfig;
+    use crate::types::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
 
     fn model(name: &str, sql: &str, partition_column: &str) -> ModelInfo {
         model_with_event_time(name, sql, partition_column, "event_timestamp")
@@ -365,11 +374,14 @@ mod tests {
             name: name.to_string(),
             sql: sql.to_string(),
             refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: event_time_column.to_string(),
+                partition_column: partition_column.to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
             incremental_config: Some(IncrementalConfig {
                 enabled: true,
-                partition_column: partition_column.to_string(),
-                event_time_column: event_time_column.to_string(),
-                granularity: Granularity::Day,
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -386,11 +398,14 @@ mod tests {
             name: name.to_string(),
             sql: sql.to_string(),
             refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_timestamp".to_string(),
+                partition_column: partition_column.to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
             incremental_config: Some(IncrementalConfig {
                 enabled: true,
-                partition_column: partition_column.to_string(),
-                event_time_column: "event_timestamp".to_string(),
-                granularity: Granularity::Day,
                 unique_key: vec![],
                 safety_overrides: overrides,
             }),
@@ -455,15 +470,19 @@ mod tests {
 
     #[test]
     fn test_detect_with_granularity() {
+        use crate::graph::TimeseriesConfig;
         let m = ModelInfo {
             name: "hourly".to_string(),
             sql: "SELECT date_trunc('hour', event_timestamp) as event_hour, COUNT(*) as cnt FROM events GROUP BY 1".to_string(),
             refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_timestamp".to_string(),
+                partition_column: "event_hour".to_string(),
+                granularity: Granularity::Hour,
+                week_start: None,
+            }),
             incremental_config: Some(IncrementalConfig {
                 enabled: true,
-                partition_column: "event_hour".to_string(),
-                event_time_column: "event_timestamp".to_string(),
-                granularity: Granularity::Hour,
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -485,6 +504,7 @@ mod tests {
             name: "test".to_string(),
             sql: "SELECT a FROM t GROUP BY 1".to_string(),
             refs: vec![],
+            timeseries_config: None,
             incremental_config: None,
         };
         assert!(detect(&m).unwrap().is_none());
@@ -643,17 +663,19 @@ mod tests {
 
     #[test]
     fn test_detect_with_weekly_granularity() {
+        use smelt_core::config::Weekday;
         let m = ModelInfo {
             name: "weekly".to_string(),
             sql: "SELECT date_trunc('week', event_timestamp) as event_week, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
             refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_timestamp".to_string(),
+                partition_column: "event_week".to_string(),
+                granularity: Granularity::Week,
+                week_start: Some(Weekday::Monday),
+            }),
             incremental_config: Some(IncrementalConfig {
                 enabled: true,
-                partition_column: "event_week".to_string(),
-                event_time_column: "event_timestamp".to_string(),
-                granularity: Granularity::Week {
-                    week_start: Weekday::Monday,
-                },
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -664,12 +686,7 @@ mod tests {
             OpportunityData::Incremental {
                 ref granularity, ..
             } => {
-                assert_eq!(
-                    granularity,
-                    &Granularity::Week {
-                        week_start: Weekday::Monday
-                    }
-                );
+                assert_eq!(granularity, &Granularity::Week);
             }
             _ => panic!("Expected Incremental data"),
         }
@@ -681,11 +698,14 @@ mod tests {
             name: "daily".to_string(),
             sql: "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
             refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_timestamp".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
             incremental_config: Some(IncrementalConfig {
                 enabled: true,
-                partition_column: "event_date".to_string(),
-                event_time_column: "event_timestamp".to_string(),
-                granularity: Granularity::Day,
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -701,11 +721,14 @@ mod tests {
             name: "daily".to_string(),
             sql: "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
             refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_timestamp".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
             incremental_config: Some(IncrementalConfig {
                 enabled: true,
-                partition_column: "event_date".to_string(),
-                event_time_column: "event_timestamp".to_string(),
-                granularity: Granularity::Day,
                 unique_key: vec!["nonexistent_col".to_string()],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -784,6 +807,7 @@ mod tests {
             name: "plain".to_string(),
             sql: "SELECT a, SUM(b) FROM t GROUP BY 1".to_string(),
             refs: vec![],
+            timeseries_config: None,
             incremental_config: None,
         };
         let safety = analyze_batch_safety(&m);
