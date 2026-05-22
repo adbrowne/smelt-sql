@@ -761,8 +761,12 @@ mod tests {
         assert_eq!(val, 999);
     }
 
+    /// `resolve_strategy` is no longer a dispatching function — it always
+    /// returns DeleteInsert. MERGE is the physical primitive of the
+    /// `cumulative_aggregate` materialization and is not selected through
+    /// the IncrementalStrategy enum.
     #[tokio::test]
-    async fn test_resolve_strategy_with_unique_key() {
+    async fn test_resolve_strategy_always_delete_insert() {
         use smelt_backend::IncrementalConfig;
         use smelt_backend::IncrementalSafetyOverrides;
 
@@ -770,33 +774,25 @@ mod tests {
         let db_path = temp_dir.path().join("test.duckdb");
         let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
 
-        let config = IncrementalConfig {
+        let config_with_key = IncrementalConfig {
             enabled: true,
             unique_key: vec!["id".to_string()],
             safety_overrides: IncrementalSafetyOverrides::default(),
         };
+        assert_eq!(
+            backend.resolve_strategy(&config_with_key),
+            smelt_backend::IncrementalStrategy::DeleteInsert,
+        );
 
-        let strategy = backend.resolve_strategy(&config);
-        assert_eq!(strategy, smelt_backend::IncrementalStrategy::Merge);
-    }
-
-    #[tokio::test]
-    async fn test_resolve_strategy_without_unique_key() {
-        use smelt_backend::IncrementalConfig;
-        use smelt_backend::IncrementalSafetyOverrides;
-
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.duckdb");
-        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
-
-        let config = IncrementalConfig {
+        let config_without_key = IncrementalConfig {
             enabled: true,
             unique_key: vec![],
             safety_overrides: IncrementalSafetyOverrides::default(),
         };
-
-        let strategy = backend.resolve_strategy(&config);
-        assert_eq!(strategy, smelt_backend::IncrementalStrategy::DeleteInsert);
+        assert_eq!(
+            backend.resolve_strategy(&config_without_key),
+            smelt_backend::IncrementalStrategy::DeleteInsert,
+        );
     }
 
     /// Bug #1 (re-run a Table materialization):

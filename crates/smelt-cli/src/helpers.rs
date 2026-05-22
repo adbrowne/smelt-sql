@@ -29,7 +29,6 @@ pub fn granularity_label(g: &Granularity) -> &'static str {
 pub fn strategy_label(s: &IncrementalStrategy) -> &'static str {
     match s {
         IncrementalStrategy::DeleteInsert => "delete+insert",
-        IncrementalStrategy::Merge => "merge",
         IncrementalStrategy::Append => "append",
         IncrementalStrategy::InsertOverwrite => "insert_overwrite",
     }

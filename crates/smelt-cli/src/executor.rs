@@ -261,21 +261,12 @@ pub async fn execute_plan_incremental(
                             source: e.into(),
                         })?;
                 } else {
+                    let _ = &unique_key; // reserved for future audit/logging use
                     match inc_strategy {
                         IncrementalStrategy::DeleteInsert => {
                             // Partitions already deleted above
                             backend
                                 .insert_into_from_query(schema, model_name, sql)
-                                .await
-                                .map_err(|e| CliError::ExecutionError {
-                                    model: model_name.to_string(),
-                                    sql: sql.clone(),
-                                    source: e.into(),
-                                })?;
-                        }
-                        IncrementalStrategy::Merge => {
-                            backend
-                                .merge_into(schema, model_name, sql, &unique_key)
                                 .await
                                 .map_err(|e| CliError::ExecutionError {
                                     model: model_name.to_string(),

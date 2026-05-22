@@ -123,76 +123,13 @@ async fn test_delete_insert_overlapping_ranges_idempotent() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// MERGE
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_merge_matches_full_refresh() -> Result<()> {
-    let (_dir, backend) = setup_backend().await?;
-    seed_transactions(&backend).await?;
-
-    run_full_refresh(&backend, "baseline_merge", DAILY_REVENUE_SQL).await?;
-
-    let ranges = vec![
-        TestTimeRange {
-            start: "2024-12-25".into(),
-            end: "2024-12-27".into(),
-        },
-        TestTimeRange {
-            start: "2024-12-27".into(),
-            end: "2024-12-30".into(),
-        },
-    ];
-
-    run_incremental_sequence(
-        &backend,
-        "inc_merge",
-        &daily_revenue_filtered,
-        &ranges,
-        IncrementalStrategy::Merge,
-        "revenue_date",
-        &["revenue_date".to_string(), "user_id".to_string()],
-    )
-    .await?;
-
-    assert_tables_equal(&backend, "baseline_merge", "inc_merge").await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_merge_overlapping_ranges_idempotent() -> Result<()> {
-    let (_dir, backend) = setup_backend().await?;
-    seed_transactions(&backend).await?;
-
-    run_full_refresh(&backend, "baseline_merge_overlap", DAILY_REVENUE_SQL).await?;
-
-    // Re-process same range twice — MERGE should be idempotent
-    let ranges = vec![
-        TestTimeRange {
-            start: "2024-12-25".into(),
-            end: "2024-12-30".into(),
-        },
-        TestTimeRange {
-            start: "2024-12-25".into(),
-            end: "2024-12-30".into(),
-        },
-    ];
-
-    run_incremental_sequence(
-        &backend,
-        "inc_merge_overlap",
-        &daily_revenue_filtered,
-        &ranges,
-        IncrementalStrategy::Merge,
-        "revenue_date",
-        &["revenue_date".to_string(), "user_id".to_string()],
-    )
-    .await?;
-
-    assert_tables_equal(&backend, "baseline_merge_overlap", "inc_merge_overlap").await?;
-    Ok(())
-}
+// MERGE is no longer an incremental strategy — UPSERT is the physical
+// primitive of the `cumulative_aggregate` materialization (see
+// `docs/specs/cumulative_aggregate.md`). The `Backend::merge_into` trait
+// method is still exercised directly in
+// `crates/smelt-backend-duckdb/src/lib.rs::test_merge_into_upsert` and the
+// cross-partition equivalence harness in
+// `crates/smelt-cli/tests/cumulative_equivalence/`.
 
 // ---------------------------------------------------------------------------
 // APPEND

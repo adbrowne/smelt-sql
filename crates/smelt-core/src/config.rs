@@ -326,11 +326,16 @@ pub struct IncrementalSafetyOverrides {
 ///
 /// Model authors declare *what* (unique_key, partition_column) and backends
 /// decide *how* (which strategy to use) via `resolve_strategy()`.
+///
+/// UPSERT (`MERGE`) is **not** an incremental strategy — it is the physical
+/// primitive used by the `cumulative_aggregate` materialization
+/// (`docs/specs/cumulative_aggregate.md`), which is a separate sibling rule
+/// with a different equivalence contract. `Backend::merge_into` remains on
+/// the backend trait for that caller; it is not reachable from this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncrementalStrategy {
     DeleteInsert,
-    Merge,
     Append,
     InsertOverwrite,
 }
@@ -921,8 +926,21 @@ targets:
         let json = serde_json::to_string(&strategy).unwrap();
         assert_eq!(json, r#""delete_insert""#);
 
-        let strategy: IncrementalStrategy = serde_json::from_str(r#""merge""#).unwrap();
-        assert_eq!(strategy, IncrementalStrategy::Merge);
+        let strategy: IncrementalStrategy = serde_json::from_str(r#""append""#).unwrap();
+        assert_eq!(strategy, IncrementalStrategy::Append);
+    }
+
+    /// `merge` is no longer an incremental strategy — UPSERT is the physical
+    /// primitive used by the `cumulative_aggregate` materialization, not a
+    /// knob on `incremental:`. Deserialising it must fail.
+    #[test]
+    fn test_incremental_strategy_no_merge_variant() {
+        let result: Result<IncrementalStrategy, _> = serde_json::from_str(r#""merge""#);
+        assert!(
+            result.is_err(),
+            "`merge` must not deserialise as an IncrementalStrategy — it is the \
+             physical primitive of `materialization: cumulative_aggregate`"
+        );
     }
 
     #[test]
