@@ -24,6 +24,19 @@ pub enum PhysicalStrategy {
     },
 }
 
+impl PhysicalStrategy {
+    /// Extract the incremental run window from this strategy, if one was set.
+    ///
+    /// Useful for materializations that need a `[start, end)` window but
+    /// have their own execution loop (e.g. `cumulative_aggregate`).
+    pub fn as_incremental_time_range(&self) -> Option<TimeRange> {
+        match self {
+            PhysicalStrategy::Incremental { time_range, .. } => Some(time_range.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// A node in the physical execution graph.
 ///
 /// Each PhysicalNode corresponds to a non-ephemeral model that needs execution.

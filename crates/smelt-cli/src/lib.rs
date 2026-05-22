@@ -2,6 +2,7 @@ pub mod backend_registry;
 pub mod backfill;
 pub mod compiler;
 pub mod config;
+pub mod cumulative;
 pub mod discovery;
 pub mod docs;
 pub mod docs_render;

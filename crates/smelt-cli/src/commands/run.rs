@@ -858,6 +858,62 @@ pub async fn run(args: RunArgs) -> Result<()> {
             &phys_node.strategy
         };
 
+        // `cumulative_aggregate` is dispatched outside the PhysicalStrategy
+        // match: the rule has its own per-partition merge loop. It still needs
+        // a `[start, end)` run window, so we require an incremental-style time
+        // range on the CLI invocation. The driving source's timeseries: comes
+        // from the upstream model's metadata, gathered from the logical graph.
+        if phys_node.materialization == Materialization::CumulativeAggregate {
+            let cumulative_time_range = time_range.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cumulative_aggregate model '{}' requires an incremental run window — \
+                     pass `--event-time-start` and `--event-time-end`",
+                    model_name
+                )
+            })?;
+
+            // Build the source_timeseries map from the logical graph: every
+            // dependency whose declared `timeseries:` block is non-None.
+            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
+            if let Ok(node) = graph.get_node(model_name) {
+                for dep_name in &node.dependencies {
+                    if let Ok(dep_node) = graph.get_node(dep_name) {
+                        if let Some(ts) = &dep_node.timeseries {
+                            // Key by the smelt.<path> reference as it appears
+                            // in the model SQL — the dep_node carries
+                            // address_segments.
+                            let smelt_key =
+                                format!("smelt.{}", dep_node.model_file.address_segments.join("."));
+                            source_timeseries.insert(smelt_key, ts.clone());
+                        }
+                    }
+                }
+            }
+
+            let result = smelt_cli::cumulative::execute_cumulative_aggregate(
+                backend,
+                model,
+                &compilers,
+                &physical_graph,
+                &phys_node.target,
+                schema,
+                &db_table_name,
+                &cumulative_time_range,
+                &source_timeseries,
+                args.verbose,
+            )
+            .await
+            .with_context(|| format!("Failed to execute cumulative model: {}", model_name))?;
+
+            info!(
+                "{} done ({} rows, {:?})",
+                result.model_name, result.row_count, result.duration
+            );
+
+            results.push((result, phys_node.strategy.clone()));
+            continue;
+        }
+
         let result = match effective_strategy {
             PhysicalStrategy::Incremental {
                 config: inc_config,
