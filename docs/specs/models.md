@@ -86,6 +86,7 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 | `ephemeral` | Not materialized. SQL is inlined as a CTE into every downstream model that references it. |
 | `materialized_view` | Backend-managed persistent view; the backend controls refresh scheduling. |
 | `test` | Not materialized. The model defines a unit test. SQL body is a test query; `test:` key in frontmatter declares mock data and assertions. See `testing.md`. |
+| `cumulative_aggregate` | Stateful merge. The SELECT's `GROUP BY` is the unique key; non-key projections must be allowlisted aggregators. Driving partition shape is read from a single `timeseries:`-tagged source in the FROM clause. See `cumulative_aggregate.md`. |
 
 ### Materialization precedence (highest to lowest)
 
@@ -141,6 +142,8 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 | `test` + `timeseries` | Hard error (see `timeseries.md`) |
 | `test` + `target` override | Hard error |
 | `incremental` without `timeseries` | Hard error (`TimeseriesRequiredForIncremental`) |
+| `cumulative_aggregate` + `timeseries` | Hard error (`CumulativeForbidsTimeseries`; see `cumulative_aggregate.md`) |
+| `cumulative_aggregate` + `incremental` | Hard error (`CumulativeForbidsIncremental`) |
 | `view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
 | `materialized_view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
 | Unknown frontmatter key | Hard error (`deny_unknown_fields`) |

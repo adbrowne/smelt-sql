@@ -79,13 +79,12 @@ Strategy is **not** declared on the model. Backends pick a strategy given the mo
 ```rust
 enum IncrementalStrategy {
     DeleteInsert,    // DELETE matching partitions + INSERT
-    Merge,           // UPSERT keyed by unique_key (requires backend MERGE support)
     Append,          // insert-only; no dedup
     InsertOverwrite, // replace entire partitions atomically
 }
 ```
 
-DuckDB currently always uses `DeleteInsert`.
+DuckDB currently always uses `DeleteInsert`. UPSERT (`MERGE`) is **not** an incremental strategy — it is the physical primitive used by `cumulative_aggregate` (`cumulative_aggregate.md`), which is a separate materialization with a different equivalence contract.
 
 ## Semantics
 
@@ -305,7 +304,7 @@ This section captures the load-bearing rationale behind the incremental model su
 - **Migration to `timeseries:` block pending.** The current implementation reads `event_time_column`, `partition_column`, and `granularity` from inside the `incremental:` block. Migration to the `timeseries:` block specified here (and in `timeseries.md`) is the next plan derived from `docs/research/20260521-incremental-as-planner-rule.md`. The cutover is one-shot — no transitional dual-form support.
 - **Bound derivation and source-filter pushdown run on the outer SQL body, not the expanded CST.** Bound derivation reads Form A / Form B patterns from the outer model SQL only; patterns inside `smelt.define` function bodies are invisible unless the caller concatenates the expanded body into the SQL string it passes to the analyser. A model whose sole RANGE clause is inside a function body will derive `Bounded(_, 0, 0)` rather than reflecting the inner bound (it will not produce `NotDerivable`, so it will not be refused — but the derived bound may be narrower than reality). Source-filter pushdown applies to all `smelt.<path>` references in the SQL text, including references that appear inside named-parameter positions (e.g., `source => smelt.silver.events_parsed` inside a function call), but the filter uses the bound derived from the outer SQL; if the outer SQL has no INTERVAL patterns for that source, the injected filter covers only the exact run window. The spec requires derivation and pushdown on the expanded CST (per `expansion.md`); wiring this requires feeding the post-expansion `LogicalNode` tree into the bound analyser. Tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
 - **Per-column `data_latency` not implemented.** Plan calls for declaring `data_latency` on upstream sources for late-arriving data; not yet available.
-- **MERGE strategy is DuckDB-only-future.** `BackendCapabilities.supports_merge` is `true` for DuckDB / Spark / PostgreSQL, but the planner emits `DeleteInsert` for all three today. A Spark MERGE pathway is in the plan but unbuilt.
+- **`IncrementalStrategy::Merge` variant is dead code.** The enum still carries a `Merge` variant in `crates/smelt-core/src/config.rs`, but no model frontmatter reaches it. The variant predated the `cumulative_aggregate` materialization (`cumulative_aggregate.md`), which is the rule that consumes the `merge_into` backend primitive. The variant is dropped as part of the plan that lands `cumulative_aggregate`.
 - **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+incremental, incremental-only — Phase 1 of the incremental plan unified `IncrementalConfig` but the CLI dispatch is still tri-modal. Should converge.
 - **Granularity conversion boilerplate.** A duplicate `Granularity` enum existed in `smelt-planner/src/types.rs` and was reconciled with `smelt-core`; check for residual conversion code in `main.rs` (lines around 669–683 in the plan reference) when next touching this area.
 - **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is planned but opt-in; see `run_state.md` anchor in `architecture.md` §"Specs not yet authored".
