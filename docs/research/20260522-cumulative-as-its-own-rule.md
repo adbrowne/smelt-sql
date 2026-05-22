@@ -12,12 +12,14 @@ Today the spec keeps `Merge` as a variant of `IncrementalStrategy` (`crates/smel
 
 This doc argues that wiring it up under `incremental:` is the wrong shape. Cumulative materialization should be a separate planner rule with its own frontmatter block, its own classifier, its own equivalence contract, and its own normative spec. The shared infrastructure (function expansion, dependency graph, the `timeseries:` metadata format consumed *from sources*) already lives in core under the planner-rule design direction; both rules consume from core, neither shares with the other.
 
-A second architectural observation, equally important: **a cumulative model is not itself a timeseries.** Its sources are. The output has a `unique_key` (one row per `(device, user)`) and aggregated columns, but no `partition_column` and no `granularity` — it has collapsed all partitions of history into a single per-key row. The cumulative rule discovers the partition-driving shape by reading `timeseries:` *from the source* declared in its FROM clause; the model itself doesn't declare a timeseries block. Downstream consumers see the cumulative table as a lookup, not a timeseries source.
+A second architectural observation, equally important: **a cumulative model is not itself a timeseries.** Its sources are. The output has a unique key (one row per `(device, user)`) and aggregated columns, but no `partition_column` and no `granularity` — it has collapsed all partitions of history into a single per-key row. The cumulative rule discovers the partition-driving shape by reading `timeseries:` *from the source* declared in its FROM clause; the model itself doesn't declare a timeseries block. Downstream consumers see the cumulative table as a lookup, not a timeseries source.
+
+A third observation, in the same spirit as the predecessor's "derive from SQL, not from YAML": **the unique key and the per-column aggregators are already in the SQL.** The `GROUP BY` names the key. Each non-key projection names its per-partition aggregator (`COUNT(*)`, `MIN(event_ts)`, …). The cross-partition combiner for each is a fixed lookup — `COUNT → SUM`, `SUM → SUM`, `MIN → MIN`, `MAX → MAX`, etc. There is no information the rule needs that isn't already in the SELECT, so the frontmatter does not re-declare any of it.
 
 Three architectural moves carry the recommendation:
 
 1. **Drop `IncrementalStrategy::Merge`.** Incremental is DELETE+INSERT only. The variant misleads readers into thinking MERGE is a within-incremental knob; it is not.
-2. **Spec a separate rule** (working name `cumulative_aggregate`). Its frontmatter block declares unique keys and per-column aggregators. The rule discovers its driving partition shape from the timeseries source(s) in its FROM clause; the model itself does not carry a `timeseries:` block. Its safety classifier asks different questions than incremental's. Its equivalence contract is structurally different.
+2. **Spec a separate rule** (working name `cumulative_aggregate`). Selection is via `materialization: cumulative_aggregate`; no other metadata is needed. The rule derives the unique key from the SELECT's `GROUP BY`, the per-column aggregators from the projection list, and the cross-partition combiners from a fixed lookup table. It discovers its driving partition shape from the timeseries source(s) in the FROM clause. Its safety classifier asks different questions than incremental's. Its equivalence contract is structurally different.
 3. **Keep `merge_into` as a backend primitive.** Backends don't care which rule called them; the trait method and DuckDB implementation become the cumulative rule's physical strategy with zero changes.
 
 A further claim, weaker but worth surfacing: cumulative isn't one pattern. SCD2, latest-value tables, and accumulating snapshot facts are all "stateful merge with history" but with different unique-key semantics and aggregator stories. The planner-rule design direction explicitly favors narrow, composable rules. Separate sibling rules per pattern (`cumulative_aggregate`, `scd2`, `latest_value`) compose better than one generic MERGE rule with enough knobs to cover all of them.
@@ -69,11 +71,11 @@ Both rules sit downstream of the same core infrastructure:
    │                              │     │   in any order                   │
    │                              │     │                                  │
    │  Classifier asks:            │     │  Classifier asks:                │
-   │   does output for partition  │     │   are aggregators commutative    │
-   │   D depend only on rows in   │     │   and associative? is the        │
-   │   [D - before, D + after)?   │     │   unique_key stable? does the    │
-   │                              │     │   SELECT shape match the rule    │
-   │  Physical strategy:          │     │   (delta per source partition)?  │
+   │   does output for partition  │     │   are all non-key projections    │
+   │   D depend only on rows in   │     │   commutative-associative        │
+   │   [D - before, D + after)?   │     │   aggregates from the allowlist? │
+   │                              │     │   does GROUP BY define a stable  │
+   │  Physical strategy:          │     │   key?                           │
    │   DELETE+INSERT per          │     │                                  │
    │   partition                  │     │  Physical strategy:              │
    │                              │     │   UPSERT (backend.merge_into)    │
@@ -137,10 +139,11 @@ The incremental safety classifier (post the May 2026 work in `crates/smelt-plann
 
 A cumulative classifier would walk the inlined outer body and reject completely different things:
 
-- **Aggregator algebra.** Each non-key projection in the SELECT must be one of an allowlist of known-commutative, known-associative aggregators (or compose to one). `SUM`, `MIN`, `MAX`, `COUNT`, `BIT_AND`, `BIT_OR`, `BIT_XOR`, `BOOL_AND`, `BOOL_OR`, set-union (via `array_agg(distinct ...)` post-merge), `APPROX_COUNT_DISTINCT` over HLL state — yes. `AVG` — no, but trivially rewritable as `SUM/COUNT` and computed at read time, so an optional rewrite. `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST` — no.
-- **Unique-key stability.** `unique_key` columns must be deterministic over the entire input — no `now()`, no `random()`, no source-rowid leakage.
-- **Reprocessing semantics.** What happens when partition D is reprocessed? Reversible aggregators (sum, count) admit subtract-then-add (requires keeping per-partition deltas, or a "reprocess" mode that re-reads the partition's prior contribution). Irreversible aggregators (min, max without auxiliary state) force a full rebuild on reprocessing. The classifier surfaces this as a property; the rule's physical strategy reads the property and either supports reprocessing or refuses it.
+- **Aggregator algebra, read from the projection list.** Each non-key projection in the SELECT must be a direct call to one of an allowlist of known-commutative, known-associative aggregators. `SUM`, `MIN`, `MAX`, `COUNT`, `BIT_AND`, `BIT_OR`, `BIT_XOR`, `BOOL_AND`, `BOOL_OR`, set-union (via `array_agg(distinct ...)` post-merge), `APPROX_COUNT_DISTINCT` over HLL state — yes. `AVG` — no, but trivially rewritable as `SUM/COUNT` and computed at read time, so an optional rewrite. `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST` — no. The classifier reads each projection's aggregate function and looks up the cross-partition combiner in a fixed table: `COUNT → SUM`, `SUM → SUM`, `MIN → MIN`, `MAX → MAX`, `BIT_OR → BIT_OR`, etc. No author-supplied combiner declaration; the SQL is the only source of truth.
+- **Unique-key derived from GROUP BY.** The cumulative target's key is the GROUP BY column list of the SELECT. The classifier verifies the columns are deterministic (no `now()`, no `random()`, no source-rowid leakage). A SELECT with no GROUP BY is refused as degenerate (would produce one row per partition with no key) unless the v2 "singleton cumulative" case is opened.
+- **Reprocessing semantics.** What happens when partition D is reprocessed? Reversible aggregators (sum, count) admit subtract-then-add (requires keeping per-partition deltas, or a "reprocess" mode that re-reads the partition's prior contribution). Irreversible aggregators (min, max without auxiliary state) force a full rebuild on reprocessing. The classifier surfaces this as a property of the projection list; the rule's physical strategy reads the property and either supports reprocessing or refuses it.
 - **No OVER / window-frame analysis.** Window functions in cumulative SQL don't make sense — the cumulative state is the window. The classifier rejects them outright in the outer body.
+- **GROUP BY must not include the driving source's partition column.** If it does, the unique_key becomes per-`(key, partition)`, which is the per-partition shape, not the cumulative shape. The classifier detects this and the diagnostic suggests switching to `incremental:` + `timeseries:` instead.
 - **No lookback derivation.** The source filter is `[D, D+G)` — only the new partition. Bounds analysis is a no-op (or rather, "bounds are trivially `(0, 0)`"). The per-source bound machinery from incremental doesn't run.
 
 None of these checks share code with the incremental classifier beyond the CST-walking framework, which is core.
@@ -153,15 +156,7 @@ Cumulative SQL is *a per-partition delta SELECT* that gets merged into the cumul
 
 ```sql
 ---
-materialization: table
-
-cumulative_aggregate:
-  enabled: true
-  unique_key: [device_id, user_id]
-  aggregators:
-    event_count: sum
-    first_seen: min
-    last_seen: max
+materialization: cumulative_aggregate
 ---
 SELECT
     device_id,
@@ -174,14 +169,16 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-No `timeseries:` block on the model itself — the output has no partition column. The rule reads `events_parsed`'s own `timeseries:` declaration to know the partition shape to step over.
+No `timeseries:` block on the model — the output has no partition column. No `unique_key` or `aggregators` declaration either — both are in the SQL. The rule reads `events_parsed`'s own `timeseries:` declaration to know the partition shape to step over.
 
-The rule's job at execution time:
+The rule's job at planning + execution time:
 
-1. Walk the FROM clause, find timeseries-tagged sources, pick the driver (exactly one, in v1 — see "Multi-source disambiguation" above).
-2. Source-filter pushdown injects `event_date IN [D, D+G)` onto `events_parsed`, using the driver source's `partition_column` and `granularity`.
-3. Engine produces the delta rows (one per key from this partition's events).
-4. Rule emits a backend `merge_into` call with `unique_key = [device_id, user_id]` and the aggregator map. Matched rows: combine target columns with delta columns via the declared aggregators (`event_count = target.event_count + delta.event_count`, `first_seen = LEAST(target.first_seen, delta.first_seen)`, `last_seen = GREATEST(target.last_seen, delta.last_seen)`). Unmatched: insert.
+1. **Read the SQL**: GROUP BY columns become the unique_key (`[device_id, user_id]`). Each non-key projection becomes a `(column, per_partition_agg, cross_partition_combiner)` triple via the fixed lookup table (`event_count, COUNT, SUM`), (`first_seen, MIN, MIN`), (`last_seen, MAX, MAX`).
+2. **Validate**: every projection's aggregator is in the allowlist; the GROUP BY columns don't include the driving source's partition column; no `OVER`/window functions in the outer body.
+3. **Walk the FROM clause**, find timeseries-tagged sources, pick the driver (exactly one, in v1 — see "Multi-source disambiguation" above).
+4. **Source-filter pushdown** injects `event_date IN [D, D+G)` onto `events_parsed`, using the driver source's `partition_column` and `granularity`.
+5. **Engine produces the delta rows** (one per key from this partition's events).
+6. **Rule emits a backend `merge_into` call** with the derived unique_key and the per-column combiner map. Matched rows: combine target columns with delta columns via the cross-partition combiners (`event_count = target.event_count + delta.event_count`, `first_seen = LEAST(target.first_seen, delta.first_seen)`, `last_seen = GREATEST(target.last_seen, delta.last_seen)`). Unmatched: insert.
 
 The SELECT's columns are deltas, not final values. The aggregator declaration is the merge rule. This is a fundamentally different author surface from incremental, where the SELECT produces final-shape rows that are written verbatim.
 
@@ -205,7 +202,7 @@ The same `--auto` orchestrator can drive all three — it just reads `rule.stale
 
 The cumulative rule's responsibility on top of the primitive:
 
-- Translate the rule's aggregator declarations into the `source_sql` that `merge_into` receives. Concretely: wrap the user's delta SELECT in a CTE, then write a `SELECT` that, for each matched key, projects `target.col <combine> delta.col` per the aggregator map. Or pass the aggregator map down to the backend and let the dialect-specific MERGE codegen handle it.
+- Translate the per-projection cross-partition combiners (derived from the SELECT) into the `source_sql` that `merge_into` receives. Concretely: wrap the user's delta SELECT in a CTE, then write a `SELECT` that, for each matched key, projects `target.col <combine> delta.col` per the derived combiner map. Or pass the combiner map down to the backend and let the dialect-specific MERGE codegen handle it.
 - Ensure the `source_sql` is filtered correctly by the source-filter pushdown (which is core machinery — same logic the incremental rule uses, with bounds derivation skipped).
 - Handle reprocessing per the classifier's verdict (refuse, or subtract-add with delta history).
 
@@ -217,20 +214,7 @@ The corollary: **`IncrementalStrategy::Merge` becomes a dangling variant** if th
 
 ```yaml
 ---
-materialization: table
-
-cumulative_aggregate:
-  enabled: true
-  unique_key: [device_id, user_id]
-  aggregators:
-    event_count: sum
-    first_seen: min
-    last_seen: max
-    # Future: aggregators with options
-    # daily_set: { aggregate: array_union, dedup: true }
-    # latest_status: { aggregate: argmax, by: event_ts }
-  # Optional explicit driver if multiple same-granularity timeseries sources:
-  # driven_by: smelt.silver.events_parsed
+materialization: cumulative_aggregate
 ---
 SELECT
     device_id,
@@ -243,21 +227,25 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-No `timeseries:` block on the model — the output has no partition column. The rule reads the driving partition shape from the timeseries source(s) in the FROM clause.
+That is the entire frontmatter. No `timeseries:` block (the output has no partition column — the rule reads it from the source). No `unique_key:` declaration (it's the GROUP BY). No `aggregators:` map (every non-key projection's per-partition aggregate is named in SQL, and the cross-partition combiner is a fixed lookup off it).
 
-`incremental:` and `cumulative_aggregate:` are mutually exclusive (validation diagnostic `ConflictingMaterializationRules` or similar). `incremental:` requires `timeseries:` on the model; `cumulative_aggregate:` forbids it.
+The materialization name *is* the opt-in. `materialization: incremental` and `materialization: cumulative_aggregate` are sibling choices alongside `table` / `view` / `ephemeral`. A model can pick one. `incremental` additionally requires a `timeseries:` block; `cumulative_aggregate` forbids one.
 
-The aggregator allowlist for v1: `sum`, `min`, `max`, `count`, `bool_and`, `bool_or`, `bit_and`, `bit_or`, `bit_xor`. Each maps to a known SQL function and is provably commutative/associative. Extensions (`array_union`, `argmax`, HLL `approx_count_distinct` state) gate behind v2 — they need either richer surface or backend-specific state representations.
+The aggregator allowlist for v1: `COUNT`, `SUM`, `MIN`, `MAX`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR`, `BIT_XOR`. Each maps to a known SQL function and is provably commutative/associative. Each has a fixed cross-partition combiner (`COUNT → SUM`, everything else → itself). Extensions (`ARRAY_UNION` from `array_agg(distinct ...)`, `APPROX_COUNT_DISTINCT` HLL state, dialect-specific aggregators) gate behind v2 — most can extend by adding entries to the allowlist + combiner lookup, but HLL-style state functions cross engines under different names and need either an aggregator registry (`smelt.config.aggregators`) or per-engine handling.
+
+**Where would per-column options live?** A handful of aggregators have knobs that aren't expressible in standard SQL — e.g. `array_union(distinct ?)` where dedup-on-merge is a choice, or `argmax` which needs a "by which column" argument. For v1 these aren't in scope. When they are, the right place for the option is *not* the model's frontmatter (it would re-introduce the metadata duplication we just removed); it's either the aggregator's call-site syntax (`smelt.functions.array_union(col, dedup => true)`) or a workspace-level aggregator registry. The model frontmatter stays empty.
 
 ## Sibling rules beyond cumulative_aggregate
 
-The same dispatching structure could naturally host other stateful-merge patterns. All of them share the "model output is not itself a timeseries, but the rule consumes a timeseries source" shape. Listing them not to commit to building them, but to test the rule-boundary instinct:
+The same dispatching structure could naturally host other stateful-merge patterns. All of them share the "model output is not itself a timeseries, but the rule consumes a timeseries source" shape, and all of them should follow the same derive-from-SQL principle — the model frontmatter is just `materialization: <rule>` and everything else is read from the SELECT. Listing them not to commit to building them, but to test the rule-boundary instinct:
 
-- **`scd2:` (slowly-changing dimensions type 2).** Surface declares `unique_key`, `change_columns`, `effective_from_col`, `effective_to_col`. Output rows have validity intervals but the *table* has no partition column — the same `(unique_key)` value appears in multiple rows with non-overlapping intervals. Classifier reads no aggregators (each dimension's history is per-row, not per-aggregator). Physical strategy: detect changes in `change_columns` for each key, close out the prior row (`effective_to = new event_ts - epsilon`), insert the new row. Equivalence contract: cumulative-after-processing source partitions, like cumulative_aggregate, but the "merge" is row-versioning rather than aggregation.
-- **`latest_value:` (currently-true table).** Surface declares `unique_key`, `version_col`. Output has one row per key — the latest one. No partition column on the output. Classifier reads the version column and verifies it's monotonic per key. Physical strategy: upsert when `delta.version_col > target.version_col`. Equivalence contract: end state equals full-refresh, where full-refresh is `ROW_NUMBER() OVER (PARTITION BY unique_key ORDER BY version_col DESC) = 1`.
-- **`accumulating_snapshot:` (lifecycle fact tables).** A fact table with milestone timestamps (`order_placed_at`, `order_paid_at`, `order_shipped_at`, …) where each row's columns get filled in as the entity progresses. One row per `unique_key`; no partition column on the output. Surface declares `unique_key`, `milestone_columns`. Classifier verifies each milestone column is once-write (NULL → non-NULL transitions only). Physical strategy: COALESCE-style upsert per milestone column.
+- **`scd2:` (slowly-changing dimensions type 2).** Output rows have validity intervals but the *table* has no partition column — the same key appears in multiple rows with non-overlapping intervals. Unique key from GROUP BY (or natural key inferred from the projection if the SELECT is row-per-event). Change-detection columns are inferred from which projection columns aren't the key or the validity timestamps. Effective-from/to column names follow a convention (`valid_from`/`valid_to`) or are detectable by type + position; if a convention turns out to be too rigid, an annotation on the column projection (`event_ts AS valid_from`) is enough. Classifier reads no aggregators. Physical strategy: detect changes in non-key, non-validity columns per key; close out the prior row, insert the new row.
+- **`latest_value:` (currently-true table).** One row per key — the latest one. No partition column on the output. Unique key from GROUP BY. Version column inferred from a `MAX(...)` projection (which establishes "what defines latest") combined with the version comparison the rule performs. Classifier verifies the version column is monotonic per key. Physical strategy: upsert when `delta.version_col > target.version_col`. Equivalence contract: end state equals full-refresh `ROW_NUMBER() OVER (PARTITION BY key ORDER BY version_col DESC) = 1`.
+- **`accumulating_snapshot:` (lifecycle fact tables).** A fact table with milestone timestamps (`order_placed_at`, `order_paid_at`, `order_shipped_at`, …) where each row's columns get filled in as the entity progresses. One row per key; no partition column on the output. Unique key from GROUP BY. Milestone columns inferred from `MIN(...)` projections on nullable timestamp columns — "earliest non-NULL value per key" is the once-write semantics. Classifier verifies each milestone column is once-write (NULL → non-NULL transitions only) by reading the projection's aggregator. Physical strategy: COALESCE-style upsert per milestone column.
 
-Each of these is narrow. Each upholds a different contract. Each produces an output that is *not a timeseries* — consistent with cumulative_aggregate, and the structural reason they all live in sibling rules rather than as variants of incremental. Folding them all into a generic `merge:` rule with enough knobs to cover all of them produces the dbt incremental-strategies kitchen-sink, where the surface ambiguity ("what does `incremental: { strategy: 'merge', incremental_strategy: 'merge', ...}` actually mean?") is the dominant complexity.
+Each of these is narrow. Each upholds a different contract. Each produces an output that is *not a timeseries* — consistent with cumulative_aggregate, and the structural reason they all live in sibling rules rather than as variants of incremental. Each derives its rule-specific parameters from the SELECT rather than the frontmatter. Folding them all into a generic `merge:` rule with enough knobs to cover all of them produces the dbt incremental-strategies kitchen-sink, where the surface ambiguity ("what does `incremental: { strategy: 'merge', incremental_strategy: 'merge', ...}` actually mean?") is the dominant complexity.
+
+The SCD2 / latest_value / accumulating_snapshot sketches are more speculative than `cumulative_aggregate`. Whether their parameters genuinely fall out of the SELECT or whether some annotation is needed (e.g. "which column is the validity interval?") is part of what specifying each rule would settle. The principle to hold across all of them: if a thing is in the SQL, do not also put it in YAML.
 
 The right shape is probably: ship `cumulative_aggregate` first (motivated by the web_analytics example), let the other patterns prove themselves with real demand before specifying them. The rule-API surface stays stable across rules; new rules are additive.
 
@@ -276,10 +264,15 @@ Three arguments for *not* separating, and where each falls down:
 With `cumulative_aggregate:` available:
 
 - `silver/device_user_edges_cumulative.sql` is deleted.
-- `silver/device_user_edges.sql` shrinks. The frontmatter:
-  - Drops the `timeseries:` block (the cumulative output has no partition column).
-  - Drops the `incremental:` block; replaced by `cumulative_aggregate: { enabled: true, unique_key: [device_id, user_id], aggregators: {...} }`.
-  - The SELECT stays the same (it already produces per-source-partition deltas via GROUP BY).
+- `silver/device_user_edges.sql` shrinks. The frontmatter collapses to two lines:
+  ```yaml
+  ---
+  materialization: cumulative_aggregate
+  ---
+  ```
+  - The `timeseries:` block is dropped (the cumulative output has no partition column).
+  - The `incremental:` block is replaced by the `cumulative_aggregate` materialization.
+  - The SELECT stays unchanged (it already produces per-source-partition deltas via `GROUP BY device_id, user_id`).
   - The per-day columns `daily_event_count` / `daily_first_seen` / `daily_last_seen` rename to `event_count` / `first_seen` / `last_seen` — no `daily_` prefix needed because the aggregator does the cross-partition combine.
 - Downstream `gold/identity_backward_fill` and `gold/identity_connected_components` switch their FROM from `silver.device_user_edges_cumulative` to `silver.device_user_edges`. Their column references don't change. Their own lookback derivation reads `events_parsed`'s `timeseries:` directly (they already had to, since cumulative-edges-as-view was always a lookup); `device_user_edges` continues to be read as a lookup from their perspective. No behavioural change downstream.
 - The README's "two-model split because of smelt limitation" caveat is deleted. Gap #5 in the gap catalogue is closed.
@@ -296,26 +289,24 @@ The as-of-day-D divergence (gap #7) doesn't change. `backward_fill` and `connect
 
 3. **What if the FROM clause references the cumulative target itself?** A pattern like "cumulative_state += sum(new_partition) - decay" reads its own prior value. This is recursive: the rule needs to know which sources are "input" (drive the iteration) vs. which is "state" (read the prior cumulative value). Probably refuse in v1 — surface this as a known divergence. Worth thinking through because some real cumulative algorithms (exponential moving average, decaying counters) need it.
 
-4. **Aggregator surface.** Flat string (`event_count: sum`) vs. structured (`event_count: { aggregate: sum }`). Flat is friendlier for v1; structured allows future options (`{ aggregate: array_union, dedup: true }`) without breaking changes. The flat form should probably parse as sugar for `{ aggregate: <name> }` so the surface stays consistent as it grows.
+4. **Where does AVG live?** `AVG` isn't commutative-associative on its own, so the classifier refuses it. Three forward paths: (i) leave it refused, force authors to write `SUM(x) / COUNT(x)` and read it as two cumulative columns plus a derived view column; (ii) accept it, store `(sum, count)` as a struct, compute `avg` at read time as a derived column; (iii) accept it with a transparent rewrite (the rule rewrites `AVG(x)` to `SUM(x) / COUNT(x)` at planning time and adds two hidden columns). Option (i) is the v1 default for simplicity. Options (ii) and (iii) are user-experience improvements worth re-visiting later.
 
-5. **Where does AVG live?** `AVG` isn't commutative-associative on its own. Three options: (i) refuse it, force authors to write `SUM(x) / COUNT(x)` and read it as two cumulative columns; (ii) accept it, store `(sum, count)` as a struct, compute `avg` at read time as a derived column; (iii) accept it with a transparent rewrite (the rule rewrites `AVG(x)` to `SUM(x) / COUNT(x)` at planning time and adds two hidden columns). Option (i) is the v1 default for simplicity. Options (ii) and (iii) are user-experience improvements worth re-visiting later.
-
-6. **Reprocessing semantics.** If partition D's source data changes after D has already been merged in, what happens? Three policies:
+5. **Reprocessing semantics.** If partition D's source data changes after D has already been merged in, what happens? Three policies:
    - **Refuse.** Cumulative tables are append-only-merge; the rule errors when asked to reprocess a past partition. Author rebuilds from scratch.
    - **Subtract-then-add (requires delta history).** The rule keeps a side table of per-partition deltas. Reprocessing D subtracts the old delta and adds the new. Only works for reversible aggregators (sum, count, bit_xor); refuses for irreversible (min, max).
    - **Cascade-rebuild.** Reprocessing partition D rebuilds the cumulative state from D onward by re-processing every partition ≥ D in sequence. Always works but expensive.
 
    v1 likely ships with "refuse" (simplest, surfaces the cost honestly). Subtract-then-add is the most useful upgrade. Cascade-rebuild is the fallback for irreversible-aggregator cases.
 
-7. **Composition with `--auto`.** `--auto`'s "process gaps since last run" needs to know which partitions are stale. For incremental this is per-partition. For cumulative it's "any partition ≥ the earliest stale partition" if any aggregator is irreversible, or "exactly the stale partitions" if all are reversible. The rule supplies this answer; the orchestrator consumes it. The rule-API surface needs a `staleness_response(model, changed_partitions) -> partitions_to_run` hook.
+6. **Composition with `--auto`.** `--auto`'s "process gaps since last run" needs to know which partitions are stale. For incremental this is per-partition. For cumulative it's "any partition ≥ the earliest stale partition" if any aggregator is irreversible, or "exactly the stale partitions" if all are reversible. The rule supplies this answer (derived from the classifier's projection-list walk); the orchestrator consumes it. The rule-API surface needs a `staleness_response(model, changed_partitions) -> partitions_to_run` hook.
 
-8. **External sources.** A cumulative model reading an external source that itself doesn't have `timeseries:` declared — what's the behaviour? Refuse, per the "zero-timeseries-source cumulative" rule in §"Cumulative outputs are not timeseries". The error message should explain why and suggest declaring `timeseries:` on the source.
+7. **External sources.** A cumulative model reading an external source that itself doesn't have `timeseries:` declared — what's the behaviour? Refuse, per the "zero-timeseries-source cumulative" rule in §"Cumulative outputs are not timeseries". The error message should explain why and suggest declaring `timeseries:` on the source.
 
-9. **Schema evolution.** Adding a new non-key column to a cumulative table is tricky — what's the "cumulative state" for the new column over the historical partitions? Two options: backfill from a `default:` value declared with the aggregator; or refuse to add columns and require a rebuild. Same problem dbt has with incremental MERGE; the prior art there is "on_schema_change" knobs. Out of scope for v1.
+8. **Schema evolution.** Adding a new non-key column to a cumulative table is tricky — what's the "cumulative state" for the new column over the historical partitions? Two options: backfill from the new projection's aggregator over historical partitions (which requires re-reading them); or refuse to add columns and require a rebuild. Same problem dbt has with incremental MERGE; the prior art there is "on_schema_change" knobs. Out of scope for v1.
 
-10. **Interaction with the projection catalog (incremental Open Question 1).** The deferred projection catalog (`DATE_TRUNC`, `AT TIME ZONE`, etc.) is incremental-specific — it's about reading bounded projections on the source partition column. Cumulative doesn't need it (bounds are trivially `(0, 0)`). The two rules don't share this machinery either.
+9. **Interaction with the projection catalog (incremental Open Question 1).** The deferred projection catalog (`DATE_TRUNC`, `AT TIME ZONE`, etc.) is incremental-specific — it's about reading bounded projections on the source partition column. Cumulative doesn't need it (bounds are trivially `(0, 0)`). The two rules don't share this machinery either.
 
-11. **Should `cumulative_aggregate` ship before the planner-rule refactor lands?** The refactor (moving incremental from in-core to a rule) is large. `cumulative_aggregate` could ship under the current architecture (parallel to incremental, both in-core) and migrate to the rule architecture when that lands. Or it could wait for the refactor. The first option lets the example simplify sooner; the second avoids two migrations. The choice depends on how soon the refactor is scheduled and how loudly the web_analytics example's two-model split bothers users.
+10. **Should `cumulative_aggregate` ship before the planner-rule refactor lands?** The refactor (moving incremental from in-core to a rule) is large. `cumulative_aggregate` could ship under the current architecture (parallel to incremental, both in-core) and migrate to the rule architecture when that lands. Or it could wait for the refactor. The first option lets the example simplify sooner; the second avoids two migrations. The choice depends on how soon the refactor is scheduled and how loudly the web_analytics example's two-model split bothers users.
 
 ## References
 
