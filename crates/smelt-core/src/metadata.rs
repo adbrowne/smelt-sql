@@ -271,6 +271,17 @@ pub enum MetadataError {
     /// The `timeseries:` block violates a structural rule.
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
+
+    /// A model declares `materialization: cumulative_aggregate` and a `timeseries:` block.
+    /// Cumulative outputs are not themselves timeseries — the rule reads the
+    /// partition shape from the driving source instead (see
+    /// `docs/specs/cumulative_aggregate.md` §"Output shape").
+    #[error("CumulativeForbidsTimeseries: cumulative_aggregate models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
+    CumulativeForbidsTimeseries,
+
+    /// A model declares `materialization: cumulative_aggregate` and an `incremental:` block.
+    #[error("CumulativeForbidsIncremental: cumulative_aggregate and incremental are sibling materializations with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
+    CumulativeForbidsIncremental,
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -308,6 +319,26 @@ fn frontmatter_has_generates(source: &str) -> bool {
 /// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
+
+    // Rule: cumulative_aggregate forbids incremental: — enforced here so the
+    // diagnostic fires alongside the other materialization-block constraints.
+    if matches!(
+        metadata.materialization,
+        Some(Materialization::CumulativeAggregate)
+    ) && metadata.incremental.is_some()
+    {
+        return Err(MetadataError::CumulativeForbidsIncremental);
+    }
+
+    // Rule: cumulative_aggregate forbids timeseries: — the cumulative output
+    // has no partition column.
+    if matches!(
+        metadata.materialization,
+        Some(Materialization::CumulativeAggregate)
+    ) && metadata.timeseries.is_some()
+    {
+        return Err(MetadataError::CumulativeForbidsTimeseries);
+    }
 
     // Rule: incremental: without timeseries: → TimeseriesRequiredForIncremental
     if metadata.incremental.is_some() && metadata.timeseries.is_none() {
@@ -1339,6 +1370,78 @@ SELECT dt FROM foo"#;
         assert!(
             err.to_string().contains("event_date"),
             "Error must name the missing column, got: {}",
+            err
+        );
+    }
+
+    // ── cumulative_aggregate frontmatter tests ───────────────────────────────
+
+    /// `materialization: cumulative_aggregate` with no other rule-specific keys
+    /// parses cleanly.
+    #[test]
+    fn test_cumulative_aggregate_frontmatter_parses() {
+        let source = r#"---
+materialization: cumulative_aggregate
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.events
+GROUP BY device_id, user_id"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(
+                    metadata.materialization,
+                    Some(crate::config::Materialization::CumulativeAggregate)
+                );
+                assert!(metadata.timeseries.is_none());
+                assert!(metadata.incremental.is_none());
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    /// A `.sql` file with `materialization: cumulative_aggregate` + a `timeseries:` block
+    /// emits `CumulativeForbidsTimeseries`.
+    #[test]
+    fn test_cumulative_aggregate_forbids_timeseries() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::CumulativeAggregate),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("cumulative_aggregate + timeseries must error");
+        assert!(
+            matches!(err, MetadataError::CumulativeForbidsTimeseries),
+            "Expected CumulativeForbidsTimeseries, got: {}",
+            err
+        );
+    }
+
+    /// A `.sql` file with `materialization: cumulative_aggregate` + an `incremental:` block
+    /// emits `CumulativeForbidsIncremental`.
+    #[test]
+    fn test_cumulative_aggregate_forbids_incremental() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::CumulativeAggregate),
+            incremental: Some(crate::config::IncrementalConfig {
+                enabled: true,
+                unique_key: vec![],
+                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT * FROM foo")
+            .expect_err("cumulative_aggregate + incremental must error");
+        assert!(
+            matches!(err, MetadataError::CumulativeForbidsIncremental),
+            "Expected CumulativeForbidsIncremental, got: {}",
             err
         );
     }

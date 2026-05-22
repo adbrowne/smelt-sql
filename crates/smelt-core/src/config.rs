@@ -25,6 +25,10 @@ pub enum Materialization {
     MaterializedView,
     /// Test model — not materialized, used for unit testing.
     Test,
+    /// Cumulative aggregate — stateful merge into one row per GROUP BY key.
+    /// Unique key, per-column aggregator, and cross-partition combiner are
+    /// derived from the SELECT (see `docs/specs/cumulative_aggregate.md`).
+    CumulativeAggregate,
 }
 
 impl<'de> Deserialize<'de> for Materialization {
@@ -39,8 +43,9 @@ impl<'de> Deserialize<'de> for Materialization {
             "ephemeral" => Ok(Materialization::Ephemeral),
             "materialized_view" => Ok(Materialization::MaterializedView),
             "test" => Ok(Materialization::Test),
+            "cumulative_aggregate" => Ok(Materialization::CumulativeAggregate),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', 'materialized_view', or 'test'",
+                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', 'materialized_view', 'test', or 'cumulative_aggregate'",
                 s
             ))),
         }
@@ -58,6 +63,9 @@ impl Serialize for Materialization {
             Materialization::Ephemeral => serializer.serialize_str("ephemeral"),
             Materialization::MaterializedView => serializer.serialize_str("materialized_view"),
             Materialization::Test => serializer.serialize_str("test"),
+            Materialization::CumulativeAggregate => {
+                serializer.serialize_str("cumulative_aggregate")
+            }
         }
     }
 }
@@ -686,6 +694,21 @@ impl Config {
                         ));
                     }
                 }
+                Materialization::CumulativeAggregate => {
+                    // `cumulative_aggregate` forbids `incremental:` — the two are
+                    // different rules with different equivalence contracts.
+                    // The `timeseries:` forbid is enforced in `validate_timeseries`
+                    // (where the block is reachable).
+                    if incremental.is_some() {
+                        errors.push((
+                            name.to_string(),
+                            "CumulativeForbidsIncremental: cumulative_aggregate models cannot \
+                             carry an `incremental:` block — they are sibling materializations \
+                             with different equivalence contracts (see docs/specs/cumulative_aggregate.md)"
+                                .to_string(),
+                        ));
+                    }
+                }
                 Materialization::Table => {} // All config is valid for tables
             }
         }
@@ -759,6 +782,64 @@ models:
         assert_eq!(
             config.models.get("model2").unwrap().materialization,
             Some(Materialization::View)
+        );
+    }
+
+    #[test]
+    fn test_materialization_cumulative_aggregate_parses() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  device_user_edges:
+    materialization: cumulative_aggregate
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config
+                .models
+                .get("device_user_edges")
+                .unwrap()
+                .materialization,
+            Some(Materialization::CumulativeAggregate)
+        );
+    }
+
+    /// Cumulative aggregate models cannot carry an incremental: block. The
+    /// validator emits a CumulativeForbidsIncremental-flavored error in
+    /// the errors vector.
+    #[test]
+    fn test_validate_cumulative_aggregate_forbids_incremental() {
+        use crate::metadata::ModelMetadata;
+
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  bad_model:
+    materialization: cumulative_aggregate
+    incremental:
+      enabled: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let errors = config.validate_model_configs(&HashMap::<String, ModelMetadata>::new());
+        assert!(
+            errors
+                .iter()
+                .any(|(name, msg)| name == "bad_model"
+                    && msg.contains("CumulativeForbidsIncremental")),
+            "Expected CumulativeForbidsIncremental error, got: {:?}",
+            errors
         );
     }
 

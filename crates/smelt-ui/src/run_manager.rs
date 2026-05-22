@@ -507,6 +507,12 @@ impl RunManager {
                         smelt_core::config::Materialization::Test => {
                             unreachable!("Test models should not be executed directly")
                         }
+                        smelt_core::config::Materialization::CumulativeAggregate => {
+                            return Err(anyhow::anyhow!(
+                                "cumulative_aggregate models require an incremental run window — \
+                                 use `smelt run --event-time-start … --event-time-end …` from the CLI"
+                            ));
+                        }
                     };
 
                     let exec_result = backend
