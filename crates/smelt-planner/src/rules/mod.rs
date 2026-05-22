@@ -1,4 +1,5 @@
 pub mod cube_split;
+pub mod cumulative;
 pub mod incremental;
 
 use crate::graph::ModelGraph;

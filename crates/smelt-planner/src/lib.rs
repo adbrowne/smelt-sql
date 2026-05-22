@@ -15,6 +15,10 @@ pub use analysis::temporal::{
     EffectiveWindow, TemporalDependency, TemporalOffset, TemporalSource,
 };
 pub use graph::{ModelGraph, ModelInfo};
+pub use rules::cumulative::{
+    classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
+    CumulativeClassification, CumulativeDiagnostic, DrivingSource, SourceTimeseriesMap,
+};
 pub use rules::incremental::{analyze_batch_safety, derive_model_source_bounds, BatchSafety};
 pub use rules::Planner;
 pub use types::{
