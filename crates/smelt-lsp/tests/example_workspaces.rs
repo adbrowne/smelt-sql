@@ -481,11 +481,11 @@ async fn find_references_on_function_call_in_web_analytics() {
     // Drain initial diagnostics so subsequent requests don't race with them.
     let _ = client.collect_diagnostics(1000).await;
 
-    // models/silver/sessions.sql line 21 (1-indexed):
+    // models/silver/sessions.sql line 34 (1-indexed):
     //     FROM smelt.functions.sessionize(
     // Cursor on "sessionize" word — char 28 is inside the token.
     let file_uri = format!("file://{}", target_file.display());
-    let locations = client.references(&file_uri, 20, 28).await;
+    let locations = client.references(&file_uri, 33, 28).await;
     client.shutdown().await;
 
     assert!(
