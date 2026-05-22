@@ -14,4 +14,3 @@ SELECT
     referrer
 FROM smelt.orders
 WHERE is_active = true
-

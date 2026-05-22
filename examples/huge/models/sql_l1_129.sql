@@ -10,4 +10,3 @@ timeseries:
 SELECT referrer, channel, profit, 'source_0' AS source_tag FROM smelt.orders
 UNION ALL
 SELECT referrer, channel, profit, 'source_1' AS source_tag FROM smelt.orders
-

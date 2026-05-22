@@ -23,4 +23,3 @@ SELECT
     f.campaign_id
 FROM aggregated a
 INNER JOIN filtered f ON a.channel = f.channel
-

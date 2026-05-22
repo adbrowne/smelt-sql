@@ -13,4 +13,3 @@ SELECT
     SUM(amount) AS agg_1
 FROM smelt.sql_l3_53
 GROUP BY page_path
-

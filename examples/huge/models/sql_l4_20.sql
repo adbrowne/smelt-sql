@@ -12,4 +12,3 @@ SELECT
     profit,
     RANK() OVER (PARTITION BY device_type ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_155
-

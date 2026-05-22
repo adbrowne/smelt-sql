@@ -16,4 +16,3 @@ SELECT
     MAX(created_at) AS agg_4
 FROM smelt.orders
 GROUP BY referrer
-

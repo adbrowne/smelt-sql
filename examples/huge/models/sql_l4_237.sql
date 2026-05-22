@@ -10,4 +10,3 @@ timeseries:
 SELECT tier, quantity, order_id, 'source_0' AS source_tag FROM smelt.sql_l3_48
 UNION ALL
 SELECT tier, quantity, order_id, 'source_1' AS source_tag FROM smelt.sql_l3_48
-

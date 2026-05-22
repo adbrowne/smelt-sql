@@ -14,4 +14,3 @@ SELECT
     AVG(price) AS agg_2
 FROM smelt.sql_l1_93
 GROUP BY updated_at
-

@@ -10,4 +10,3 @@ timeseries:
 SELECT revenue, country, ip_address, 'source_0' AS source_tag FROM smelt.errors
 UNION ALL
 SELECT revenue, country, ip_address, 'source_1' AS source_tag FROM smelt.errors
-

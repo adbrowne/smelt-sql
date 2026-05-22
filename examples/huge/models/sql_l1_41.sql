@@ -14,4 +14,3 @@ SELECT
     event_type
 FROM smelt.subscriptions
 WHERE category IS NOT NULL
-

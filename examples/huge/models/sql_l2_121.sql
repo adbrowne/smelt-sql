@@ -13,4 +13,3 @@ SELECT
     AVG(duration_seconds) AS metric_2
 FROM smelt.sql_l1_123
 GROUP BY DATE_TRUNC('day', event_time)
-

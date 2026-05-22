@@ -15,4 +15,3 @@ FROM smelt.sql_l3_155
 WHERE user_id IN (
     SELECT user_id FROM smelt.sql_l3_165 WHERE platform = 'web'
 )
-

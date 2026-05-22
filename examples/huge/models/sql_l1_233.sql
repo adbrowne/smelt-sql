@@ -14,4 +14,3 @@ SELECT
     quantity
 FROM smelt.products
 WHERE score >= 50
-

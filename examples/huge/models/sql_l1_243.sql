@@ -15,4 +15,3 @@ FROM smelt.refunds
 WHERE user_id IN (
     SELECT user_id FROM smelt.refunds WHERE status = 'active'
 )
-

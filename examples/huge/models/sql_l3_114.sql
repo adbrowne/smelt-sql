@@ -23,4 +23,3 @@ SELECT
     f.tier
 FROM aggregated a
 INNER JOIN filtered f ON a.session_id = f.session_id
-

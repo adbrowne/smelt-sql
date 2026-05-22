@@ -15,4 +15,3 @@ FROM smelt.reviews
 WHERE user_id IN (
     SELECT user_id FROM smelt.reviews WHERE event_type = 'purchase'
 )
-

@@ -15,4 +15,3 @@ SELECT
     COUNT(*) AS agg_3
 FROM smelt.users
 GROUP BY category
-

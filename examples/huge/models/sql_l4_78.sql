@@ -16,4 +16,3 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_4
 FROM smelt.sql_l3_2
 GROUP BY discount
-

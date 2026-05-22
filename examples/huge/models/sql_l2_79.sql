@@ -12,4 +12,3 @@ UNION ALL
 SELECT os_name, revenue, event_time, 'source_1' AS source_tag FROM smelt.sql_l1_106
 UNION ALL
 SELECT os_name, revenue, event_time, 'source_2' AS source_tag FROM smelt.sql_l1_65
-

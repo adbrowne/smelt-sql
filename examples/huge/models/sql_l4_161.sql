@@ -14,4 +14,3 @@ SELECT
     quantity
 FROM smelt.sql_l3_154
 WHERE category IS NOT NULL
-

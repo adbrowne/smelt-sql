@@ -13,4 +13,3 @@ SELECT
     AVG(price) AS agg_1
 FROM smelt.sql_l1_173
 GROUP BY device_type
-

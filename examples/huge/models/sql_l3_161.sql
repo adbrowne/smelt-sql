@@ -12,4 +12,3 @@ SELECT
     product_id,
     RANK() OVER (PARTITION BY platform ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_137
-

@@ -23,4 +23,3 @@ SELECT
     f.platform
 FROM aggregated a
 INNER JOIN filtered f ON a.tier = f.tier
-

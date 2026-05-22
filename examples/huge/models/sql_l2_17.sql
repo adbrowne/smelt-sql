@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_58
 GROUP BY event_time
 HAVING COUNT(*) > 10
-

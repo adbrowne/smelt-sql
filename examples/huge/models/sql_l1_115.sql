@@ -15,4 +15,3 @@ SELECT
 FROM smelt.events a
 INNER JOIN smelt.events b ON a.user_id = b.user_id
 LEFT JOIN smelt.events c ON a.user_id = c.user_id
-

@@ -10,4 +10,3 @@ timeseries:
 SELECT is_active, channel, platform, 'source_0' AS source_tag FROM smelt.sql_l3_131
 UNION ALL
 SELECT is_active, channel, platform, 'source_1' AS source_tag FROM smelt.sql_l3_131
-

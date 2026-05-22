@@ -13,4 +13,3 @@ SELECT
     SUM(quantity) AS metric_2
 FROM smelt.sql_l3_15
 GROUP BY DATE_TRUNC('month', event_time)
-

@@ -14,4 +14,3 @@ SELECT
     price
 FROM smelt.sql_l1_201
 WHERE status = 'active'
-

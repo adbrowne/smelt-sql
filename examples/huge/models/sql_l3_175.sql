@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_67
 GROUP BY profit
 HAVING COUNT(*) > 10
-

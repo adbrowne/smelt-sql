@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_35
 GROUP BY plan_type
 HAVING COUNT(*) > 10
-

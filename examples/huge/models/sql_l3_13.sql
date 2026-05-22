@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_6
 GROUP BY event_type
 HAVING COUNT(*) > 10
-

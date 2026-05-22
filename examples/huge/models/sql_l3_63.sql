@@ -10,4 +10,3 @@ timeseries:
 SELECT os_name, price, is_verified, 'source_0' AS source_tag FROM smelt.sql_l2_90
 UNION ALL
 SELECT os_name, price, is_verified, 'source_1' AS source_tag FROM smelt.sql_l2_140
-

@@ -12,4 +12,3 @@ UNION ALL
 SELECT session_id, category, segment, 'source_1' AS source_tag FROM smelt.sql_l3_237
 UNION ALL
 SELECT session_id, category, segment, 'source_2' AS source_tag FROM smelt.sql_l3_81
-

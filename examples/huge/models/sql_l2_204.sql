@@ -15,4 +15,3 @@ SELECT
     SUM(revenue) AS agg_3
 FROM smelt.sql_l1_92
 GROUP BY price
-

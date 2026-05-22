@@ -16,4 +16,3 @@ SELECT
     AVG(duration_seconds) AS agg_4
 FROM smelt.sql_l3_118
 GROUP BY order_id
-

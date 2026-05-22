@@ -13,4 +13,3 @@ SELECT
     MAX(created_at) AS agg_1
 FROM smelt.reviews
 GROUP BY referrer
-

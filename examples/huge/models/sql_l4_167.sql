@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_4
 GROUP BY quantity
 HAVING COUNT(*) > 10
-

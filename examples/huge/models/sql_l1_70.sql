@@ -14,4 +14,3 @@ SELECT
 FROM smelt.notifications
 GROUP BY ip_address
 HAVING COUNT(*) > 10
-

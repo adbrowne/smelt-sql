@@ -13,4 +13,3 @@ SELECT
     b.os_name
 FROM smelt.sql_l1_146 a
 LEFT JOIN smelt.sql_l1_133 b ON a.user_id = b.user_id
-

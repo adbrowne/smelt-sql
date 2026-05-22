@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_121
 GROUP BY revenue
 HAVING COUNT(*) > 10
-

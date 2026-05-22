@@ -23,4 +23,3 @@ SELECT
     f.channel
 FROM aggregated a
 INNER JOIN filtered f ON a.email_domain = f.email_domain
-

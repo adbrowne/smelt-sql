@@ -13,4 +13,3 @@ SELECT
     b.quantity
 FROM smelt.shipments a
 LEFT JOIN smelt.shipments b ON a.user_id = b.user_id
-

@@ -14,4 +14,3 @@ SELECT
     is_active
 FROM smelt.sql_l2_118
 WHERE status = 'active'
-

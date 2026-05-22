@@ -12,4 +12,3 @@ SELECT
     email_domain,
     ROW_NUMBER() OVER (PARTITION BY quantity ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_83
-

@@ -13,4 +13,3 @@ SELECT
     b.browser
 FROM smelt.sql_l2_76 a
 INNER JOIN smelt.sql_l2_43 b ON a.user_id = b.user_id
-

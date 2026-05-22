@@ -14,4 +14,3 @@ SELECT
     segment
 FROM smelt.sql_l1_42
 WHERE is_active = true
-

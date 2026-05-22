@@ -14,4 +14,3 @@ SELECT
 FROM smelt.logs
 GROUP BY profit
 HAVING COUNT(*) > 10
-

@@ -13,4 +13,3 @@ SELECT
     COUNT(DISTINCT user_id) AS metric_2
 FROM smelt.subscriptions
 GROUP BY DATE_TRUNC('week', event_time)
-

@@ -14,4 +14,3 @@ SELECT
 FROM smelt.page_views
 GROUP BY email_domain
 HAVING COUNT(*) > 10
-

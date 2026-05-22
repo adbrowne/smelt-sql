@@ -13,4 +13,3 @@ SELECT
     COUNT(*) AS metric_2
 FROM smelt.sql_l2_247
 GROUP BY DATE_TRUNC('week', event_time)
-

@@ -14,4 +14,3 @@ SELECT
     session_id
 FROM smelt.sql_l2_116
 WHERE country = 'US'
-

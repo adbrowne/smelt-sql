@@ -14,4 +14,3 @@ SELECT
     updated_at
 FROM smelt.clicks
 WHERE status = 'active'
-

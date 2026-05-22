@@ -14,4 +14,3 @@ SELECT
     profit
 FROM smelt.categories
 WHERE amount > 0
-

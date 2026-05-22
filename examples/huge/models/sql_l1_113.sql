@@ -14,4 +14,3 @@ SELECT
     MAX(created_at) AS agg_2
 FROM smelt.logs
 GROUP BY category
-

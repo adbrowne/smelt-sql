@@ -13,4 +13,3 @@ SELECT
     MIN(created_at) AS agg_1
 FROM smelt.sql_l3_182
 GROUP BY plan_type
-

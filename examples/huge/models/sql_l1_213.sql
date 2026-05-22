@@ -14,4 +14,3 @@ SELECT
     region
 FROM smelt.sessions
 WHERE event_type = 'purchase'
-

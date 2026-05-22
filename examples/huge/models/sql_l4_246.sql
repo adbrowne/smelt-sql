@@ -13,4 +13,3 @@ SELECT
     b.event_time
 FROM smelt.sql_l3_63 a
 LEFT JOIN smelt.sql_l3_238 b ON a.user_id = b.user_id
-

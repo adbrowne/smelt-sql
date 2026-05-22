@@ -14,4 +14,3 @@ SELECT
     price
 FROM smelt.sql_l2_126
 WHERE platform = 'web'
-

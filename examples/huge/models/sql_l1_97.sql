@@ -15,4 +15,3 @@ FROM smelt.categories
 WHERE user_id IN (
     SELECT user_id FROM smelt.categories WHERE category IS NOT NULL
 )
-

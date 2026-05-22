@@ -14,4 +14,3 @@ SELECT
     channel
 FROM smelt.sql_l3_111
 WHERE country = 'US'
-

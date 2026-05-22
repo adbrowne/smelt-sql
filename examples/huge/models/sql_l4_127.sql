@@ -23,4 +23,3 @@ SELECT
     f.event_date
 FROM aggregated a
 INNER JOIN filtered f ON a.event_time = f.event_time
-

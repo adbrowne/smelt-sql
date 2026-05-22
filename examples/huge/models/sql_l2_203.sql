@@ -13,4 +13,3 @@ SELECT
     b.duration_seconds
 FROM smelt.sql_l1_32 a
 INNER JOIN smelt.sql_l1_54 b ON a.user_id = b.user_id
-

@@ -14,4 +14,3 @@ SELECT
     SUM(revenue) AS agg_2
 FROM smelt.sql_l2_47
 GROUP BY amount
-

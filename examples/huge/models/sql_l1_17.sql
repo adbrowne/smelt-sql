@@ -14,4 +14,3 @@ SELECT
     segment
 FROM smelt.campaigns
 WHERE quantity > 0
-

@@ -14,4 +14,3 @@ SELECT
     region
 FROM smelt.sql_l2_85
 WHERE quantity > 0
-

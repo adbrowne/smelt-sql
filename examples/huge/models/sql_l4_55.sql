@@ -12,4 +12,3 @@ SELECT
     device_type,
     ROW_NUMBER() OVER (PARTITION BY os_name ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_77
-

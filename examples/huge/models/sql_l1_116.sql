@@ -14,4 +14,3 @@ SELECT
 FROM smelt.signups
 GROUP BY event_date
 HAVING COUNT(*) > 10
-

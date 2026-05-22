@@ -16,4 +16,3 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_4
 FROM smelt.reviews
 GROUP BY order_id
-

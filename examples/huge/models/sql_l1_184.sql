@@ -15,4 +15,3 @@ SELECT
 FROM smelt.sessions a
 INNER JOIN smelt.sessions b ON a.user_id = b.user_id
 LEFT JOIN smelt.sessions c ON a.user_id = c.user_id
-

@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_173
 GROUP BY transaction_id
 HAVING COUNT(*) > 10
-

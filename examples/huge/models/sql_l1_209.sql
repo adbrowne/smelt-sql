@@ -14,4 +14,3 @@ SELECT
     order_id
 FROM smelt.users
 WHERE status = 'active'
-

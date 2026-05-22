@@ -16,4 +16,3 @@ SELECT
     AVG(amount) AS agg_4
 FROM smelt.sql_l2_226
 GROUP BY is_active
-

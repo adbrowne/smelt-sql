@@ -15,4 +15,3 @@ FROM smelt.sql_l2_117
 WHERE user_id IN (
     SELECT user_id FROM smelt.sql_l2_58 WHERE event_type = 'purchase'
 )
-

@@ -18,4 +18,3 @@ SELECT
 FROM base b
 INNER JOIN smelt.transactions j ON b.user_id = j.user_id
 GROUP BY b.event_type
-

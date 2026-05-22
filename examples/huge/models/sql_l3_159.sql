@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_171
 GROUP BY price
 HAVING COUNT(*) > 10
-

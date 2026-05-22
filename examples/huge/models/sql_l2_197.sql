@@ -12,4 +12,3 @@ UNION ALL
 SELECT rating, country, profit, 'source_1' AS source_tag FROM smelt.sql_l1_27
 UNION ALL
 SELECT rating, country, profit, 'source_2' AS source_tag FROM smelt.sql_l1_56
-

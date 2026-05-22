@@ -16,4 +16,3 @@ SELECT
     AVG(price) AS agg_4
 FROM smelt.errors
 GROUP BY amount
-

@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_249
 GROUP BY created_at
 HAVING COUNT(*) > 10
-

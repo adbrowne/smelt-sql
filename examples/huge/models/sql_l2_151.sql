@@ -13,4 +13,3 @@ SELECT
     b.ip_address
 FROM smelt.sql_l1_220 a
 LEFT JOIN smelt.sql_l1_104 b ON a.user_id = b.user_id
-

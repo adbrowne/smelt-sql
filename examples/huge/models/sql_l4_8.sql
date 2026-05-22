@@ -13,4 +13,3 @@ SELECT
     AVG(amount) AS agg_1
 FROM smelt.sql_l3_127
 GROUP BY order_id
-

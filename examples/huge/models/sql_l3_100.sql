@@ -10,4 +10,3 @@ timeseries:
 SELECT browser, session_id, quantity, 'source_0' AS source_tag FROM smelt.sql_l2_232
 UNION ALL
 SELECT browser, session_id, quantity, 'source_1' AS source_tag FROM smelt.sql_l2_88
-

@@ -14,4 +14,3 @@ SELECT
     amount
 FROM smelt.errors
 WHERE event_type = 'purchase'
-

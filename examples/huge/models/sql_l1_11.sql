@@ -14,4 +14,3 @@ SELECT
 FROM smelt.notifications
 GROUP BY user_id
 HAVING COUNT(*) > 10
-

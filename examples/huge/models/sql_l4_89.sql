@@ -13,4 +13,3 @@ SELECT
     b.cohort_date
 FROM smelt.sql_l3_78 a
 INNER JOIN smelt.sql_l3_136 b ON a.user_id = b.user_id
-

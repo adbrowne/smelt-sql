@@ -10,4 +10,3 @@ timeseries:
 SELECT os_name, revenue, is_active, 'source_0' AS source_tag FROM smelt.sessions
 UNION ALL
 SELECT os_name, revenue, is_active, 'source_1' AS source_tag FROM smelt.sessions
-

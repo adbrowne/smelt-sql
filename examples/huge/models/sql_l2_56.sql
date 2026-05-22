@@ -16,4 +16,3 @@ SELECT
     AVG(price) AS agg_4
 FROM smelt.sql_l1_140
 GROUP BY browser
-

@@ -15,4 +15,3 @@ SELECT
     SUM(amount) AS agg_3
 FROM smelt.sql_l2_62
 GROUP BY cohort_date
-

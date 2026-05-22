@@ -14,4 +14,3 @@ SELECT
     score
 FROM smelt.sql_l3_60
 WHERE score >= 50
-

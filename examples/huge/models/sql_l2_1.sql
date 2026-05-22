@@ -10,4 +10,3 @@ timeseries:
 SELECT profit, revenue, user_id, 'source_0' AS source_tag FROM smelt.sql_l1_160
 UNION ALL
 SELECT profit, revenue, user_id, 'source_1' AS source_tag FROM smelt.sql_l1_160
-

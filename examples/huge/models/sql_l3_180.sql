@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_56
 GROUP BY region
 HAVING COUNT(*) > 10
-

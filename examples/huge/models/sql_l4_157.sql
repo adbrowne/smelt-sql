@@ -14,4 +14,3 @@ SELECT
     event_time
 FROM smelt.sql_l3_5
 WHERE quantity > 0
-

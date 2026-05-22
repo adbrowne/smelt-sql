@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_143
 GROUP BY device_type
 HAVING COUNT(*) > 10
-

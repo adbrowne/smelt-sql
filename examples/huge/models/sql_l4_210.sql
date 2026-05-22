@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_111
 GROUP BY referrer
 HAVING COUNT(*) > 10
-

@@ -15,4 +15,3 @@ FROM smelt.orders
 WHERE user_id IN (
     SELECT user_id FROM smelt.orders WHERE created_at >= '2024-01-01'
 )
-

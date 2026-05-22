@@ -13,4 +13,3 @@ SELECT
     b.segment
 FROM smelt.sql_l2_140 a
 INNER JOIN smelt.sql_l2_131 b ON a.user_id = b.user_id
-

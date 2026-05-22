@@ -14,4 +14,3 @@ SELECT
     COUNT(*) AS agg_2
 FROM smelt.page_views
 GROUP BY channel
-

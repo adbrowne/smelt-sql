@@ -16,4 +16,3 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_4
 FROM smelt.sql_l1_81
 GROUP BY email_domain
-

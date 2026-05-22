@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_126
 GROUP BY page_path
 HAVING COUNT(*) > 10
-

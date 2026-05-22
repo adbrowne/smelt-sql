@@ -12,4 +12,3 @@ SELECT
     event_time,
     LAG(amount, 1) OVER (PARTITION BY revenue ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_43
-

@@ -14,4 +14,3 @@ SELECT
     tier
 FROM smelt.sql_l3_176
 WHERE event_type = 'purchase'
-

@@ -16,4 +16,3 @@ SELECT
     SUM(quantity) AS agg_4
 FROM smelt.signups
 GROUP BY rating
-

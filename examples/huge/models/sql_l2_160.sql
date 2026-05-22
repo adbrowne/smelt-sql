@@ -13,4 +13,3 @@ SELECT
     b.status
 FROM smelt.sql_l1_220 a
 INNER JOIN smelt.sql_l1_186 b ON a.user_id = b.user_id
-

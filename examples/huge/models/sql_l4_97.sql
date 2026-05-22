@@ -23,4 +23,3 @@ SELECT
     f.is_active
 FROM aggregated a
 INNER JOIN filtered f ON a.campaign_id = f.campaign_id
-

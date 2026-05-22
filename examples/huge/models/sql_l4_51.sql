@@ -14,4 +14,3 @@ SELECT
     device_type
 FROM smelt.sql_l3_170
 WHERE country = 'US'
-

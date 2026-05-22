@@ -13,4 +13,3 @@ SELECT
     b.discount
 FROM smelt.payments a
 INNER JOIN smelt.payments b ON a.user_id = b.user_id
-

@@ -13,4 +13,3 @@ SELECT
     b.email_domain
 FROM smelt.sql_l1_211 a
 LEFT JOIN smelt.sql_l1_211 b ON a.user_id = b.user_id
-

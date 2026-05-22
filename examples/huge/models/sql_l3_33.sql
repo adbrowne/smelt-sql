@@ -14,4 +14,3 @@ SELECT
     transaction_id
 FROM smelt.sql_l2_89
 WHERE country = 'US'
-

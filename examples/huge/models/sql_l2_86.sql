@@ -14,4 +14,3 @@ SELECT
     discount
 FROM smelt.sql_l1_191
 WHERE amount > 0
-

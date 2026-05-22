@@ -14,4 +14,3 @@ SELECT
     order_id
 FROM smelt.sql_l1_75
 WHERE score >= 50
-

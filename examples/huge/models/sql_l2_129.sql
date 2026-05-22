@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_143
 GROUP BY is_active
 HAVING COUNT(*) > 10
-

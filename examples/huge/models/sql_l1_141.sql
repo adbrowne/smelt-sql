@@ -15,4 +15,3 @@ SELECT
 FROM smelt.categories a
 INNER JOIN smelt.categories b ON a.user_id = b.user_id
 LEFT JOIN smelt.categories c ON a.user_id = c.user_id
-

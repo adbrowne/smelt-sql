@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_223
 GROUP BY cohort_date
 HAVING COUNT(*) > 10
-

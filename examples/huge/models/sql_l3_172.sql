@@ -23,4 +23,3 @@ SELECT
     f.is_verified
 FROM aggregated a
 INNER JOIN filtered f ON a.device_type = f.device_type
-

@@ -14,4 +14,3 @@ SELECT
     event_time
 FROM smelt.transactions
 WHERE amount > 0
-

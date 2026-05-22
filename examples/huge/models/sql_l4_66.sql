@@ -14,4 +14,3 @@ SELECT
     cost
 FROM smelt.sql_l3_166
 WHERE status = 'active'
-

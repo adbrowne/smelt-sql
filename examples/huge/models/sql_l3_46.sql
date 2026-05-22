@@ -14,4 +14,3 @@ SELECT
     SUM(amount) AS agg_2
 FROM smelt.sql_l2_55
 GROUP BY order_id
-

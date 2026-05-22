@@ -12,4 +12,3 @@ SELECT
     event_type,
     RANK() OVER (PARTITION BY is_active ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_10
-

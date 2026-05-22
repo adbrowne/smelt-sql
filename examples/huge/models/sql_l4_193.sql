@@ -13,4 +13,3 @@ SELECT
     COUNT(*) AS metric_2
 FROM smelt.sql_l3_194
 GROUP BY DATE_TRUNC('month', event_time)
-

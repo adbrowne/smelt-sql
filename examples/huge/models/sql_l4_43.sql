@@ -14,4 +14,3 @@ SELECT
     product_id
 FROM smelt.sql_l3_243
 WHERE event_type = 'purchase'
-

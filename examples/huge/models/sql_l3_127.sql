@@ -23,4 +23,3 @@ SELECT
     f.user_id
 FROM aggregated a
 INNER JOIN filtered f ON a.ip_address = f.ip_address
-

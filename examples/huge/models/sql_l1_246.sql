@@ -16,4 +16,3 @@ SELECT
         ELSE 'low'
     END AS value_tier
 FROM smelt.page_views
-

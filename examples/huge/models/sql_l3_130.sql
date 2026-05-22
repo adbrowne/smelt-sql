@@ -15,4 +15,3 @@ FROM smelt.sql_l2_153
 WHERE user_id IN (
     SELECT user_id FROM smelt.sql_l2_31 WHERE score >= 50
 )
-

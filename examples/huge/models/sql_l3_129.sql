@@ -23,4 +23,3 @@ SELECT
     f.revenue
 FROM aggregated a
 INNER JOIN filtered f ON a.is_verified = f.is_verified
-

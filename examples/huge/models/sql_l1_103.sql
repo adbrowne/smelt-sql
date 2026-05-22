@@ -14,4 +14,3 @@ SELECT
 FROM smelt.page_views
 GROUP BY discount
 HAVING COUNT(*) > 10
-

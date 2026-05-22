@@ -13,4 +13,3 @@ SELECT
     b.page_path
 FROM smelt.subscriptions a
 INNER JOIN smelt.subscriptions b ON a.user_id = b.user_id
-

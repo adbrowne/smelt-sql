@@ -14,4 +14,3 @@ SELECT
     tier
 FROM smelt.sql_l1_96
 WHERE platform = 'web'
-

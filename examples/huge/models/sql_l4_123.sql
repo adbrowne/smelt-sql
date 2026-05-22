@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_11
 GROUP BY status
 HAVING COUNT(*) > 10
-

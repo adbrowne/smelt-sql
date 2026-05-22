@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_43
 GROUP BY ip_address
 HAVING COUNT(*) > 10
-

@@ -23,4 +23,3 @@ SELECT
     f.user_id
 FROM aggregated a
 INNER JOIN filtered f ON a.updated_at = f.updated_at
-

@@ -12,4 +12,3 @@ UNION ALL
 SELECT product_id, platform, device_type, 'source_1' AS source_tag FROM smelt.sql_l2_147
 UNION ALL
 SELECT product_id, platform, device_type, 'source_2' AS source_tag FROM smelt.sql_l2_176
-

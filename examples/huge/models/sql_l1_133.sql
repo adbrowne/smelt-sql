@@ -13,4 +13,3 @@ SELECT
     COUNT(*) AS agg_1
 FROM smelt.shipments
 GROUP BY os_name
-

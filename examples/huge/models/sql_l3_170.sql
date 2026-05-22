@@ -14,4 +14,3 @@ SELECT
     is_verified
 FROM smelt.sql_l2_71
 WHERE score >= 50
-

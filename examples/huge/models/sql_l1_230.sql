@@ -10,4 +10,3 @@ timeseries:
 SELECT email_domain, platform, order_id, 'source_0' AS source_tag FROM smelt.users
 UNION ALL
 SELECT email_domain, platform, order_id, 'source_1' AS source_tag FROM smelt.users
-

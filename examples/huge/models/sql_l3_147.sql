@@ -13,4 +13,3 @@ SELECT
     b.quantity
 FROM smelt.sql_l2_16 a
 LEFT JOIN smelt.sql_l2_52 b ON a.user_id = b.user_id
-

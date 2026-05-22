@@ -12,4 +12,3 @@ SELECT
     updated_at,
     RANK() OVER (PARTITION BY tier ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_190
-

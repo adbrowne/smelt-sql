@@ -12,4 +12,3 @@ UNION ALL
 SELECT amount, category, rating, 'source_1' AS source_tag FROM smelt.sql_l2_14
 UNION ALL
 SELECT amount, category, rating, 'source_2' AS source_tag FROM smelt.sql_l2_149
-

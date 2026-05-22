@@ -14,4 +14,3 @@ SELECT
     rating
 FROM smelt.categories
 WHERE status = 'active'
-

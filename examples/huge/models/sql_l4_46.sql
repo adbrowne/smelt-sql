@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_89
 GROUP BY duration_seconds
 HAVING COUNT(*) > 10
-

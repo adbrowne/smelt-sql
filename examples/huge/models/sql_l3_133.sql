@@ -14,4 +14,3 @@ SELECT
     is_active
 FROM smelt.sql_l2_196
 WHERE platform = 'web'
-

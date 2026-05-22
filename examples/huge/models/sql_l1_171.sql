@@ -14,4 +14,3 @@ SELECT
     plan_type
 FROM smelt.sessions
 WHERE score >= 50
-

@@ -14,4 +14,3 @@ SELECT
 FROM smelt.clicks
 GROUP BY is_active
 HAVING COUNT(*) > 10
-

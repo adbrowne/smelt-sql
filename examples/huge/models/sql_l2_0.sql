@@ -23,4 +23,3 @@ SELECT
     f.device_type
 FROM aggregated a
 INNER JOIN filtered f ON a.os_name = f.os_name
-

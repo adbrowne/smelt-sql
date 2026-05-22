@@ -10,4 +10,3 @@ timeseries:
 SELECT segment, amount, region, 'source_0' AS source_tag FROM smelt.sql_l2_206
 UNION ALL
 SELECT segment, amount, region, 'source_1' AS source_tag FROM smelt.sql_l2_163
-

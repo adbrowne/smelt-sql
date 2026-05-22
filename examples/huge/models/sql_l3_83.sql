@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_70
 GROUP BY product_id
 HAVING COUNT(*) > 10
-

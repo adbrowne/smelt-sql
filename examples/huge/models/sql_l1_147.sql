@@ -23,4 +23,3 @@ SELECT
     f.rating
 FROM aggregated a
 INNER JOIN filtered f ON a.page_path = f.page_path
-

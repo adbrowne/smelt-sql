@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_179
 GROUP BY cost
 HAVING COUNT(*) > 10
-

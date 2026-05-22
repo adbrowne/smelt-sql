@@ -13,4 +13,3 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_1
 FROM smelt.sql_l2_89
 GROUP BY updated_at
-

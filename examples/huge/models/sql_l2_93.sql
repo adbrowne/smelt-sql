@@ -10,4 +10,3 @@ timeseries:
 SELECT transaction_id, event_date, campaign_id, 'source_0' AS source_tag FROM smelt.sql_l1_23
 UNION ALL
 SELECT transaction_id, event_date, campaign_id, 'source_1' AS source_tag FROM smelt.sql_l1_64
-

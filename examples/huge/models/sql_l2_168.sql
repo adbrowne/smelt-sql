@@ -10,4 +10,3 @@ timeseries:
 SELECT duration_seconds, quantity, status, 'source_0' AS source_tag FROM smelt.sql_l1_21
 UNION ALL
 SELECT duration_seconds, quantity, status, 'source_1' AS source_tag FROM smelt.sql_l1_74
-

@@ -12,4 +12,3 @@ SELECT
     quantity,
     ROW_NUMBER() OVER (PARTITION BY channel ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_145
-

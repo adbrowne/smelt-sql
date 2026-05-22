@@ -10,4 +10,3 @@ timeseries:
 SELECT ip_address, order_id, platform, 'source_0' AS source_tag FROM smelt.sql_l3_111
 UNION ALL
 SELECT ip_address, order_id, platform, 'source_1' AS source_tag FROM smelt.sql_l3_111
-

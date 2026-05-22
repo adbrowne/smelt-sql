@@ -14,4 +14,3 @@ SELECT
 FROM smelt.invoices
 GROUP BY event_date
 HAVING COUNT(*) > 10
-

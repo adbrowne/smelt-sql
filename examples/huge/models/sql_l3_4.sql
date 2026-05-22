@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_65
 GROUP BY order_id
 HAVING COUNT(*) > 10
-

@@ -13,4 +13,3 @@ SELECT
     b.region
 FROM smelt.events a
 LEFT JOIN smelt.events b ON a.user_id = b.user_id
-

@@ -15,4 +15,3 @@ FROM smelt.sql_l3_23
 WHERE user_id IN (
     SELECT user_id FROM smelt.sql_l3_141 WHERE quantity > 0
 )
-

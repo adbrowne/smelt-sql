@@ -14,4 +14,3 @@ SELECT
     created_at
 FROM smelt.sql_l2_54
 WHERE platform = 'web'
-

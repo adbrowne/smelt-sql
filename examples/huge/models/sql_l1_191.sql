@@ -14,4 +14,3 @@ SELECT
 FROM smelt.refunds
 GROUP BY country
 HAVING COUNT(*) > 10
-

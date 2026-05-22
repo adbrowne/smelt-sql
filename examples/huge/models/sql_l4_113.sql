@@ -23,4 +23,3 @@ SELECT
     f.browser
 FROM aggregated a
 INNER JOIN filtered f ON a.event_date = f.event_date
-

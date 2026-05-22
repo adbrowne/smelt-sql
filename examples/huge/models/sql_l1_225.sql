@@ -13,4 +13,3 @@ SELECT
     b.quantity
 FROM smelt.errors a
 INNER JOIN smelt.errors b ON a.user_id = b.user_id
-

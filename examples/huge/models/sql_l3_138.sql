@@ -14,4 +14,3 @@ SELECT
     device_type
 FROM smelt.sql_l2_46
 WHERE status = 'active'
-

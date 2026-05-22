@@ -16,4 +16,3 @@ SELECT
     MIN(created_at) AS agg_4
 FROM smelt.sql_l2_69
 GROUP BY ip_address
-

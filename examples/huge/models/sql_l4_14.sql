@@ -18,4 +18,3 @@ SELECT
 FROM base b
 INNER JOIN smelt.sql_l3_131 j ON b.user_id = j.user_id
 GROUP BY b.cost
-

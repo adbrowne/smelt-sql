@@ -14,4 +14,3 @@ SELECT
     COUNT(*) AS agg_2
 FROM smelt.sql_l1_17
 GROUP BY profit
-

@@ -13,4 +13,3 @@ SELECT
     b.category
 FROM smelt.sql_l1_238 a
 INNER JOIN smelt.sql_l1_151 b ON a.user_id = b.user_id
-

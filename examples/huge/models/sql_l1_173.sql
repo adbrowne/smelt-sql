@@ -15,4 +15,3 @@ SELECT
 FROM smelt.shipments a
 INNER JOIN smelt.shipments b ON a.user_id = b.user_id
 LEFT JOIN smelt.shipments c ON a.user_id = c.user_id
-

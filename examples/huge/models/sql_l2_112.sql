@@ -14,4 +14,3 @@ SELECT
     product_id
 FROM smelt.sql_l1_117
 WHERE status = 'active'
-

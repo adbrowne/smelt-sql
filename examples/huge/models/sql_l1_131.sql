@@ -15,4 +15,3 @@ FROM smelt.clicks
 WHERE user_id IN (
     SELECT user_id FROM smelt.clicks WHERE status = 'active'
 )
-

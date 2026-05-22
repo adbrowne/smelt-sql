@@ -15,4 +15,3 @@ FROM smelt.signups
 WHERE user_id IN (
     SELECT user_id FROM smelt.signups WHERE is_active = true
 )
-

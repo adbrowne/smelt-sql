@@ -12,4 +12,3 @@ UNION ALL
 SELECT plan_type, email_domain, segment, 'source_1' AS source_tag FROM smelt.sql_l3_66
 UNION ALL
 SELECT plan_type, email_domain, segment, 'source_2' AS source_tag FROM smelt.sql_l3_165
-

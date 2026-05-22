@@ -14,4 +14,3 @@ SELECT
     category
 FROM smelt.categories
 WHERE quantity > 0
-

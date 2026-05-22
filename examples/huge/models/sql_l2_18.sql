@@ -12,4 +12,3 @@ UNION ALL
 SELECT score, status, price, 'source_1' AS source_tag FROM smelt.sql_l1_237
 UNION ALL
 SELECT score, status, price, 'source_2' AS source_tag FROM smelt.sql_l1_131
-

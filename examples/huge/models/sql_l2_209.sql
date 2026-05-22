@@ -10,4 +10,3 @@ timeseries:
 SELECT rating, score, amount, 'source_0' AS source_tag FROM smelt.sql_l1_135
 UNION ALL
 SELECT rating, score, amount, 'source_1' AS source_tag FROM smelt.sql_l1_135
-

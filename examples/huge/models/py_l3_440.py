@@ -5,12 +5,15 @@ def py_l3_440(project):
     """Generated model: union tagged."""
     parts = []
     for dep in ['py_l2_299']:
-        parts.append(f"SELECT user_id, event_time, amount FROM smelt.ref('{dep}')")
+        parts.append(f"SELECT user_id, event_time, amount FROM smelt.{dep}")
     return """
 ---
 materialization: table
 incremental:
   enabled: true
+timeseries:
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 """ + "\nUNION ALL\n".join(parts)

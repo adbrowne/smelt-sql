@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sessions
 GROUP BY event_date
 HAVING COUNT(*) > 10
-

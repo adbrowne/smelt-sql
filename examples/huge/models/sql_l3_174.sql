@@ -16,4 +16,3 @@ SELECT
     COUNT(*) AS agg_4
 FROM smelt.sql_l2_157
 GROUP BY rating
-

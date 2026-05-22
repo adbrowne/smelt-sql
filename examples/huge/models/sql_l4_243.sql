@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_31
 GROUP BY platform
 HAVING COUNT(*) > 10
-

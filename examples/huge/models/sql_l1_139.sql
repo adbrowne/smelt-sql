@@ -14,4 +14,3 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_2
 FROM smelt.payments
 GROUP BY is_verified
-

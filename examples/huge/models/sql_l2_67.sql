@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_201
 GROUP BY session_id
 HAVING COUNT(*) > 10
-

@@ -12,4 +12,3 @@ SELECT
     order_id,
     ROW_NUMBER() OVER (PARTITION BY created_at ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_194
-

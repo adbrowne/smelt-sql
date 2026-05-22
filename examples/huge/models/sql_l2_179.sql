@@ -14,4 +14,3 @@ SELECT
     rating
 FROM smelt.sql_l1_213
 WHERE score >= 50
-

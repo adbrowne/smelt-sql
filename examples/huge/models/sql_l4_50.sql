@@ -14,4 +14,3 @@ SELECT
     event_date
 FROM smelt.sql_l3_217
 WHERE country = 'US'
-

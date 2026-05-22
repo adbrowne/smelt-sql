@@ -13,4 +13,3 @@ SELECT
     b.updated_at
 FROM smelt.sql_l1_158 a
 INNER JOIN smelt.sql_l1_158 b ON a.user_id = b.user_id
-

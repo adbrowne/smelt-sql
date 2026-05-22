@@ -15,4 +15,3 @@ SELECT
     MIN(created_at) AS agg_3
 FROM smelt.sql_l1_28
 GROUP BY created_at
-

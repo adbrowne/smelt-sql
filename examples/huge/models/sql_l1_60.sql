@@ -13,4 +13,3 @@ SELECT
     SUM(amount) AS metric_2
 FROM smelt.page_views
 GROUP BY DATE_TRUNC('day', event_time)
-

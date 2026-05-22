@@ -10,4 +10,3 @@ timeseries:
 SELECT user_id, amount, channel, 'source_0' AS source_tag FROM smelt.sql_l1_10
 UNION ALL
 SELECT user_id, amount, channel, 'source_1' AS source_tag FROM smelt.sql_l1_10
-

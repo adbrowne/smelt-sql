@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_21
 GROUP BY amount
 HAVING COUNT(*) > 10
-

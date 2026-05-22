@@ -14,4 +14,3 @@ SELECT
     page_path
 FROM smelt.invoices
 WHERE category IS NOT NULL
-

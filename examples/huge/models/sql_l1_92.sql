@@ -13,4 +13,3 @@ SELECT
     b.discount
 FROM smelt.errors a
 LEFT JOIN smelt.errors b ON a.user_id = b.user_id
-

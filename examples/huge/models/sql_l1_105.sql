@@ -15,4 +15,3 @@ SELECT
     AVG(duration_seconds) AS agg_3
 FROM smelt.events
 GROUP BY category
-

@@ -13,4 +13,3 @@ SELECT
     AVG(price) AS metric_2
 FROM smelt.events
 GROUP BY DATE_TRUNC('day', event_time)
-

@@ -14,4 +14,3 @@ SELECT
 FROM smelt.refunds
 GROUP BY platform
 HAVING COUNT(*) > 10
-

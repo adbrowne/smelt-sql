@@ -14,4 +14,3 @@ SELECT
     score
 FROM smelt.sql_l3_40
 WHERE status = 'active'
-

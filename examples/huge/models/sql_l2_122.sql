@@ -23,4 +23,3 @@ SELECT
     f.plan_type
 FROM aggregated a
 INNER JOIN filtered f ON a.rating = f.rating
-

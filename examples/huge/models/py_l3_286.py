@@ -13,13 +13,16 @@ def py_l3_286(project):
 materialization: table
 incremental:
   enabled: true
+timeseries:
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     user_id,
     event_time,
     amount,
     category
-FROM smelt.ref('py_l2_350')
+FROM smelt.py_l2_350
 {filter_clause}
 """

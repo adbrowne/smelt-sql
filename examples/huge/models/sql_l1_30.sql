@@ -13,4 +13,3 @@ SELECT
     b.discount
 FROM smelt.subscriptions a
 LEFT JOIN smelt.subscriptions b ON a.user_id = b.user_id
-

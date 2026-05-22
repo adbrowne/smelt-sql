@@ -3,7 +3,7 @@ version: 1
 
 paths:
   - models
-  - seeds
+
 
 targets:
   dev:

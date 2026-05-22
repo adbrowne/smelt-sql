@@ -12,4 +12,3 @@ SELECT
     device_type,
     RANK() OVER (PARTITION BY price ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_170
-

@@ -14,4 +14,3 @@ SELECT
     country
 FROM smelt.campaigns
 WHERE event_type = 'purchase'
-

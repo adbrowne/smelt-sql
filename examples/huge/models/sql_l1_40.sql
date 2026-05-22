@@ -14,4 +14,3 @@ SELECT
     SUM(quantity) AS agg_2
 FROM smelt.categories
 GROUP BY cost
-

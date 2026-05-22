@@ -13,4 +13,3 @@ SELECT
     b.user_id
 FROM smelt.orders a
 LEFT JOIN smelt.orders b ON a.user_id = b.user_id
-

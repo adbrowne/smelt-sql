@@ -15,4 +15,3 @@ FROM smelt.sql_l1_211
 WHERE user_id IN (
     SELECT user_id FROM smelt.sql_l1_147 WHERE created_at >= '2024-01-01'
 )
-

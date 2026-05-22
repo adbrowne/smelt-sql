@@ -15,4 +15,3 @@ SELECT
     SUM(amount) AS agg_3
 FROM smelt.sql_l3_43
 GROUP BY created_at
-

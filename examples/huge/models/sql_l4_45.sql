@@ -15,4 +15,3 @@ SELECT
     SUM(revenue) AS agg_3
 FROM smelt.sql_l3_181
 GROUP BY event_type
-

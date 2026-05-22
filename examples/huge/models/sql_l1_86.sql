@@ -14,4 +14,3 @@ SELECT
     status
 FROM smelt.errors
 WHERE quantity > 0
-

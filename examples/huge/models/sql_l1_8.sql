@@ -15,4 +15,3 @@ FROM smelt.errors
 WHERE user_id IN (
     SELECT user_id FROM smelt.errors WHERE is_active = true
 )
-

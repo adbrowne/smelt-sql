@@ -16,4 +16,3 @@ SELECT
     AVG(price) AS agg_4
 FROM smelt.page_views
 GROUP BY event_date
-

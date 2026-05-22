@@ -14,4 +14,3 @@ SELECT
     transaction_id
 FROM smelt.payments
 WHERE platform = 'web'
-

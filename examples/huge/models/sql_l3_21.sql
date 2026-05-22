@@ -13,4 +13,3 @@ SELECT
     MIN(created_at) AS agg_1
 FROM smelt.sql_l2_206
 GROUP BY amount
-

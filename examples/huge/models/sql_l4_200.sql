@@ -23,4 +23,3 @@ SELECT
     f.quantity
 FROM aggregated a
 INNER JOIN filtered f ON a.rating = f.rating
-

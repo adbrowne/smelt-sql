@@ -14,4 +14,3 @@ SELECT
     AVG(amount) AS agg_2
 FROM smelt.sql_l1_87
 GROUP BY created_at
-

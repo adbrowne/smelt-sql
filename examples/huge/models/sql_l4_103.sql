@@ -13,4 +13,3 @@ SELECT
     b.region
 FROM smelt.sql_l3_236 a
 LEFT JOIN smelt.sql_l3_236 b ON a.user_id = b.user_id
-

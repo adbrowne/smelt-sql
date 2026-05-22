@@ -14,4 +14,3 @@ SELECT
     updated_at
 FROM smelt.sql_l2_204
 WHERE category IS NOT NULL
-

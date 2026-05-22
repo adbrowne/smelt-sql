@@ -23,4 +23,3 @@ SELECT
     f.cohort_date
 FROM aggregated a
 INNER JOIN filtered f ON a.ip_address = f.ip_address
-

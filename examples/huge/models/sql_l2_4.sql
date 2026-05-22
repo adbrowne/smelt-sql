@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_207
 GROUP BY score
 HAVING COUNT(*) > 10
-

@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_71
 GROUP BY channel
 HAVING COUNT(*) > 10
-

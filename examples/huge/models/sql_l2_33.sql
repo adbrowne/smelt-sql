@@ -14,4 +14,3 @@ SELECT
     cohort_date
 FROM smelt.sql_l1_155
 WHERE event_type = 'purchase'
-

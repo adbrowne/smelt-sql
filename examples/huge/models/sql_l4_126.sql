@@ -23,4 +23,3 @@ SELECT
     f.ip_address
 FROM aggregated a
 INNER JOIN filtered f ON a.order_id = f.order_id
-

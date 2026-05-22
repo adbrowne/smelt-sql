@@ -14,4 +14,3 @@ SELECT
 FROM smelt.page_views
 GROUP BY ip_address
 HAVING COUNT(*) > 10
-

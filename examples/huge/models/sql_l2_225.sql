@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_37
 GROUP BY tier
 HAVING COUNT(*) > 10
-

@@ -23,4 +23,3 @@ SELECT
     f.profit
 FROM aggregated a
 INNER JOIN filtered f ON a.category = f.category
-

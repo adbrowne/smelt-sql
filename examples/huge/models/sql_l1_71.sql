@@ -15,4 +15,3 @@ SELECT
 FROM smelt.reviews a
 INNER JOIN smelt.reviews b ON a.user_id = b.user_id
 LEFT JOIN smelt.reviews c ON a.user_id = c.user_id
-

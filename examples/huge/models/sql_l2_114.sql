@@ -14,4 +14,3 @@ SELECT
     segment
 FROM smelt.sql_l1_29
 WHERE category IS NOT NULL
-

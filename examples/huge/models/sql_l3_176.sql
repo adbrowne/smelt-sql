@@ -14,4 +14,3 @@ SELECT
     rating
 FROM smelt.sql_l2_151
 WHERE status = 'active'
-

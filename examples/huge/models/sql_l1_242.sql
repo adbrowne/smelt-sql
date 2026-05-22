@@ -15,4 +15,3 @@ SELECT
 FROM smelt.invoices a
 INNER JOIN smelt.invoices b ON a.user_id = b.user_id
 LEFT JOIN smelt.invoices c ON a.user_id = c.user_id
-

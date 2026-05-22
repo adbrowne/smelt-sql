@@ -23,4 +23,3 @@ SELECT
     f.os_name
 FROM aggregated a
 INNER JOIN filtered f ON a.cost = f.cost
-

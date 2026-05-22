@@ -23,4 +23,3 @@ SELECT
     f.event_time
 FROM aggregated a
 INNER JOIN filtered f ON a.discount = f.discount
-

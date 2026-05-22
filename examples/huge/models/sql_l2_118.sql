@@ -12,4 +12,3 @@ SELECT
     created_at,
     RANK() OVER (PARTITION BY event_date ORDER BY created_at) AS win_val
 FROM smelt.sql_l1_130
-

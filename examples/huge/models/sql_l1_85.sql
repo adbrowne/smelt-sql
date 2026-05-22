@@ -13,4 +13,3 @@ SELECT
     b.cost
 FROM smelt.reviews a
 LEFT JOIN smelt.reviews b ON a.user_id = b.user_id
-

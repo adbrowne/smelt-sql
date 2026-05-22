@@ -16,4 +16,3 @@ SELECT
     AVG(amount) AS agg_4
 FROM smelt.sql_l1_204
 GROUP BY event_time
-

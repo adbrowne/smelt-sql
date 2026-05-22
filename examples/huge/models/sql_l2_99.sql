@@ -16,4 +16,3 @@ SELECT
     COUNT(*) AS agg_4
 FROM smelt.sql_l1_13
 GROUP BY transaction_id
-

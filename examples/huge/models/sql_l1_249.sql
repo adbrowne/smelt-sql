@@ -14,4 +14,3 @@ SELECT
     AVG(amount) AS agg_2
 FROM smelt.categories
 GROUP BY status
-

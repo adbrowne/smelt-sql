@@ -13,4 +13,3 @@ SELECT
     b.user_id
 FROM smelt.sessions a
 INNER JOIN smelt.sessions b ON a.user_id = b.user_id
-

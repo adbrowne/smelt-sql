@@ -14,4 +14,3 @@ SELECT
     SUM(quantity) AS agg_2
 FROM smelt.sql_l2_164
 GROUP BY event_date
-

@@ -14,4 +14,3 @@ SELECT
     SUM(revenue) AS agg_2
 FROM smelt.reviews
 GROUP BY category
-

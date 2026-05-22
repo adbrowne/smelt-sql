@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_223
 GROUP BY email_domain
 HAVING COUNT(*) > 10
-

@@ -10,4 +10,3 @@ timeseries:
 SELECT rating, user_id, price, 'source_0' AS source_tag FROM smelt.users
 UNION ALL
 SELECT rating, user_id, price, 'source_1' AS source_tag FROM smelt.users
-

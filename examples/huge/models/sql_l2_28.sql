@@ -14,4 +14,3 @@ SELECT
     event_date
 FROM smelt.sql_l1_109
 WHERE score >= 50
-

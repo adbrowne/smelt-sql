@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_114
 GROUP BY country
 HAVING COUNT(*) > 10
-

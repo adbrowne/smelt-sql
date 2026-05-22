@@ -14,4 +14,3 @@ SELECT
     transaction_id
 FROM smelt.events
 WHERE score >= 50
-

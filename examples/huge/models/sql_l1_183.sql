@@ -10,4 +10,3 @@ timeseries:
 SELECT transaction_id, created_at, status, 'source_0' AS source_tag FROM smelt.shipments
 UNION ALL
 SELECT transaction_id, created_at, status, 'source_1' AS source_tag FROM smelt.shipments
-

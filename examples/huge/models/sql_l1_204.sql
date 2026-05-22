@@ -14,4 +14,3 @@ SELECT
     duration_seconds
 FROM smelt.clicks
 WHERE created_at >= '2024-01-01'
-

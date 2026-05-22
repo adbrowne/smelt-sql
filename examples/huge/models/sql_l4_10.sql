@@ -23,4 +23,3 @@ SELECT
     f.status
 FROM aggregated a
 INNER JOIN filtered f ON a.user_id = f.user_id
-

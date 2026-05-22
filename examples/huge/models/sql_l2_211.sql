@@ -13,4 +13,3 @@ SELECT
     b.referrer
 FROM smelt.sql_l1_23 a
 INNER JOIN smelt.sql_l1_59 b ON a.user_id = b.user_id
-

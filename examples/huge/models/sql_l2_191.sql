@@ -16,4 +16,3 @@ SELECT
     SUM(revenue) AS agg_4
 FROM smelt.sql_l1_205
 GROUP BY campaign_id
-

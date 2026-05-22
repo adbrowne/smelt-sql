@@ -18,4 +18,3 @@ SELECT
 FROM base b
 INNER JOIN smelt.sql_l1_66 j ON b.user_id = j.user_id
 GROUP BY b.is_verified
-

@@ -13,4 +13,3 @@ SELECT
     SUM(quantity) AS metric_2
 FROM smelt.sql_l1_203
 GROUP BY DATE_TRUNC('week', event_time)
-

@@ -12,4 +12,3 @@ UNION ALL
 SELECT browser, rating, updated_at, 'source_1' AS source_tag FROM smelt.sql_l2_32
 UNION ALL
 SELECT browser, rating, updated_at, 'source_2' AS source_tag FROM smelt.sql_l2_161
-

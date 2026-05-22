@@ -14,4 +14,3 @@ SELECT
     is_active
 FROM smelt.reviews
 WHERE is_active = true
-

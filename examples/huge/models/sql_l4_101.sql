@@ -14,4 +14,3 @@ SELECT
     AVG(price) AS agg_2
 FROM smelt.sql_l3_234
 GROUP BY event_date
-

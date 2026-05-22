@@ -12,4 +12,3 @@ SELECT
     session_id,
     ROW_NUMBER() OVER (PARTITION BY device_type ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_216
-

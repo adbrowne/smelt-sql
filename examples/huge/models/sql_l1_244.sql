@@ -12,4 +12,3 @@ SELECT
     country,
     RANK() OVER (PARTITION BY transaction_id ORDER BY created_at) AS win_val
 FROM smelt.invoices
-

@@ -8,12 +8,15 @@ def py_l3_427(project):
 materialization: table
 incremental:
   enabled: true
+timeseries:
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     a.user_id,
     a.event_time,
     b.amount
-FROM smelt.ref('sql_l2_111') a
-LEFT JOIN smelt.ref('py_l2_325') b ON a.user_id = b.user_id
+FROM smelt.sql_l2_111 a
+LEFT JOIN smelt.py_l2_325 b ON a.user_id = b.user_id
 """

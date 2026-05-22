@@ -23,4 +23,3 @@ SELECT
     f.category
 FROM aggregated a
 INNER JOIN filtered f ON a.amount = f.amount
-

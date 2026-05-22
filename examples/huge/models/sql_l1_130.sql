@@ -14,4 +14,3 @@ SELECT
     quantity
 FROM smelt.clicks
 WHERE platform = 'web'
-

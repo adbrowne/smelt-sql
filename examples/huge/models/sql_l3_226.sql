@@ -13,4 +13,3 @@ SELECT
     b.platform
 FROM smelt.sql_l2_220 a
 LEFT JOIN smelt.sql_l2_172 b ON a.user_id = b.user_id
-

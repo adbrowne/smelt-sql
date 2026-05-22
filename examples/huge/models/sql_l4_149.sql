@@ -14,4 +14,3 @@ SELECT
     campaign_id
 FROM smelt.sql_l3_160
 WHERE amount > 0
-

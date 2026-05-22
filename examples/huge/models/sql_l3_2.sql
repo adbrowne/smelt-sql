@@ -14,4 +14,3 @@ SELECT
     cost
 FROM smelt.sql_l2_49
 WHERE platform = 'web'
-

@@ -14,4 +14,3 @@ SELECT
     revenue
 FROM smelt.notifications
 WHERE category IS NOT NULL
-

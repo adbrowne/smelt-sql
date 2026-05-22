@@ -13,4 +13,3 @@ SELECT
     b.category
 FROM smelt.campaigns a
 INNER JOIN smelt.campaigns b ON a.user_id = b.user_id
-

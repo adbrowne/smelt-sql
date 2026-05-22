@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l2_166
 GROUP BY campaign_id
 HAVING COUNT(*) > 10
-

@@ -12,4 +12,3 @@ SELECT
     browser,
     RANK() OVER (PARTITION BY category ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_18
-

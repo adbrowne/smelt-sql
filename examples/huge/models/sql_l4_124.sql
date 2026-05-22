@@ -12,4 +12,3 @@ SELECT
     email_domain,
     LAG(amount, 1) OVER (PARTITION BY campaign_id ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_171
-

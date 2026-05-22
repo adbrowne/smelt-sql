@@ -14,4 +14,3 @@ SELECT
     plan_type
 FROM smelt.sql_l2_221
 WHERE platform = 'web'
-

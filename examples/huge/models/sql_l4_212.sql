@@ -12,4 +12,3 @@ UNION ALL
 SELECT profit, ip_address, event_date, 'source_1' AS source_tag FROM smelt.sql_l3_145
 UNION ALL
 SELECT profit, ip_address, event_date, 'source_2' AS source_tag FROM smelt.sql_l3_153
-

@@ -13,4 +13,3 @@ SELECT
     COUNT(*) AS agg_1
 FROM smelt.sql_l3_96
 GROUP BY channel
-

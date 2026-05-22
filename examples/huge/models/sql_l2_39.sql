@@ -14,4 +14,3 @@ SELECT
     profit
 FROM smelt.sql_l1_161
 WHERE created_at >= '2024-01-01'
-

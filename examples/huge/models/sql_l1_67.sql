@@ -14,4 +14,3 @@ SELECT
 FROM smelt.products
 GROUP BY rating
 HAVING COUNT(*) > 10
-

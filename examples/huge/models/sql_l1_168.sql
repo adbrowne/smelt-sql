@@ -23,4 +23,3 @@ SELECT
     f.region
 FROM aggregated a
 INNER JOIN filtered f ON a.platform = f.platform
-

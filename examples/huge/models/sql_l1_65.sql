@@ -10,4 +10,3 @@ timeseries:
 SELECT event_time, status, user_id, 'source_0' AS source_tag FROM smelt.refunds
 UNION ALL
 SELECT event_time, status, user_id, 'source_1' AS source_tag FROM smelt.refunds
-

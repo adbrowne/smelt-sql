@@ -13,4 +13,3 @@ SELECT
     SUM(revenue) AS metric_2
 FROM smelt.sql_l1_101
 GROUP BY DATE_TRUNC('month', event_time)
-

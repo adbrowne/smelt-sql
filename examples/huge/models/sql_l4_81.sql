@@ -15,4 +15,3 @@ FROM smelt.sql_l3_95
 WHERE user_id IN (
     SELECT user_id FROM smelt.sql_l3_17 WHERE is_active = true
 )
-

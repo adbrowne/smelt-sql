@@ -14,4 +14,3 @@ SELECT
     MIN(created_at) AS agg_2
 FROM smelt.sql_l1_180
 GROUP BY page_path
-

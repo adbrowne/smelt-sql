@@ -13,4 +13,3 @@ SELECT
     b.is_verified
 FROM smelt.refunds a
 LEFT JOIN smelt.refunds b ON a.user_id = b.user_id
-

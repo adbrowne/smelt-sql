@@ -13,4 +13,3 @@ SELECT
     b.created_at
 FROM smelt.clicks a
 LEFT JOIN smelt.clicks b ON a.user_id = b.user_id
-

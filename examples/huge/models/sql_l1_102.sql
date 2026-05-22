@@ -13,4 +13,3 @@ SELECT
     AVG(duration_seconds) AS metric_2
 FROM smelt.clicks
 GROUP BY DATE_TRUNC('week', event_time)
-

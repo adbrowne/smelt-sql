@@ -14,4 +14,3 @@ SELECT
     quantity
 FROM smelt.shipments
 WHERE score >= 50
-

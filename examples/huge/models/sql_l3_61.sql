@@ -13,4 +13,3 @@ SELECT
     COUNT(DISTINCT user_id) AS metric_2
 FROM smelt.sql_l2_174
 GROUP BY DATE_TRUNC('month', event_time)
-

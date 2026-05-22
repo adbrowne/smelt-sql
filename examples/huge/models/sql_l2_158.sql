@@ -12,4 +12,3 @@ UNION ALL
 SELECT segment, rating, campaign_id, 'source_1' AS source_tag FROM smelt.sql_l1_44
 UNION ALL
 SELECT segment, rating, campaign_id, 'source_2' AS source_tag FROM smelt.sql_l1_65
-

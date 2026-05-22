@@ -13,4 +13,3 @@ SELECT
     AVG(amount) AS agg_1
 FROM smelt.sql_l1_233
 GROUP BY plan_type
-

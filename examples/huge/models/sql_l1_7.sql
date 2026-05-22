@@ -14,4 +14,3 @@ SELECT
     status
 FROM smelt.events
 WHERE event_type = 'purchase'
-

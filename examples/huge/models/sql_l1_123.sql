@@ -13,4 +13,3 @@ SELECT
     COUNT(*) AS metric_2
 FROM smelt.transactions
 GROUP BY DATE_TRUNC('day', event_time)
-

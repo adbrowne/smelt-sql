@@ -14,4 +14,3 @@ SELECT
     created_at
 FROM smelt.sql_l3_153
 WHERE is_active = true
-

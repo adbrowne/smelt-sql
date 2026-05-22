@@ -14,4 +14,3 @@ SELECT
     user_id
 FROM smelt.sql_l3_145
 WHERE score >= 50
-

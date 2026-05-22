@@ -14,4 +14,3 @@ SELECT
     campaign_id
 FROM smelt.sql_l1_24
 WHERE platform = 'web'
-

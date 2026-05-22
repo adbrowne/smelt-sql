@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_204
 GROUP BY discount
 HAVING COUNT(*) > 10
-

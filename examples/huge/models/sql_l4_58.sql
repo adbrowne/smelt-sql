@@ -16,4 +16,3 @@ SELECT
     SUM(amount) AS agg_4
 FROM smelt.sql_l3_79
 GROUP BY profit
-

@@ -12,4 +12,3 @@ SELECT
     price,
     RANK() OVER (PARTITION BY duration_seconds ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_67
-

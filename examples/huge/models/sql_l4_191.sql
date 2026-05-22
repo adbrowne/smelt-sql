@@ -14,4 +14,3 @@ SELECT
     category
 FROM smelt.sql_l3_130
 WHERE is_active = true
-

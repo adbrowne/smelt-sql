@@ -13,4 +13,3 @@ SELECT
     AVG(amount) AS metric_2
 FROM smelt.transactions
 GROUP BY DATE_TRUNC('month', event_time)
-

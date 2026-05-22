@@ -23,4 +23,3 @@ SELECT
     f.country
 FROM aggregated a
 INNER JOIN filtered f ON a.created_at = f.created_at
-

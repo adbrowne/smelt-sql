@@ -15,4 +15,3 @@ FROM smelt.transactions
 WHERE user_id IN (
     SELECT user_id FROM smelt.transactions WHERE score >= 50
 )
-

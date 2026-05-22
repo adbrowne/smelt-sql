@@ -14,4 +14,3 @@ SELECT
     category
 FROM smelt.sql_l2_102
 WHERE quantity > 0
-

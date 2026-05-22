@@ -15,4 +15,3 @@ SELECT
 FROM smelt.refunds a
 INNER JOIN smelt.refunds b ON a.user_id = b.user_id
 LEFT JOIN smelt.refunds c ON a.user_id = c.user_id
-

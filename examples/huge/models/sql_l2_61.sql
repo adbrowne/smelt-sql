@@ -23,4 +23,3 @@ SELECT
     f.channel
 FROM aggregated a
 INNER JOIN filtered f ON a.plan_type = f.plan_type
-

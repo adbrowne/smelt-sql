@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_199
 GROUP BY rating
 HAVING COUNT(*) > 10
-

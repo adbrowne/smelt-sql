@@ -16,4 +16,3 @@ SELECT
     MAX(created_at) AS agg_4
 FROM smelt.sql_l2_33
 GROUP BY ip_address
-

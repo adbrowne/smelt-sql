@@ -14,4 +14,3 @@ SELECT
     MAX(created_at) AS agg_2
 FROM smelt.sql_l2_247
 GROUP BY quantity
-

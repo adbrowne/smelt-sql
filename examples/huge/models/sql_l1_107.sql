@@ -14,4 +14,3 @@ SELECT
 FROM smelt.logs
 GROUP BY user_id
 HAVING COUNT(*) > 10
-

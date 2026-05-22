@@ -13,4 +13,3 @@ SELECT
     b.rating
 FROM smelt.sql_l3_163 a
 INNER JOIN smelt.sql_l3_194 b ON a.user_id = b.user_id
-

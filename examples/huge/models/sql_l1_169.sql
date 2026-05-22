@@ -15,4 +15,3 @@ FROM smelt.subscriptions
 WHERE user_id IN (
     SELECT user_id FROM smelt.subscriptions WHERE country = 'US'
 )
-

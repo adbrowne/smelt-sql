@@ -14,4 +14,3 @@ SELECT
     is_verified
 FROM smelt.sql_l2_81
 WHERE event_type = 'purchase'
-

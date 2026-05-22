@@ -23,4 +23,3 @@ SELECT
     f.platform
 FROM aggregated a
 INNER JOIN filtered f ON a.transaction_id = f.transaction_id
-

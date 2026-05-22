@@ -14,4 +14,3 @@ SELECT
     SUM(amount) AS agg_2
 FROM smelt.sql_l3_223
 GROUP BY amount
-

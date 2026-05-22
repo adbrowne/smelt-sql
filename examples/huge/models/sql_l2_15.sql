@@ -15,4 +15,3 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_3
 FROM smelt.sql_l1_160
 GROUP BY price
-

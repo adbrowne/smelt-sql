@@ -12,4 +12,3 @@ SELECT
     user_id,
     RANK() OVER (PARTITION BY cost ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_160
-

@@ -13,4 +13,3 @@ SELECT
     AVG(amount) AS metric_2
 FROM smelt.sql_l2_148
 GROUP BY DATE_TRUNC('day', event_time)
-

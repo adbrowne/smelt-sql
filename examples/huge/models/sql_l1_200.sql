@@ -14,4 +14,3 @@ SELECT
 FROM smelt.categories
 GROUP BY device_type
 HAVING COUNT(*) > 10
-

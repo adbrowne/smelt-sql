@@ -13,4 +13,3 @@ SELECT
     b.status
 FROM smelt.sql_l1_166 a
 LEFT JOIN smelt.sql_l1_91 b ON a.user_id = b.user_id
-

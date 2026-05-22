@@ -23,4 +23,3 @@ SELECT
     f.discount
 FROM aggregated a
 INNER JOIN filtered f ON a.is_active = f.is_active
-

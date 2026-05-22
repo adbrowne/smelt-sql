@@ -14,4 +14,3 @@ SELECT
 FROM smelt.sql_l1_149
 GROUP BY os_name
 HAVING COUNT(*) > 10
-

@@ -13,4 +13,3 @@ SELECT
     b.discount
 FROM smelt.clicks a
 INNER JOIN smelt.clicks b ON a.user_id = b.user_id
-

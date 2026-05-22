@@ -14,4 +14,3 @@ SELECT
 FROM smelt.refunds
 GROUP BY event_time
 HAVING COUNT(*) > 10
-

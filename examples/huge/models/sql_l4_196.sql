@@ -12,4 +12,3 @@ SELECT
     score,
     ROW_NUMBER() OVER (PARTITION BY discount ORDER BY created_at) AS win_val
 FROM smelt.sql_l3_30
-

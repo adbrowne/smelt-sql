@@ -14,4 +14,3 @@ SELECT
 FROM smelt.subscriptions
 GROUP BY platform
 HAVING COUNT(*) > 10
-

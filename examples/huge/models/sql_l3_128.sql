@@ -13,4 +13,3 @@ SELECT
     MAX(created_at) AS metric_2
 FROM smelt.sql_l2_231
 GROUP BY DATE_TRUNC('month', event_time)
-

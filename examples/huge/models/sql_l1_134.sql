@@ -14,4 +14,3 @@ SELECT
     channel
 FROM smelt.categories
 WHERE category IS NOT NULL
-

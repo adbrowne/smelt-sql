@@ -14,4 +14,3 @@ SELECT
     transaction_id
 FROM smelt.sql_l1_53
 WHERE status = 'active'
-

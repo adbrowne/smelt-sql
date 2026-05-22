@@ -14,4 +14,3 @@ SELECT
     referrer
 FROM smelt.sql_l2_59
 WHERE score >= 50
-

@@ -14,4 +14,3 @@ SELECT
     referrer
 FROM smelt.categories
 WHERE platform = 'web'
-

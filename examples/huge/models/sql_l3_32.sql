@@ -23,4 +23,3 @@ SELECT
     f.is_verified
 FROM aggregated a
 INNER JOIN filtered f ON a.cohort_date = f.cohort_date
-

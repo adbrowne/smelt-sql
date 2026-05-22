@@ -12,4 +12,3 @@ SELECT
     transaction_id,
     ROW_NUMBER() OVER (PARTITION BY score ORDER BY created_at) AS win_val
 FROM smelt.sql_l2_164
-
