@@ -76,7 +76,7 @@ const CONDITIONS: &[&str] = &[
 
 /// YAML frontmatter for incremental models.
 fn frontmatter() -> &'static str {
-    "---\nmaterialization: table\nincremental:\n  enabled: true\n  event_time_column: event_time\n  partition_column: event_date\n  granularity: day\n---\n"
+    "---\nmaterialization: table\nincremental:\n  enabled: true\ntimeseries:\n  event_time_column: event_time\n  partition_column: event_date\n  granularity: day\n---\n"
 }
 
 /// Generate SQL content for a model spec using a randomly selected template.
