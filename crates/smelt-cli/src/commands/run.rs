@@ -864,13 +864,54 @@ pub async fn run(args: RunArgs) -> Result<()> {
         // range on the CLI invocation. The driving source's timeseries: comes
         // from the upstream model's metadata, gathered from the logical graph.
         if phys_node.materialization == Materialization::CumulativeAggregate {
-            let cumulative_time_range = time_range.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cumulative_aggregate model '{}' requires an incremental run window — \
-                     pass `--event-time-start` and `--event-time-end`",
-                    model_name
-                )
-            })?;
+            // Without a time range, fall back to single-shot full refresh: the
+            // SELECT is run once, with no per-partition source filter, and the
+            // result is CREATE TABLE AS'd. This makes `smelt build` work
+            // without requiring `--event-time-start`/`--event-time-end` while
+            // an explicit run window still drives the per-partition merge loop.
+            let cumulative_time_range = match time_range.clone() {
+                Some(r) => r,
+                None => {
+                    info!(
+                        "Running model: {} (cumulative_aggregate, full refresh — no run window)",
+                        model_name
+                    );
+                    let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+                    let compiled = compiler
+                        .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
+                        .with_context(|| format!("Failed to compile model: {}", model_name))?;
+                    backend
+                        .drop_table_if_exists(schema, &db_table_name)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to drop {}: {}", db_table_name, e))?;
+                    backend
+                        .create_table_as(schema, &db_table_name, &compiled.sql)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to create cumulative model {}: {}",
+                                model_name,
+                                e
+                            )
+                        })?;
+                    let row_count = backend
+                        .get_row_count(schema, &db_table_name)
+                        .await
+                        .unwrap_or(0);
+                    let result = smelt_backend::ExecutionResult {
+                        model_name: model_name.to_string(),
+                        duration: std::time::Duration::from_millis(0),
+                        row_count,
+                        preview: None,
+                    };
+                    info!(
+                        "{} done ({} rows, full refresh)",
+                        result.model_name, result.row_count
+                    );
+                    results.push((result, phys_node.strategy.clone()));
+                    continue;
+                }
+            };
 
             // Build the source_timeseries map from the logical graph: every
             // dependency whose declared `timeseries:` block is non-None.

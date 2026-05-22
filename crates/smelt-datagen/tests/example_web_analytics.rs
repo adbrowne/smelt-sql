@@ -1102,7 +1102,7 @@ fn test_sessions_model_materializes() {
 // ---------------------------------------------------------------------------
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
-/// `smelt build`, then verify that `main.silver_device_user_edges_cumulative`
+/// `smelt build`, then verify that `main.silver_device_user_edges`
 /// (the view that rolls the per-day `silver/device_user_edges` table up across
 /// dates) materializes with at least one row, its row count matches the
 /// distinct (device_id, user_id) pairs in `events_parsed` with non-null
@@ -1111,7 +1111,7 @@ fn test_sessions_model_materializes() {
 ///
 /// `models/silver/device_user_edges_cumulative.sql` address segments are
 /// `["silver", "device_user_edges_cumulative"]`, so smelt materializes the
-/// view as `silver_device_user_edges_cumulative` in the `main` schema.
+/// view as `silver_device_user_edges` in the `main` schema.
 #[test]
 fn test_device_user_edges_view() {
     let tmp = TempDir::new().expect("tempdir");
@@ -1174,13 +1174,11 @@ fn test_device_user_edges_view() {
 
     let edge_count: i64 = conn2
         .query_row(
-            "SELECT COUNT(*) FROM main.silver_device_user_edges_cumulative",
+            "SELECT COUNT(*) FROM main.silver_device_user_edges",
             [],
             |row| row.get(0),
         )
-        .unwrap_or_else(|e| {
-            panic!("SELECT COUNT(*) FROM main.silver_device_user_edges_cumulative: {e}")
-        });
+        .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_device_user_edges: {e}"));
 
     assert!(
         edge_count > 0,
@@ -1211,7 +1209,7 @@ fn test_device_user_edges_view() {
     // --- Step 7: verify every edge has event_count >= 1 ---
     let min_event_count: i64 = conn2
         .query_row(
-            "SELECT MIN(event_count) FROM main.silver_device_user_edges_cumulative",
+            "SELECT MIN(event_count) FROM main.silver_device_user_edges",
             [],
             |row| row.get(0),
         )
@@ -1225,7 +1223,7 @@ fn test_device_user_edges_view() {
     // --- Step 8: verify no edge has first_seen > last_seen ---
     let bad_temporal_count: i64 = conn2
         .query_row(
-            "SELECT COUNT(*) FROM main.silver_device_user_edges_cumulative WHERE first_seen > last_seen",
+            "SELECT COUNT(*) FROM main.silver_device_user_edges WHERE first_seen > last_seen",
             [],
             |row| row.get(0),
         )
@@ -1761,12 +1759,12 @@ fn test_identity_backward_fill_materializes() {
     // Step 6: one row per device that ever had a signed-in event
     let device_count: i64 = conn2
         .query_row(
-            "SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges_cumulative",
+            "SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges",
             [],
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges_cumulative: {e}")
+            panic!("SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges: {e}")
         });
 
     assert_eq!(
@@ -1802,10 +1800,10 @@ fn test_identity_backward_fill_materializes() {
             "SELECT COUNT(*) FROM main.gold_identity_backward_fill bf
              JOIN (
                  SELECT device_id, MAX(event_count) AS max_count
-                 FROM main.silver_device_user_edges_cumulative
+                 FROM main.silver_device_user_edges
                  GROUP BY device_id
              ) m ON bf.device_id = m.device_id
-             JOIN main.silver_device_user_edges_cumulative e
+             JOIN main.silver_device_user_edges e
                  ON e.device_id = bf.device_id
                 AND 'u:' || CAST(e.user_id AS VARCHAR) = bf.backward_fill_amplitude_id
              WHERE e.event_count != m.max_count",
@@ -1826,15 +1824,15 @@ fn test_identity_backward_fill_materializes() {
     let tiebreaker_violation_count: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM main.gold_identity_backward_fill bf
-             JOIN main.silver_device_user_edges_cumulative chosen
+             JOIN main.silver_device_user_edges chosen
                  ON chosen.device_id = bf.device_id
                 AND 'u:' || CAST(chosen.user_id AS VARCHAR) = bf.backward_fill_amplitude_id
              JOIN (
                  SELECT e.device_id, MIN(e.first_seen) AS min_first_seen_among_max
-                 FROM main.silver_device_user_edges_cumulative e
+                 FROM main.silver_device_user_edges e
                  JOIN (
                      SELECT device_id, MAX(event_count) AS max_count
-                     FROM main.silver_device_user_edges_cumulative
+                     FROM main.silver_device_user_edges
                      GROUP BY device_id
                  ) m ON e.device_id = m.device_id AND e.event_count = m.max_count
                  GROUP BY e.device_id
@@ -2092,12 +2090,12 @@ fn test_identity_connected_components_materializes() {
     // Step 5: one row per device that ever had a signed-in event
     let device_count: i64 = conn2
         .query_row(
-            "SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges_cumulative",
+            "SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges",
             [],
             |row| row.get(0),
         )
         .unwrap_or_else(|e| {
-            panic!("SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges_cumulative: {e}")
+            panic!("SELECT COUNT(DISTINCT device_id) FROM main.silver_device_user_edges: {e}")
         });
 
     assert_eq!(
@@ -2148,8 +2146,8 @@ fn test_identity_connected_components_materializes() {
     // must have the same connected_components_cluster_id.
     let transitive_violation: i64 = conn2
         .query_row(
-            "SELECT COUNT(*) FROM main.silver_device_user_edges_cumulative e1
-             JOIN main.silver_device_user_edges_cumulative e2 ON e1.user_id = e2.user_id
+            "SELECT COUNT(*) FROM main.silver_device_user_edges e1
+             JOIN main.silver_device_user_edges e2 ON e1.user_id = e2.user_id
              JOIN main.gold_identity_connected_components c1 ON c1.device_id = e1.device_id
              JOIN main.gold_identity_connected_components c2 ON c2.device_id = e2.device_id
              WHERE c1.connected_components_cluster_id != c2.connected_components_cluster_id",
@@ -2172,7 +2170,7 @@ fn test_identity_connected_components_materializes() {
             "SELECT COUNT(*) FROM (
                  SELECT c.connected_components_cluster_id, MIN(e.user_id) AS min_uid
                  FROM main.gold_identity_connected_components c
-                 JOIN main.silver_device_user_edges_cumulative e ON e.device_id = c.device_id
+                 JOIN main.silver_device_user_edges e ON e.device_id = c.device_id
                  GROUP BY c.connected_components_cluster_id
                  HAVING 'u:' || CAST(MIN(e.user_id) AS VARCHAR) != c.connected_components_cluster_id
              )",
