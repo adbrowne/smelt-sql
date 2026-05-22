@@ -232,8 +232,7 @@ This section captures the load-bearing rationale.
 
 ## Known Divergences / Open Questions
 
-- **Initial implementation not yet landed.** Tracked in `docs/plans/20260523-cumulative-aggregate.md`. Until then, the workaround in the motivating example (`examples/web_analytics/models/silver/device_user_edges.sql` + `device_user_edges_cumulative.sql`) is a two-model split: a per-day incremental table feeding a view that aggregates across all dates.
-- **`IncrementalStrategy::Merge` is a dangling variant.** Today the variant exists on the `IncrementalStrategy` enum in `crates/smelt-core/src/config.rs` but no model frontmatter reaches the dispatcher. The plan that lands `cumulative_aggregate` drops this variant; until then it is dead code.
+- **`IncrementalStrategy::Merge` is a dangling variant.** The variant exists on the `IncrementalStrategy` enum in `crates/smelt-core/src/config.rs` but no model frontmatter reaches the dispatcher. Tracked for removal in `docs/plans/20260523-cumulative-aggregate.md` Phase 4; until then it is dead code.
 - **`AVG` rewrite.** Out of scope for v1. The classifier refuses `AVG(...)`. A future plan may rewrite it at planning time to `SUM/COUNT` and surface the average as a derived column.
 - **Multi-source disambiguation (`driven_by:`).** A cumulative model reading multiple timeseries-tagged sources is rejected in v1 (`CumulativeMultipleDrivingSources`). A future plan may add an explicit `driven_by: smelt.<source>` field on the frontmatter to pick among same-granularity candidates. Different-granularity sources are deferred indefinitely.
 - **Self-referential cumulative.** A SELECT that joins to its own cumulative target (e.g., `cumulative_state += sum(new_partition) - decay`) reads "prior cumulative value" and is recursive. Rejected in v1 by the general "exactly one driving source" rule when the target itself is in the FROM clause. A future plan may admit this pattern with explicit input/state distinction.

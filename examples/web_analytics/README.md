@@ -56,8 +56,8 @@ Cross-device clustering via union-find over the `(device, user)` co-occurrence
 graph. The cluster's representative is `'u:' || min(user_id)` in the cluster,
 and every event of every device in the cluster is tagged with that
 representative. Implemented as 8-iteration unrolled label propagation over
-`silver/device_user_edges_cumulative`; true recursive-CTE fixed-point
-convergence is a possible future extension.
+`silver/device_user_edges`; true recursive-CTE fixed-point convergence is a
+possible future extension.
 
 ## Pipeline
 
@@ -66,10 +66,9 @@ bronze/raw_events                  (view; passthrough)
   └── silver/events_parsed         (INCR by event_date)
         ├── silver/sessions        (INCR by session_start_date; 1-day lookback)
         │     └── gold/identity_forward_only         (INCR by session_start_date)
-        └── silver/device_user_edges                 (INCR by event_date; per-day rows)
-              └── silver/device_user_edges_cumulative (view; rolls per-day rows up)
-                    ├── gold/identity_backward_fill        (view; rebuilt on query)
-                    └── gold/identity_connected_components (view; rebuilt on query)
+        └── silver/device_user_edges                 (cumulative_aggregate)
+              ├── gold/identity_backward_fill        (view; rebuilt on query)
+              └── gold/identity_connected_components (view; rebuilt on query)
         ↓
         gold/eventstream_with_identity (INCR by event_date)
               ├── marts/daily_active_users_by_method (INCR by event_date)
@@ -85,7 +84,6 @@ Source files:
   [`functions/sessionize.sql`](functions/sessionize.sql) +
   [`functions/compute_session_start_date.sql`](functions/compute_session_start_date.sql) (see [Known divergences](#known-divergences))
 - [`models/silver/device_user_edges.sql`](models/silver/device_user_edges.sql)
-- [`models/silver/device_user_edges_cumulative.sql`](models/silver/device_user_edges_cumulative.sql)
 - [`models/gold/identity_forward_only.sql`](models/gold/identity_forward_only.sql)
 - [`models/gold/identity_backward_fill.sql`](models/gold/identity_backward_fill.sql)
 - [`models/gold/identity_connected_components.sql`](models/gold/identity_connected_components.sql)
@@ -95,31 +93,33 @@ Source files:
 
 ## Incremental shape
 
-Six models are incremental; the rest are views.
+Five models are incremental, one is cumulative_aggregate, and the rest are
+views.
 
-| Model                                         | Materialization | Partition column   |
-|-----------------------------------------------|-----------------|--------------------|
-| `silver/events_parsed`                        | INCR table      | `event_date`       |
-| `silver/sessions`                             | INCR table      | `session_start_date` |
-| `silver/device_user_edges`                    | INCR table      | `event_date`       |
-| `gold/identity_forward_only`                  | INCR table      | `session_start_date` |
-| `gold/eventstream_with_identity`              | INCR table      | `event_date`       |
-| `marts/daily_active_users_by_method`          | INCR table      | `event_date`       |
-| `bronze/raw_events`                           | view            | —                  |
-| `silver/device_user_edges_cumulative`         | view            | —                  |
-| `gold/identity_backward_fill`                 | view            | —                  |
-| `gold/identity_connected_components`          | view            | —                  |
-| `marts/identity_method_comparison`            | view            | —                  |
+| Model                                         | Materialization     | Partition column     |
+|-----------------------------------------------|---------------------|----------------------|
+| `silver/events_parsed`                        | INCR table          | `event_date`         |
+| `silver/sessions`                             | INCR table          | `session_start_date` |
+| `silver/device_user_edges`                    | cumulative_aggregate | (driven by source)   |
+| `gold/identity_forward_only`                  | INCR table          | `session_start_date` |
+| `gold/eventstream_with_identity`              | INCR table          | `event_date`         |
+| `marts/daily_active_users_by_method`          | INCR table          | `event_date`         |
+| `bronze/raw_events`                           | view                | —                    |
+| `gold/identity_backward_fill`                 | view                | —                    |
+| `gold/identity_connected_components`          | view                | —                    |
+| `marts/identity_method_comparison`            | view                | —                    |
 
-### Why some identity models stay views
+### Why device_user_edges is cumulative_aggregate
 
 The two global identity algorithms (backward_fill, connected_components) need
 the cumulative `(device, user)` edge set to produce correct per-device
-elections and clusters. Splitting `silver/device_user_edges` into a per-day
-incremental table plus a `silver/device_user_edges_cumulative` view keeps the
-daily-run cost proportional to that day's signed-in events while still
-exposing the full edge set to the two algorithms. They remain views and are
-re-evaluated on every query against `gold/eventstream_with_identity`.
+elections and clusters. `silver/device_user_edges` uses
+`materialization: cumulative_aggregate` so each daily run only aggregates that
+day's signed-in events and merges them into the running cumulative state via
+the SQL aggregator → cross-partition combiner mapping (COUNT→SUM, MIN→MIN,
+MAX→MAX). The backward_fill and connected_components models read this
+cumulative table directly as a lookup; they remain views and are re-evaluated
+on every query against `gold/eventstream_with_identity`.
 
 `marts/identity_method_comparison` is a 3-row global aggregation with no time
 dimension, so no `partition_column` exists; it stays a view too.
@@ -332,8 +332,9 @@ cases rather than aggregate statistics.
   asserts the 30-minute inactivity rule and the platform-boundary split
   produce the expected session_id assignments on a mocked event sequence.
 - [`tests/device_user_edges_per_day_invariants.test.sql`](tests/device_user_edges_per_day_invariants.test.sql) —
-  asserts the per-day aggregation shape (`daily_event_count`, `daily_first_seen`,
-  `daily_last_seen`) and that anonymous events are excluded.
+  asserts the cumulative aggregation shape (one row per `(device, user)`,
+  `event_count` = SUM across days, `first_seen` = MIN, `last_seen` = MAX) and
+  that anonymous events are excluded.
 - [`tests/forward_only_resolution_invariants.test.sql`](tests/forward_only_resolution_invariants.test.sql) —
   asserts within-session `arg_max` resolution: a session's `forward_only_amplitude_id`
   is `'u:' || ` the latest non-null `user_id` observed inside the session window;

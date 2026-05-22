@@ -171,7 +171,10 @@ This requires resolving "partition_date" symbolically to the run-window — whic
 
 This is called out in `docs/specs/incremental_models.md` § "Known Divergences" as planned-but-not-wired. The minimal version doesn't need full algebraic equivalence — it needs the lookback from #3 and a way to recognise time-partition columns on source tables (which is already present in their incremental frontmatter).
 
-#### 5. No cumulative / MERGE materialization
+#### 5. No cumulative / MERGE materialization — **closed**
+
+> **Closed by** `docs/plans/20260523-cumulative-aggregate.md`, which lands `materialization: cumulative_aggregate` as a sibling of `incremental`. `examples/web_analytics/models/silver/device_user_edges.sql` is now a single cumulative_aggregate model; the per-day-table + cumulative-view split is deleted.
+
 
 `silver/device_user_edges` stores `(device_id, user_id, event_date, daily_event_count, daily_first_seen, daily_last_seen)`. To produce the cumulative `(device_id, user_id, event_count, first_seen, last_seen)` shape the identity algorithms need, we added `silver/device_user_edges_cumulative.sql` as a view that aggregates across all dates.
 

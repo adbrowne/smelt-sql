@@ -19,5 +19,5 @@
 SELECT DISTINCT ON (device_id)
     device_id,
     'u:' || CAST(user_id AS VARCHAR) AS backward_fill_amplitude_id
-FROM smelt.silver.device_user_edges_cumulative
+FROM smelt.silver.device_user_edges
 ORDER BY device_id, event_count DESC, first_seen ASC, user_id ASC

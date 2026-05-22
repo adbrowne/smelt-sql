@@ -3,7 +3,7 @@ materialization: test
 test:
   model: identity_connected_components
   inputs:
-    silver_device_user_edges_cumulative:
+    silver_device_user_edges:
       # Cluster 1: single device, single user (degenerate base case)
       - {device_id: 1, user_id: 100, event_count: 1, first_seen: '2026-04-01 09:00:00', last_seen: '2026-04-01 09:01:00'}
 

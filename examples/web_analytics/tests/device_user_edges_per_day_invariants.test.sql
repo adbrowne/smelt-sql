@@ -1,4 +1,4 @@
---- name: test_device_user_edges_per_day_invariants ---
+--- name: test_device_user_edges_cumulative_invariants ---
 materialization: test
 test:
   model: device_user_edges
@@ -21,11 +21,9 @@ test:
       - {event_id: 10, device_id: 3, user_id: ~, event_ts: '2026-04-01T14:00:00', event_date: '2026-04-01', amplitude_id: 'd:3', event_name: 'view', platform: 'web', url: '/'}
       - {event_id: 11, device_id: 3, user_id: ~, event_ts: '2026-04-02T14:00:00', event_date: '2026-04-02', amplitude_id: 'd:3', event_name: 'view', platform: 'web', url: '/'}
   expect:
-    # Day 1
-    - {device_id: 1, user_id: 100, event_date: '2026-04-01', daily_event_count: 3, daily_first_seen: '2026-04-01T09:00:00', daily_last_seen: '2026-04-01T10:00:00'}
-    - {device_id: 1, user_id: 101, event_date: '2026-04-01', daily_event_count: 1, daily_first_seen: '2026-04-01T11:00:00', daily_last_seen: '2026-04-01T11:00:00'}
-    - {device_id: 2, user_id: 200, event_date: '2026-04-01', daily_event_count: 2, daily_first_seen: '2026-04-01T12:00:00', daily_last_seen: '2026-04-01T13:00:00'}
-    # Day 2
-    - {device_id: 1, user_id: 100, event_date: '2026-04-02', daily_event_count: 2, daily_first_seen: '2026-04-02T09:00:00', daily_last_seen: '2026-04-02T09:30:00'}
-    - {device_id: 2, user_id: 200, event_date: '2026-04-02', daily_event_count: 1, daily_first_seen: '2026-04-02T10:00:00', daily_last_seen: '2026-04-02T10:00:00'}
+    # One row per (device, user) — cumulative across all dates. event_count
+    # sums; first_seen is the global MIN; last_seen is the global MAX.
+    - {device_id: 1, user_id: 100, event_count: 5, first_seen: '2026-04-01T09:00:00', last_seen: '2026-04-02T09:30:00'}
+    - {device_id: 1, user_id: 101, event_count: 1, first_seen: '2026-04-01T11:00:00', last_seen: '2026-04-01T11:00:00'}
+    - {device_id: 2, user_id: 200, event_count: 3, first_seen: '2026-04-01T12:00:00', last_seen: '2026-04-02T10:00:00'}
 ---

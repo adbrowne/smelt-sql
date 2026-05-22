@@ -91,9 +91,12 @@ fn web_analytics_incremental_models_classify_as_safe() {
     // Models without a Form B date filter: must stay fully_batch_safe.
     // Listed explicitly so adding a new incremental model without a
     // classification check fails noisily here.
+    //
+    // `device_user_edges` is intentionally absent — it uses
+    // `materialization: cumulative_aggregate`, not incremental, so the
+    // incremental batch-safety analyser does not apply to it.
     for model in &[
         "sessions",
-        "device_user_edges",
         "events_parsed",
         "eventstream_with_identity",
         "daily_active_users_by_method",
