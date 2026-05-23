@@ -81,7 +81,7 @@ A future requirement is folded in: the UI may eventually expose an in-browser ed
 | 3 — Move selection/filter pass into `smelt-runtime::select`; CLI + UI both consume; today's UI test-filter fix becomes the shared function | done | ad73f9b5 | 2026-05-23 |
 | 4a — `smelt-runtime::execute_project` entry point + `BackendFactory` trait; UI shrinks to surface wrapper (726→317 lines) | done | 7599d648 | 2026-05-23 |
 | 4b — Cumulative dispatch moves into runtime (`execute_project` handles `CumulativeAggregate`; UI supports cumulative models). CLI's `commands/run.rs` migration to `execute_project` + planner-orchestration extraction + backfill + end-to-end CLI↔UI parity CI gate remain pending. | partial | 854c8046 | 2026-05-23 |
-| 5 — Surface tightening: make `smelt-runtime` internals `pub(crate)`; delete consumer-side duplicates; final crate-graph audit | pending |  |  |
+| 5 — Surface tightening: CLI internal callers + tests bypass the shims and import from `smelt_runtime` directly. Structural `pub(crate)` lockdown deferred (depends on CLI execute-loop migration; lib.rs re-exports kept as stable smelt_cli API). | partial | d1b5b043 | 2026-05-23 |
 
 ---
 
