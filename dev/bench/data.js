@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779579401100,
+  "lastUpdate": 1779579403233,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -22850,6 +22850,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 21.544125040965643,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c7d2737630b72fe63a03a2b9f54b0f2cb14478b6",
+          "message": "docs(spec): drop \"Phase 5\" phase-vocabulary from incremental_models\n\nTwo references to \"Phase 5 of the incremental plan\" violated the\ntimeless-oracle rule for specs. Replace with the behaviour-only phrase\n\"opt-in extension\".\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-24T09:34:52+10:00",
+          "tree_id": "e70bab2d3aa3c2c393314f4dd32b0cb5048dd469",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c7d2737630b72fe63a03a2b9f54b0f2cb14478b6"
+        },
+        "date": 1779579402634,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.222048779285778,
             "unit": "MB/s"
           }
         ]
