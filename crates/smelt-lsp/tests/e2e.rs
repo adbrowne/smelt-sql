@@ -343,6 +343,17 @@ impl TestClient {
         .await
     }
 
+    async fn hover(&mut self, uri: &str, line: u32, col: u32) -> Value {
+        self.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": col }
+            }),
+        )
+        .await
+    }
+
     async fn code_actions(
         &mut self,
         uri: &str,
@@ -737,6 +748,86 @@ async fn test_goto_definition_column() {
     assert!(
         result_str.contains("upstream"),
         "goto-definition should point to upstream.sql, got: {}",
+        result_str
+    );
+
+    client.shutdown().await;
+}
+
+/// Hover on a qualified SQL column reference shows its resolved type and the
+/// source it came from.
+#[tokio::test]
+async fn test_hover_on_qualified_column() {
+    let ws = TestWorkspaceDir::new();
+    ws.add_model("upstream", "SELECT 1 AS id, 'hello' AS name");
+    let downstream_sql = "SELECT u.id FROM smelt.models.upstream u";
+    ws.add_model("downstream", downstream_sql);
+    let mut client = TestClient::new(ws.path()).await;
+
+    let upstream_uri = ws.model_uri("upstream");
+    let downstream_uri = ws.model_uri("downstream");
+    client
+        .open_file(&upstream_uri, "SELECT 1 AS id, 'hello' AS name")
+        .await;
+    client.open_file(&downstream_uri, downstream_sql).await;
+    client.collect_diagnostics(1000).await;
+
+    // Hover on "id" inside "u.id" — "id" starts at col 9 in
+    // "SELECT u.id FROM smelt.models.upstream u".
+    let result = client.hover(&downstream_uri, 0, 9).await;
+    let result_str = serde_json::to_string(&result).unwrap();
+
+    // The id column in upstream is `SELECT 1 AS id` — DuckDB infers this as
+    // an integer (`INTEGER` / `BIGINT` depending on the literal). The exact
+    // rendering follows the `Display` impl on `DataType` (uppercase). We
+    // assert the type line uses backticks and that the source line names
+    // the upstream model the column came from.
+    assert!(
+        result_str.contains("u.id"),
+        "hover content should mention the qualified column `u.id`, got: {}",
+        result_str
+    );
+    assert!(
+        result_str.to_lowercase().contains("from model"),
+        "hover content should describe the column source (`From model …`), got: {}",
+        result_str
+    );
+
+    client.shutdown().await;
+}
+
+/// Hover on an unqualified SQL column reference (no FROM alias) still shows
+/// the resolved type — the type comes from the upstream model's schema.
+#[tokio::test]
+async fn test_hover_on_unqualified_column() {
+    let ws = TestWorkspaceDir::new();
+    ws.add_model("upstream", "SELECT 1 AS id, 'hello' AS name");
+    let downstream_sql = "SELECT id FROM smelt.models.upstream";
+    ws.add_model("downstream", downstream_sql);
+    let mut client = TestClient::new(ws.path()).await;
+
+    let upstream_uri = ws.model_uri("upstream");
+    let downstream_uri = ws.model_uri("downstream");
+    client
+        .open_file(&upstream_uri, "SELECT 1 AS id, 'hello' AS name")
+        .await;
+    client.open_file(&downstream_uri, downstream_sql).await;
+    client.collect_diagnostics(1000).await;
+
+    // Hover on "id" — starts at col 7.
+    let result = client.hover(&downstream_uri, 0, 7).await;
+    let result_str = serde_json::to_string(&result).unwrap();
+
+    assert!(
+        result_str.contains("**`id`**"),
+        "hover content should render the unqualified column name in bold backticks, got: {}",
+        result_str
+    );
+    // Type line must be backtick-wrapped (not the "*type unknown*" fallback)
+    // because the upstream's `id` literal is resolvable.
+    assert!(
+        !result_str.contains("type unknown"),
+        "type should resolve for an unqualified column from a single upstream, got: {}",
         result_str
     );
 

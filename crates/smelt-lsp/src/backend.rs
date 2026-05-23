@@ -47,6 +47,7 @@ use crate::hover::{
     find_var_line_in_smelt_yml,
     goto_def_for_emitted_model_reference,
     hover_text_for_column_ref_field,
+    hover_text_for_column_reference,
     hover_text_for_columns_of_call,
     hover_text_for_generates_frontmatter,
     hover_text_for_hof_meta_language,
@@ -4159,6 +4160,55 @@ impl LanguageServer for Backend {
                                 }
                             }
                         }
+                    }
+                }
+
+                // ── SQL column reference hover (fallback) ───────────────────
+                // Runs LAST so the more-specific handlers above (smelt.<path>
+                // refs, smelt.define parameters, meta-language constructs,
+                // generator-file ModelDefs) win on overlapping positions.
+                //
+                // `symbol_at_cursor` returns `ColumnRef { qualifier, name }`
+                // when the cursor is on a bare SQL identifier in a column-
+                // reference position. We resolve the type via the file's
+                // `TypeContext` and derive a source description from the
+                // qualifier when present.
+                if let Some(SymbolAtCursor::ColumnRef { qualifier, name }) =
+                    symbol_at_cursor(&file, &text, cursor_offset)
+                {
+                    if let (Some(ws), Some(file_input)) =
+                        (Workspace::try_get(&db), lookup_file(&db, &effective_path))
+                    {
+                        let ctx = smelt_db::type_context(&db, ws, file_input);
+                        let typed_col = ctx.lookup_column(qualifier.as_deref(), &name).cloned();
+
+                        // Build the display string the user typed.
+                        let display = match qualifier.as_deref() {
+                            Some(q) => format!("{q}.{name}"),
+                            None => name.clone(),
+                        };
+
+                        // Convert `describe_qualifier`'s single-quoted output
+                        // ("CTE 'sessions'") into markdown with the name in
+                        // backticks ("CTE `sessions`") for visual consistency
+                        // with the rest of the hover surface.
+                        let source_desc = qualifier
+                            .as_deref()
+                            .and_then(|q| ctx.describe_qualifier(q))
+                            .map(|d| d.replace('\'', "`"));
+
+                        let value = hover_text_for_column_reference(
+                            &display,
+                            typed_col.as_ref(),
+                            source_desc.as_deref(),
+                        );
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value,
+                            }),
+                            range: None,
+                        }));
                     }
                 }
             }
