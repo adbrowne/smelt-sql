@@ -471,10 +471,20 @@ smelt supports multiple strategies for how data is updated. The strategy is chos
 
 | Strategy | When used | Behavior |
 |---|---|---|
-| `delete_insert` | Default when no `unique_key` | DELETE matching partitions, then INSERT new data |
-| `merge` | When `unique_key` is set and backend supports it | MERGE/UPSERT based on unique key columns |
+| `delete_insert` | Default | DELETE matching partitions, then INSERT new data |
 | `append` | Append-only workloads | INSERT only, no deletion |
 | `insert_overwrite` | Backend-specific optimization | Overwrite entire partitions atomically |
+
+UPSERT (`MERGE`) is **not** an incremental strategy — it is the backend primitive used by the [`cumulative_aggregate` materialization](materializations.md#cumulative_aggregate), which is a separate sibling rule with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `cumulative_aggregate`, not `incremental`.
+
+## Incremental vs cumulative
+
+`incremental` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `cumulative_aggregate` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
+
+- Use `incremental` when the answer to "what did this partition produce?" is well-defined and stable.
+- Use `cumulative_aggregate` when the answer is "what's the running total per key?".
+
+See the [materializations guide](materializations.md#incremental-vs-cumulative_aggregate) for a side-by-side comparison.
 
 ## Schema evolution
 
@@ -488,5 +498,6 @@ When an incremental model's output schema changes (columns added, types widened,
 ## Further reading
 
 - [Materializations](materializations.md) for an overview of all materialization types
+- [cumulative_aggregate](materializations.md#cumulative_aggregate) for cumulative state (one row per key)
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs

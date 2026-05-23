@@ -1,6 +1,6 @@
 # Materializations
 
-A materialization controls how smelt persists the results of a model in the target database. There are four materialization types, each suited to different use cases.
+A materialization controls how smelt persists the results of a model in the target database. There are five materialization types, each suited to different use cases.
 
 ## Materialization types
 
@@ -62,6 +62,57 @@ Best for:
 !!! note
     Materialized views are refreshed atomically by the backend. Incremental configuration on a materialized view has no effect and will produce a warning.
 
+### cumulative_aggregate
+
+Stateful merge into one row per `GROUP BY` key. Each daily run only aggregates the new partition's events and merges them into the running cumulative state. The model's frontmatter collapses to one line — the unique key, the per-column aggregator, and the cross-partition combiner are all derived from the SQL.
+
+```sql
+---
+materialization: cumulative_aggregate
+---
+SELECT
+    device_id,
+    user_id,
+    COUNT(*)      AS event_count,
+    MIN(event_ts) AS first_seen,
+    MAX(event_ts) AS last_seen
+FROM smelt.silver.events_parsed
+WHERE user_id IS NOT NULL
+GROUP BY device_id, user_id
+```
+
+The output has one row per `(device_id, user_id)`. There is no `event_date` column — partitions collapse into a per-key row. The driving partition shape is read from the source's `timeseries:` declaration; running with `--event-time-start D --event-time-end D+N` merges the N partitions in temporal order. Without a run window, the model falls back to a single-shot full refresh.
+
+Each non-key projection must be a direct call to one of the **allowlisted aggregators**, which are paired with a fixed cross-partition combiner:
+
+| Per-partition aggregator | Cross-partition combiner |
+|---|---|
+| `COUNT(...)` | `SUM` |
+| `SUM(...)` | `SUM` |
+| `MIN(...)` | `MIN` |
+| `MAX(...)` | `MAX` |
+| `BOOL_AND(...)` | `BOOL_AND` |
+| `BOOL_OR(...)` | `BOOL_OR` |
+| `BIT_AND(...)` | `BIT_AND` |
+| `BIT_OR(...)` | `BIT_OR` |
+| `BIT_XOR(...)` | `xor()` |
+
+Anything outside the allowlist — `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `AVG`, composite expressions like `SUM(x) + 1` — is rejected at planning time. Each allowed aggregator is commutative and associative, which is the property that lets the rule merge partitions in any order and still produce the same final state.
+
+Best for:
+
+- Cumulative counts and identity edge sets (e.g. `(device, user)` co-occurrence)
+- Per-key rollups where each daily run should be cheap — proportional to that day's source rows, not the full source history
+- Tables consumed downstream as a lookup (no `partition_column` on the output)
+
+!!! warning "Forbidden combinations"
+    `materialization: cumulative_aggregate` cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare an `incremental:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` error.
+
+!!! note "Reprocessing"
+    v1 does not support per-partition reprocessing for already-merged source partitions. If a past partition's data changes, run with `--full-refresh` to truncate and rebuild from scratch.
+
+For the deeper rationale, see the [cumulative_aggregate spec](../reference/cumulative-aggregate.md).
+
 ## Setting materialization
 
 There are three ways to set a model's materialization. They are listed here in order of precedence (highest to lowest):
@@ -109,9 +160,24 @@ When `materialization` is omitted in the SQL frontmatter, in `models.<name>` of 
 | Aggregations queried by BI tools | `table` |
 | Intermediate step used by one downstream | `ephemeral` |
 | Model with many downstream dependents | `table` |
-| Incremental processing | `table` (required) |
+| Incremental processing (per-partition output) | `incremental` (per-partition `timeseries:` output) |
+| Cumulative state (one row per key across history) | `cumulative_aggregate` |
 | Database-managed refresh | `materialized_view` |
 | Development / iteration | `view` |
+
+## Incremental vs cumulative_aggregate
+
+Both shapes are time-aware, but they uphold different contracts:
+
+| Property | `incremental` | `cumulative_aggregate` |
+|---|---|---|
+| Output shape | One row per `(partition_column, …)` — partitioned | One row per `GROUP BY` key — collapsed |
+| Declares `timeseries:`? | Yes (the model's output is a timeseries) | No (forbidden; reads partition shape from source) |
+| Equivalence contract | Per-partition equivalence with full refresh | Cross-partition equivalence under any partition ordering |
+| Re-running a past partition | Idempotent (DELETE+INSERT) | Refused in v1; use `--full-refresh` |
+| Backend primitive | `DELETE` + `INSERT` per partition | `MERGE INTO` with per-column combiners |
+
+If the question is "what's the day's contribution?", use `incremental`. If the question is "what's the running total per key?", use `cumulative_aggregate`.
 
 ## Changing materialization type
 
@@ -133,4 +199,5 @@ Run `smelt run --select my_model` and smelt will drop the view and create the ta
 ## Further reading
 
 - [Incremental Models](incremental-models.md) for time-partitioned incremental processing (requires `table`)
+- [cumulative_aggregate spec](../reference/cumulative-aggregate.md) for the normative behaviour, classifier rules, and complete diagnostic list
 - [SQL Models](sql-models.md) for YAML frontmatter syntax

@@ -72,9 +72,9 @@ The motivating concrete simplification is `examples/web_analytics/`: today's two
 | 2 — Cumulative classifier (pure function, allowlist + GROUP BY + driving source) | done | 16c526b2 | 2026-05-23 |
 | 3 — Per-partition execution loop + source-filter pushdown + combiner-aware source SQL | done | ab78810a | 2026-05-23 |
 | 4 — Drop `IncrementalStrategy::Merge` and its dispatcher branch | done | 707ae7fd | 2026-05-23 |
-| 5 — Cross-partition equivalence harness (real DuckDB fixture in `examples/web_analytics`) | done |  | 2026-05-23 |
+| 5 — Cross-partition equivalence harness (real DuckDB fixture in `examples/web_analytics`) | done | 9b0759fc | 2026-05-23 |
 | 6 — `examples/web_analytics/` migration to `cumulative_aggregate` | done | f087673a | 2026-05-23 |
-| 7 — User docs: `docs-site/docs/guide/materializations.md` + cross-link from incremental | pending |  |  |
+| 7 — User docs: `docs-site/docs/guide/materializations.md` + cross-link from incremental | done |  | 2026-05-23 |
 
 ---
 
