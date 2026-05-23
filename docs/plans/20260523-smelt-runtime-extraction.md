@@ -76,7 +76,7 @@ A future requirement is folded in: the UI may eventually expose an in-browser ed
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 0 — Spec update: `architecture.md` adds Run Pipeline Parity Rule, `smelt-runtime` crate row, language-service slot; CLAUDE.md pointer | done | 262abe65 | 2026-05-23 |
-| 1 — Create `smelt-runtime` crate; move pure helpers (`inject_time_filter`, `build_fn_body_map*`); establish `RunReporter` trait | pending |  |  |
+| 1 — Create `smelt-runtime` crate; move pure helpers (`inject_time_filter`, `build_fn_body_map*`); establish `RunReporter` trait | done | 270e705e | 2026-05-23 |
 | 2 — Move `SqlCompiler` + emitters into `smelt-runtime::compile`; CLI + UI both consume; new compile-parity CI gate | pending |  |  |
 | 3 — Move selection/filter pass into `smelt-runtime::select`; CLI + UI both consume; today's UI test-filter fix becomes the shared function | pending |  |  |
 | 4 — Move execute loop into `smelt-runtime::execute`; consumers shrink to surface wrappers; new end-to-end parity CI gate | pending |  |  |
