@@ -127,11 +127,13 @@ impl TestClient {
             .await
             .unwrap();
         loop {
-            // 30s per-RPC timeout: the multi-project tests open all of
-            // `examples/` and initialize takes ~4s locally; busy CI runners
-            // routinely exceed a 5s budget. 30s is generous enough to absorb
-            // runner contention while still bounding genuine hangs.
-            let response = read_message_timeout(&mut self.client_rx, 30000)
+            // 60s per-RPC timeout: cargo runs tests in parallel within the
+            // binary; multiple multi-project tests open all of `examples/`
+            // simultaneously and compete for CPU on single-vCPU CI runners.
+            // Initialize takes ~4s locally and ~30s on a contended runner.
+            // 60s is generous enough to absorb that contention while still
+            // bounding genuine hangs.
+            let response = read_message_timeout(&mut self.client_rx, 60000)
                 .await
                 .unwrap_or_else(|| {
                     panic!("Timeout waiting for response to {} (id={})", method, id)
