@@ -420,13 +420,14 @@ impl RunManager {
 
                         // Compile SQL: strip frontmatter, inject time filter, resolve refs
                         let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                        let filter_start_str = batch.filter_start.format("%Y-%m-%d").to_string();
-                        let filter_end_str = batch.filter_end.format("%Y-%m-%d").to_string();
-                        let filtered_sql = inject_time_filter(
+                        let time_range = smelt_runtime::TimeRange {
+                            start: batch.filter_start.format("%Y-%m-%d").to_string(),
+                            end: batch.filter_end.format("%Y-%m-%d").to_string(),
+                        };
+                        let filtered_sql = smelt_runtime::inject_time_filter(
                             &clean_sql,
                             &inc_plan.timeseries.event_time_column,
-                            &filter_start_str,
-                            &filter_end_str,
+                            &time_range,
                         )?;
 
                         let compiled_sql = compile_sql(&filtered_sql, schema, backend);
@@ -639,40 +640,6 @@ fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) ->
         smelt_path_call: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
-}
-
-/// Inject a time filter into SQL (AST-based, appends to WHERE or creates WHERE).
-fn inject_time_filter(
-    sql: &str,
-    event_time_column: &str,
-    start: &str,
-    end: &str,
-) -> Result<String> {
-    use smelt_parser::ast::File;
-
-    let parse = smelt_parser::parse(sql);
-    let file = File::cast(parse.syntax())
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse SQL for time filter injection"))?;
-    let stmt = file
-        .select_stmt()
-        .ok_or_else(|| anyhow::anyhow!("No SELECT statement found"))?;
-
-    let filter = format!(
-        "{} >= '{}' AND {} < '{}'",
-        event_time_column, start, event_time_column, end
-    );
-
-    if let Some(where_clause) = stmt.where_clause() {
-        let where_end = usize::from(where_clause.text_range().end());
-        let (before, after) = sql.split_at(where_end);
-        Ok(format!("{} AND ({}){}", before, filter, after))
-    } else if let Some(from_clause) = stmt.from_clause() {
-        let from_end = usize::from(from_clause.text_range().end());
-        let (before, after) = sql.split_at(from_end);
-        Ok(format!("{} WHERE {}{}", before, filter, after))
-    } else {
-        anyhow::bail!("No FROM clause found - cannot inject time filter")
-    }
 }
 
 #[allow(unreachable_code, unused_variables)]

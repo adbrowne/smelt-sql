@@ -4113,6 +4113,7 @@ dependencies = [
  "smelt-dialect",
  "smelt-parser",
  "smelt-planner",
+ "smelt-runtime",
  "smelt-state",
  "smelt-types",
  "smelt-ui",
@@ -4259,6 +4260,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-runtime"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "smelt-backend",
+ "smelt-core",
+ "smelt-db",
+ "smelt-dialect",
+ "smelt-parser",
+ "smelt-planner",
+ "smelt-state",
+ "smelt-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smelt-state"
 version = "0.3.2"
 dependencies = [
@@ -4302,6 +4323,7 @@ dependencies = [
  "smelt-dialect",
  "smelt-parser",
  "smelt-planner",
+ "smelt-runtime",
  "smelt-state",
  "tokio",
  "tokio-util",

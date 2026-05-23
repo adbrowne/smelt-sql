@@ -1,0 +1,26 @@
+[package]
+name = "smelt-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+smelt-core = { path = "../smelt-core" }
+smelt-parser = { path = "../smelt-parser" }
+smelt-db = { path = "../smelt-db" }
+smelt-types = { path = "../smelt-types" }
+smelt-planner = { path = "../smelt-planner" }
+smelt-backend = { path = "../smelt-backend" }
+smelt-dialect = { path = "../smelt-dialect" }
+smelt-state = { path = "../smelt-state" }
+
+anyhow.workspace = true
+thiserror.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+serde = { version = "1", features = ["derive"] }
+tracing.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]

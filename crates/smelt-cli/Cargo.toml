@@ -23,6 +23,7 @@ smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, defa
 duckdb = { workspace = true, optional = true }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
 smelt-state = { path = "../smelt-state" }
+smelt-runtime = { path = "../smelt-runtime" }
 smelt-ui = { path = "../smelt-ui" }
 
 # Parser dependencies (for TextRange in graph tests)
