@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779576539643,
+  "lastUpdate": 1779579401100,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17389,6 +17389,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 15.583181,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c7d2737630b72fe63a03a2b9f54b0f2cb14478b6",
+          "message": "docs(spec): drop \"Phase 5\" phase-vocabulary from incremental_models\n\nTwo references to \"Phase 5 of the incremental plan\" violated the\ntimeless-oracle rule for specs. Replace with the behaviour-only phrase\n\"opt-in extension\".\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-24T09:34:52+10:00",
+          "tree_id": "e70bab2d3aa3c2c393314f4dd32b0cb5048dd469",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c7d2737630b72fe63a03a2b9f54b0f2cb14478b6"
+        },
+        "date": 1779579399970,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 44.631645,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 42.146071,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.18779,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.606222,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.373407,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1003.128984,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.733326,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.137152,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.882365,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.8505090000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1006.030029,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.591220000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.04397,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.310814,
             "unit": "ms"
           }
         ]
