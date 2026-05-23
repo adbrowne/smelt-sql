@@ -1,0 +1,581 @@
+//! `execute_project` — the shared run pipeline.
+//!
+//! Composes the analysis layer (`smelt-db`, `smelt-core`, `smelt-planner`),
+//! the compile layer (`smelt_runtime::compile`), and the selection layer
+//! (`smelt_runtime::select`) into the full per-model execute loop. Both
+//! `smelt-cli`'s `commands/run.rs` and `smelt-ui`'s `run_manager.rs`
+//! consume this function via a `RunReporter` adapter.
+//!
+//! This file owns the model-plan construction (batch dispatch per
+//! `BatchSafety` shape), the per-model compile+execute loop (full refresh
+//! and incremental batches), cancellation handling, manifest writes, and
+//! interval-store updates.
+//!
+//! Not (yet) handled: cumulative_aggregate dispatch (lives in
+//! `smelt-cli/src/cumulative.rs` for now — moving it here is a follow-up
+//! tracked under Phase 4b of the runtime-extraction plan).
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration as StdDuration, Instant};
+
+use anyhow::{Context, Result};
+use chrono::{Duration, NaiveDate, Utc};
+use tokio_util::sync::CancellationToken;
+
+use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
+use smelt_core::config::Config;
+use smelt_core::graph::DependencyGraph;
+use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+use smelt_state::file_store::FileStore;
+use smelt_state::intervals::compute_model_hash;
+use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
+
+use crate::compile::CompilerRegistry;
+use crate::reporter::RunReporter;
+use crate::select::{select_executable_models, SelectionRequest};
+use crate::transformer::{inject_time_filter, TimeRange};
+use crate::types::{ExecuteRequest, RunOutcome};
+use crate::{build_fn_body_map, EphemeralResolver, UpstreamSchemas};
+
+/// Plan for one model's execution. Internal to `execute_project` — the
+/// public API is `ExecuteRequest` in / `RunOutcome` out.
+struct ModelPlan {
+    name: String,
+    sql: String,
+    materialization: smelt_core::config::Materialization,
+    incremental: Option<IncrementalPlan>,
+    model_file: smelt_core::ModelFile,
+}
+
+struct IncrementalPlan {
+    config: smelt_core::IncrementalConfig,
+    timeseries: smelt_core::config::TimeseriesConfig,
+    batches: Vec<BatchPlan>,
+}
+
+struct BatchPlan {
+    partition_start: NaiveDate,
+    partition_end: NaiveDate,
+    filter_start: NaiveDate,
+    filter_end: NaiveDate,
+}
+
+fn granularity_days(g: &smelt_core::Granularity) -> u32 {
+    match g {
+        smelt_core::Granularity::Hour => 1,
+        smelt_core::Granularity::Day => 1,
+        smelt_core::Granularity::Week => 7,
+        smelt_core::Granularity::Month => 30,
+        smelt_core::Granularity::Quarter => 91,
+        smelt_core::Granularity::Year => 365,
+    }
+}
+
+/// Backend factory injected by the consumer. The UI and CLI know how to
+/// build their backends (DuckDB, Spark, etc.) and may differ in cred
+/// resolution / feature gating; the runtime stays agnostic.
+pub trait BackendFactory: Send + Sync {
+    fn create<'a>(
+        &'a self,
+        target_name: &'a str,
+        target_config: &'a smelt_core::config::Target,
+        project_dir: &'a Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Backend>>> + Send + 'a>>;
+}
+
+/// Run the project end-to-end.
+///
+/// `graph` and `db` are passed as ref-counted async mutexes so the runtime
+/// can do brief reads (build `UpstreamSchemas`, enumerate ephemerals) and
+/// release the locks before the long execution phase. The graph lock is
+/// released before any backend call; the DB lock is released after compile
+/// context is built.
+///
+/// `reporter` receives progress callbacks in this order on a successful run:
+/// `run_started → (model_started → batch_completed* → model_completed)+ →
+/// run_completed`. A cancelled run sends `run_cancelled`; a failed run sends
+/// `run_failed` with the failing model.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_project(
+    run_id: String,
+    request: ExecuteRequest,
+    config: Arc<Config>,
+    graph: Arc<tokio::sync::Mutex<DependencyGraph>>,
+    db: Arc<tokio::sync::Mutex<smelt_db::Database>>,
+    project_dir: &Path,
+    backend_factory: &dyn BackendFactory,
+    reporter: &dyn RunReporter,
+    cancel: CancellationToken,
+) -> Result<RunOutcome> {
+    let run_start = Utc::now();
+    let execution_start = Instant::now();
+
+    if !config.targets.contains_key(&request.target) {
+        anyhow::bail!("Target '{}' not found", request.target);
+    }
+
+    // ── Selection ───────────────────────────────────────────────────────
+    let graph_lock = graph.lock().await;
+
+    let selection_request = SelectionRequest {
+        select: request.select.clone(),
+        exclude: request.exclude.clone(),
+        target: request.target.clone(),
+    };
+    let selection = select_executable_models(&graph_lock, &config, &selection_request)?;
+    let selected = selection.ordered_models;
+    let target_assignments = selection.target_assignments;
+    let cross_edges = selection.cross_engine_edges;
+    if !cross_edges.is_empty() {
+        tracing::info!(
+            "Cross-engine references detected ({} transfer(s) via Parquet)",
+            cross_edges.len()
+        );
+    }
+
+    // ── Backend creation ────────────────────────────────────────────────
+    let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
+    let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+    for target_name in &needed_targets {
+        let target_config = config
+            .targets
+            .get(target_name)
+            .ok_or_else(|| anyhow::anyhow!("Target '{}' not found", target_name))?;
+        let backend = backend_factory
+            .create(target_name, target_config, project_dir)
+            .await?;
+        backends.insert(target_name.clone(), backend);
+    }
+
+    // ── Time range parsing ──────────────────────────────────────────────
+    let (start_date, end_date) = match (request.start.as_deref(), request.end.as_deref()) {
+        (Some(s), Some(e)) => {
+            let sd = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .with_context(|| format!("Invalid start date: {s}"))?;
+            let ed = NaiveDate::parse_from_str(e, "%Y-%m-%d")
+                .with_context(|| format!("Invalid end date: {e}"))?;
+            if sd >= ed {
+                anyhow::bail!("Start date must be before end date");
+            }
+            (Some(sd), Some(ed))
+        }
+        (None, None) => (None, None),
+        _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
+    };
+
+    // ── Model-plan construction + ephemeral collection ──────────────────
+    let mut model_plans: Vec<ModelPlan> = Vec::new();
+    let mut total_batches: usize = 0;
+
+    for model_name in &selected {
+        let model = graph_lock.get_model(model_name)?;
+        let metadata = model.metadata.as_deref();
+        let frontmatter = Frontmatter::parse(&model.content);
+
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+
+        match (inc_config, ts_config, start_date, end_date) {
+            (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
+                let model_info = ModelInfo {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    timeseries_config: Some(ts.clone()),
+                    incremental_config: Some(inc.clone()),
+                };
+                let safety = analyze_batch_safety(&model_info);
+
+                let (batch_days, context_days) = if request.per_partition {
+                    (granularity_days(&ts.granularity), 0)
+                } else if let Some(override_days) = request.batch_size_days {
+                    let ctx = match &safety {
+                        BatchSafety::BoundedSafe { context_days, .. } => *context_days,
+                        _ => 0,
+                    };
+                    (override_days, ctx)
+                } else {
+                    match &safety {
+                        BatchSafety::FullyBatchSafe => {
+                            ((end_date - start_date).num_days() as u32, 0)
+                        }
+                        BatchSafety::BoundedSafe {
+                            max_chunk_days,
+                            context_days,
+                            ..
+                        } => (*max_chunk_days, *context_days),
+                        BatchSafety::PerPartitionOnly { .. } => {
+                            (granularity_days(&ts.granularity), 0)
+                        }
+                    }
+                };
+
+                let mut batches = Vec::new();
+                let mut batch_start = start_date;
+                while batch_start < end_date {
+                    let batch_end = (batch_start + Duration::days(batch_days as i64)).min(end_date);
+                    let filter_start = batch_start - Duration::days(context_days as i64);
+                    batches.push(BatchPlan {
+                        partition_start: batch_start,
+                        partition_end: batch_end,
+                        filter_start,
+                        filter_end: batch_end,
+                    });
+                    batch_start = batch_end;
+                }
+
+                total_batches += batches.len();
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: Some(IncrementalPlan {
+                        config: inc,
+                        timeseries: ts,
+                        batches,
+                    }),
+                    model_file: model.clone(),
+                });
+            }
+            (Some(_inc), Some(_ts), _, _) => {
+                // Incremental config present but no time window. Fall back to
+                // full refresh; the model still compiles and executes.
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: None,
+                    model_file: model.clone(),
+                });
+            }
+            (Some(_inc), None, _, _) => {
+                eprintln!(
+                    "warning: model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
+                );
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: None,
+                    model_file: model.clone(),
+                });
+            }
+            (None, _, _, _) => {
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: None,
+                    model_file: model.clone(),
+                });
+            }
+        }
+    }
+
+    let all_models: Vec<smelt_core::ModelFile> =
+        graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
+    let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    {
+        let exec_order = graph_lock.execution_order()?;
+        for model_name in &exec_order {
+            let Ok(model) = graph_lock.get_model(model_name) else {
+                continue;
+            };
+            let metadata = model.metadata.as_deref();
+            let mat = config.get_materialization_with_metadata(model_name, metadata);
+            if mat == smelt_core::config::Materialization::Ephemeral {
+                let target = config.get_target(model_name, metadata, &request.target);
+                ephemeral_models_by_target
+                    .entry(target)
+                    .or_default()
+                    .push((model_name.clone(), model.content.clone()));
+            }
+        }
+    }
+    drop(graph_lock);
+
+    // ── Compile context (UpstreamSchemas + FnBodyMap from Salsa) ────────
+    let needed_target_configs: HashMap<String, smelt_core::config::Target> = needed_targets
+        .iter()
+        .filter_map(|t| config.targets.get(t).map(|c| (t.clone(), c.clone())))
+        .collect();
+    let mut compilers = CompilerRegistry::new(config.as_ref(), &needed_target_configs);
+
+    let (upstream_schemas, fn_bodies) = {
+        let db_guard = db.lock().await;
+        let db_ref: &smelt_db::Database = &db_guard;
+        let workspace = smelt_db::Workspace::try_get(db_ref)
+            .ok_or_else(|| anyhow::anyhow!("workspace not initialised in DB"))?;
+        let upstream = UpstreamSchemas::from_database(db_ref, project_dir, &all_models)?;
+        let bodies = build_fn_body_map(db_ref, workspace);
+        (Arc::new(upstream), bodies)
+    };
+    compilers.set_upstream_schemas_all(upstream_schemas);
+    if !fn_bodies.is_empty() {
+        compilers.set_function_bodies_all(fn_bodies);
+    }
+
+    let mut ephemeral_resolvers: HashMap<String, EphemeralResolver> = HashMap::new();
+    for target_name in &needed_targets {
+        let schema = &config.targets[target_name].schema;
+        let models = ephemeral_models_by_target
+            .get(target_name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let compiler = compilers.get(target_name);
+        ephemeral_resolvers.insert(
+            target_name.clone(),
+            compiler.build_ephemeral_resolver(models, schema),
+        );
+    }
+
+    // ── Execute loop ────────────────────────────────────────────────────
+    reporter.run_started(
+        &run_id,
+        &model_plans
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
+        total_batches,
+    );
+
+    let file_store = FileStore::new(project_dir);
+    let mut manifest = RunManifest {
+        run_id: run_id.clone(),
+        started_at: run_start,
+        completed_at: None,
+        models: HashMap::new(),
+    };
+
+    let mut total_rows_overall: usize = 0;
+
+    for (model_idx, plan) in model_plans.iter().enumerate() {
+        if cancel.is_cancelled() {
+            reporter.run_cancelled(&run_id);
+            return Ok(build_outcome(&run_id, run_start, None, manifest, 0));
+        }
+
+        reporter.model_started(&run_id, &plan.name, model_idx, model_plans.len());
+
+        let model_start = Instant::now();
+        let mut total_rows = 0usize;
+
+        let model_target = &target_assignments[&plan.name];
+        let backend = backends[model_target].as_ref();
+        let schema = &config.targets[model_target].schema;
+
+        let result: Result<()> = match &plan.incremental {
+            Some(inc_plan) => {
+                let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
+
+                for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
+                    if cancel.is_cancelled() {
+                        reporter.run_cancelled(&run_id);
+                        return Ok(build_outcome(
+                            &run_id,
+                            run_start,
+                            None,
+                            manifest,
+                            total_rows_overall,
+                        ));
+                    }
+
+                    let batch_start_time = Instant::now();
+
+                    let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
+                    let time_range = TimeRange {
+                        start: batch.filter_start.format("%Y-%m-%d").to_string(),
+                        end: batch.filter_end.format("%Y-%m-%d").to_string(),
+                    };
+                    let filtered_sql = inject_time_filter(
+                        &clean_sql,
+                        &inc_plan.timeseries.event_time_column,
+                        &time_range,
+                    )?;
+
+                    let compiler = compilers.get(model_target);
+                    let resolver = &ephemeral_resolvers[model_target];
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &filtered_sql,
+                        resolver,
+                    )?;
+
+                    let partition = PartitionRange {
+                        column: inc_plan.timeseries.partition_column.clone(),
+                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                    };
+
+                    let strategy = MaterializationStrategy::Incremental {
+                        partition,
+                        strategy: resolved_strategy.clone(),
+                        unique_key: inc_plan.config.unique_key.clone(),
+                    };
+
+                    let exec_result = backend
+                        .execute_model_incremental(
+                            schema,
+                            &plan.name,
+                            &compiled.sql,
+                            Materialization::Table,
+                            strategy,
+                            false,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                    total_rows += exec_result.row_count;
+                    total_rows_overall += exec_result.row_count;
+
+                    let batch_duration = batch_start_time.elapsed();
+                    reporter.batch_completed(
+                        &run_id,
+                        &plan.name,
+                        batch_idx,
+                        inc_plan.batches.len(),
+                        exec_result.row_count,
+                        batch_duration,
+                    );
+                }
+
+                // Manifest entry for the model
+                let (start_str, end_str) = match (start_date, end_date) {
+                    (Some(s), Some(e)) => (
+                        s.format("%Y-%m-%d").to_string(),
+                        e.format("%Y-%m-%d").to_string(),
+                    ),
+                    _ => (String::new(), String::new()),
+                };
+                manifest.models.insert(
+                    plan.name.clone(),
+                    ModelRunRecord {
+                        strategy: format!("{:?}", resolved_strategy).to_lowercase(),
+                        time_range: Some(TimeRangeRecord {
+                            start: start_str.clone(),
+                            end: end_str.clone(),
+                        }),
+                        partitions_updated: vec![],
+                        row_count: total_rows,
+                        duration_ms: model_start.elapsed().as_millis() as u64,
+                        batch_safety: Some("incremental".to_string()),
+                    },
+                );
+
+                // Update interval store
+                if let Ok(mut interval_store) = file_store.load_intervals() {
+                    let model_hash = compute_model_hash(&plan.sql);
+                    let intervals = interval_store.get_or_create(&plan.name, &model_hash);
+                    intervals.record_interval(&start_str, &end_str);
+                    let _ = file_store.save_intervals(&interval_store);
+                }
+
+                Ok(())
+            }
+            None => {
+                // Full refresh
+                let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
+                let compiler = compilers.get(model_target);
+                let resolver = &ephemeral_resolvers[model_target];
+                let compiled = compiler.compile_with_sql_and_ephemerals(
+                    &plan.model_file,
+                    schema,
+                    &clean_sql,
+                    resolver,
+                )?;
+
+                let mat = match plan.materialization {
+                    smelt_core::config::Materialization::Table => Materialization::Table,
+                    smelt_core::config::Materialization::View => Materialization::View,
+                    smelt_core::config::Materialization::MaterializedView => {
+                        Materialization::MaterializedView
+                    }
+                    smelt_core::config::Materialization::Ephemeral => {
+                        unreachable!("Ephemeral models should be inlined as CTEs, not executed")
+                    }
+                    smelt_core::config::Materialization::Test => {
+                        unreachable!("Test models should not be executed directly")
+                    }
+                    smelt_core::config::Materialization::CumulativeAggregate => {
+                        return Err(anyhow::anyhow!(
+                            "cumulative_aggregate models require an incremental run window — \
+                             use `smelt run --event-time-start … --event-time-end …`"
+                        ));
+                    }
+                };
+
+                let exec_result = backend
+                    .execute_model(schema, &plan.name, &compiled.sql, mat, false)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                total_rows = exec_result.row_count;
+                total_rows_overall += exec_result.row_count;
+
+                manifest.models.insert(
+                    plan.name.clone(),
+                    ModelRunRecord {
+                        strategy: "full_refresh".to_string(),
+                        time_range: None,
+                        partitions_updated: vec![],
+                        row_count: exec_result.row_count,
+                        duration_ms: model_start.elapsed().as_millis() as u64,
+                        batch_safety: None,
+                    },
+                );
+
+                Ok(())
+            }
+        };
+
+        if let Err(e) = result {
+            reporter.run_failed(&run_id, Some(&plan.name), &e.to_string());
+            return Err(e);
+        }
+
+        let model_duration = model_start.elapsed();
+        reporter.model_completed(&run_id, &plan.name, total_rows, model_duration);
+    }
+
+    manifest.completed_at = Some(Utc::now());
+    if let Err(e) = file_store.save_run(&manifest) {
+        tracing::warn!("Failed to save run manifest: {}", e);
+    }
+
+    let total_duration: StdDuration = execution_start.elapsed();
+    reporter.run_completed(&run_id, total_rows_overall, total_duration);
+
+    Ok(build_outcome(
+        &run_id,
+        run_start,
+        Some(Utc::now()),
+        manifest,
+        total_rows_overall,
+    ))
+}
+
+fn build_outcome(
+    run_id: &str,
+    started_at: chrono::DateTime<Utc>,
+    completed_at: Option<chrono::DateTime<Utc>>,
+    manifest: RunManifest,
+    total_rows: usize,
+) -> RunOutcome {
+    RunOutcome {
+        run_id: run_id.to_string(),
+        started_at,
+        completed_at,
+        models: manifest.models,
+        total_rows,
+    }
+}
