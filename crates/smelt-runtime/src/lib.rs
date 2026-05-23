@@ -31,7 +31,7 @@ pub use compile::{
     UpstreamSchemas,
 };
 pub use cumulative::{build_cumulative_merge_sql, execute_cumulative_aggregate};
-pub use execute::{execute_project, BackendFactory};
+pub use execute::{execute_project, BackendFactory, BackendFuture};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use reporter::{NoOpReporter, RunReporter};
 pub use select::{select_executable_models, SelectionPlan, SelectionRequest};

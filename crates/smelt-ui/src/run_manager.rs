@@ -12,7 +12,6 @@
 //! (CLI ↔ UI)".
 
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -279,7 +278,7 @@ impl BackendFactory for UiBackendFactory {
         target_name: &'a str,
         target_config: &'a smelt_core::config::Target,
         project_dir: &'a Path,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Backend>>> + Send + 'a>> {
+    ) -> smelt_runtime::BackendFuture<'a> {
         Box::pin(create_backend_inner(
             target_name,
             target_config,
