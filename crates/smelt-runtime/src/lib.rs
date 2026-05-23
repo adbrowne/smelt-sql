@@ -19,6 +19,7 @@
 pub mod compile;
 pub mod fn_bodies;
 pub mod reporter;
+pub mod select;
 pub mod transformer;
 pub mod types;
 
@@ -29,6 +30,7 @@ pub use compile::{
 };
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use reporter::{NoOpReporter, RunReporter};
+pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{
     inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
 };

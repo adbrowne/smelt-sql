@@ -327,37 +327,18 @@ pub fn build_run_plan(
         return Err(anyhow::anyhow!("Start date must be before end date"));
     }
 
-    // Resolve select/exclude using proper selector parsing
-    let mut selected = if request.select.is_empty() {
-        graph.all_model_names()
-    } else {
-        let selectors: Vec<_> = request
-            .select
-            .iter()
-            .map(|s| {
-                parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid selector '{}': {}", s, e))
-            })
-            .collect::<Result<_, _>>()?;
-        graph.select_models(&selectors, config)?
+    // Use the shared selection pass so the preview (`/api/run/plan`) lists
+    // the same models that `/api/run/execute` would actually execute —
+    // tests filtered, generators filtered, selectors resolved consistently.
+    // Target assignments are computed but unused here; the preview cares
+    // only about the model list and batch shapes.
+    let selection_request = smelt_runtime::SelectionRequest {
+        select: request.select.clone(),
+        exclude: request.exclude.clone(),
+        target: String::new(),
     };
-
-    if !request.exclude.is_empty() {
-        let excludes: Vec<_> = request
-            .exclude
-            .iter()
-            .map(|s| {
-                parse_selector(s)
-                    .map_err(|e| anyhow::anyhow!("Invalid exclude selector '{}': {}", s, e))
-            })
-            .collect::<Result<_, _>>()?;
-        selected = graph.exclude_models(&selected, &excludes, config)?;
-    }
-
-    let selected: Vec<String> = graph
-        .filtered_execution_order(&selected)?
-        .into_iter()
-        .filter(|name| graph.get_model(name).map(|m| !m.is_test()).unwrap_or(true))
-        .collect();
+    let selected: Vec<String> =
+        smelt_runtime::select_executable_models(graph, config, &selection_request)?.ordered_models;
 
     let mut plan_models = Vec::new();
     let mut total_batches = 0;

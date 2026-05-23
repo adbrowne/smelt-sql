@@ -11,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
-use smelt_core::parse_selector;
 use smelt_core::SourcesConfig;
 use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
 use smelt_state::file_store::FileStore;
@@ -168,54 +167,23 @@ impl RunManager {
             anyhow::bail!("Target '{}' not found", request.target);
         }
 
-        // Resolve select/exclude into execution order (hold graph lock for reads)
+        // Resolve select/exclude into execution order via the shared
+        // selection pass. This is the Run Pipeline Parity Rule in action —
+        // CLI and UI both call `smelt_runtime::select_executable_models`,
+        // so test models, generator files, and target-assignment logic
+        // can never drift between consumers.
         let graph_lock = graph.lock().await;
 
-        let mut selected_set = if request.select.is_empty() {
-            graph_lock.all_model_names()
-        } else {
-            let selectors: Vec<_> = request
-                .select
-                .iter()
-                .map(|s| {
-                    parse_selector(s)
-                        .map_err(|e| anyhow::anyhow!("Invalid selector '{}': {}", s, e))
-                })
-                .collect::<Result<_, _>>()?;
-            graph_lock.select_models(&selectors, &config)?
+        let selection_request = smelt_runtime::SelectionRequest {
+            select: request.select.clone(),
+            exclude: request.exclude.clone(),
+            target: request.target.clone(),
         };
-
-        if !request.exclude.is_empty() {
-            let excludes: Vec<_> = request
-                .exclude
-                .iter()
-                .map(|s| {
-                    parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid exclude '{}': {}", s, e))
-                })
-                .collect::<Result<_, _>>()?;
-            selected_set = graph_lock.exclude_models(&selected_set, &excludes, &config)?;
-        }
-
-        let selected: Vec<String> = graph_lock
-            .filtered_execution_order(&selected_set)?
-            .into_iter()
-            .filter(|name| {
-                graph_lock
-                    .get_model(name)
-                    .map(|m| !m.is_test())
-                    .unwrap_or(true)
-            })
-            .collect();
-
-        // Compute per-model target assignments
-        let mut target_assignments: HashMap<String, String> = HashMap::new();
-        for model_name in &selected {
-            let model = graph_lock.get_model(model_name)?;
-            let target = config.get_target(model_name, model.metadata.as_deref(), &request.target);
-            target_assignments.insert(model_name.clone(), target);
-        }
-
-        let cross_edges = graph_lock.find_cross_backend_edges(&target_assignments);
+        let selection =
+            smelt_runtime::select_executable_models(&graph_lock, &config, &selection_request)?;
+        let selected = selection.ordered_models;
+        let target_assignments = selection.target_assignments;
+        let cross_edges = selection.cross_engine_edges;
         if !cross_edges.is_empty() {
             tracing::info!(
                 "Cross-engine references detected ({} transfer(s) via Parquet)",
