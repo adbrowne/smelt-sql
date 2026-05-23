@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::logical_graph::LogicalGraph;
 use crate::temporal::compute_incremental_windows;
-use crate::transformer::TimeRange;
+use smelt_runtime::TimeRange;
 
 /// A computed execution plan for one model during a backfill/backbuild.
 #[derive(Debug, Clone)]

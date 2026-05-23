@@ -16,6 +16,7 @@ smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, defa
 smelt-state = { path = "../smelt-state" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-dialect = { path = "../smelt-dialect" }
+smelt-runtime = { path = "../smelt-runtime" }
 
 # Web server
 axum = { version = "0.8", features = ["ws"] }

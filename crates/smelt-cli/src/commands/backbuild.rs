@@ -295,7 +295,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         // byte-for-byte identically to the pre-Phase-56 codepath.
         let workspace =
             smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
-        let fn_bodies = smelt_cli::build_fn_body_map(&type_db, workspace);
+        let fn_bodies = smelt_runtime::build_fn_body_map(&type_db, workspace);
         if !fn_bodies.is_empty() {
             compilers.set_function_bodies_all(fn_bodies);
         }

@@ -10,7 +10,7 @@ use smelt_planner::{
     EffectiveWindow,
 };
 
-use crate::transformer::TimeRange;
+use smelt_runtime::TimeRange;
 
 /// The result of computing temporal windows for an incremental model.
 #[derive(Debug, Clone)]

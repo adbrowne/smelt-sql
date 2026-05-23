@@ -31,6 +31,8 @@ Stages and their producers:
 | Generate | `smelt-dialect`                                 | SQL `String` per dialect              |
 | Execute  | `smelt-backend-*` (`-duckdb`, `-spark`)        | `ExecutionResult` (Arrow `RecordBatch`) |
 
+**Stages above are *building blocks*; `smelt-runtime` is the *driver*.** The Generate and Execute stages — together with the surrounding lifecycle work (selection/filter pass, function-body resolution, ephemeral inlining, type-cast wrapping, time-filter injection, per-model batch dispatch, manifest writes, interval-store updates, pre-execution diagnostic gate) — are composed by `smelt-runtime`. Both `smelt-cli` and `smelt-ui` consume `smelt-runtime`'s `execute_project(request, reporter)` entry point and contribute only surface concerns (argument parsing, progress reporting, HTTP serialization). `smelt-lsp` does *not* depend on `smelt-runtime`; its needs are met entirely by the analysis layer (`smelt-parser`, `smelt-db`, `smelt-core`, `smelt-planner`). See §"Run pipeline parity rule (CLI ↔ UI)" for the normative invariant.
+
 ### Crate responsibilities
 
 Each crate has a single job; downstream crates depend on it but never the reverse.
@@ -44,12 +46,13 @@ Each crate has a single job; downstream crates depend on it but never the revers
 | `smelt-dialect`        | sync, lightweight  | `SqlDialect`, `BackendCapabilities`, dialect-aware printer   |
 | `smelt-planner`        | sync               | Model-graph transforms; rule-based optimization              |
 | `smelt-lsp`            | async (tower-lsp)  | Thin async shell over sync Salsa queries                     |
-| `smelt-cli`            | async (entry point) | CLI surface, model discovery, dialect selection — async because the entry point drives the async execution stage |
+| `smelt-cli`            | async (entry point) | CLI surface (argument parsing, stdout reporter, `commands/`), reporter adapter over `smelt-runtime` — async because the entry point drives the async execution stage |
 | `smelt-backend`        | async              | `Backend` trait (see "Backend trait surface" below), `ExecutionResult` |
 | `smelt-backend-duckdb` | async              | DuckDB execution                                             |
 | `smelt-backend-spark`  | async              | Spark execution                                              |
 | `smelt-state`          | sync               | `RunManifest`, `IntervalStore`, `FileStore`                  |
-| `smelt-ui`             | async              | Web dashboard, run execution, WebSocket streaming            |
+| `smelt-runtime`        | async              | Compile + execute driver: `compile`, `select_executable_models`, `execute_project`, `RunReporter` trait. Composes the analysis-layer crates above; consumed by `smelt-cli` and `smelt-ui`. Not depended on by `smelt-lsp`. |
+| `smelt-ui`             | async              | Web dashboard surface (HTTP / WebSocket), reporter adapter over `smelt-runtime` |
 
 ### Project layout
 
@@ -298,6 +301,22 @@ The invariant applies to every Salsa query that takes `workspace: Workspace` and
 
 The structural fix is that **every workspace-scoped resolver becomes project-scoped**: `resolve_function`, `resolve_function_path`, the `sig_lookup` closures in `workspace_function_diagnostics` and `function_body_check`, and function-call cycle detection all accept (or derive) a `ProjectInput` and only consider files whose `project_root` matches. Callers thread the project through from the file under analysis (its `source_file.project_root(db)` is the project key). The LSP's goto-def derives the project from the cursor file's project root before calling `resolve_function_path`. The standing CI gate is a multi-project case in `cargo test -p smelt-lsp --test example_workspaces` that opens the entire `examples/` directory as one workspace folder and asserts no diagnostics on `web_analytics/models/silver/sessions.sql` — this case fails before the fix and passes after.
 
+### Run pipeline parity rule (CLI ↔ UI)
+
+The compile + execute pipeline lives in **exactly one place**: `smelt-runtime`. Both `smelt-cli` (via `commands/run.rs`) and `smelt-ui` (via `run_manager.rs`) consume it through a single `execute_project(request, reporter)` entry point. Consumer crates contribute only surface concerns — argument parsing, stdout/HTTP serialization, `RunReporter` implementations — and never reimplement compile or execute logic.
+
+The pipeline that `smelt-runtime` owns covers the full lifecycle above the analysis layer: the selection/filter pass (resolve selectors, apply excludes, drop tests, drop generator files, expand emitted models, per-model target assignment), the compile pipeline (function-body resolution via `build_fn_body_map`, `SqlCompiler` with its `smelt_fn` / `smelt_as_struct` / `smelt_path_ref` / `smelt_path_call` emitters, ephemeral CTE inlining, `apply_type_casts`, time-filter injection), the pre-execution diagnostic gate (fail-fast on `UnknownSmeltFn` and the rest of the configured gate set), and the per-model execute loop (full refresh, incremental batches, cumulative dispatch, `RunManifest` writes, interval-store updates, cancellation handling). The `RunReporter` trait abstracts progress: `smelt-cli` implements it as a stdout/spinner reporter; `smelt-ui` implements it as a broadcast reporter over `RunProgressEvent`; tests implement a captured-log reporter.
+
+The invariant exists because incidents trace to two failure modes at different layers. **Mode A** (a consumer reimplements *analysis* logic instead of calling the shared analysis layer) is the bug class the Workspace Loading Parity Rule and Project Isolation Rule address — the LSP `functions/`-discovery miss, the `set_loader_file` miss, the flat-resolver multi-project leak. **Mode B** (a consumer reimplements *compile or execute* logic because there is no shared layer to call) is the bug class this rule addresses — the UI executing `materialization: test` models, the UI silently passing `smelt.fn.*` calls through unexpanded because its `PrintContext` was constructed with `smelt_fn: None`, the UI skipping `apply_type_casts` and ephemeral inlining, the UI not running the pre-execution `UnknownSmeltFn` gate, the UI not expanding `*.gen.sql` generators. Layered single-ownership closes both modes: every shared lifecycle stage has exactly one owning crate, and consumers may only depend downward.
+
+**The rule in practice:**
+- **DO** place new lifecycle logic at the *lowest* layer that needs it. If the LSP needs it (parsing, analysis, type inference, schemas, diagnostics, workspace discovery, planning), it lives in `smelt-parser` / `smelt-db` / `smelt-core` / `smelt-planner`. If only CLI and UI need it (compile, execute, manifests, selection/filter), it lives in `smelt-runtime`. Surface concerns live in the consumer crate.
+- **DO** make `smelt-runtime`'s internals `pub(crate)` so consumers cannot construct a `CompiledModel` half-way (e.g. with type casts but no fn expansion).
+- **DON'T** add a parallel compile or execute helper inside `smelt-cli` or `smelt-ui`. If `smelt-runtime` doesn't expose the shape you need, change `smelt-runtime`.
+- **DON'T** move analysis logic *up* into `smelt-runtime`. Diagnostic checks, type inference, schema extraction, and workspace ingest must remain in `smelt-db` / `smelt-core` so the LSP can continue to consume them and a future `smelt-language-service` extraction (see Known Divergences) remains mechanical.
+
+The standing CI gate is `cargo test -p smelt-runtime --test execute_parity`, which runs the same fixture project through both `smelt-cli` and `smelt-ui` entry points and asserts identical model outputs, manifest contents, and selection sets. The fixture set includes test models (filter), generators (expansion), `smelt.fn.*` calls (compile), incremental models (batch dispatch), and cumulative aggregates (rule dispatch) — each one a known failure-mode-B class.
+
 ### Planner scope
 
 The planner handles cross-model and execution-shape transforms only:
@@ -355,6 +374,7 @@ Update as part of any plan that touches architecture.
 - **Namespace decoupled from directory path is future work.** Today `smelt.<path>` is the literal workspace-relative directory path. A future extension could let projects declare a namespace alias (per-directory `package.yml`, top-level `smelt.yml` mapping, or a `smelt.package <name>` declaration at file scope) so deeply nested directories can present a flatter namespace — useful when an organisation's filesystem hierarchy is richer than the desired call-surface depth (e.g., `models/teams/payments/marts/balances.sql` exposed as `smelt.payments.balances`). Deferred until concrete need emerges; the literal-path rule is the default and removes one layer of indirection.
 - **LSP dialect diagnostics are planned but not implemented.** `smelt-dialect` is in place; the LSP does not yet emit "QUALIFY will be rewritten" hints. Add to a future plan.
 - **`smelt-check` crate not yet extracted.** The Salsa purity rule is currently upheld by convention; nothing prevents a regression. Once `smelt-check` is extracted, it becomes structurally enforced.
+- **Language-service slot is empty.** Editor-relevant analysis features (diagnostics, completions, hover, goto-def, document-version tracking) live inside `smelt-lsp::backend` mixed with tower-lsp transport. A future `smelt-language-service` crate would extract the transport-agnostic portion so that `smelt-lsp` (JSON-RPC adapter) and `smelt-ui` (HTTP/WebSocket adapter, for eventual in-browser editing) consume one shared service. The Run Pipeline Parity Rule forbids analysis logic from moving up into `smelt-runtime`, which keeps this option open without committing to its shape — extraction is triggered by UI-editor feature work, not by the runtime extraction. Until then, the LSP is the only consumer of editor-relevant analysis, and the UI does not surface live diagnostics in its model viewer.
 - **Planner cost estimation is future work.** Current rules are deterministic detectors with no statistics input.
 - **Python model discovery** (`smelt-core` extracting SQL from `@model` decorators) is via subprocess/PyO3 — interface details are still in flux; no spec yet.
 - **Multi-backend execution model not specified beyond trait surface.** Capability negotiation (incremental support, MERGE support, ALTER COLUMN support), cross-engine reference resolution rules (when does `read_parquet()` substitution apply?), and target precedence will land in `multi_backend.md` (or an expansion of §"Backend trait surface"). Today, capability claims are scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, and `smelt_yml.md`.

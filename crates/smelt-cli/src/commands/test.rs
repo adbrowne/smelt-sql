@@ -32,7 +32,7 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
     // execution — mirroring what `smelt build` does at print time.
     let fn_body_map = {
         let fn_files = discovery.discover_function_files().unwrap_or_default();
-        smelt_cli::build_fn_body_map_from_model_files(&fn_files)
+        smelt_runtime::build_fn_body_map_from_model_files(&fn_files)
     };
 
     // 3. Separate test models from regular models
