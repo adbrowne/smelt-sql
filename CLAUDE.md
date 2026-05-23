@@ -242,6 +242,22 @@ This is an architectural invariant. `find_smelt_projects` discovers projects rec
 
 The standing CI gate is a multi-project case in `cargo test -p smelt-lsp --test example_workspaces` that opens the entire `examples/` directory as one workspace folder.
 
+### Run Pipeline Parity Rule (CLI ↔ UI)
+
+**The compile + execute pipeline lives in exactly one place: `smelt-runtime`. Both `smelt-cli`'s `commands/run.rs` and `smelt-ui`'s `run_manager.rs` consume it through a single `execute_project(request, reporter)` entry point.**
+
+This covers: the selection/filter pass (resolve selectors, drop tests, drop `.gen` generators, expand emitted models), the compile pipeline (`SqlCompiler` with all four emitters, ephemeral inlining, `apply_type_casts`, `inject_time_filter`, `build_fn_body_map`), the pre-execution diagnostic gate (`UnknownSmeltFn` etc.), and the per-model execute loop (batch dispatch, `RunManifest`, intervals). Consumer crates contribute only surface concerns — argument parsing, stdout/HTTP serialization, and `RunReporter` implementations.
+
+**Why this matters:** Incidents trace to two failure modes at different layers. **Mode A** (a consumer reimplements *analysis* logic instead of calling the shared analysis layer) is what the two rules above address — LSP `functions/`-discovery miss, `set_loader_file` miss, flat-resolver project leak. **Mode B** (a consumer reimplements *compile or execute* logic because there is no shared layer to call) is what this rule addresses — UI executing `materialization: test` models (today's `unreachable!` panic), UI silently passing `smelt.fn.*` calls through unexpanded because its `PrintContext` had `smelt_fn: None`, UI skipping `apply_type_casts` and ephemeral inlining, UI not expanding `*.gen.sql` generators. Layered single-ownership closes both modes. See `docs/specs/architecture.md` → "Run pipeline parity rule (CLI ↔ UI)" for the normative spec.
+
+**The rule in practice:**
+- **DO** place new lifecycle logic at the *lowest* layer that needs it. LSP-shared (parsing, analysis, type inference, diagnostics, workspace discovery, planning) → `smelt-parser` / `smelt-db` / `smelt-core` / `smelt-planner`. CLI+UI-only (compile, execute, manifests, selection/filter) → `smelt-runtime`. Surface concerns → consumer crate.
+- **DO** make `smelt-runtime`'s internal helpers (`SqlCompiler`, emitter factories, `PrintContext` constructors, `inject_time_filter`) `pub(crate)` so consumers cannot construct a `CompiledModel` half-way.
+- **DON'T** add a parallel compile or execute helper inside `smelt-cli` or `smelt-ui`. If `smelt-runtime` doesn't expose the shape you need, change `smelt-runtime`.
+- **DON'T** move analysis logic *up* into `smelt-runtime`. Diagnostic checks, type inference, schema extraction, and workspace ingest stay in `smelt-db` / `smelt-core` so the LSP continues to consume them and a future `smelt-language-service` extraction (for UI in-browser editing) remains mechanical.
+
+The standing CI gate is `cargo test -p smelt-runtime --test execute_parity`, which runs the same fixture project through both `smelt-cli` and `smelt-ui` entry points and asserts identical model outputs, manifest contents, and selection sets. Always run this when touching the compile pipeline, the execute loop, or either consumer's run path.
+
 ### Key Dependencies
 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)
