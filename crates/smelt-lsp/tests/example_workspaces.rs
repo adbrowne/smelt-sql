@@ -127,7 +127,11 @@ impl TestClient {
             .await
             .unwrap();
         loop {
-            let response = read_message_timeout(&mut self.client_rx, 5000)
+            // 30s per-RPC timeout: the multi-project tests open all of
+            // `examples/` and initialize takes ~4s locally; busy CI runners
+            // routinely exceed a 5s budget. 30s is generous enough to absorb
+            // runner contention while still bounding genuine hangs.
+            let response = read_message_timeout(&mut self.client_rx, 30000)
                 .await
                 .unwrap_or_else(|| {
                     panic!("Timeout waiting for response to {} (id={})", method, id)
