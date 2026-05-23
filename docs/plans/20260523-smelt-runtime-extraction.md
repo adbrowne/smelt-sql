@@ -79,7 +79,8 @@ A future requirement is folded in: the UI may eventually expose an in-browser ed
 | 1 — Create `smelt-runtime` crate; move pure helpers (`inject_time_filter`, `build_fn_body_map*`); establish `RunReporter` trait | done | 270e705e | 2026-05-23 |
 | 2 — Move `SqlCompiler` + emitters into `smelt-runtime::compile`; CLI + UI both consume; new compile-parity CI gate | done | e5407144 | 2026-05-23 |
 | 3 — Move selection/filter pass into `smelt-runtime::select`; CLI + UI both consume; today's UI test-filter fix becomes the shared function | done | ad73f9b5 | 2026-05-23 |
-| 4 — Move execute loop into `smelt-runtime::execute`; consumers shrink to surface wrappers; new end-to-end parity CI gate | pending |  |  |
+| 4a — `smelt-runtime::execute_project` entry point + `BackendFactory` trait; UI shrinks to surface wrapper (726→317 lines) | done | 7599d648 | 2026-05-23 |
+| 4b — CLI migrates to `execute_project`; cumulative + backfill + planner-orchestration move into runtime; end-to-end CLI↔UI parity CI gate | pending |  |  |
 | 5 — Surface tightening: make `smelt-runtime` internals `pub(crate)`; delete consumer-side duplicates; final crate-graph audit | pending |  |  |
 
 ---
