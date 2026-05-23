@@ -353,7 +353,11 @@ pub fn build_run_plan(
         selected = graph.exclude_models(&selected, &excludes, config)?;
     }
 
-    let selected: Vec<String> = graph.filtered_execution_order(&selected)?;
+    let selected: Vec<String> = graph
+        .filtered_execution_order(&selected)?
+        .into_iter()
+        .filter(|name| graph.get_model(name).map(|m| !m.is_test()).unwrap_or(true))
+        .collect();
 
     let mut plan_models = Vec::new();
     let mut total_batches = 0;

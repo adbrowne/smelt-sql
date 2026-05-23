@@ -192,7 +192,16 @@ impl RunManager {
             selected_set = graph_lock.exclude_models(&selected_set, &excludes, &config)?;
         }
 
-        let selected: Vec<String> = graph_lock.filtered_execution_order(&selected_set)?;
+        let selected: Vec<String> = graph_lock
+            .filtered_execution_order(&selected_set)?
+            .into_iter()
+            .filter(|name| {
+                graph_lock
+                    .get_model(name)
+                    .map(|m| !m.is_test())
+                    .unwrap_or(true)
+            })
+            .collect();
 
         // Compute per-model target assignments
         let mut target_assignments: HashMap<String, String> = HashMap::new();
