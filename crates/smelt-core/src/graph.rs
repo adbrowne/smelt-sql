@@ -72,23 +72,26 @@ impl DependencyGraph {
             }
         }
 
-        // Build dependency map from path-form refs. The string-keyed graph
-        // extracts model deps from `SmeltRef::Path` entries whose first
-        // segment is "models" (e.g. `["models", "users"]` -> dep "users").
-        // `smelt.models.name` was removed in Phase 4, so only path-form
-        // refs are present. Path-tuple resolution is also available via
-        // `build_from_workspace`.
+        // Build dependency map from path-form refs. Any SmeltRef::Path whose
+        // first segment is not "functions" or "sources" is treated as a model
+        // dependency; the leaf segment is used as the model name. Path-tuple
+        // resolution is also available via `build_from_workspace`.
         for model in models {
             let deps: Vec<String> = model
                 .refs
                 .iter()
-                .filter_map(|r| match &r.smelt_ref {
-                    crate::refs::SmeltRef::Path(segs)
-                        if segs.first().map(|s| s == "models").unwrap_or(false) =>
-                    {
-                        segs.last().cloned()
+                .filter_map(|r| {
+                    let crate::refs::SmeltRef::Path(segs) = &r.smelt_ref;
+                    if segs.is_empty() {
+                        return None;
                     }
-                    _ => None,
+                    // Exclude function call refs (smelt.functions.*) and source
+                    // refs (smelt.sources.*); everything else is a model dep.
+                    let first = segs[0].as_str();
+                    if first == "functions" || first == "sources" {
+                        return None;
+                    }
+                    segs.last().cloned()
                 })
                 .collect();
 
@@ -587,6 +590,52 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("undefined"));
         assert!(err_msg.contains("nonexistent"));
+    }
+
+    /// Layer-prefix refs like `smelt.silver.events_parsed` produce segments
+    /// `["silver", "events_parsed"]`. The graph must capture these as model
+    /// dependencies so that UI edges and execution order are correct.
+    #[test]
+    fn test_layer_prefix_refs_captured_as_deps() {
+        // Simulate smelt.silver.events_parsed / smelt.bronze.raw_events style refs.
+        let make_layer_ref = |layer: &str, model: &str| RefInfo {
+            model_name: model.to_string(),
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![layer.to_string(), model.to_string()]),
+        };
+        let make_function_ref = |name: &str| RefInfo {
+            model_name: name.to_string(),
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "functions".to_string(),
+                name.to_string(),
+            ]),
+        };
+
+        let mut raw_events = make_model("raw_events", vec![]);
+        let mut events_parsed = make_model("events_parsed", vec![]);
+        events_parsed.refs = vec![
+            make_layer_ref("bronze", "raw_events"),
+            make_function_ref("parse_event_payload"), // should be excluded
+        ];
+        let mut sessions = make_model("sessions", vec![]);
+        sessions.refs = vec![make_layer_ref("silver", "events_parsed")];
+        raw_events.refs = vec![];
+
+        let graph = DependencyGraph::build(vec![raw_events, events_parsed, sessions], None).unwrap();
+
+        let order = graph.execution_order().unwrap();
+        assert_eq!(order[0], "raw_events");
+        assert_eq!(order[1], "events_parsed");
+        assert_eq!(order[2], "sessions");
+
+        let deps = graph.get_upstream("events_parsed");
+        assert_eq!(deps, vec!["raw_events"]);
+
+        let deps2 = graph.get_upstream("sessions");
+        assert_eq!(deps2, vec!["events_parsed"]);
     }
 
     #[test]

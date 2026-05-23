@@ -117,6 +117,12 @@ async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -
             let sf = db.set_source_file(model.path.clone(), content, project_dir.to_path_buf());
             source_files.push(sf);
         }
+        // Register function files so smelt.functions.* calls resolve.
+        for fn_path in smelt_core::discover_function_file_paths(project_dir) {
+            let content = std::fs::read_to_string(&fn_path).unwrap_or_default();
+            let sf = db.set_source_file(fn_path, content, project_dir.to_path_buf());
+            source_files.push(sf);
+        }
 
         // Re-read sources.yml
         let sources_yaml = smelt_core::find_config_file(project_dir, "sources")

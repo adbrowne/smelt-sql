@@ -21,8 +21,15 @@ pub async fn ui(args: UiArgs) -> Result<()> {
 
     info!("Found {} models", models.len());
 
-    // Initialize smelt-db for schema queries
-    let db = init_db(&project_dir, &models);
+    let function_files = discovery
+        .discover_function_files()
+        .with_context(|| "Failed to discover function files")?;
+
+    // Initialize smelt-db for schema queries; include function files so
+    // smelt.functions.* calls resolve without "Unknown function" diagnostics.
+    let mut db_files: Vec<smelt_core::ModelFile> = models.to_vec();
+    db_files.extend(function_files);
+    let db = init_db(&project_dir, &db_files);
 
     // Build dependency graph. `models` is `Vec<smelt_core::ModelFile>` so
     // the previous field-by-field rebuild is redundant since the type was
