@@ -109,6 +109,7 @@ async fn test_cube_split_matches_naive() {
         name: "cube_result".to_string(),
         sql: annotated_sql.to_string(),
         refs: vec![],
+        timeseries_config: None,
         incremental_config: None,
     };
 
@@ -206,6 +207,7 @@ async fn test_cube_split_with_ref_calls() {
         name: "ref_cube".to_string(),
         sql: annotated_sql.to_string(),
         refs: vec!["events".to_string()],
+        timeseries_config: None,
         incremental_config: None,
     };
 
@@ -280,6 +282,8 @@ async fn test_incremental_full_then_partial() {
     let model_sql = r#"---
 materialized: table
 incremental:
+  unique_key: [event_date, user_id]
+timeseries:
   partition_column: event_date
   event_time_column: event_time
   granularity: day
@@ -297,6 +301,7 @@ GROUP BY 1, 2"#;
         name: "daily_events".to_string(),
         sql: model_sql.to_string(),
         refs: vec![],
+        timeseries_config: frontmatter.timeseries,
         incremental_config: frontmatter.incremental,
     };
 
@@ -405,6 +410,8 @@ async fn test_composed_cube_split_incremental() {
     let model_sql = r#"---
 materialized: table
 incremental:
+  unique_key: [event_date]
+timeseries:
   partition_column: event_date
   event_time_column: event_time
   granularity: day
@@ -424,6 +431,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
         name: "cube_metrics".to_string(),
         sql: model_sql.to_string(),
         refs: vec![],
+        timeseries_config: frontmatter.timeseries,
         incremental_config: frontmatter.incremental,
     };
 
@@ -549,6 +557,8 @@ fn test_mandatory_time_range_detection() {
     let model_sql = r#"---
 materialized: table
 incremental:
+  unique_key: [event_date]
+timeseries:
   partition_column: event_date
   event_time_column: event_time
   granularity: day
@@ -560,6 +570,7 @@ SELECT date_trunc('day', event_time) as event_date, COUNT(*) as cnt FROM events 
         name: "inc_model".to_string(),
         sql: model_sql.to_string(),
         refs: vec![],
+        timeseries_config: frontmatter.timeseries,
         incremental_config: frontmatter.incremental,
     };
 

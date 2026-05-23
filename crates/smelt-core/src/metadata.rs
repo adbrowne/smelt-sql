@@ -23,7 +23,7 @@
 //!    SELECT ...
 //!    ```
 
-use crate::config::{DataLatency, IncrementalConfig, Materialization};
+use crate::config::{DataLatency, IncrementalConfig, Materialization, TimeseriesConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -131,6 +131,10 @@ pub struct ModelMetadata {
     /// Materialization strategy (table or view)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub materialization: Option<Materialization>,
+
+    /// Time-dimension declaration (event_time_column, partition_column, granularity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeseries: Option<TimeseriesConfig>,
 
     /// Incremental configuration
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +263,25 @@ pub enum MetadataError {
         offending: MixedKind,
         span: SourceSpan,
     },
+
+    /// A model declares `incremental:` without a sibling `timeseries:` block.
+    #[error("TimeseriesRequiredForIncremental: model declares `incremental:` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
+    TimeseriesRequiredForIncremental,
+
+    /// The `timeseries:` block violates a structural rule.
+    #[error("MalformedTimeseries: {message}")]
+    MalformedTimeseries { message: String },
+
+    /// A model declares `materialization: cumulative_aggregate` and a `timeseries:` block.
+    /// Cumulative outputs are not themselves timeseries — the rule reads the
+    /// partition shape from the driving source instead (see
+    /// `docs/specs/cumulative_aggregate.md` §"Output shape").
+    #[error("CumulativeForbidsTimeseries: cumulative_aggregate models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
+    CumulativeForbidsTimeseries,
+
+    /// A model declares `materialization: cumulative_aggregate` and an `incremental:` block.
+    #[error("CumulativeForbidsIncremental: cumulative_aggregate and incremental are sibling materializations with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
+    CumulativeForbidsIncremental,
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -278,6 +301,100 @@ fn frontmatter_has_generates(source: &str) -> bool {
         }
     }
     false
+}
+
+/// Validate `timeseries:` and `incremental:` constraints on parsed metadata.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata` and the
+/// SQL body text (for partition-column projection checks). Emits the first
+/// constraint violation found, or `Ok(())` when all constraints pass.
+///
+/// Rules checked (per `timeseries.md` §Semantics):
+/// - `incremental:` present without `timeseries:` → `TimeseriesRequiredForIncremental`
+/// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
+/// - Legacy nested form (`event_time_column` inside `incremental:`) was removed;
+///   its presence in the YAML block now produces a YAML parse error (unknown field)
+///   rather than a custom diagnostic, because `IncrementalConfig` no longer
+///   declares those fields.
+/// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
+pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
+    use crate::config::Materialization;
+
+    // Rule: cumulative_aggregate forbids incremental: — enforced here so the
+    // diagnostic fires alongside the other materialization-block constraints.
+    if matches!(
+        metadata.materialization,
+        Some(Materialization::CumulativeAggregate)
+    ) && metadata.incremental.is_some()
+    {
+        return Err(MetadataError::CumulativeForbidsIncremental);
+    }
+
+    // Rule: cumulative_aggregate forbids timeseries: — the cumulative output
+    // has no partition column.
+    if matches!(
+        metadata.materialization,
+        Some(Materialization::CumulativeAggregate)
+    ) && metadata.timeseries.is_some()
+    {
+        return Err(MetadataError::CumulativeForbidsTimeseries);
+    }
+
+    // Rule: incremental: without timeseries: → TimeseriesRequiredForIncremental
+    if metadata.incremental.is_some() && metadata.timeseries.is_none() {
+        return Err(MetadataError::TimeseriesRequiredForIncremental);
+    }
+
+    let ts = match &metadata.timeseries {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    // Rule: timeseries: on ephemeral or test → MalformedTimeseries
+    if let Some(mat) = &metadata.materialization {
+        match mat {
+            Materialization::Ephemeral => {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: "timeseries: is not allowed on ephemeral models (no persisted output)"
+                        .to_string(),
+                });
+            }
+            Materialization::Test => {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: "timeseries: is not allowed on test models (not a persistent output)"
+                        .to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Rule: week_start requires granularity: week
+    if ts.week_start.is_some() && ts.granularity != crate::config::Granularity::Week {
+        return Err(MetadataError::MalformedTimeseries {
+            message: "week_start requires granularity: week".to_string(),
+        });
+    }
+
+    // Rule: partition_column must appear in the model's SELECT output (projection check)
+    // Only check when there is actual SQL body content.
+    if !sql_body.trim().is_empty() {
+        let upper_body = sql_body.to_uppercase();
+        let col_upper = ts.partition_column.to_uppercase();
+        // Simple heuristic: the column name must appear somewhere in the SQL body.
+        // A full SELECT-list parse is done by the planner; here we do a fast presence check
+        // to catch the most obvious cases (completely absent column name).
+        if !upper_body.contains(&col_upper) {
+            return Err(MetadataError::MalformedTimeseries {
+                message: format!(
+                    "partition_column '{}' does not appear in the model's SQL body",
+                    ts.partition_column
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Extract metadata from SQL source text
@@ -623,11 +740,12 @@ SELECT * FROM users"#;
         let source = r#"---
 name: daily_revenue
 materialization: table
-incremental:
-  enabled: true
+timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: day
+incremental:
+  enabled: true
 tags: [revenue, core]
 ---
 SELECT DATE(transaction_timestamp) as revenue_date, SUM(amount)
@@ -643,9 +761,11 @@ GROUP BY 1"#;
 
                 let incremental = metadata.incremental.unwrap();
                 assert!(incremental.enabled);
-                assert_eq!(incremental.event_time_column, "transaction_timestamp");
-                assert_eq!(incremental.partition_column, "revenue_date");
-                assert_eq!(incremental.granularity, crate::config::Granularity::Day);
+
+                let timeseries = metadata.timeseries.unwrap();
+                assert_eq!(timeseries.event_time_column, "transaction_timestamp");
+                assert_eq!(timeseries.partition_column, "revenue_date");
+                assert_eq!(timeseries.granularity, crate::config::Granularity::Day);
             }
             _ => panic!("Expected Single variant"),
         }
@@ -1120,6 +1240,210 @@ SELECT * FROM users"#;
             }
             other => panic!("Expected Generator variant, got: {:?}", other),
         }
+    }
+
+    // ── timeseries: block tests ───────────────────────────────────────────────
+
+    /// A frontmatter with a `timeseries:` block parses to a `TimeseriesConfig`
+    /// carrying the four fields.
+    #[test]
+    fn test_timeseries_block_parses() {
+        let source = r#"---
+materialization: table
+timeseries:
+  event_time_column: order_ts
+  partition_column: order_date
+  granularity: day
+---
+SELECT DATE_TRUNC('day', order_ts) AS order_date, order_ts
+FROM smelt.orders_raw"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                let ts = metadata.timeseries.expect("timeseries must be present");
+                assert_eq!(ts.event_time_column, "order_ts");
+                assert_eq!(ts.partition_column, "order_date");
+                assert_eq!(ts.granularity, crate::config::Granularity::Day);
+                assert_eq!(ts.week_start, None);
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    /// A `.sql` file declaring `incremental:` with no `timeseries:` produces
+    /// `TimeseriesRequiredForIncremental` from `validate_timeseries`.
+    #[test]
+    fn test_incremental_without_timeseries_errors() {
+        // Build a ModelMetadata with incremental but no timeseries
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            incremental: Some(crate::config::IncrementalConfig {
+                enabled: true,
+                unique_key: vec![],
+                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT event_date FROM foo")
+            .expect_err("must error when incremental: has no timeseries:");
+        assert!(
+            matches!(err, MetadataError::TimeseriesRequiredForIncremental),
+            "Expected TimeseriesRequiredForIncremental, got: {}",
+            err
+        );
+    }
+
+    /// A `.sql` file declaring `event_time_column` inside `incremental:` is
+    /// rejected at YAML parse time (unknown field) because `IncrementalConfig`
+    /// no longer declares those fields.  This is the effective `MalformedTimeseries`
+    /// for the legacy nested form — the error message points at the unknown key.
+    #[test]
+    fn test_legacy_nested_form_errors() {
+        let source = r#"---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+---
+SELECT dt FROM foo"#;
+        let result = extract_file_metadata(source);
+        assert!(result.is_err(), "Legacy nested form must be rejected");
+        // The error should mention the unknown field
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("event_time_column") || err_msg.contains("unknown field"),
+            "Error should mention the unknown field, got: {}",
+            err_msg
+        );
+    }
+
+    /// `materialization: ephemeral` + `timeseries:` is `MalformedTimeseries`.
+    #[test]
+    fn test_timeseries_on_ephemeral_errors() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Ephemeral),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("ephemeral + timeseries must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("ephemeral"),
+            "Error must mention ephemeral"
+        );
+    }
+
+    /// `partition_column` absent from the model's SQL body is `MalformedTimeseries`.
+    #[test]
+    fn test_timeseries_partition_column_must_project() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            ..Default::default()
+        };
+        // SQL body does NOT contain "event_date"
+        let err = validate_timeseries(&metadata, "SELECT event_ts, user_id FROM foo")
+            .expect_err("partition_column absent from SQL must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("event_date"),
+            "Error must name the missing column, got: {}",
+            err
+        );
+    }
+
+    // ── cumulative_aggregate frontmatter tests ───────────────────────────────
+
+    /// `materialization: cumulative_aggregate` with no other rule-specific keys
+    /// parses cleanly.
+    #[test]
+    fn test_cumulative_aggregate_frontmatter_parses() {
+        let source = r#"---
+materialization: cumulative_aggregate
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.events
+GROUP BY device_id, user_id"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(
+                    metadata.materialization,
+                    Some(crate::config::Materialization::CumulativeAggregate)
+                );
+                assert!(metadata.timeseries.is_none());
+                assert!(metadata.incremental.is_none());
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    /// A `.sql` file with `materialization: cumulative_aggregate` + a `timeseries:` block
+    /// emits `CumulativeForbidsTimeseries`.
+    #[test]
+    fn test_cumulative_aggregate_forbids_timeseries() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::CumulativeAggregate),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("cumulative_aggregate + timeseries must error");
+        assert!(
+            matches!(err, MetadataError::CumulativeForbidsTimeseries),
+            "Expected CumulativeForbidsTimeseries, got: {}",
+            err
+        );
+    }
+
+    /// A `.sql` file with `materialization: cumulative_aggregate` + an `incremental:` block
+    /// emits `CumulativeForbidsIncremental`.
+    #[test]
+    fn test_cumulative_aggregate_forbids_incremental() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::CumulativeAggregate),
+            incremental: Some(crate::config::IncrementalConfig {
+                enabled: true,
+                unique_key: vec![],
+                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT * FROM foo")
+            .expect_err("cumulative_aggregate + incremental must error");
+        assert!(
+            matches!(err, MetadataError::CumulativeForbidsIncremental),
+            "Expected CumulativeForbidsIncremental, got: {}",
+            err
+        );
     }
 
     #[test]

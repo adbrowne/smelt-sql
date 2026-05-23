@@ -147,6 +147,8 @@ pub fn available_columns(
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
 
+    let project = find_project(db, workspace, &file.project_root(db).clone());
+
     if let Some(ast) = AstFile::cast(syntax) {
         if let Some(select_stmt) = ast.select_stmt() {
             if let Some(from_clause) = select_stmt.from_clause() {
@@ -155,7 +157,9 @@ pub fn available_columns(
                         let segs = path_ref.segments();
                         if segs.first().map(|s| s.as_str()) == Some("models") {
                             if let Some(model_name) = segs.last().cloned() {
-                                if let Some(upstream) = resolve_ref(db, workspace, model_name) {
+                                if let Some(upstream) =
+                                    project.and_then(|p| resolve_ref(db, workspace, p, model_name))
+                                {
                                     let upstream_schema = model_schema(db, upstream);
                                     for col in upstream_schema.columns.iter() {
                                         available.push(col.clone());
@@ -488,7 +492,13 @@ impl SalsaRefSchemaProvider<'_> {
 
 impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
     fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>> {
-        let upstream = resolve_ref(self.db, self.workspace, model_name.to_string())?;
+        // Project isolation rule: only consider models declared in the same
+        // project as the file whose schema we're computing. Without this
+        // filter, a same-named model in another project leaks its column
+        // types in. See lib.rs::resolve_ref and the standing CI gate in
+        // crates/smelt-lsp/tests/example_workspaces.rs.
+        let project = self.project?;
+        let upstream = resolve_ref(self.db, self.workspace, project, model_name.to_string())?;
         let resolved = resolved_model_schema(self.db, self.workspace, upstream);
         Some(
             resolved
@@ -506,26 +516,25 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
     }
 
     fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>> {
-        // Seeds aren't part of the file-based resolve_ref graph; walk all
-        // projects in the workspace and look in each project's seeds.
-        for project in self.workspace.projects(self.db).iter().copied() {
-            for seed in project_seeds(self.db, project).iter() {
-                if seed.address_segments.join("_") == seed_name {
-                    return Some(
-                        seed.columns
-                            .iter()
-                            .map(|(name, dt)| {
-                                (
-                                    name.clone(),
-                                    TypedColumn {
-                                        data_type: dt.clone(),
-                                        nullable: true,
-                                    },
-                                )
-                            })
-                            .collect(),
-                    );
-                }
+        // Project isolation rule: only consider seeds declared in the same
+        // project as the file whose schema we're computing.
+        let project = self.project?;
+        for seed in project_seeds(self.db, project).iter() {
+            if seed.address_segments.join("_") == seed_name {
+                return Some(
+                    seed.columns
+                        .iter()
+                        .map(|(name, dt)| {
+                            (
+                                name.clone(),
+                                TypedColumn {
+                                    data_type: dt.clone(),
+                                    nullable: true,
+                                },
+                            )
+                        })
+                        .collect(),
+                );
             }
         }
         None
@@ -1016,8 +1025,12 @@ pub fn resolved_model_schema(
     let mut unresolved_extensions = Vec::new();
     let mut is_fully_resolved = true;
 
+    let project = find_project(db, workspace, &file.project_root(db).clone());
+
     for ext in &typed_schema.row_extensions {
-        if let Some(upstream) = resolve_ref(db, workspace, ext.ref_name.clone()) {
+        if let Some(upstream) =
+            project.and_then(|p| resolve_ref(db, workspace, p, ext.ref_name.clone()))
+        {
             let upstream_resolved = resolved_model_schema(db, workspace, upstream);
             for col in &upstream_resolved.columns {
                 if !ext.excluded_columns.contains(&col.name) {
@@ -1071,10 +1084,11 @@ pub fn resolved_model_schema(
 pub fn columns_of_for_table_expr(
     db: &dyn salsa::Database,
     workspace: Workspace,
+    project: crate::ProjectInput,
     model_name: String,
 ) -> Result<Arc<Vec<smelt_types::ColumnRefValue>>, ()> {
     // Resolve the model name to a SourceFile via the existing resolution machinery.
-    let file = match resolve_ref(db, workspace, model_name.clone()) {
+    let file = match resolve_ref(db, workspace, project, model_name.clone()) {
         Some(f) => f,
         None => return Err(()),
     };

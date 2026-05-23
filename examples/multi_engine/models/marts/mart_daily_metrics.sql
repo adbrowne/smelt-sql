@@ -3,6 +3,7 @@ materialization: table
 target: duckdb_local
 incremental:
   enabled: true
+timeseries:
   event_time_column: session_date
   partition_column: metric_date
   granularity: day

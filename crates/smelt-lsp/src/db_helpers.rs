@@ -39,10 +39,19 @@ pub(crate) fn lookup_project(db: &Database, root: &Path) -> Option<ProjectInput>
     db.project_input(root)
 }
 
-/// Resolve a model name to the file that defines it (via the workspace).
-pub(crate) fn resolve_ref_path(db: &Database, model_name: &str) -> Option<PathBuf> {
+/// Resolve a model name to the file that defines it (within `project`).
+///
+/// Project-scoped per the project isolation rule — callers must pass the
+/// project containing the file under analysis. `project_root` is the
+/// project root path on disk (as recorded on the `SourceFile` input).
+pub(crate) fn resolve_ref_path(
+    db: &Database,
+    project_root: &Path,
+    model_name: &str,
+) -> Option<PathBuf> {
     let ws = Workspace::try_get(db)?;
-    smelt_db::resolve_ref(db, ws, model_name.to_string()).map(|f| f.path(db).clone())
+    let project = lookup_project(db, project_root)?;
+    smelt_db::resolve_ref(db, ws, project, model_name.to_string()).map(|f| f.path(db).clone())
 }
 
 /// Shorthand for calling the `file_diagnostics` query given a file path.

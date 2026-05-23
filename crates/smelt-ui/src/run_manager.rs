@@ -8,7 +8,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionSpec};
+use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
@@ -246,18 +246,24 @@ impl RunManager {
                 .cloned()
                 .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
-            match inc_config {
-                Some(inc) => {
+            let ts_config = config
+                .get_timeseries_with_metadata(model_name, metadata)
+                .cloned()
+                .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+
+            match (inc_config, ts_config) {
+                (Some(inc), Some(ts)) => {
                     let model_info = ModelInfo {
                         name: model_name.clone(),
                         sql: model.content.clone(),
                         refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                        timeseries_config: Some(ts.clone()),
                         incremental_config: Some(inc.clone()),
                     };
                     let safety = analyze_batch_safety(&model_info);
 
                     let (batch_days, context_days) = if request.per_partition {
-                        (granularity_days(&inc.granularity), 0)
+                        (granularity_days(&ts.granularity), 0)
                     } else if let Some(override_days) = request.batch_size_days {
                         let ctx = match &safety {
                             BatchSafety::BoundedSafe { context_days, .. } => *context_days,
@@ -275,7 +281,7 @@ impl RunManager {
                                 ..
                             } => (*max_chunk_days, *context_days),
                             BatchSafety::PerPartitionOnly { .. } => {
-                                (granularity_days(&inc.granularity), 0)
+                                (granularity_days(&ts.granularity), 0)
                             }
                         }
                     };
@@ -303,11 +309,26 @@ impl RunManager {
                             .get_materialization_with_metadata(model_name, metadata),
                         incremental: Some(IncrementalPlan {
                             config: inc,
+                            timeseries: ts,
                             batches,
                         }),
                     });
                 }
-                None => {
+                (Some(_inc), None) => {
+                    // incremental without timeseries — skip with warning
+                    eprintln!(
+                        "warning: model '{}' has incremental: but no timeseries: — skipping incremental execution",
+                        model_name
+                    );
+                    model_plans.push(ModelPlan {
+                        name: model_name.clone(),
+                        sql: model.content.clone(),
+                        materialization: config
+                            .get_materialization_with_metadata(model_name, metadata),
+                        incremental: None,
+                    });
+                }
+                (None, _) => {
                     model_plans.push(ModelPlan {
                         name: model_name.clone(),
                         sql: model.content.clone(),
@@ -394,22 +415,17 @@ impl RunManager {
                         let filter_end_str = batch.filter_end.format("%Y-%m-%d").to_string();
                         let filtered_sql = inject_time_filter(
                             &clean_sql,
-                            &inc_plan.config.event_time_column,
+                            &inc_plan.timeseries.event_time_column,
                             &filter_start_str,
                             &filter_end_str,
                         )?;
 
                         let compiled_sql = compile_sql(&filtered_sql, schema, backend);
 
-                        let partition_values = generate_partition_values(
-                            &batch.partition_start,
-                            &batch.partition_end,
-                            &inc_plan.config.granularity,
-                        );
-
-                        let partition = PartitionSpec {
-                            column: inc_plan.config.partition_column.clone(),
-                            values: partition_values,
+                        let partition = PartitionRange {
+                            column: inc_plan.timeseries.partition_column.clone(),
+                            start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                            end: batch.partition_end.format("%Y-%m-%d").to_string(),
                         };
 
                         let strategy = MaterializationStrategy::Incremental {
@@ -491,6 +507,12 @@ impl RunManager {
                         smelt_core::config::Materialization::Test => {
                             unreachable!("Test models should not be executed directly")
                         }
+                        smelt_core::config::Materialization::CumulativeAggregate => {
+                            return Err(anyhow::anyhow!(
+                                "cumulative_aggregate models require an incremental run window — \
+                                 use `smelt run --event-time-start … --event-time-end …` from the CLI"
+                            ));
+                        }
                     };
 
                     let exec_result = backend
@@ -568,6 +590,7 @@ struct ModelPlan {
 
 struct IncrementalPlan {
     config: smelt_core::IncrementalConfig,
+    timeseries: smelt_core::config::TimeseriesConfig,
     batches: Vec<BatchPlan>,
 }
 
@@ -584,26 +607,11 @@ fn granularity_days(g: &smelt_core::Granularity) -> u32 {
     match g {
         smelt_core::Granularity::Hour => 1,
         smelt_core::Granularity::Day => 1,
-        smelt_core::Granularity::Week { .. } => 7,
+        smelt_core::Granularity::Week => 7,
         smelt_core::Granularity::Month => 30,
         smelt_core::Granularity::Quarter => 91,
         smelt_core::Granularity::Year => 365,
     }
-}
-
-fn generate_partition_values(
-    start: &NaiveDate,
-    end: &NaiveDate,
-    granularity: &smelt_core::Granularity,
-) -> Vec<String> {
-    let mut values = Vec::new();
-    let step_days = granularity_days(granularity) as i64;
-    let mut current = *start;
-    while current < *end {
-        values.push(current.format("%Y-%m-%d").to_string());
-        current += Duration::days(step_days);
-    }
-    values
 }
 
 /// Compile SQL by resolving smelt.ref() calls to schema-qualified table names.

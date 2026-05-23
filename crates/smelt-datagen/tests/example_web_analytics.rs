@@ -1102,14 +1102,16 @@ fn test_sessions_model_materializes() {
 // ---------------------------------------------------------------------------
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
-/// `smelt build`, then verify that `main.silver_device_user_edges` materializes
-/// with at least one row, its row count matches the distinct (device_id, user_id)
-/// pairs in `events_parsed` with non-null `user_id`, every edge has a non-zero
-/// event count, and no edge has `first_seen > last_seen`.
+/// `smelt build`, then verify that `main.silver_device_user_edges`
+/// (the view that rolls the per-day `silver/device_user_edges` table up across
+/// dates) materializes with at least one row, its row count matches the
+/// distinct (device_id, user_id) pairs in `events_parsed` with non-null
+/// `user_id`, every edge has a non-zero event count, and no edge has
+/// `first_seen > last_seen`.
 ///
-/// `models/silver/device_user_edges.sql` address segments are
-/// `["silver", "device_user_edges"]`, so smelt materializes the view as
-/// `silver_device_user_edges` in the `main` schema.
+/// `models/silver/device_user_edges_cumulative.sql` address segments are
+/// `["silver", "device_user_edges_cumulative"]`, so smelt materializes the
+/// view as `silver_device_user_edges` in the `main` schema.
 #[test]
 fn test_device_user_edges_view() {
     let tmp = TempDir::new().expect("tempdir");

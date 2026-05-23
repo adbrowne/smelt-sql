@@ -127,7 +127,13 @@ impl TestClient {
             .await
             .unwrap();
         loop {
-            let response = read_message_timeout(&mut self.client_rx, 5000)
+            // 60s per-RPC timeout: cargo runs tests in parallel within the
+            // binary; multiple multi-project tests open all of `examples/`
+            // simultaneously and compete for CPU on single-vCPU CI runners.
+            // Initialize takes ~4s locally and ~30s on a contended runner.
+            // 60s is generous enough to absorb that contention while still
+            // bounding genuine hangs.
+            let response = read_message_timeout(&mut self.client_rx, 60000)
                 .await
                 .unwrap_or_else(|| {
                     panic!("Timeout waiting for response to {} (id={})", method, id)
@@ -227,6 +233,26 @@ impl TestClient {
             return Vec::new();
         }
         serde_json::from_value(result).unwrap_or_default()
+    }
+
+    async fn hover(&mut self, file_uri: &str, line: u32, character: u32) -> Option<String> {
+        let result = self
+            .send_request(
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": file_uri },
+                    "position": { "line": line, "character": character }
+                }),
+            )
+            .await;
+        if result.is_null() {
+            return None;
+        }
+        let contents = result.get("contents")?;
+        contents
+            .get("value")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     async fn shutdown(&mut self) {
@@ -481,11 +507,11 @@ async fn find_references_on_function_call_in_web_analytics() {
     // Drain initial diagnostics so subsequent requests don't race with them.
     let _ = client.collect_diagnostics(1000).await;
 
-    // models/silver/sessions.sql line 21 (1-indexed):
+    // models/silver/sessions.sql line 34 (1-indexed):
     //     FROM smelt.functions.sessionize(
     // Cursor on "sessionize" word — char 28 is inside the token.
     let file_uri = format!("file://{}", target_file.display());
-    let locations = client.references(&file_uri, 20, 28).await;
+    let locations = client.references(&file_uri, 33, 28).await;
     client.shutdown().await;
 
     assert!(
@@ -609,5 +635,128 @@ async fn project_isolation_in_multi_project_workspace() {
          sessions.sql when examples/ was opened as a multi-project workspace. \
          Diagnostics: {:?}",
         missing_arg,
+    );
+}
+
+/// Project-isolation CI gate for **model-name resolution** (the
+/// `resolve_ref` axis, distinct from the `resolve_function` axis the test
+/// above covers).
+///
+/// Repro: `examples/web_analytics/models/sources/raw/events.yml` and
+/// `examples/timeseries/models/events.sql` both share the leaf name
+/// `events` but live in different projects with different schemas. Opening
+/// `examples/` as one workspace folder used to make `resolve_ref("events")`
+/// — called from `process_table_ref_pure` while building the type context
+/// for a file that does `FROM smelt.sources.raw.events` — return the
+/// timeseries model's columns to the web-analytics file, poisoning column
+/// type inference for any column whose name happens to exist in both
+/// schemas (here: `event_id`, `user_id`). That surfaced as a
+/// `Could not infer type` warning on those specific columns of
+/// `web_analytics/models/bronze/raw_events.sql`.
+///
+/// The fix threads `ProjectInput` through `resolve_ref` (mirroring the
+/// `resolve_function` fix). This test asserts no cross-project column-type
+/// leak on raw_events.sql.
+#[tokio::test]
+async fn no_cross_project_column_type_leak_through_resolve_ref() {
+    let examples = examples_root();
+    let target_file = examples
+        .join("web_analytics")
+        .join("models")
+        .join("bronze")
+        .join("raw_events.sql");
+    assert!(
+        target_file.exists(),
+        "fixture not found: {}",
+        target_file.display()
+    );
+
+    let mut client = TestClient::open_workspace(&examples).await;
+    client
+        .open_file(&target_file)
+        .await
+        .expect("open raw_events.sql");
+
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let target_uri_substr = "web_analytics/models/bronze/raw_events.sql";
+    let latest: Vec<&lsp_types::Diagnostic> = diags
+        .iter()
+        .rfind(|(uri, _)| uri.contains(target_uri_substr))
+        .map(|(_, ds)| ds.iter().collect())
+        .unwrap_or_default();
+
+    let leaks: Vec<&lsp_types::Diagnostic> = latest
+        .iter()
+        .copied()
+        .filter(|d| {
+            d.message.contains("Could not infer type")
+                || d.message.contains("Undeclared column")
+                || d.message.contains("Undefined source")
+        })
+        .collect();
+
+    assert!(
+        leaks.is_empty(),
+        "project isolation violated: type-inference / column diagnostics \
+         fired on raw_events.sql when examples/ was opened as a \
+         multi-project workspace. Every column listed in raw_events.sql \
+         is declared in web_analytics's events.yml; any diagnostic here \
+         is a cross-project leak. Diagnostics: {:?}",
+        leaks,
+    );
+}
+
+/// Hover on a `smelt.sources.<schema>.<table>` path ref must render the
+/// per-entity source YAML's description + columns, not fall back to the
+/// "Undefined source" branch.
+///
+/// Regression: the hover handler only consulted the legacy aggregate
+/// `sources.yml` resolver; projects that use per-entity `models/sources/.../*.yml`
+/// files (the canonical layout since the per-entity migration) would always
+/// hit the "Undefined source" fallback. Reproduced by opening
+/// `web_analytics/models/bronze/raw_events.sql` and hovering on the
+/// `events` token of `FROM smelt.sources.raw.events`.
+#[tokio::test]
+async fn hover_on_per_entity_source_renders_columns() {
+    let workspace = examples_root().join("web_analytics");
+    let target_file = workspace
+        .join("models")
+        .join("bronze")
+        .join("raw_events.sql");
+    assert!(
+        target_file.exists(),
+        "fixture not found: {}",
+        target_file.display()
+    );
+
+    let mut client = TestClient::open_workspace(&workspace).await;
+    client
+        .open_file(&target_file)
+        .await
+        .expect("open raw_events.sql");
+    let _ = client.collect_diagnostics(1000).await;
+
+    // raw_events.sql line 10 (1-indexed) = line 9 (0-indexed):
+    //   `FROM smelt.sources.raw.events`
+    // Character 25 lands inside the `events` token.
+    let file_uri = format!("file://{}", target_file.display());
+    let hover = client.hover(&file_uri, 9, 25).await;
+    client.shutdown().await;
+
+    let content = hover.expect("hover on smelt.sources.raw.events must return content");
+    assert!(
+        !content.contains("Undefined source"),
+        "hover on smelt.sources.raw.events returned `Undefined source` even \
+         though web_analytics declares the source at \
+         models/sources/raw/events.yml (per-entity layout). Hover content:\n{}",
+        content
+    );
+    // Should render columns from the per-entity YAML.
+    assert!(
+        content.contains("event_id") && content.contains("device_id"),
+        "hover should render columns from per-entity events.yml. Got:\n{}",
+        content
     );
 }

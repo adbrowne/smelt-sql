@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 pub use smelt_core::config::{
     Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
-    Materialization, Weekday,
+    Materialization, TimeseriesConfig, Weekday,
 };
 
 /// A transformation the optimizer wants to apply to a model.
@@ -85,6 +85,9 @@ pub enum OpportunityData {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Frontmatter {
     pub materialized: Option<String>,
+    #[serde(default)]
+    pub timeseries: Option<TimeseriesConfig>,
+    #[serde(default)]
     pub incremental: Option<IncrementalConfig>,
 }
 

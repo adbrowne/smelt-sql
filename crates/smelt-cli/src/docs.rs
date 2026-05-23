@@ -205,15 +205,18 @@ pub fn build_catalog(
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
 
-        let incremental = node.incremental.as_ref().map(|inc| CatalogIncremental {
-            granularity: serde_json::to_value(&inc.granularity)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| "unknown".to_string()),
-            partition_column: inc.partition_column.clone(),
-            event_time_column: inc.event_time_column.clone(),
-            unique_key: inc.unique_key.clone(),
-        });
+        let incremental = match (&node.incremental, &node.timeseries) {
+            (Some(inc), Some(ts)) => Some(CatalogIncremental {
+                granularity: serde_json::to_value(&ts.granularity)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                partition_column: ts.partition_column.clone(),
+                event_time_column: ts.event_time_column.clone(),
+                unique_key: inc.unique_key.clone(),
+            }),
+            _ => None,
+        };
 
         // Build tag index
         for tag in &node.tags {

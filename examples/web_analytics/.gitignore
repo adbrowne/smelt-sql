@@ -1,3 +1,4 @@
 data/
 target/
 .smelt/
+.last_run.json

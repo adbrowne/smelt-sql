@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: event_time
   partition_column: event_date
   granularity: day
@@ -13,4 +14,3 @@ SELECT
 FROM smelt.sql_l3_130
 GROUP BY cohort_date
 HAVING COUNT(*) > 10
-

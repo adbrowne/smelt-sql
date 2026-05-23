@@ -1,3 +1,12 @@
+---
+materialization: table
+incremental:
+  enabled: true
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
 -- Compose event_ts from the partition date + sub-day offset, project the JSON
 -- payload fields as typed columns via parse_event_payload, and synthesise the
 -- amplitude_id — the Amplitude-style never-NULL identifier that prefers the

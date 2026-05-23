@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-21
 owners: [andrew]
 ---
 
@@ -65,7 +65,8 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 |-----|------|---------|-------------|
 | `name` | string | — | Accepted but ignored in single-model files; overridden by delimiter in multi-model files |
 | `materialization` | enum | project default (`view`) | How to persist the model's output. See Materialization modes. |
-| `incremental` | object | — | Incremental configuration. See `incremental_models.md`. |
+| `timeseries` | object | — | Time-dimension declaration (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Required when `incremental:` is declared. |
+| `incremental` | object | — | Incremental configuration. See `incremental_models.md`. Requires `timeseries:` to be present. |
 | `target` | string | — | Override execution target for this model (overrides `smelt.yml` and `--target`). Not valid on `ephemeral` or `test` models. |
 | `tags` | string[] | `[]` | Organization labels. Merged with `smelt.yml` model config tags (union, deduplicated). |
 | `owner` | string | — | Responsible team or person. Informational; surfaced in data catalog. |
@@ -85,6 +86,7 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 | `ephemeral` | Not materialized. SQL is inlined as a CTE into every downstream model that references it. |
 | `materialized_view` | Backend-managed persistent view; the backend controls refresh scheduling. |
 | `test` | Not materialized. The model defines a unit test. SQL body is a test query; `test:` key in frontmatter declares mock data and assertions. See `testing.md`. |
+| `cumulative_aggregate` | Stateful merge. The SELECT's `GROUP BY` is the unique key; non-key projections must be allowlisted aggregators. Driving partition shape is read from a single `timeseries:`-tagged source in the FROM clause. See `cumulative_aggregate.md`. |
 
 ### Materialization precedence (highest to lowest)
 
@@ -134,9 +136,14 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 | Combination | Result |
 |-------------|--------|
 | `ephemeral` + `incremental` | Hard error |
+| `ephemeral` + `timeseries` | Hard error (see `timeseries.md`) |
 | `ephemeral` + `target` override | Hard error |
 | `test` + `incremental` | Hard error |
+| `test` + `timeseries` | Hard error (see `timeseries.md`) |
 | `test` + `target` override | Hard error |
+| `incremental` without `timeseries` | Hard error (`TimeseriesRequiredForIncremental`) |
+| `cumulative_aggregate` + `timeseries` | Hard error (`CumulativeForbidsTimeseries`; see `cumulative_aggregate.md`) |
+| `cumulative_aggregate` + `incremental` | Hard error (`CumulativeForbidsIncremental`) |
 | `view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
 | `materialized_view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
 | Unknown frontmatter key | Hard error (`deny_unknown_fields`) |
@@ -219,6 +226,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
   - `docs-site/docs/guide/materializations.md` (missing `test` mode)
 - **Related specs**:
   - `architecture.md` — `smelt.<path>` addressing scheme and identity-from-structure principle
+  - `timeseries.md` — `timeseries:` frontmatter block
   - `incremental_models.md` — incremental frontmatter keys
   - `testing.md` — `materialization: test` and the `test:` frontmatter key (forthcoming)
   - `schema_evolution.md` — `schema_evolution:` and `columns.default/backfill` frontmatter keys (forthcoming)

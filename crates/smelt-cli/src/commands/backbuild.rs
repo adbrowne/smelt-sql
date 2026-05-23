@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use smelt_backend::PartitionSpec;
+use smelt_backend::PartitionRange;
 use smelt_cli::{
     compiler::UpstreamSchemas, compute_backbuild_plans, discover_python_models, executor,
     find_project_root, format_plan_summary, init_db, inject_time_filter, parse_selector,
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::helpers::{generate_partition_values, strategy_label};
+use crate::helpers::strategy_label;
 use crate::BackbuildArgs;
 
 pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
@@ -159,6 +159,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         sources.as_ref(),
         &requested_range,
         &backfill_options,
+        args.allow_downgrade,
     )
     .with_context(|| "Failed to compute backbuild plans")?;
 
@@ -348,9 +349,17 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .cloned()
             .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
-        let inc_config = match inc_config {
-            Some(c) => c,
-            None => continue,
+        let ts_config = config
+            .get_timeseries_with_metadata(
+                &plan.model_name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
+            )
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.timeseries.clone()));
+
+        let (inc_config, ts_config) = match (inc_config, ts_config) {
+            (Some(i), Some(t)) => (i, t),
+            _ => continue,
         };
 
         let resolved_strategy = backend.resolve_strategy(&inc_config);
@@ -384,7 +393,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             let clean_sql = smelt_parser::strip_frontmatter(&model.content);
             let transformed_sql = inject_time_filter(
                 &clean_sql,
-                &inc_config.event_time_column,
+                &ts_config.event_time_column,
                 &batch.filter_range,
             )
             .with_context(|| format!("Failed to transform SQL for model: {}", plan.model_name))?;
@@ -401,15 +410,10 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
                 println!("{}", compiled.sql);
             }
 
-            let partition_values = generate_partition_values(
-                &batch.partition_range.start,
-                &batch.partition_range.end,
-                &inc_config.granularity,
-            )?;
-
-            let partition = PartitionSpec {
-                column: inc_config.partition_column.clone(),
-                values: partition_values,
+            let partition = PartitionRange {
+                column: ts_config.partition_column.clone(),
+                start: batch.partition_range.start.clone(),
+                end: batch.partition_range.end.clone(),
             };
 
             let result = executor::execute_model_incremental(

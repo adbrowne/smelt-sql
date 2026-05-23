@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: event_time
   partition_column: event_date
   granularity: day
@@ -12,4 +13,3 @@ SELECT
     b.campaign_id
 FROM smelt.sql_l1_13 a
 INNER JOIN smelt.sql_l1_106 b ON a.user_id = b.user_id
-

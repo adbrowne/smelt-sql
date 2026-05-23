@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-21
 owners: [andrew]
 ---
 
@@ -50,9 +50,29 @@ columns:
 | `columns[].nullable` | no | `true` | Whether the column may contain NULL in the upstream database. Type-checking respects this. |
 | `columns[].description` | no | absent | Free-text description, surfaced in LSP hover. |
 | `name` | no | derived | Override the database-side name. When present, must be a `<schema>.<table>` literal. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
+| `timeseries` | no | absent | Declares a time dimension on this source (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. When present, the named columns must appear in `columns:` with date/timestamp-compatible types. |
 | `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
-The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML — seed-specific keys"). The only differences are: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path).
+The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML — seed-specific keys"). Differences: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path); a source may declare `timeseries:` (a seed sidecar may not — seeds are loaded by smelt and have no externally-imposed partition layout).
+
+### Source with `timeseries:` declaration
+
+A source declaring a time dimension opts in to being a pushdown target for downstream planner rules — incremental models reading the source will receive source-filter pushdown based on the declared partition column:
+
+```yaml
+description: Raw events feed; partitioned daily by event_date.
+columns:
+  - { name: event_id, type: BIGINT, nullable: false }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+  - { name: user_id, type: INTEGER, nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+```
+
+Declaring `timeseries:` does not change how the source is loaded — sources remain externally managed. It only declares the partition shape downstream consumers may rely on.
 
 ### Discovery and addressing
 
@@ -128,4 +148,6 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
   - `architecture.md` §"Default materialization name mapping" — the rule the source `name:` override departs from.
   - `seeds.md` — shares the YAML grammar; the load-side complement of this spec.
   - `smelt_yml.md` — `paths:` key the discovery layer consumes.
+  - `timeseries.md` — declares the `timeseries:` block grammar this spec hosts on external sources.
+  - `incremental_models.md` — primary consumer of `timeseries:` on sources, via source-filter pushdown.
   - `types.md` — `DataType` vocabulary used by `columns[].type`.

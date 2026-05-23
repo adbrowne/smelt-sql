@@ -70,6 +70,27 @@ pub struct PartitionSpec {
     pub values: Vec<String>,
 }
 
+/// Half-open range `[start, end)` for partition deletion.
+///
+/// The DELETE generated from this range uses:
+/// ```sql
+/// WHERE column >= start AND column < end
+/// ```
+/// This form is more efficient than an `IN (...)` list for large windows and
+/// is the canonical form for run-window deletion (per `incremental_models.md`
+/// §"Run window vs partition granularity").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionRange {
+    /// Column name used for partitioning (e.g., "event_date")
+    pub column: String,
+
+    /// Inclusive start of the range (ISO-8601 date or timestamp string)
+    pub start: String,
+
+    /// Exclusive end of the range (ISO-8601 date or timestamp string)
+    pub end: String,
+}
+
 /// Materialization strategy for tables.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum MaterializationStrategy {
@@ -77,9 +98,14 @@ pub enum MaterializationStrategy {
     #[default]
     FullRefresh,
 
-    /// Incremental: strategy-dependent update
+    /// Incremental: strategy-dependent update.
+    ///
+    /// `partition` is the half-open range `[start, end)` used for the
+    /// DELETE step of DELETE+INSERT.  INSERT OVERWRITE keeps its own
+    /// partition spec (via `insert_overwrite`) that is separate from this
+    /// field.
     Incremental {
-        partition: PartitionSpec,
+        partition: PartitionRange,
         strategy: IncrementalStrategy,
         /// Columns that uniquely identify a row (used by Merge strategy)
         unique_key: Vec<String>,

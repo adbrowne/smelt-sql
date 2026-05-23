@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: event_time
   partition_column: event_date
   granularity: day
@@ -14,4 +15,3 @@ SELECT
     AVG(price) AS agg_3
 FROM smelt.sql_l2_8
 GROUP BY device_type
-

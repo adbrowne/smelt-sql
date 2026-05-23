@@ -3918,8 +3918,10 @@ mod tests {
         let ws = db.sync_workspace();
 
         // Call-site: f(orders) → columns [id, amount].
-        let orders_cols = crate::columns_of_for_table_expr(&db.db, ws, "orders".to_string())
-            .expect("columns_of_for_table_expr must resolve orders");
+        let project = db.db.project_input(&PathBuf::from(".")).expect("project");
+        let orders_cols =
+            crate::columns_of_for_table_expr(&db.db, ws, project, "orders".to_string())
+                .expect("columns_of_for_table_expr must resolve orders");
         assert_eq!(
             orders_cols.len(),
             2,
@@ -3930,8 +3932,9 @@ mod tests {
         assert_eq!(orders_cols[1].name, "amount");
 
         // Call-site: f(products) → columns [sku, price].
-        let products_cols = crate::columns_of_for_table_expr(&db.db, ws, "products".to_string())
-            .expect("columns_of_for_table_expr must resolve products");
+        let products_cols =
+            crate::columns_of_for_table_expr(&db.db, ws, project, "products".to_string())
+                .expect("columns_of_for_table_expr must resolve products");
         assert_eq!(
             products_cols.len(),
             2,

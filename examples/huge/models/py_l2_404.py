@@ -8,13 +8,16 @@ def py_l2_404(project):
 materialization: table
 incremental:
   enabled: true
+timeseries:
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     user_id,
     event_time,
     amount,
     status
-FROM smelt.ref('py_l1_267')
+FROM smelt.py_l1_267
 WHERE status = 'active'
 """

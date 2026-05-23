@@ -1,7 +1,7 @@
 #![cfg(feature = "duckdb")]
 //! Integration test for incremental materialization
 
-use smelt_backend::{Backend, PartitionSpec};
+use smelt_backend::{Backend, PartitionRange};
 use smelt_backend_duckdb::DuckDbBackend;
 use tempfile::TempDir;
 
@@ -96,10 +96,11 @@ async fn test_incremental_delete_and_insert() -> anyhow::Result<()> {
     let count = backend.get_row_count("main", "daily_revenue").await?;
     assert!(count > 0, "Expected rows in daily_revenue");
 
-    // Test delete_partitions
-    let partition = PartitionSpec {
+    // Test delete_partitions (range form: [2024-12-25, 2024-12-26))
+    let partition = PartitionRange {
         column: "revenue_date".to_string(),
-        values: vec!["2024-12-25".to_string()],
+        start: "2024-12-25".to_string(),
+        end: "2024-12-26".to_string(),
     };
 
     backend

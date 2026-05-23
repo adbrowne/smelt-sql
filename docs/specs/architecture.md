@@ -149,6 +149,7 @@ A YAML frontmatter block (between `---` fences) attaches to the **immediately fo
 The frontmatter parser is shared across all four declaration kinds; the parsing contract is identical. Property semantics differ — per-feature key catalogues live in the relevant feature spec:
 
 - **Function and extern keys** (`deterministic`, `idempotent`, `append_only`, `backends`, gated `joins` / `provenance`): see `functions.md`.
+- **Time-dimension keys** (`timeseries`): see `timeseries.md`.
 - **Model materialization keys** (`materialization`, `incremental`, …): see `incremental_models.md`.
 
 This spec does not duplicate those catalogues; it only fixes the attachment rule and the parser-sharing invariant.
@@ -386,6 +387,6 @@ Each in-spec Known Divergence cross-references this anchor.
 - **Tests**: dialect printer identity tests under `crates/smelt-dialect/tests/`; parse-level pg_query / Spark equivalence tests in `crates/smelt-parser-compat/tests/`; pure-function tests in `crates/smelt-db/tests/type_property_tests.rs`
 - **User docs**: `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/developing/architecture.md`
 - **Plans (history)**: see `docs/plans/` for area-specific implementation work
-- **Related specs**: feature specs under `docs/specs/` extend this one — `functions.md` (the function half of the models-as-functions equivalence), `incremental_models.md` (model materialization keys), `types.md` (type vocabulary), `planner_integration.md` (planner consumption of frontmatter properties)
+- **Related specs**: feature specs under `docs/specs/` extend this one — `functions.md` (the function half of the models-as-functions equivalence), `timeseries.md` (time-dimension declaration), `incremental_models.md` (model materialization keys), `types.md` (type vocabulary), `planner_integration.md` (planner consumption of frontmatter properties)
 - **Research**: `docs/research/20260413-smelt-functions.md` §4 (the unified-model framing)
 - **Legacy reference (will thin out)**: `docs/architecture_overview.md` — superseded by this spec

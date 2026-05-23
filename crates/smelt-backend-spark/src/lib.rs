@@ -14,7 +14,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::FromPyArrow;
 use async_trait::async_trait;
 use pyo3::prelude::*;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionSpec, SqlDialect};
+use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
 
 mod sql;
 
@@ -317,10 +317,10 @@ impl Backend for SparkBackend {
         &self,
         schema: &str,
         name: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::delete_partitions(&table_name, partition))
+        self.py_execute_no_result(&sql::delete_partitions_range(&table_name, partition))
             .await
     }
 
@@ -352,7 +352,7 @@ impl Backend for SparkBackend {
         schema: &str,
         table: &str,
         sql: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, table);
         self.py_execute_no_result(&sql::insert_overwrite(&table_name, sql, partition))

@@ -608,10 +608,7 @@ mod tests {
             model_name: name.to_string(),
             has_named_params: false,
             range: TextRange::default(),
-            smelt_ref: crate::refs::SmeltRef::Path(vec![
-                "functions".to_string(),
-                name.to_string(),
-            ]),
+            smelt_ref: crate::refs::SmeltRef::Path(vec!["functions".to_string(), name.to_string()]),
         };
 
         let mut raw_events = make_model("raw_events", vec![]);
@@ -624,7 +621,8 @@ mod tests {
         sessions.refs = vec![make_layer_ref("silver", "events_parsed")];
         raw_events.refs = vec![];
 
-        let graph = DependencyGraph::build(vec![raw_events, events_parsed, sessions], None).unwrap();
+        let graph =
+            DependencyGraph::build(vec![raw_events, events_parsed, sessions], None).unwrap();
 
         let order = graph.execution_order().unwrap();
         assert_eq!(order[0], "raw_events");
@@ -711,6 +709,7 @@ mod tests {
                 name.to_string(),
                 ModelConfig {
                     materialization: None,
+                    timeseries: None,
                     incremental: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,

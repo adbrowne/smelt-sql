@@ -36,6 +36,7 @@ pub async fn build(args: BuildArgs) -> Result<()> {
         auto: false,
         allow_column_removal: false,
         allow_full_refresh: false,
+        allow_downgrade: args.allow_downgrade,
     };
     super::run::run(run_args).await
 }

@@ -11,7 +11,9 @@ pub use smelt_core::config::{
     Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
-pub use types::{ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec};
+pub use types::{
+    ExecutionResult, Materialization, MaterializationStrategy, PartitionRange, PartitionSpec,
+};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -206,13 +208,11 @@ pub trait Backend: Send + Sync {
                 if !table_exists {
                     self.create_table_as(schema, name, sql).await?;
                 } else {
+                    let _ = unique_key; // unused since the cumulative path owns merge_into
                     match inc_strategy {
                         IncrementalStrategy::DeleteInsert => {
                             self.delete_partitions(schema, name, &partition).await?;
                             self.insert_into_from_query(schema, name, sql).await?;
-                        }
-                        IncrementalStrategy::Merge => {
-                            self.merge_into(schema, name, sql, &unique_key).await?;
                         }
                         IncrementalStrategy::Append => {
                             self.insert_into_from_query(schema, name, sql).await?;
@@ -244,22 +244,27 @@ pub trait Backend: Send + Sync {
 
     /// Resolve the best incremental strategy for the given config.
     ///
-    /// Default implementation: uses MERGE if unique_key is set and supported,
-    /// otherwise falls back to DELETE+INSERT.
-    fn resolve_strategy(&self, config: &IncrementalConfig) -> IncrementalStrategy {
-        if !config.unique_key.is_empty() && self.capabilities().supports_merge {
-            IncrementalStrategy::Merge
-        } else {
-            IncrementalStrategy::DeleteInsert
-        }
+    /// Default implementation: always returns `DeleteInsert`. MERGE is no
+    /// longer an incremental strategy — it is the physical primitive of the
+    /// `cumulative_aggregate` materialization (see
+    /// `docs/specs/cumulative_aggregate.md`). The `unique_key` field on
+    /// `IncrementalConfig` is reserved for backends that may want to use it
+    /// for diagnostics or audit; it does not change strategy selection here.
+    fn resolve_strategy(&self, _config: &IncrementalConfig) -> IncrementalStrategy {
+        IncrementalStrategy::DeleteInsert
     }
 
-    /// Delete rows matching partition values.
+    /// Delete rows in a half-open partition range `[start, end)`.
+    ///
+    /// Emits `DELETE FROM table WHERE column >= start AND column < end`.
+    /// This form is both more efficient than an IN-list for large windows and
+    /// is correct for any window size without enumerating individual partition
+    /// values.
     async fn delete_partitions(
         &self,
         schema: &str,
         name: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError>;
 
     /// Insert data from a SELECT query into an existing table.
@@ -290,7 +295,7 @@ pub trait Backend: Send + Sync {
         schema: &str,
         table: &str,
         sql: &str,
-        partition: &PartitionSpec,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError>;
 
     /// Create a materialized view from a SQL query.

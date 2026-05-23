@@ -19,7 +19,7 @@ pub fn granularity_label(g: &Granularity) -> &'static str {
     match g {
         Granularity::Hour => "hours",
         Granularity::Day => "days",
-        Granularity::Week { .. } => "weeks",
+        Granularity::Week => "weeks",
         Granularity::Month => "months",
         Granularity::Quarter => "quarters",
         Granularity::Year => "years",
@@ -29,7 +29,6 @@ pub fn granularity_label(g: &Granularity) -> &'static str {
 pub fn strategy_label(s: &IncrementalStrategy) -> &'static str {
     match s {
         IncrementalStrategy::DeleteInsert => "delete+insert",
-        IncrementalStrategy::Merge => "merge",
         IncrementalStrategy::Append => "append",
         IncrementalStrategy::InsertOverwrite => "insert_overwrite",
     }
@@ -65,10 +64,14 @@ pub fn infer_deployed_columns(
 }
 
 /// Generate partition values from a time range based on granularity.
+///
+/// `week_start` is the first day of the week for weekly partitions.
+/// Only relevant when `granularity` is `Week`. When `None`, defaults to Monday.
 pub fn generate_partition_values(
     start: &str,
     end: &str,
     granularity: &Granularity,
+    week_start: Option<&Weekday>,
 ) -> Result<Vec<String>> {
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .with_context(|| format!("Invalid start date: {}", start))?;
@@ -105,8 +108,10 @@ pub fn generate_partition_values(
                 current += Duration::days(1);
             }
         }
-        Granularity::Week { week_start } => {
-            let chrono_day = weekday_to_chrono(week_start);
+        Granularity::Week => {
+            let default_weekday = Weekday::Monday;
+            let ws = week_start.unwrap_or(&default_weekday);
+            let chrono_day = weekday_to_chrono(ws);
             // Find first date >= start_date that falls on the week_start day
             let mut current = start_date;
             let days_ahead = (chrono_day.num_days_from_monday() as i64

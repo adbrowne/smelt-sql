@@ -1,3 +1,12 @@
+---
+materialization: table
+incremental:
+  enabled: true
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
 -- Per-event wide table that joins every silver/events_parsed row to its
 -- session (silver/sessions) and attaches each available identity algorithm's
 -- resolved amplitude_id. The wide shape carries the no-merging baseline

@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: event_time
   partition_column: event_date
   granularity: day
@@ -22,4 +23,3 @@ SELECT
     f.campaign_id
 FROM aggregated a
 INNER JOIN filtered f ON a.transaction_id = f.transaction_id
-

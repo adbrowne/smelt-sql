@@ -14,18 +14,24 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-Incremental behavior is configured either in YAML frontmatter within the SQL file or in the `models` section of `smelt.yml`.
+Incremental behavior is configured using two frontmatter blocks:
+
+- **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
+- **`incremental:`** opts the model into incremental execution and carries strategy-specific keys.
+
+Both blocks are required when running incrementally. Declaring `incremental:` without `timeseries:` is a validation error (`TimeseriesRequiredForIncremental`).
 
 ### Frontmatter example
 
 ```sql
 ---
 materialization: table
-incremental:
-  enabled: true
+timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: day
+incremental:
+  enabled: true
 ---
 
 SELECT
@@ -38,29 +44,31 @@ WHERE transaction_timestamp IS NOT NULL
 GROUP BY 1, 2
 ```
 
+`timeseries:` declares the time dimension; `incremental:` opts the model into incremental execution.
+
 ### smelt.yml example
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
-    incremental:
-      enabled: true
+    timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
+    incremental:
+      enabled: true
 ```
 
-### Configuration fields
+### `incremental:` fields
 
 | Field | Required | Description |
 |---|---|---|
 | `enabled` | No | Defaults to `true`. Set to `false` to disable incremental processing. |
-| `event_time_column` | Yes | Column in the **source** data used for the WHERE filter. smelt injects `WHERE event_time_column >= start AND event_time_column < end`. |
-| `partition_column` | Yes | Column in the **output** data used for the DELETE step. smelt runs `DELETE FROM table WHERE partition_column >= start AND partition_column < end` before inserting. |
-| `granularity` | Yes | Time granularity for partitions. One of: `hour`, `day`, `week`, `month`, `quarter`, `year`. |
 | `unique_key` | No | List of columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
 | `safety_overrides` | No | Override safety checks for patterns that may behave differently on partial data. See [Safety analysis](#safety-analysis). |
+
+For the `timeseries:` fields (`event_time_column`, `partition_column`, `granularity`, `week_start`), see the [timeseries reference](../reference/timeseries.md).
 
 ### Granularity options
 
@@ -148,11 +156,12 @@ ORDER BY 1, 2
 models:
   daily_revenue:
     materialization: table
-    incremental:
-      enabled: true
+    timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
+    incremental:
+      enabled: true
 ```
 
 **Running it**:
@@ -184,6 +193,27 @@ smelt statically analyzes your SQL for patterns that can produce incorrect resul
 | Subqueries | Subqueries may reference data outside the filtered time range. |
 | DISTINCT | `SELECT DISTINCT` on partial data may miss duplicates that span partition boundaries. |
 
+### When a model is refused
+
+If a model fails the safety classifier, `smelt run` exits non-zero and prints a diagnostic:
+
+```
+Error: Incremental safety check refused the following model(s). Fix the SQL or use
+--allow-downgrade to fall back to full-table refresh:
+  • Model 'daily_sessions': window functions (OVER clause) are not compatible with
+    incremental materialization — they may produce different results on partial data
+```
+
+**The recommended fix** is to rewrite the SQL to remove the unsafe pattern, then use `safety_overrides` if you are confident the specific usage is partition-safe.
+
+**Temporary escape hatch** — if you need to unblock a run while the fix is in progress, pass `--allow-downgrade`:
+
+```bash
+smelt run --event-time-start 2025-01-01 --event-time-end 2025-01-02 --allow-downgrade
+```
+
+With `--allow-downgrade` set, refused models fall back to a full-table refresh for this run. A warning is emitted for each downgraded model. This flag must be passed explicitly every time; it is not persisted anywhere. Using it regularly means the model is not actually running incrementally — fix the SQL instead.
+
 ### Overriding safety checks
 
 If you understand the implications and the pattern is safe in your specific case, use `safety_overrides`:
@@ -192,11 +222,12 @@ If you understand the implications and the pattern is safe in your specific case
 models:
   my_model:
     materialization: table
-    incremental:
-      enabled: true
+    timeseries:
       event_time_column: event_time
       partition_column: event_date
       granularity: day
+    incremental:
+      enabled: true
       safety_overrides:
         allow_window_functions: true
         allow_having: true
@@ -208,6 +239,144 @@ models:
 
 !!! warning
     Only override safety checks when you have verified that your specific query produces correct results on partial data. For example, a window function partitioned by date is safe for daily incremental processing, but one partitioned by user is not.
+
+### Partition-aligned window functions
+
+You do not need a safety override for window functions that are **partition-aligned** — where the `PARTITION BY` keys of the window include the model's `partition_column`. The optimizer admits these directly because each window is evaluated within a single output partition: the DELETE+INSERT contract deletes and re-inserts entire partitions, and a window that cannot look across partition boundaries produces the same result on partial data as on the full table.
+
+For a model with `partition_column: event_date`, these windows are admissible without any override:
+
+```sql
+-- Admitted: PARTITION BY contains event_date (equality)
+FIRST_VALUE(user_id) OVER (PARTITION BY event_date ORDER BY event_ts) AS first_user
+
+-- Admitted: PARTITION BY contains event_date (superset — extra key is fine)
+FIRST_VALUE(user_id) OVER (PARTITION BY event_date, device_id ORDER BY event_ts) AS first_user
+```
+
+These windows are **not** admissible (and will be refused) because their `PARTITION BY` keys do not include `event_date`:
+
+```sql
+-- Refused: PARTITION BY does not contain event_date
+ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_ts) AS rn
+
+-- Refused: no PARTITION BY at all
+SUM(amount) OVER (ORDER BY event_ts) AS running_total
+```
+
+Use `safety_overrides.allow_window_functions: true` for windows that cannot be partition-aligned and that you have verified are safe in your specific context.
+
+## Per-source lookback derivation
+
+For each upstream `smelt.<path>` reference in an incremental model body, the planner derives how far outside the run window that source must be read. This **bound** has the form `(before, after)`: read the source starting `before` seconds before the run start and ending `after` seconds after the run end.
+
+The planner recognises two standard SQL forms:
+
+### Form A — window-frame `RANGE BETWEEN INTERVAL`
+
+When a window function uses an explicit `RANGE BETWEEN INTERVAL '…' PRECEDING` clause, the interval becomes the source's lookback:
+
+```sql
+SELECT
+    device_id,
+    event_ts,
+    LAG(event_ts) OVER (
+        PARTITION BY device_id
+        ORDER BY event_ts
+        RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW
+    ) AS prev_ts
+FROM smelt.silver.events_parsed
+```
+
+The planner reads `INTERVAL '30 minutes' PRECEDING` and derives `before = PT30M` for `events_parsed`.
+
+A bare `LAG(x) OVER (PARTITION BY id ORDER BY ts)` without a `RANGE BETWEEN` clause is **not derivable** — the planner cannot determine the lookback and will refuse the model at planning time. Rewrite it with an explicit `RANGE BETWEEN INTERVAL '…' PRECEDING` clause.
+
+### Form B — explicit WHERE/JOIN interval filters
+
+When the model's WHERE clause or a JOIN condition contains an explicit `INTERVAL` offset on a source column, the interval becomes the source's bound:
+
+```sql
+-- Same-column lookback: reads 1 day before the run window
+WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1 day' AND m.partition_date
+```
+
+```sql
+-- Cross-column rebase: UTC timestamps into local-date partitions
+WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL '1 day'
+                          AND m.event_date_local + INTERVAL '1 day'
+```
+
+Both `BETWEEN` form and paired `>=` / `<` form are read:
+
+```sql
+WHERE s.event_date >= m.partition_date - INTERVAL '1 day'
+  AND s.event_date < m.partition_date
+```
+
+### Viewing derived bounds
+
+Run `smelt explain --json` to see the derived bound map for each incremental model:
+
+```bash
+smelt explain --json | jq '.models.sessions.incremental.source_bounds'
+```
+
+Example output:
+```json
+{
+  "events_parsed": {
+    "type": "bounded",
+    "partition_col": "event_date",
+    "before": "PT0S",
+    "after": "PT0S"
+  }
+}
+```
+
+Durations use ISO-8601 format: `PT30M` (30 minutes), `P1D` (1 day), `PT0S` (zero / partition-local).
+
+### When the bound is not derivable
+
+If the planner cannot derive a bound for a source — a bare window function without a `RANGE` clause, or a computed-expression join with no explicit interval filter — the model is **refused at planning time** with a diagnostic naming the offending source. Rewrite using Form A or Form B to give the planner enough information to prove the lookback.
+
+Sources without `timeseries:` declared (lookup tables, dimension tables) are always read in full and do not appear in the bound map.
+
+### Source-filter pushdown
+
+Once smelt derives the bound for a source, it automatically injects a pushdown `WHERE` filter on that source's `FROM` clause. For a run window `[run_start, run_end)` and a source with bound `Bounded(col, before, after)`:
+
+```sql
+-- Injected by the planner on the source's FROM:
+WHERE col >= run_start - before
+  AND col <  run_end + after
+```
+
+This filter is applied **per source reference** before compilation — each `smelt.<path>` reference in the model SQL gets its own pushdown WHERE. The outer model WHERE (constraining the model's output to the run window using the model's own `partition_column`) is unchanged and applied separately.
+
+**Example.** A sessions model that reads `smelt.silver.events_parsed` (partition column `event_date`) with a derived bound of `PT0S`/`PT0S` (partition-local, no lookback) for a run window `[2024-01-15, 2024-01-16)`:
+
+```sql
+-- Before pushdown (model SQL):
+WITH sessionized AS (
+  SELECT * FROM smelt.functions.sessionize(
+    source => smelt.silver.events_parsed, ...
+  )
+) ...
+
+-- After pushdown (what the engine sees):
+WITH sessionized AS (
+  SELECT * FROM smelt.functions.sessionize(
+    source => (SELECT * FROM smelt.silver.events_parsed
+               WHERE event_date >= '2024-01-15'
+                 AND event_date < '2024-01-16'), ...
+  )
+) ...
+```
+
+Lookup sources (those without `timeseries:`) are never pushdown candidates — they are read in full each run. Pushdown is per-reference: a self-join on a timeseries source receives the same widened filter on each occurrence.
+
+> **Current scope:** pushdown applies the bound derived from the **outer SQL body**. `smelt.define` function bodies are not yet expanded before bound derivation, so a source whose only INTERVAL pattern is inside a function body receives a partition-local (`PT0S`) filter. The exact run-window filter is still correct for correctness; it may read more data than necessary if the function body introduces a wider lookback. Full expansion-before-derivation is tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
 
 ## Batching
 
@@ -257,6 +426,29 @@ smelt history daily_revenue
 smelt history --limit 50
 ```
 
+## Run window vs partition granularity
+
+The `--event-time-start` / `--event-time-end` flags declare a **run window** — not a per-partition invocation. The window must be a positive integer multiple of the model's `timeseries.granularity` aligned to granularity boundaries, but inside that constraint the window size and the partition unit are independent.
+
+For a daily-partitioned model, all of the following are valid:
+
+```bash
+# One-day run
+smelt run daily_revenue --event-time-start 2025-03-01 --event-time-end 2025-03-02
+
+# One-week run — one engine query, seven partitions written
+smelt run daily_revenue --event-time-start 2025-03-01 --event-time-end 2025-03-08
+
+# 60-day backfill — one engine query, sixty partitions written
+smelt run daily_revenue --event-time-start 2025-01-01 --event-time-end 2025-03-02
+```
+
+For `FullyBatchSafe` models, the entire window runs as a single engine query covering the whole range, then a single `DELETE` over the partitions in the window followed by `INSERT`. Backfilling 60 days is one invocation, not sixty.
+
+For `BoundedSafe(n)` models, the window is auto-chunked into sub-ranges sized to `n` partitions each; each chunk is one engine query and one DELETE+INSERT transaction. `PerPartitionOnly` models still run one partition at a time, sequentially.
+
+Misaligned windows (not an integer multiple of granularity, or endpoints that aren't on granularity boundaries) are rejected at planning time with a clear diagnostic.
+
 ## Backbuilding
 
 Backbuilding rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
@@ -271,8 +463,7 @@ The `+` prefix means "include upstream dependencies." smelt will:
 2. Process each upstream model for the specified time range, in topological order.
 3. Process the target model last.
 
-!!! tip
-    Backbuilding respects the same `--batch-size` and `--per-partition` options as `smelt run`.
+Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
 ## Incremental strategies
 
@@ -280,10 +471,20 @@ smelt supports multiple strategies for how data is updated. The strategy is chos
 
 | Strategy | When used | Behavior |
 |---|---|---|
-| `delete_insert` | Default when no `unique_key` | DELETE matching partitions, then INSERT new data |
-| `merge` | When `unique_key` is set and backend supports it | MERGE/UPSERT based on unique key columns |
+| `delete_insert` | Default | DELETE matching partitions, then INSERT new data |
 | `append` | Append-only workloads | INSERT only, no deletion |
 | `insert_overwrite` | Backend-specific optimization | Overwrite entire partitions atomically |
+
+UPSERT (`MERGE`) is **not** an incremental strategy — it is the backend primitive used by the [`cumulative_aggregate` materialization](materializations.md#cumulative_aggregate), which is a separate sibling rule with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `cumulative_aggregate`, not `incremental`.
+
+## Incremental vs cumulative
+
+`incremental` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `cumulative_aggregate` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
+
+- Use `incremental` when the answer to "what did this partition produce?" is well-defined and stable.
+- Use `cumulative_aggregate` when the answer is "what's the running total per key?".
+
+See the [materializations guide](materializations.md#incremental-vs-cumulative_aggregate) for a side-by-side comparison.
 
 ## Schema evolution
 
@@ -297,5 +498,6 @@ When an incremental model's output schema changes (columns added, types widened,
 ## Further reading
 
 - [Materializations](materializations.md) for an overview of all materialization types
+- [cumulative_aggregate](materializations.md#cumulative_aggregate) for cumulative state (one row per key)
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs

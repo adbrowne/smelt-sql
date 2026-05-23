@@ -96,60 +96,12 @@ async fn test_late_arriving_data_captured_by_reprocess() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_late_arriving_data_with_merge() -> Result<()> {
-    let (_dir, backend) = setup_backend().await?;
-    seed_with_late_arrivals(&backend).await?;
-
-    // Process incrementally with MERGE
-    run_incremental_sequence(
-        &backend,
-        "inc_merge_lookback",
-        &daily_revenue_filtered,
-        &[
-            TestTimeRange {
-                start: "2024-12-25".into(),
-                end: "2024-12-26".into(),
-            },
-            TestTimeRange {
-                start: "2024-12-26".into(),
-                end: "2024-12-27".into(),
-            },
-        ],
-        IncrementalStrategy::Merge,
-        "revenue_date",
-        &["revenue_date".to_string(), "user_id".to_string()],
-    )
-    .await?;
-
-    // Late arrivals
-    insert_late_arrivals(&backend).await?;
-
-    // Re-MERGE Dec 25
-    run_incremental_sequence(
-        &backend,
-        "inc_merge_lookback",
-        &daily_revenue_filtered,
-        &[TestTimeRange {
-            start: "2024-12-25".into(),
-            end: "2024-12-26".into(),
-        }],
-        IncrementalStrategy::Merge,
-        "revenue_date",
-        &["revenue_date".to_string(), "user_id".to_string()],
-    )
-    .await?;
-
-    run_full_refresh(
-        &backend,
-        "baseline_merge_lookback",
-        &daily_revenue_filtered("2024-12-25", "2024-12-27"),
-    )
-    .await?;
-
-    assert_tables_equal(&backend, "baseline_merge_lookback", "inc_merge_lookback").await?;
-    Ok(())
-}
+// `test_late_arriving_data_with_merge` was deleted along with the
+// `IncrementalStrategy::Merge` variant. MERGE is now the physical primitive of
+// `materialization: cumulative_aggregate`; the late-arriving-data semantics
+// for cumulative tables are covered by the cross-partition equivalence
+// harness in `crates/smelt-cli/tests/cumulative_equivalence/` and by the
+// Reprocessing semantics section of `docs/specs/cumulative_aggregate.md`.
 
 #[tokio::test]
 async fn test_lookback_window_wider_than_partition() -> Result<()> {

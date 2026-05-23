@@ -3,7 +3,7 @@ use crate::errors::CliError;
 use anyhow::Result;
 use smelt_backend::{
     Backend, ExecutionResult, IncrementalStrategy, Materialization, MaterializationStrategy,
-    PartitionSpec,
+    PartitionRange,
 };
 use smelt_core::SourcesConfig;
 
@@ -24,6 +24,12 @@ pub async fn execute_model(
         }
         crate::config::Materialization::Test => {
             unreachable!("Test models should not be executed directly")
+        }
+        crate::config::Materialization::CumulativeAggregate => {
+            unreachable!(
+                "cumulative_aggregate models are dispatched through the cumulative loop, \
+                 not the standard execute_model path"
+            )
         }
     };
 
@@ -55,7 +61,7 @@ pub async fn execute_model_incremental(
     backend: &dyn Backend,
     compiled: &CompiledModel,
     schema: &str,
-    partition: PartitionSpec,
+    partition: PartitionRange,
     inc_strategy: IncrementalStrategy,
     unique_key: Vec<String>,
     show_results: bool,
@@ -188,7 +194,7 @@ pub async fn execute_plan_incremental(
     model_name: &str,
     steps: &[smelt_planner::ExecutionStep],
     schema: &str,
-    partition: PartitionSpec,
+    partition: PartitionRange,
     event_time_column: &str,
     time_range: &crate::transformer::TimeRange,
     inc_strategy: IncrementalStrategy,
@@ -255,21 +261,12 @@ pub async fn execute_plan_incremental(
                             source: e.into(),
                         })?;
                 } else {
+                    let _ = &unique_key; // reserved for future audit/logging use
                     match inc_strategy {
                         IncrementalStrategy::DeleteInsert => {
                             // Partitions already deleted above
                             backend
                                 .insert_into_from_query(schema, model_name, sql)
-                                .await
-                                .map_err(|e| CliError::ExecutionError {
-                                    model: model_name.to_string(),
-                                    sql: sql.clone(),
-                                    source: e.into(),
-                                })?;
-                        }
-                        IncrementalStrategy::Merge => {
-                            backend
-                                .merge_into(schema, model_name, sql, &unique_key)
                                 .await
                                 .map_err(|e| CliError::ExecutionError {
                                     model: model_name.to_string(),

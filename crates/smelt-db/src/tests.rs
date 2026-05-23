@@ -3975,7 +3975,8 @@ fn columns_of_salsa_query_resolves_smelt_path_schema() {
     db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
     let ws = db.sync_workspace();
-    let result = columns_of_for_table_expr(&db.db, ws, "orders".to_string());
+    let project = db.db.project_input(&PathBuf::from(".")).expect("project");
+    let result = columns_of_for_table_expr(&db.db, ws, project, "orders".to_string());
 
     // Should resolve successfully.
     let cols = result.expect("columns_of_for_table_expr must resolve orders");
@@ -4029,7 +4030,8 @@ fn columns_of_returns_err_for_nonexistent_model() {
     db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
     let ws = db.sync_workspace();
-    let result = columns_of_for_table_expr(&db.db, ws, "nonexistent".to_string());
+    let project = db.db.project_input(&PathBuf::from(".")).expect("project");
+    let result = columns_of_for_table_expr(&db.db, ws, project, "nonexistent".to_string());
 
     assert!(
         result.is_err(),
@@ -4058,8 +4060,9 @@ fn columns_of_invalidates_when_upstream_schema_changes() {
 
     // First evaluation: 1 column.
     let ws = db.sync_workspace();
-    let cols_v1 =
-        columns_of_for_table_expr(&db.db, ws, "orders".to_string()).expect("v1 must resolve");
+    let project = db.db.project_input(&PathBuf::from(".")).expect("project");
+    let cols_v1 = columns_of_for_table_expr(&db.db, ws, project, "orders".to_string())
+        .expect("v1 must resolve");
     assert_eq!(
         cols_v1.len(),
         1,
@@ -4075,8 +4078,9 @@ fn columns_of_invalidates_when_upstream_schema_changes() {
 
     // Second evaluation after invalidation: 2 columns.
     let ws2 = db.sync_workspace();
-    let cols_v2 =
-        columns_of_for_table_expr(&db.db, ws2, "orders".to_string()).expect("v2 must resolve");
+    let project2 = db.db.project_input(&PathBuf::from(".")).expect("project");
+    let cols_v2 = columns_of_for_table_expr(&db.db, ws2, project2, "orders".to_string())
+        .expect("v2 must resolve");
     assert_eq!(
         cols_v2.len(),
         2,
@@ -4415,12 +4419,17 @@ fn model_ref_columns_routes_through_columns_of_query() {
     let model_ref = &models[0];
 
     // Route m.columns through columns_of_for_table_expr using model_name_for_columns.
-    let columns_via_ref =
-        columns_of_for_table_expr(&db.db, ws, model_ref.model_name_for_columns.clone())
-            .expect("columns_of_for_table_expr must succeed for an existing model");
+    let project = db.db.project_input(&root).expect("project");
+    let columns_via_ref = columns_of_for_table_expr(
+        &db.db,
+        ws,
+        project,
+        model_ref.model_name_for_columns.clone(),
+    )
+    .expect("columns_of_for_table_expr must succeed for an existing model");
 
     // Also get directly.
-    let columns_direct = columns_of_for_table_expr(&db.db, ws, "orders".to_string())
+    let columns_direct = columns_of_for_table_expr(&db.db, ws, project, "orders".to_string())
         .expect("columns_of_for_table_expr must succeed directly");
 
     // Byte-equal: same column list via both paths.

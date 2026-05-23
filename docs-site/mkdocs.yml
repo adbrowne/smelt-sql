@@ -102,6 +102,8 @@ nav:
     - CLI Commands: reference/cli.md
     - Project Configuration: reference/smelt-yml.md
     - Sources Configuration: reference/sources-yml.md
+    - Timeseries: reference/timeseries.md
+    - cumulative_aggregate: reference/cumulative-aggregate.md
     - Language Spec: reference/language.md
   - Developing smelt:
     - Architecture: developing/architecture.md

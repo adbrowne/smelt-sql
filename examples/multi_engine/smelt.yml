@@ -28,6 +28,7 @@ models:
     target: spark_docker
     incremental:
       enabled: true
+    timeseries:
       event_time_column: session_start
       partition_column: session_date
       granularity: day
@@ -36,6 +37,7 @@ models:
     target: duckdb_local
     incremental:
       enabled: true
+    timeseries:
       event_time_column: session_date
       partition_column: metric_date
       granularity: day

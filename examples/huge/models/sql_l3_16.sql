@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: event_time
   partition_column: event_date
   granularity: day
@@ -12,4 +13,3 @@ SELECT
     AVG(duration_seconds) AS agg_1
 FROM smelt.sql_l2_32
 GROUP BY quantity
-

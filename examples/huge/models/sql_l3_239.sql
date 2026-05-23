@@ -2,6 +2,7 @@
 materialization: table
 incremental:
   enabled: true
+timeseries:
   event_time_column: event_time
   partition_column: event_date
   granularity: day
@@ -13,4 +14,3 @@ SELECT
     is_verified
 FROM smelt.sql_l2_81
 WHERE event_type = 'purchase'
-

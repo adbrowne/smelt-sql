@@ -2,6 +2,7 @@ pub mod backend_registry;
 pub mod backfill;
 pub mod compiler;
 pub mod config;
+pub mod cumulative;
 pub mod discovery;
 pub mod docs;
 pub mod docs_render;
@@ -27,9 +28,9 @@ pub use backfill::{
     format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
 };
 pub use compiler::{
-    build_fn_body_map, build_fn_body_map_from_model_files, prepend_ephemeral_ctes,
-    resolve_refs_in_sql, CompiledModel, CompilerRegistry, EphemeralResolver, FnBodyMap,
-    SqlCompiler,
+    build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
+    prepend_ephemeral_ctes, resolve_refs_in_sql, CompiledModel, CompilerRegistry,
+    EphemeralResolver, FnBodyMap, SqlCompiler,
 };
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
@@ -43,10 +44,14 @@ pub use physical_graph::{PhysicalGraph, PhysicalGraphBuilder, PhysicalNode, Phys
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
-pub use temporal::{compute_incremental_windows, IncrementalWindows};
+pub use temporal::{
+    compute_incremental_windows, validate_run_window_alignment, IncrementalWindows,
+};
 pub use test_compiler::{compile_whole_model_test_with_fns, extract_ctes, CteInfo};
 pub use test_runner::TestResult;
-pub use transformer::{inject_time_filter, TimeRange, TransformError};
+pub use transformer::{
+    inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
+};
 
 use anyhow::Context as _;
 use std::collections::HashMap;

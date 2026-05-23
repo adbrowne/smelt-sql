@@ -415,12 +415,30 @@ pub type Range = smelt_parser::ast::Range;
 
 /// Resolve a `smelt.ref(name)` call to the `SourceFile` that defines it.
 #[salsa::tracked]
+/// Resolve a bare `smelt.models.<name>` reference to the file that defines
+/// the model, scoped to `project`.
+///
+/// Project-scoped per `docs/specs/architecture.md` → "Project isolation
+/// rule": a workspace folder may contain multiple smelt projects, and each
+/// project is a closed resolution scope. Without filtering, a same-named
+/// model in another project leaks into this project's name lookups — see
+/// `crates/smelt-lsp/tests/example_workspaces.rs::
+/// no_cross_project_column_type_leak_through_resolve_ref` for the failure
+/// shape the rule prevents.
+///
+/// Callers thread the project through from the file under analysis:
+/// `source_file.project_root(db)` → `find_project(workspace, root)`.
 pub fn resolve_ref(
     db: &dyn salsa::Database,
     workspace: Workspace,
+    project: ProjectInput,
     model_name: String,
 ) -> Option<SourceFile> {
+    let project_root = project.root(db);
     for file in workspace.files(db).iter().copied() {
+        if file.project_root(db) != project_root {
+            continue;
+        }
         if let Some(model) = parse_model(db, file) {
             if model.name == model_name {
                 return Some(file);
@@ -886,6 +904,46 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // Timeseries / incremental frontmatter validation.
+    // Runs on every non-CSV, non-generator file that has Single frontmatter.
+    // Calls the pure `validate_timeseries` function from smelt-core and maps
+    // its errors into DiagnosticAcc entries so they surface through
+    // `file_diagnostics`.
+    if let Ok(FileMetadata::Single {
+        ref metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    {
+        let sql_body = &text[sql_offset..];
+        if let Err(ts_err) = smelt_core::metadata::validate_timeseries(metadata, sql_body) {
+            let maybe_diag = match &ts_err {
+                smelt_core::metadata::MetadataError::TimeseriesRequiredForIncremental => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::TimeseriesRequiredForIncremental,
+                )),
+                smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
+                    Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
+                }
+                // Other MetadataError variants are already handled by the generates-key
+                // block above or by serde_yaml at parse time; skip them here.
+                _ => None,
+            };
+            if let Some((message, code)) = maybe_diag {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message,
+                    range: Range {
+                        start: Position { line: 0, column: 0 },
+                        end: Position { line: 0, column: 0 },
+                    },
+                    code: Some(code),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+        }
+    }
+
     // Parse errors
     let parse = parse_file(db, file);
     for error in parse.errors.iter() {
@@ -1121,9 +1179,8 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Undefined refs (legacy `smelt.models.name` form)
     let refs = model_refs(db, file);
     for ref_loc in refs.iter() {
-        if resolve_ref(db, workspace, ref_loc.name.clone()).is_none()
-            && !is_known_seed(db, workspace, &ref_loc.name)
-        {
+        let resolved = project.and_then(|p| resolve_ref(db, workspace, p, ref_loc.name.clone()));
+        if resolved.is_none() && !is_known_seed(db, workspace, &ref_loc.name) {
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Undefined model reference: '{}'", ref_loc.name),
@@ -1477,7 +1534,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                             Some(n) => n,
                             None => continue,
                         };
-                        if columns_of_for_table_expr(db, workspace, model_name.clone()).is_err() {
+                        let resolves = project
+                            .map(|p| {
+                                columns_of_for_table_expr(db, workspace, p, model_name.clone())
+                                    .is_ok()
+                            })
+                            .unwrap_or(false);
+                        if !resolves {
                             let call_range =
                                 smelt_parser::ast::text_range_to_range(text, node.text_range());
                             DiagnosticAcc(Diagnostic {

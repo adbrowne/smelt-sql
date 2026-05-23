@@ -1,16 +1,17 @@
 use anyhow::{Context, Result};
 use arrow::util::pretty;
 use chrono::{NaiveDate, Utc};
-use smelt_backend::PartitionSpec;
+use smelt_backend::PartitionRange;
 use smelt_cli::{
-    compiler::UpstreamSchemas, compute_batches_for_model, compute_incremental_windows,
-    discover_emitted_model_files, discover_python_models, executor, find_project_root, init_db,
-    inject_time_filter, migration, parse_selector, BackendRegistry, BackfillOptions,
-    CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
-    PhysicalStrategy, SourcesConfig, TimeRange,
+    build_source_bound_map, compiler::UpstreamSchemas, compute_batches_for_model,
+    compute_incremental_windows, discover_emitted_model_files, discover_python_models, executor,
+    find_project_root, init_db, inject_source_filters, inject_time_filter, migration,
+    parse_selector, BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph,
+    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
+    TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
-use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
+use smelt_planner::{derive_model_source_bounds, Frontmatter, ModelGraph, ModelInfo, Planner};
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
@@ -460,6 +461,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             name: model.name.clone(),
             sql: model.content.clone(),
             refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
             incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
         });
     }
@@ -467,8 +469,66 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let planner = Planner::new();
     let (transformations, plan_errors) = planner.plan(&opt_graph);
 
-    for err in &plan_errors {
-        warn!("Planner error: {}", err);
+    if !plan_errors.is_empty() {
+        if args.allow_downgrade {
+            // Explicit opt-in: log and continue with full-table refresh fallback.
+            for err in &plan_errors {
+                warn!(
+                    "Incremental safety check failed (falling back to full-table refresh \
+                     because --allow-downgrade is set): {}",
+                    err
+                );
+            }
+        } else {
+            // Hard refusal: models that fail the safety classifier are not run.
+            // Use --allow-downgrade to enable full-table fallback as an escape hatch.
+            let mut msg = String::from(
+                "Incremental safety check refused the following model(s). \
+                 Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n",
+            );
+            for err in &plan_errors {
+                msg.push_str("  • ");
+                msg.push_str(err);
+                msg.push('\n');
+            }
+            return Err(anyhow::anyhow!("{}", msg.trim_end()));
+        }
+    }
+
+    // Constraint 10: derive per-source temporal bounds for every incremental model.
+    // A model whose SQL contains a bare LAG/LEAD (no RANGE BETWEEN INTERVAL) over a
+    // timeseries source produces NotDerivable — refuse execution unless --allow-downgrade.
+    {
+        let mut bound_errors: Vec<String> = Vec::new();
+        for model_info in opt_graph.models() {
+            if model_info.incremental_config.is_some() && model_info.timeseries_config.is_some() {
+                if let Err(diag) = derive_model_source_bounds(model_info, &opt_graph) {
+                    bound_errors.push(diag);
+                }
+            }
+        }
+        if !bound_errors.is_empty() {
+            if args.allow_downgrade {
+                for err in &bound_errors {
+                    warn!(
+                        "Bound derivation failed (falling back to full-table refresh \
+                         because --allow-downgrade is set): {}",
+                        err
+                    );
+                }
+            } else {
+                let mut msg = String::from(
+                    "Temporal bound derivation refused the following model(s) — \
+                     Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n",
+                );
+                for err in &bound_errors {
+                    msg.push_str("  • ");
+                    msg.push_str(err);
+                    msg.push('\n');
+                }
+                return Err(anyhow::anyhow!("{}", msg.trim_end()));
+            }
+        }
     }
 
     // 10. Build physical graph (resolves strategies, ephemeral resolvers)
@@ -798,9 +858,107 @@ pub async fn run(args: RunArgs) -> Result<()> {
             &phys_node.strategy
         };
 
+        // `cumulative_aggregate` is dispatched outside the PhysicalStrategy
+        // match: the rule has its own per-partition merge loop. It still needs
+        // a `[start, end)` run window, so we require an incremental-style time
+        // range on the CLI invocation. The driving source's timeseries: comes
+        // from the upstream model's metadata, gathered from the logical graph.
+        if phys_node.materialization == Materialization::CumulativeAggregate {
+            // Without a time range, fall back to single-shot full refresh: the
+            // SELECT is run once, with no per-partition source filter, and the
+            // result is CREATE TABLE AS'd. This makes `smelt build` work
+            // without requiring `--event-time-start`/`--event-time-end` while
+            // an explicit run window still drives the per-partition merge loop.
+            let cumulative_time_range = match time_range.clone() {
+                Some(r) => r,
+                None => {
+                    info!(
+                        "Running model: {} (cumulative_aggregate, full refresh — no run window)",
+                        model_name
+                    );
+                    let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+                    let compiled = compiler
+                        .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
+                        .with_context(|| format!("Failed to compile model: {}", model_name))?;
+                    backend
+                        .drop_table_if_exists(schema, &db_table_name)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to drop {}: {}", db_table_name, e))?;
+                    backend
+                        .create_table_as(schema, &db_table_name, &compiled.sql)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to create cumulative model {}: {}",
+                                model_name,
+                                e
+                            )
+                        })?;
+                    let row_count = backend
+                        .get_row_count(schema, &db_table_name)
+                        .await
+                        .unwrap_or(0);
+                    let result = smelt_backend::ExecutionResult {
+                        model_name: model_name.to_string(),
+                        duration: std::time::Duration::from_millis(0),
+                        row_count,
+                        preview: None,
+                    };
+                    info!(
+                        "{} done ({} rows, full refresh)",
+                        result.model_name, result.row_count
+                    );
+                    results.push((result, phys_node.strategy.clone()));
+                    continue;
+                }
+            };
+
+            // Build the source_timeseries map from the logical graph: every
+            // dependency whose declared `timeseries:` block is non-None.
+            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
+            if let Ok(node) = graph.get_node(model_name) {
+                for dep_name in &node.dependencies {
+                    if let Ok(dep_node) = graph.get_node(dep_name) {
+                        if let Some(ts) = &dep_node.timeseries {
+                            // Key by the smelt.<path> reference as it appears
+                            // in the model SQL — the dep_node carries
+                            // address_segments.
+                            let smelt_key =
+                                format!("smelt.{}", dep_node.model_file.address_segments.join("."));
+                            source_timeseries.insert(smelt_key, ts.clone());
+                        }
+                    }
+                }
+            }
+
+            let result = smelt_cli::cumulative::execute_cumulative_aggregate(
+                backend,
+                model,
+                &compilers,
+                &physical_graph,
+                &phys_node.target,
+                schema,
+                &db_table_name,
+                &cumulative_time_range,
+                &source_timeseries,
+                args.verbose,
+            )
+            .await
+            .with_context(|| format!("Failed to execute cumulative model: {}", model_name))?;
+
+            info!(
+                "{} done ({} rows, {:?})",
+                result.model_name, result.row_count, result.duration
+            );
+
+            results.push((result, phys_node.strategy.clone()));
+            continue;
+        }
+
         let result = match effective_strategy {
             PhysicalStrategy::Incremental {
                 config: inc_config,
+                timeseries: inc_ts,
                 time_range: range,
                 plan_steps: Some(steps),
             } => {
@@ -815,11 +973,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let model_latency = model
                     .metadata
                     .as_ref()
-                    .and_then(|m| m.columns.get(&inc_config.event_time_column))
+                    .and_then(|m| m.columns.get(&inc_ts.event_time_column))
                     .and_then(|c| c.data_latency.as_ref());
                 let windows = compute_incremental_windows(
                     &model.content,
                     inc_config,
+                    inc_ts,
                     sources.as_ref(),
                     model_latency,
                     range,
@@ -831,14 +990,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     debug!("Temporal window: {}", windows.effective_window.explanation);
                 }
 
-                let partition_values = generate_partition_values(
-                    &windows.partition_range.start,
-                    &windows.partition_range.end,
-                    &inc_config.granularity,
-                )?;
-                let partition = PartitionSpec {
-                    column: inc_config.partition_column.clone(),
-                    values: partition_values,
+                let partition = PartitionRange {
+                    column: inc_ts.partition_column.clone(),
+                    start: windows.partition_range.start.clone(),
+                    end: windows.partition_range.end.clone(),
                 };
 
                 executor::execute_plan_incremental(
@@ -847,7 +1002,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     steps,
                     schema,
                     partition,
-                    &inc_config.event_time_column,
+                    &inc_ts.event_time_column,
                     &windows.filter_range,
                     resolved_strategy,
                     inc_config.unique_key.clone(),
@@ -866,6 +1021,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
             PhysicalStrategy::Incremental {
                 config: inc_config,
+                timeseries: inc_ts,
                 time_range: range,
                 plan_steps: None,
             } => {
@@ -875,20 +1031,46 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let model_latency = model
                     .metadata
                     .as_ref()
-                    .and_then(|m| m.columns.get(&inc_config.event_time_column))
+                    .and_then(|m| m.columns.get(&inc_ts.event_time_column))
                     .and_then(|c| c.data_latency.as_ref());
                 let windows = compute_incremental_windows(
                     &model.content,
                     inc_config,
+                    inc_ts,
                     sources.as_ref(),
                     model_latency,
                     range,
                 );
 
+                // Validate run-window alignment against the model's granularity.
+                // The window [start, end) must be a positive integer multiple of
+                // `granularity` aligned to granularity boundaries.
+                {
+                    use chrono::NaiveDate;
+                    let start_date = NaiveDate::parse_from_str(&range.start, "%Y-%m-%d")
+                        .with_context(|| format!("Invalid start date: {}", range.start))?;
+                    let end_date = NaiveDate::parse_from_str(&range.end, "%Y-%m-%d")
+                        .with_context(|| format!("Invalid end date: {}", range.end))?;
+                    smelt_cli::validate_run_window_alignment(
+                        start_date,
+                        end_date,
+                        &inc_ts.granularity,
+                    )
+                    .map_err(|msg| {
+                        anyhow::anyhow!(
+                            "Run window not aligned for model '{}' (granularity: {:?}): {}",
+                            model_name,
+                            inc_ts.granularity,
+                            msg
+                        )
+                    })?;
+                }
+
                 // Compute smart batching based on batch safety analysis
                 let (batch_safety, batches) = compute_batches_for_model(
                     &model.content,
                     inc_config,
+                    inc_ts,
                     range,
                     &windows.filter_range,
                     &backfill_options,
@@ -948,9 +1130,37 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     }
 
                     let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+
+                    // Phase 5: Source-filter pushdown.
+                    // Inject per-reference WHERE filters for each bounded timeseries source
+                    // *before* the outer model WHERE (inject_time_filter below).
+                    // This constrains each source scan to `[run_start - before, run_end + after)`.
+                    // Constraint 5: outer-model WHERE and source-filter pushdown are independent.
+                    let source_pushed_sql = {
+                        let mut dep_timeseries: HashMap<String, (Vec<String>, String)> =
+                            HashMap::new();
+                        if let Ok(node) = graph.get_node(model_name) {
+                            for dep_name in &node.dependencies {
+                                if let Ok(dep_node) = graph.get_node(dep_name) {
+                                    if let Some(ts) = &dep_node.timeseries {
+                                        dep_timeseries.insert(
+                                            dep_name.clone(),
+                                            (
+                                                dep_node.model_file.address_segments.clone(),
+                                                ts.partition_column.clone(),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let bound_map = build_source_bound_map(&clean_sql, &dep_timeseries);
+                        inject_source_filters(&clean_sql, &bound_map, &batch.filter_range)
+                    };
+
                     let transformed_sql = inject_time_filter(
-                        &clean_sql,
-                        &inc_config.event_time_column,
+                        &source_pushed_sql,
+                        &inc_ts.event_time_column,
                         &batch.filter_range,
                     )
                     .with_context(|| {
@@ -971,37 +1181,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         println!("{}", compiled.sql);
                     }
 
-                    let partition_values = generate_partition_values(
-                        &batch.partition_range.start,
-                        &batch.partition_range.end,
-                        &inc_config.granularity,
-                    )?;
+                    let partition = PartitionRange {
+                        column: inc_ts.partition_column.clone(),
+                        start: batch.partition_range.start.clone(),
+                        end: batch.partition_range.end.clone(),
+                    };
 
                     if effective_batches.len() == 1 {
                         debug!(
-                            "Partitions to update: {} ({} {})",
-                            if partition_values.len() <= 3 {
-                                partition_values.join(", ")
-                            } else {
-                                format!(
-                                    "{}, ..., {}",
-                                    partition_values
-                                        .first()
-                                        .expect("partition_values is non-empty when len > 3"),
-                                    partition_values
-                                        .last()
-                                        .expect("partition_values is non-empty when len > 3")
-                                )
-                            },
-                            partition_values.len(),
-                            granularity_label(&inc_config.granularity),
+                            "Partition window: [{}, {}) ({})",
+                            partition.start,
+                            partition.end,
+                            granularity_label(&inc_ts.granularity),
                         );
                     }
-
-                    let partition = PartitionSpec {
-                        column: inc_config.partition_column.clone(),
-                        values: partition_values,
-                    };
 
                     let result = executor::execute_model_incremental(
                         backend,
@@ -1101,6 +1294,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let (strategy_name, tr, partitions, batch_safety_label) = match strategy {
             PhysicalStrategy::Incremental {
                 config: inc,
+                timeseries: inc_ts,
                 time_range: range,
                 ..
             } => {
@@ -1113,8 +1307,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         start: range.start.clone(),
                         end: range.end.clone(),
                     }),
-                    generate_partition_values(&range.start, &range.end, &inc.granularity)
-                        .unwrap_or_default(),
+                    generate_partition_values(
+                        &range.start,
+                        &range.end,
+                        &inc_ts.granularity,
+                        inc_ts.week_start.as_ref(),
+                    )
+                    .unwrap_or_default(),
                     Some("incremental".to_string()),
                 )
             }
@@ -1134,9 +1333,21 @@ pub async fn run(args: RunArgs) -> Result<()> {
             },
         );
 
-        // Update interval tracking for incremental models
+        // Update interval tracking for incremental models.
+        //
+        // `result.model_name` is the db-form (e.g. "silver_events_parsed"), but
+        // LogicalGraph::get_model keys by the leaf bare name. For nested models
+        // those forms differ, so a direct get_model lookup fails. Resolve by
+        // matching db_name across the graph as a fallback. (Flat-layout models
+        // hit the fast path because leaf == db_name.)
         if let Some(ref range) = tr {
-            let model = graph.get_model(&result.model_name)?;
+            let model = graph.get_model(&result.model_name).or_else(|_| {
+                graph
+                    .iter_models()
+                    .find(|(_, m)| m.db_name_owned() == result.model_name)
+                    .map(|(_, m)| m)
+                    .ok_or_else(|| anyhow::anyhow!("Model not found: {}", result.model_name))
+            })?;
             let model_hash = compute_model_hash(&model.content);
             let intervals = interval_store.get_or_create(&result.model_name, &model_hash);
             intervals.record_interval(&range.start, &range.end);

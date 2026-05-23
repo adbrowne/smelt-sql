@@ -585,6 +585,46 @@ pub fn hover_text_for_columns_of_call(
     }
 }
 
+/// Render hover text for a plain SQL column reference (`u.user_id` or `user_id`)
+/// inside a SELECT/WHERE/etc. clause.
+///
+/// Shape:
+/// ```text
+/// **`u.user_id`** — `BigInt`
+///
+/// From CTE `sessions`
+/// ```
+///
+/// - `display` is the rendered identifier (qualifier + name as the user typed
+///   them), e.g. `"u.user_id"` or `"user_id"`.
+/// - `typed_col` carries the resolved type; when `None`, the type line shows
+///   `*type unknown*` (column was not resolvable in the local scope — usually
+///   because the upstream model is broken or schema inference bailed out).
+/// - `source_desc` is an already-rendered source hint, e.g.
+///   ``"CTE `sessions`"``, ``"model `users`"``, ``"source `api.orders`"``.
+///   When `None`, the trailing source line is omitted.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_column_reference(
+    display: &str,
+    typed_col: Option<&smelt_types::TypedColumn>,
+    source_desc: Option<&str>,
+) -> String {
+    let type_line = match typed_col {
+        Some(tc) => {
+            let nullable_suffix = if tc.nullable { "?" } else { "" };
+            format!("`{}{}`", tc.data_type, nullable_suffix)
+        }
+        None => "*type unknown*".to_string(),
+    };
+    let mut s = format!("**`{display}`** — {type_line}");
+    if let Some(src) = source_desc {
+        s.push_str("\n\nFrom ");
+        s.push_str(src);
+    }
+    s
+}
+
 /// Render hover text for a `ColumnRef`-typed lambda parameter binding.
 ///
 /// Shows `ColumnRef` as the type and lists the three closed fields with their
@@ -2914,5 +2954,39 @@ mod phase_f_tests {
             "goto_def_for_ternary_keyword must return None (graceful no-op); got: {:?}",
             result
         );
+    }
+
+    // ── SQL column reference hover ──────────────────────────────────────────
+
+    /// Qualified column with a known type and a known source renders type +
+    /// source description on separate lines.
+    #[test]
+    fn column_ref_hover_qualified_with_known_type_and_source() {
+        let tc = smelt_types::TypedColumn {
+            data_type: smelt_types::DataType::BigInt,
+            nullable: false,
+        };
+        let text = hover_text_for_column_reference("u.user_id", Some(&tc), Some("CTE `sessions`"));
+        assert_eq!(text, "**`u.user_id`** — `BIGINT`\n\nFrom CTE `sessions`");
+    }
+
+    /// Nullable type renders a trailing `?` to mirror `format_type` in
+    /// `column_resolution.rs` (the same convention `smelt.models.X` hover uses).
+    #[test]
+    fn column_ref_hover_nullable_renders_question_mark() {
+        let tc = smelt_types::TypedColumn {
+            data_type: smelt_types::DataType::Text,
+            nullable: true,
+        };
+        let text = hover_text_for_column_reference("name", Some(&tc), None);
+        assert_eq!(text, "**`name`** — `TEXT?`");
+    }
+
+    /// Unknown type (resolution failed) renders an italic placeholder; no
+    /// source line when none was supplied.
+    #[test]
+    fn column_ref_hover_unknown_type_no_source() {
+        let text = hover_text_for_column_reference("user_id", None, None);
+        assert_eq!(text, "**`user_id`** — *type unknown*");
     }
 }
