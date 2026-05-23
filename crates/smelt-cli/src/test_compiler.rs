@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::compiler::{substitute_params_with_named, FnBodyMap};
 use smelt_parser::ast::File as AstFile;
+use smelt_runtime::{substitute_params_with_named, FnBodyMap};
 
 /// Information about a CTE extracted from a SQL model.
 #[derive(Debug, Clone)]

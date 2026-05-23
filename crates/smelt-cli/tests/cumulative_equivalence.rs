@@ -21,11 +21,11 @@ use arrow::array::{BooleanArray, Int32Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_cli::cumulative::build_cumulative_merge_sql;
 use smelt_core::config::{Granularity, TimeseriesConfig};
 use smelt_planner::{
     AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
+use smelt_runtime::build_cumulative_merge_sql;
 use tempfile::TempDir;
 
 /// One row in the synthetic source table.

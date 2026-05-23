@@ -7,9 +7,9 @@
 //!
 //! Tests follow red-green TDD: they were written before the implementation.
 
-use smelt_cli::compiler::{SqlCompiler, UpstreamSchemas};
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::{ModelFile, ModelKind};
+use smelt_runtime::{SqlCompiler, UpstreamSchemas};
 use smelt_types::{DataType, TypedColumn};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -174,7 +174,7 @@ fn as_struct_except_excludes_columns() {
 fn smelt_fn_call_expands_body() {
     // A function `safe_div` with params (a, b) and body: a / NULLIF(b, 0)
     let mut compiler = duckdb_compiler();
-    let mut fn_bodies: smelt_cli::compiler::FnBodyMap = HashMap::new();
+    let mut fn_bodies: smelt_runtime::FnBodyMap = HashMap::new();
     fn_bodies.insert(
         "safe_div".to_string(),
         (

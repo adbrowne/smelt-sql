@@ -633,7 +633,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let workspace =
         smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
     {
-        let fn_bodies = smelt_cli::build_fn_body_map(&type_db, workspace);
+        let fn_bodies = smelt_runtime::build_fn_body_map(&type_db, workspace);
         if !fn_bodies.is_empty() {
             compilers.set_function_bodies_all(fn_bodies);
         }
@@ -932,7 +932,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
 
             let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
-            let result = smelt_cli::cumulative::execute_cumulative_aggregate(
+            let result = smelt_runtime::execute_cumulative_aggregate(
                 backend,
                 model,
                 &compilers,

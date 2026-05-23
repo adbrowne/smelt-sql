@@ -7,10 +7,10 @@
 //! that the production codepaths now invoke. They do not execute SQL — they
 //! only assert on emitted text, so no `bundled-duckdb` feature is required.
 
-use smelt_cli::compiler::{build_fn_body_map, CompilerRegistry, SqlCompiler};
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::ModelDiscovery;
 use smelt_cli::init_db;
+use smelt_runtime::{build_fn_body_map, CompilerRegistry, SqlCompiler};
 use std::collections::HashMap;
 use tempfile::TempDir;
 

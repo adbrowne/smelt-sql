@@ -1,4 +1,3 @@
-use crate::compiler::CompiledModel;
 use crate::errors::CliError;
 use anyhow::Result;
 use smelt_backend::{
@@ -6,6 +5,7 @@ use smelt_backend::{
     PartitionRange,
 };
 use smelt_core::SourcesConfig;
+use smelt_runtime::CompiledModel;
 
 /// Execute a compiled model using any Backend implementation.
 pub async fn execute_model(
@@ -196,12 +196,12 @@ pub async fn execute_plan_incremental(
     schema: &str,
     partition: PartitionRange,
     event_time_column: &str,
-    time_range: &crate::transformer::TimeRange,
+    time_range: &smelt_runtime::TimeRange,
     inc_strategy: IncrementalStrategy,
     unique_key: Vec<String>,
     show_results: bool,
 ) -> Result<ExecutionResult> {
-    use crate::transformer::inject_time_filter;
+    use smelt_runtime::inject_time_filter;
 
     let start = std::time::Instant::now();
 

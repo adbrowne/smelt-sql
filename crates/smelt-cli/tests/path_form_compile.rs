@@ -5,10 +5,10 @@
 //! These tests cover the new `smelt_path_ref` and `smelt_path_call` closures
 //! wired into `PrintContext`. No SQL execution — assertions are on emitted text.
 
-use smelt_cli::compiler::CompilerRegistry;
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::ModelDiscovery;
 use smelt_cli::init_db;
+use smelt_runtime::CompilerRegistry;
 use std::collections::HashMap;
 use tempfile::TempDir;
 

@@ -5,10 +5,10 @@
 //! SQL contains the schema-qualified name `main.base` with no residual
 //! `smelt.` prefix.
 
-use smelt_cli::compiler::CompilerRegistry;
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::ModelDiscovery;
 use smelt_cli::init_db;
+use smelt_runtime::CompilerRegistry;
 use std::collections::HashMap;
 use tempfile::TempDir;
 

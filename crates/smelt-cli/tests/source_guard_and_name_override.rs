@@ -9,10 +9,10 @@
 //! `warehouse.users_v2` (not the default schema-qualified name) in the FROM
 //! clause of a model that references `smelt.sources.raw.users`.
 
-use smelt_cli::compiler::{CompilerRegistry, UpstreamSchemas};
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::ModelDiscovery;
 use smelt_cli::init_db;
+use smelt_runtime::{CompilerRegistry, UpstreamSchemas};
 use std::collections::HashMap;
 use tempfile::TempDir;
 

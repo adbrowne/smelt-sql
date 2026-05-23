@@ -1,11 +1,10 @@
-use crate::compiler::{resolve_refs_in_sql, CompilerRegistry, EphemeralResolver};
 use crate::discovery::{ModelFile, ModelKind};
 use crate::logical_graph::LogicalGraph;
-use crate::transformer::TimeRange;
 use anyhow::{anyhow, Result};
 use smelt_core::config::{IncrementalConfig, Materialization, TimeseriesConfig};
 use smelt_core::{ModelId, RefInfo};
 use smelt_planner::{ExecutionStep, Transformation};
+use smelt_runtime::{resolve_refs_in_sql, CompilerRegistry, EphemeralResolver, TimeRange};
 use std::collections::{HashMap, HashSet};
 
 /// How a physical node should be executed.
