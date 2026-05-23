@@ -73,6 +73,7 @@ pub async fn post_run_execute(
             state.config.clone(),
             state.sources.clone(),
             state.graph.clone(),
+            state.db.clone(),
         )
         .await
     {

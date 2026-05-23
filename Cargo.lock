@@ -4265,6 +4265,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
+ "rowan",
  "serde",
  "smelt-backend",
  "smelt-core",

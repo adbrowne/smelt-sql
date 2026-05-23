@@ -92,6 +92,7 @@ impl RunManager {
         config: Arc<Config>,
         sources: Arc<Option<SourcesConfig>>,
         graph: Arc<Mutex<DependencyGraph>>,
+        db: Arc<Mutex<smelt_db::Database>>,
     ) -> Result<String, &'static str> {
         let mut inner = self.inner.lock().await;
         if inner.state == RunState::Running {
@@ -122,6 +123,7 @@ impl RunManager {
                     config,
                     sources,
                     graph,
+                    db,
                     cancel_token,
                 )
                 .await;
@@ -148,6 +150,7 @@ impl RunManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_execution(
         self: &Arc<Self>,
         run_id: String,
@@ -155,6 +158,7 @@ impl RunManager {
         config: Arc<Config>,
         _sources: Arc<Option<SourcesConfig>>,
         graph: Arc<Mutex<DependencyGraph>>,
+        db: Arc<Mutex<smelt_db::Database>>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
         let run_start = Utc::now();
@@ -321,6 +325,7 @@ impl RunManager {
                             timeseries: ts,
                             batches,
                         }),
+                        model_file: model.clone(),
                     });
                 }
                 (Some(_inc), None) => {
@@ -335,6 +340,7 @@ impl RunManager {
                         materialization: config
                             .get_materialization_with_metadata(model_name, metadata),
                         incremental: None,
+                        model_file: model.clone(),
                     });
                 }
                 (None, _) => {
@@ -344,13 +350,87 @@ impl RunManager {
                         materialization: config
                             .get_materialization_with_metadata(model_name, metadata),
                         incremental: None,
+                        model_file: model.clone(),
                     });
+                }
+            }
+        }
+
+        // Collect inputs needed to build the shared compile pipeline.
+        // `all_models` feeds UpstreamSchemas; `ephemeral_models_by_target`
+        // feeds the per-target EphemeralResolver. Done inside the graph_lock
+        // scope so we don't have to re-acquire it.
+        let all_models: Vec<smelt_core::ModelFile> =
+            graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
+        let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        {
+            let exec_order = graph_lock.execution_order()?;
+            for model_name in &exec_order {
+                let Ok(model) = graph_lock.get_model(model_name) else {
+                    continue;
+                };
+                let metadata = model.metadata.as_deref();
+                let mat = config.get_materialization_with_metadata(model_name, metadata);
+                if mat == smelt_core::config::Materialization::Ephemeral {
+                    let target = config.get_target(model_name, metadata, &request.target);
+                    ephemeral_models_by_target
+                        .entry(target)
+                        .or_default()
+                        .push((model_name.clone(), model.content.clone()));
                 }
             }
         }
 
         // Drop graph lock before execution
         drop(graph_lock);
+
+        // Build the shared compile pipeline. The CompilerRegistry holds one
+        // SqlCompiler per needed target; UpstreamSchemas and FnBodyMap are
+        // shared across compilers so type-cast wrapping and `smelt.fn.*`
+        // expansion work identically across backends. This mirrors what
+        // smelt-cli's `commands/run.rs` does so both consumers produce the
+        // same SQL — the Run Pipeline Parity Rule's load-bearing guarantee.
+        let needed_target_configs: HashMap<String, smelt_core::config::Target> = needed_targets
+            .iter()
+            .filter_map(|t| config.targets.get(t).map(|c| (t.clone(), c.clone())))
+            .collect();
+        let mut compilers =
+            smelt_runtime::CompilerRegistry::new(config.as_ref(), &needed_target_configs);
+
+        let (upstream_schemas, fn_bodies) = {
+            let db_guard = db.lock().await;
+            let db_ref: &smelt_db::Database = &db_guard;
+            let workspace = smelt_db::Workspace::try_get(db_ref)
+                .ok_or_else(|| anyhow::anyhow!("workspace not initialised in smelt-ui DB"))?;
+            let upstream = smelt_runtime::UpstreamSchemas::from_database(
+                db_ref,
+                &self.project_dir,
+                &all_models,
+            )?;
+            let bodies = smelt_runtime::build_fn_body_map(db_ref, workspace);
+            (Arc::new(upstream), bodies)
+        };
+        compilers.set_upstream_schemas_all(upstream_schemas);
+        if !fn_bodies.is_empty() {
+            compilers.set_function_bodies_all(fn_bodies);
+        }
+
+        // Per-target ephemeral resolvers. Empty resolver when the target has
+        // no ephemerals — same as the CLI's behaviour.
+        let mut ephemeral_resolvers: HashMap<String, smelt_runtime::EphemeralResolver> =
+            HashMap::new();
+        for target_name in &needed_targets {
+            let schema = &config.targets[target_name].schema;
+            let models = ephemeral_models_by_target
+                .get(target_name)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let compiler = compilers.get(target_name);
+            ephemeral_resolvers.insert(
+                target_name.clone(),
+                compiler.build_ephemeral_resolver(models, schema),
+            );
+        }
 
         // Update totals
         {
@@ -430,7 +510,15 @@ impl RunManager {
                             &time_range,
                         )?;
 
-                        let compiled_sql = compile_sql(&filtered_sql, schema, backend);
+                        let compiler = compilers.get(model_target);
+                        let resolver = &ephemeral_resolvers[model_target];
+                        let compiled = compiler.compile_with_sql_and_ephemerals(
+                            &plan.model_file,
+                            schema,
+                            &filtered_sql,
+                            resolver,
+                        )?;
+                        let compiled_sql = compiled.sql;
 
                         let partition = PartitionRange {
                             column: inc_plan.timeseries.partition_column.clone(),
@@ -503,7 +591,15 @@ impl RunManager {
                 None => {
                     // Full refresh: compile and execute
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                    let compiled_sql = compile_sql(&clean_sql, schema, backend);
+                    let compiler = compilers.get(model_target);
+                    let resolver = &ephemeral_resolvers[model_target];
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &clean_sql,
+                        resolver,
+                    )?;
+                    let compiled_sql = compiled.sql;
 
                     let mat = match plan.materialization {
                         smelt_core::config::Materialization::Table => Materialization::Table,
@@ -596,6 +692,10 @@ struct ModelPlan {
     sql: String,
     materialization: smelt_core::config::Materialization,
     incremental: Option<IncrementalPlan>,
+    /// The original `ModelFile` from the dependency graph — needed by
+    /// `SqlCompiler::compile_with_sql_and_ephemerals` to derive the
+    /// materialization, address-based DB name, and metadata-aware overrides.
+    model_file: smelt_core::ModelFile,
 }
 
 struct IncrementalPlan {
@@ -622,24 +722,6 @@ fn granularity_days(g: &smelt_core::Granularity) -> u32 {
         smelt_core::Granularity::Quarter => 91,
         smelt_core::Granularity::Year => 365,
     }
-}
-
-/// Compile SQL by resolving smelt.ref() calls to schema-qualified table names.
-fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) -> String {
-    let parse = smelt_parser::parse(sql);
-    let capabilities = backend.capabilities();
-    let ctx = smelt_dialect::PrintContext {
-        dialect: &backend.dialect(),
-        capabilities: &capabilities,
-        schema,
-        ephemeral_models: std::collections::HashSet::new(),
-        cross_engine_refs: std::collections::HashMap::new(),
-        smelt_as_struct: None,
-        smelt_fn: None,
-        smelt_path_ref: None,
-        smelt_path_call: None,
-    };
-    smelt_dialect::print(&parse.syntax(), &ctx)
 }
 
 #[allow(unreachable_code, unused_variables)]

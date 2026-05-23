@@ -24,3 +24,4 @@ tracing.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+rowan.workspace = true

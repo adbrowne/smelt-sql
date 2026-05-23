@@ -16,11 +16,17 @@
 //! See `docs/specs/architecture.md` → "Run pipeline parity rule (CLI ↔ UI)"
 //! for the normative invariant.
 
+pub mod compile;
 pub mod fn_bodies;
 pub mod reporter;
 pub mod transformer;
 pub mod types;
 
+pub use compile::{
+    bind_named_args, build_source_bound_map, prepend_ephemeral_ctes, resolve_refs_in_sql,
+    substitute_params_with_named, CompiledModel, CompilerRegistry, EphemeralResolver, SqlCompiler,
+    UpstreamSchemas,
+};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use reporter::{NoOpReporter, RunReporter};
 pub use transformer::{
