@@ -12,7 +12,7 @@ use crate::queries::schema::{
     model_input_constraints, model_schema, resolved_model_schema, type_context, typed_model_schema,
 };
 use crate::type_inference;
-use crate::{resolve_ref, DiagnosticAcc, Position, Range, SourceFile, Workspace};
+use crate::{find_project, resolve_ref, DiagnosticAcc, Position, Range, SourceFile, Workspace};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
 // ============================================================================
@@ -256,9 +256,13 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    let project = find_project(db, workspace, &file.project_root(db).clone());
+
     let input_constraints = model_input_constraints(db, workspace, file);
     for constraint in input_constraints.iter() {
-        let upstream = match resolve_ref(db, workspace, constraint.ref_name.clone()) {
+        let upstream = match project
+            .and_then(|p| resolve_ref(db, workspace, p, constraint.ref_name.clone()))
+        {
             Some(p) => p,
             None => continue,
         };
@@ -312,7 +316,9 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             Some(n) => n.clone(),
             None => continue,
         };
-        if let Some(upstream) = resolve_ref(db, workspace, model_name.clone()) {
+        if let Some(upstream) =
+            project.and_then(|p| resolve_ref(db, workspace, p, model_name.clone()))
+        {
             let upstream_base = model_schema(db, upstream);
             let upstream_resolved = resolved_model_schema(db, workspace, upstream);
             let all_unknown = !upstream_resolved.columns.is_empty()

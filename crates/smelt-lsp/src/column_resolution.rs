@@ -162,6 +162,7 @@ pub(crate) fn resolve_column_definitions(
         return Vec::new();
     };
     let ctx = smelt_db::type_context(db, ws, current_file);
+    let project_root = file_project_root(db, current_path);
 
     // Determine which sources this column could come from
     let resolved_qualifier =
@@ -175,6 +176,7 @@ pub(crate) fn resolve_column_definitions(
     find_column_in_ctes(
         db,
         current_path,
+        &project_root,
         effective_qualifier,
         column_name,
         &ctx,
@@ -185,6 +187,7 @@ pub(crate) fn resolve_column_definitions(
     find_column_in_models(
         db,
         current_path,
+        &project_root,
         effective_qualifier,
         column_name,
         &ctx,
@@ -208,6 +211,7 @@ pub(crate) fn resolve_column_definitions(
 fn find_column_in_ctes(
     db: &Database,
     current_path: &std::path::Path,
+    project_root: &std::path::Path,
     qualifier: Option<&str>,
     column_name: &str,
     ctx: &smelt_db::TypeContext,
@@ -323,10 +327,13 @@ fn find_column_in_ctes(
                             let model_name =
                                 path_ref.segments().last().cloned().unwrap_or_default();
                             if !model_name.is_empty() {
-                                if let Some(upstream_path) = resolve_ref_path(db, &model_name) {
+                                if let Some(upstream_path) =
+                                    resolve_ref_path(db, project_root, &model_name)
+                                {
                                     find_column_in_model_chain(
                                         db,
                                         &upstream_path,
+                                        project_root,
                                         column_name,
                                         10,
                                         locations,
@@ -346,6 +353,7 @@ fn find_column_in_ctes(
 fn find_column_in_models(
     db: &Database,
     current_path: &std::path::Path,
+    project_root: &std::path::Path,
     qualifier: Option<&str>,
     column_name: &str,
     ctx: &smelt_db::TypeContext,
@@ -364,9 +372,15 @@ fn find_column_in_models(
     };
 
     for model_name in &model_names {
-        if let Some(upstream_path) = resolve_ref_path(db, model_name) {
-            if find_column_in_model_chain(db, &upstream_path, column_name, 10, locations)
-                && qualifier.is_some()
+        if let Some(upstream_path) = resolve_ref_path(db, project_root, model_name) {
+            if find_column_in_model_chain(
+                db,
+                &upstream_path,
+                project_root,
+                column_name,
+                10,
+                locations,
+            ) && qualifier.is_some()
             {
                 return; // Qualified lookup: stop after first match
             }
@@ -379,6 +393,7 @@ fn find_column_in_models(
 fn find_column_in_model_chain(
     db: &Database,
     model_path: &std::path::Path,
+    project_root: &std::path::Path,
     column_name: &str,
     depth_limit: usize,
     locations: &mut Vec<ColumnDefLocation>,
@@ -410,10 +425,11 @@ fn find_column_in_model_chain(
 
     // If not found in explicit columns, check wildcard extensions
     for ext in &schema.row_extensions {
-        if let Some(upstream_path) = resolve_ref_path(db, &ext.ref_name) {
+        if let Some(upstream_path) = resolve_ref_path(db, project_root, &ext.ref_name) {
             if find_column_in_model_chain(
                 db,
                 &upstream_path,
+                project_root,
                 column_name,
                 depth_limit - 1,
                 locations,
@@ -543,17 +559,22 @@ pub(crate) fn collect_from_model_names(db: &Database, path: &std::path::Path) ->
 pub(crate) fn trace_upstream_column(
     db: &Database,
     all_files: &[PathBuf],
+    project_root: &std::path::Path,
     model_name: &str,
     column_name: &str,
     edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
 ) {
     for upstream_path in all_files.iter() {
+        // Project isolation: only match files under the caller's project root.
+        if !upstream_path.starts_with(project_root) {
+            continue;
+        }
         let up_name = upstream_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
         if up_name == model_name {
-            trace_upstream_column_chain(db, upstream_path, column_name, 10, edits);
+            trace_upstream_column_chain(db, upstream_path, project_root, column_name, 10, edits);
             break;
         }
     }
@@ -564,6 +585,7 @@ pub(crate) fn trace_upstream_column(
 fn trace_upstream_column_chain(
     db: &Database,
     model_path: &std::path::Path,
+    project_root: &std::path::Path,
     column_name: &str,
     depth_limit: usize,
     edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
@@ -597,10 +619,11 @@ fn trace_upstream_column_chain(
         // Check wildcard extensions (SELECT *)
         let schema = smelt_db::model_schema(db, up_file_input);
         for ext in &schema.row_extensions {
-            if let Some(upstream_path) = resolve_ref_path(db, &ext.ref_name) {
+            if let Some(upstream_path) = resolve_ref_path(db, project_root, &ext.ref_name) {
                 if trace_upstream_column_chain(
                     db,
                     &upstream_path,
+                    project_root,
                     column_name,
                     depth_limit - 1,
                     edits,

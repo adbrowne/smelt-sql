@@ -245,10 +245,11 @@ impl TestWorkspace {
         smelt_db::typed_model_schema(&self.db, ws, fi)
     }
 
-    /// Wrapper: resolve_ref
+    /// Wrapper: resolve_ref (scoped to the test workspace's single project)
     fn resolve_ref(&self, model_name: &str) -> Option<PathBuf> {
         let ws = self.workspace()?;
-        smelt_db::resolve_ref(&self.db, ws, model_name.to_string())
+        let project = self.db.project_input(&self.project_root())?;
+        smelt_db::resolve_ref(&self.db, ws, project, model_name.to_string())
             .map(|f| f.path(&self.db).clone())
     }
 
@@ -1139,8 +1140,10 @@ impl TestWorkspace {
             let schema = smelt_db::model_schema(&self.db, up_fi);
             for ext in &schema.row_extensions {
                 let ws = self.workspace();
-                let upstream_file =
-                    ws.and_then(|w| smelt_db::resolve_ref(&self.db, w, ext.ref_name.clone()));
+                let project = self.db.project_input(&self.project_root());
+                let upstream_file = ws
+                    .zip(project)
+                    .and_then(|(w, p)| smelt_db::resolve_ref(&self.db, w, p, ext.ref_name.clone()));
                 if let Some(upstream) = upstream_file {
                     let upstream_path = upstream.path(&self.db).clone();
                     if self.trace_upstream_column_chain(

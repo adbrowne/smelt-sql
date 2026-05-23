@@ -2708,6 +2708,7 @@ impl LanguageServer for Backend {
                             // Cross-file tracing
                             let mut cross_file_edits = Vec::new();
                             let all_files = all_file_paths(&db);
+                            let trace_project_root = file_project_root(&db, &effective_path);
                             let schema = file_input
                                 .map(|f| smelt_db::model_schema(&db, f))
                                 .unwrap_or_else(|| Arc::new(smelt_db::ModelSchema::empty()));
@@ -2730,6 +2731,7 @@ impl LanguageServer for Backend {
                                         trace_upstream_column(
                                             &db,
                                             &all_files,
+                                            &trace_project_root,
                                             model_name,
                                             &column_name,
                                             &mut cross_file_edits,
@@ -2759,6 +2761,7 @@ impl LanguageServer for Backend {
                                     trace_upstream_column(
                                         &db,
                                         &all_files,
+                                        &trace_project_root,
                                         model_name,
                                         &column_name,
                                         &mut cross_file_edits,
@@ -2906,9 +2909,16 @@ impl LanguageServer for Backend {
                                     }
                                 }
 
-                                // Compute old model file path
+                                // Compute old model file path (project-scoped — only
+                                // consider models in the same project as the file
+                                // being renamed).
+                                let rename_project_root = file_project_root(&db, &effective_path);
+                                let rename_project = lookup_project(&db, &rename_project_root);
                                 let old_model_path = ws
-                                    .and_then(|w| smelt_db::resolve_ref(&db, w, model_name.clone()))
+                                    .zip(rename_project)
+                                    .and_then(|(w, p)| {
+                                        smelt_db::resolve_ref(&db, w, p, model_name.clone())
+                                    })
                                     .map(|sf| sf.path(&db).clone());
 
                                 Some(RenameKind::Model {
@@ -3228,9 +3238,14 @@ impl LanguageServer for Backend {
                     if cursor_offset >= start && cursor_offset <= end {
                         if let Some(model_name) = segments.get(1).cloned() {
                             // Resolve upstream model and show its resolved schema
+                            // (project-scoped — only consider models in the same
+                            // project as the file being hovered).
                             let ws = Workspace::try_get(&db);
-                            let upstream_file =
-                                ws.and_then(|w| smelt_db::resolve_ref(&db, w, model_name.clone()));
+                            let hover_project_root = file_project_root(&db, &effective_path);
+                            let hover_project = lookup_project(&db, &hover_project_root);
+                            let upstream_file = ws.zip(hover_project).and_then(|(w, p)| {
+                                smelt_db::resolve_ref(&db, w, p, model_name.clone())
+                            });
                             if let (Some(upstream), Some(w)) = (upstream_file, ws) {
                                 // Use resolved_model_schema to get type information through wildcards
                                 let resolved = smelt_db::resolved_model_schema(&db, w, upstream);
@@ -3350,69 +3365,104 @@ impl LanguageServer for Backend {
 
                     // Check if cursor is within this path ref
                     if cursor_offset >= start && cursor_offset <= end {
-                        if let (Some(source_name), Some(table_name)) =
-                            (segments.get(1).cloned(), segments.get(2).cloned())
-                        {
-                            let qualified_name = format!("{}.{}", source_name, table_name);
-
-                            // Try to resolve the source
-                            let project_root = file_project_root(&db, &effective_path);
-                            let project = lookup_project(&db, &project_root);
-                            if let Some(table_def) = project.and_then(|p| {
-                                smelt_db::resolve_source(
-                                    &db,
-                                    p,
-                                    source_name.clone(),
-                                    table_name.clone(),
-                                )
-                            }) {
-                                // Format source info as markdown
-                                let mut content = format!("**Source: {}**\n\n", qualified_name);
-
-                                // Show table description if available
-                                if let Some(ref desc) = table_def.description {
-                                    content.push_str(&format!("{}\n\n", desc));
-                                }
-
-                                if !table_def.columns.is_empty() {
-                                    content.push_str("Columns:\n");
-                                    for col in &table_def.columns {
-                                        content.push_str(&format!("- `{}`", col.name));
-                                        if let Some(ref dtype) = col.data_type {
-                                            content.push_str(&format!(" ({})", dtype));
-                                        }
-                                        if let Some(ref desc) = col.description {
-                                            content.push_str(&format!(" - {}", desc));
-                                        }
-                                        content.push('\n');
-                                    }
-                                } else {
-                                    content.push_str("*(No column definitions)*\n");
-                                }
-
-                                return Ok(Some(Hover {
-                                    contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: content,
-                                    }),
-                                    range: None,
-                                }));
-                            } else {
-                                // Source not found - show error hover
-                                let content = format!(
-                                    "**Source: {}**\n\n⚠️ *Undefined source*",
-                                    qualified_name
-                                );
-
-                                return Ok(Some(Hover {
-                                    contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: content,
-                                    }),
-                                    range: None,
-                                }));
-                            }
+                        // Need at least `sources.<schema>.<table>` (three segments).
+                        if segments.len() < 3 {
+                            continue;
                         }
+                        let source_name = segments[segments.len() - 2].clone();
+                        let table_name = segments[segments.len() - 1].clone();
+                        let qualified_name = format!("{}.{}", source_name, table_name);
+
+                        let project_root = file_project_root(&db, &effective_path);
+                        let project = lookup_project(&db, &project_root);
+
+                        // Try the per-entity source registry first (the canonical
+                        // shape since the per-entity migration). Address segments
+                        // include the leading `sources` segment, so the full
+                        // `path_ref.segments()` is the lookup key.
+                        let per_entity = project.and_then(|p| {
+                            let sources = smelt_db::project_sources(&db, p);
+                            sources
+                                .iter()
+                                .find(|s| s.address_segments == segments)
+                                .cloned()
+                        });
+
+                        if let Some(info) = per_entity {
+                            let mut content = format!("**Source: {}**\n\n", qualified_name);
+                            if let Some(ref desc) = info.description {
+                                content.push_str(&format!("{}\n\n", desc));
+                            }
+                            if !info.columns.is_empty() {
+                                content.push_str("Columns:\n");
+                                for col in &info.columns {
+                                    content
+                                        .push_str(&format!("- `{}` ({})", col.name, col.data_type));
+                                    if let Some(ref d) = col.description {
+                                        content.push_str(&format!(" - {}", d));
+                                    }
+                                    content.push('\n');
+                                }
+                            } else {
+                                content.push_str("*(No column definitions)*\n");
+                            }
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: content,
+                                }),
+                                range: None,
+                            }));
+                        }
+
+                        // Fall back to the legacy aggregate sources.yml resolver
+                        // for projects that haven't migrated to per-entity yet.
+                        if let Some(table_def) = project.and_then(|p| {
+                            smelt_db::resolve_source(
+                                &db,
+                                p,
+                                source_name.clone(),
+                                table_name.clone(),
+                            )
+                        }) {
+                            let mut content = format!("**Source: {}**\n\n", qualified_name);
+                            if let Some(ref desc) = table_def.description {
+                                content.push_str(&format!("{}\n\n", desc));
+                            }
+                            if !table_def.columns.is_empty() {
+                                content.push_str("Columns:\n");
+                                for col in &table_def.columns {
+                                    content.push_str(&format!("- `{}`", col.name));
+                                    if let Some(ref dtype) = col.data_type {
+                                        content.push_str(&format!(" ({})", dtype));
+                                    }
+                                    if let Some(ref desc) = col.description {
+                                        content.push_str(&format!(" - {}", desc));
+                                    }
+                                    content.push('\n');
+                                }
+                            } else {
+                                content.push_str("*(No column definitions)*\n");
+                            }
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: content,
+                                }),
+                                range: None,
+                            }));
+                        }
+
+                        // Source not found in either registry.
+                        let content =
+                            format!("**Source: {}**\n\n⚠️ *Undefined source*", qualified_name);
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: content,
+                            }),
+                            range: None,
+                        }));
                     }
                 }
 
@@ -3775,10 +3825,13 @@ impl LanguageServer for Backend {
                             .map(|a| a.text())
                             .unwrap_or_else(|| "?".to_string());
 
-                        // Try Salsa resolution.
+                        // Try Salsa resolution (project-scoped — only consider
+                        // models in the same project as the hover site).
                         let ws = Workspace::try_get(&db);
-                        let resolved_cols = ws.and_then(|w| {
-                            smelt_db::columns_of_for_table_expr(&db, w, table_name.clone()).ok()
+                        let cols_project_root = file_project_root(&db, &effective_path);
+                        let cols_project = lookup_project(&db, &cols_project_root);
+                        let resolved_cols = ws.zip(cols_project).and_then(|(w, p)| {
+                            smelt_db::columns_of_for_table_expr(&db, w, p, table_name.clone()).ok()
                         });
 
                         let value = hover_text_for_columns_of_call(
