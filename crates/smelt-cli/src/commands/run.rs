@@ -931,11 +931,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 }
             }
 
+            let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
             let result = smelt_cli::cumulative::execute_cumulative_aggregate(
                 backend,
                 model,
                 &compilers,
-                &physical_graph,
+                resolver,
                 &phys_node.target,
                 schema,
                 &db_table_name,

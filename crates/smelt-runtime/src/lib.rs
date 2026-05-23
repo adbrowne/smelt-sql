@@ -17,6 +17,7 @@
 //! for the normative invariant.
 
 pub mod compile;
+pub mod cumulative;
 pub mod execute;
 pub mod fn_bodies;
 pub mod reporter;
@@ -29,6 +30,7 @@ pub use compile::{
     substitute_params_with_named, CompiledModel, CompilerRegistry, EphemeralResolver, SqlCompiler,
     UpstreamSchemas,
 };
+pub use cumulative::{build_cumulative_merge_sql, execute_cumulative_aggregate};
 pub use execute::{execute_project, BackendFactory};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use reporter::{NoOpReporter, RunReporter};

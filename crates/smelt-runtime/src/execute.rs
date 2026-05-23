@@ -7,13 +7,10 @@
 //! consume this function via a `RunReporter` adapter.
 //!
 //! This file owns the model-plan construction (batch dispatch per
-//! `BatchSafety` shape), the per-model compile+execute loop (full refresh
-//! and incremental batches), cancellation handling, manifest writes, and
+//! `BatchSafety` shape), the per-model compile+execute loop (full refresh,
+//! incremental batches, and `cumulative_aggregate` dispatch via
+//! `crate::cumulative`), cancellation handling, manifest writes, and
 //! interval-store updates.
-//!
-//! Not (yet) handled: cumulative_aggregate dispatch (lives in
-//! `smelt-cli/src/cumulative.rs` for now — moving it here is a follow-up
-//! tracked under Phase 4b of the runtime-extraction plan).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -284,6 +281,10 @@ pub async fn execute_project(
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
     let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    // Project-wide `smelt.<path> → timeseries` map. Cumulative dispatch
+    // looks up its driving source's ts here; the classifier resolves the
+    // smelt.<path> key against this map (per cumulative_aggregate.md).
+    let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
     {
         let exec_order = graph_lock.execution_order()?;
         for model_name in &exec_order {
@@ -298,6 +299,10 @@ pub async fn execute_project(
                     .entry(target)
                     .or_default()
                     .push((model_name.clone(), model.content.clone()));
+            }
+            if let Some(ts) = metadata.and_then(|m| m.timeseries.clone()) {
+                let smelt_key = format!("smelt.{}", model.address_segments.join("."));
+                source_timeseries.insert(smelt_key, ts);
             }
         }
     }
@@ -372,6 +377,107 @@ pub async fn execute_project(
         let model_target = &target_assignments[&plan.name];
         let backend = backends[model_target].as_ref();
         let schema = &config.targets[model_target].schema;
+
+        // Cumulative-aggregate dispatch — handled separately from the
+        // incremental / full-refresh branches because it has its own per-
+        // partition merge loop (see `smelt_runtime::cumulative` and
+        // `docs/specs/cumulative_aggregate.md`).
+        if plan.materialization == smelt_core::config::Materialization::CumulativeAggregate {
+            let db_table_name = plan.model_file.db_name_owned();
+            let compiler = compilers.get(model_target);
+            let resolver = &ephemeral_resolvers[model_target];
+
+            let exec_result = match (start_date, end_date) {
+                (Some(s), Some(e)) => {
+                    let time_range = TimeRange {
+                        start: s.format("%Y-%m-%d").to_string(),
+                        end: e.format("%Y-%m-%d").to_string(),
+                    };
+                    crate::cumulative::execute_cumulative_aggregate(
+                        backend,
+                        &plan.model_file,
+                        &compilers,
+                        resolver,
+                        model_target,
+                        schema,
+                        &db_table_name,
+                        &time_range,
+                        &source_timeseries,
+                        false,
+                    )
+                    .await
+                }
+                _ => {
+                    // No run window: single-shot full refresh of the
+                    // cumulative SELECT. Matches CLI's behaviour for
+                    // `smelt build` / `smelt run` without an event-time
+                    // window.
+                    let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &clean_sql,
+                        resolver,
+                    )?;
+                    backend
+                        .drop_table_if_exists(schema, &db_table_name)
+                        .await
+                        .map_err(|err| {
+                            anyhow::anyhow!("Failed to drop {}: {}", db_table_name, err)
+                        })?;
+                    backend
+                        .create_table_as(schema, &db_table_name, &compiled.sql)
+                        .await
+                        .map_err(|err| {
+                            anyhow::anyhow!(
+                                "Failed to create cumulative model {}: {}",
+                                plan.name,
+                                err
+                            )
+                        })?;
+                    let row_count = backend
+                        .get_row_count(schema, &db_table_name)
+                        .await
+                        .unwrap_or(0);
+                    Ok(smelt_backend::ExecutionResult {
+                        model_name: plan.name.clone(),
+                        duration: StdDuration::from_millis(0),
+                        row_count,
+                        preview: None,
+                    })
+                }
+            };
+
+            let exec_result = match exec_result {
+                Ok(r) => r,
+                Err(e) => {
+                    reporter.run_failed(&run_id, Some(&plan.name), &e.to_string());
+                    return Err(e);
+                }
+            };
+
+            total_rows = exec_result.row_count;
+            total_rows_overall += exec_result.row_count;
+            manifest.models.insert(
+                plan.name.clone(),
+                ModelRunRecord {
+                    strategy: "cumulative_aggregate".to_string(),
+                    time_range: match (start_date, end_date) {
+                        (Some(s), Some(e)) => Some(TimeRangeRecord {
+                            start: s.format("%Y-%m-%d").to_string(),
+                            end: e.format("%Y-%m-%d").to_string(),
+                        }),
+                        _ => None,
+                    },
+                    partitions_updated: vec![],
+                    row_count: exec_result.row_count,
+                    duration_ms: model_start.elapsed().as_millis() as u64,
+                    batch_safety: Some("cumulative".to_string()),
+                },
+            );
+            reporter.model_completed(&run_id, &plan.name, total_rows, model_start.elapsed());
+            continue;
+        }
 
         let result: Result<()> = match &plan.incremental {
             Some(inc_plan) => {
@@ -507,10 +613,7 @@ pub async fn execute_project(
                         unreachable!("Test models should not be executed directly")
                     }
                     smelt_core::config::Materialization::CumulativeAggregate => {
-                        return Err(anyhow::anyhow!(
-                            "cumulative_aggregate models require an incremental run window — \
-                             use `smelt run --event-time-start … --event-time-end …`"
-                        ));
+                        unreachable!("cumulative_aggregate dispatched above the match")
                     }
                 };
 
