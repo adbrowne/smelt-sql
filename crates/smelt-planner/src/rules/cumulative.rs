@@ -55,7 +55,8 @@ pub enum CrossPartitionCombiner {
     BitAnd,
     /// `target.c | delta.c`.
     BitOr,
-    /// `target.c # delta.c` (XOR; dialect-specific operator).
+    /// `xor(target.c, delta.c)` — function form is DuckDB-compatible and works
+    /// in Postgres as well; the `#` infix operator is Postgres-only.
     BitXor,
 }
 
@@ -70,7 +71,7 @@ impl CrossPartitionCombiner {
             CrossPartitionCombiner::BoolOr => format!("{} OR {}", target_col, delta_col),
             CrossPartitionCombiner::BitAnd => format!("{} & {}", target_col, delta_col),
             CrossPartitionCombiner::BitOr => format!("{} | {}", target_col, delta_col),
-            CrossPartitionCombiner::BitXor => format!("{} # {}", target_col, delta_col),
+            CrossPartitionCombiner::BitXor => format!("xor({}, {})", target_col, delta_col),
         }
     }
 }
