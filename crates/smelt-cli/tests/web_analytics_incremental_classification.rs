@@ -95,11 +95,17 @@ fn web_analytics_incremental_models_classify_as_safe() {
     // `device_user_edges` is intentionally absent — it uses
     // `materialization: cumulative_aggregate`, not incremental, so the
     // incremental batch-safety analyser does not apply to it.
+    //
+    // Canonical paths after LogicalGraph rekey (Phase 3):
+    //   sessions                    → silver.sessions
+    //   events_parsed               → silver.events_parsed
+    //   eventstream_with_identity   → gold.eventstream_with_identity
+    //   daily_active_users_by_method → marts.daily_active_users_by_method
     for model in &[
-        "sessions",
-        "events_parsed",
-        "eventstream_with_identity",
-        "daily_active_users_by_method",
+        "silver.sessions",
+        "silver.events_parsed",
+        "gold.eventstream_with_identity",
+        "marts.daily_active_users_by_method",
     ] {
         assert_incremental_and_fully_batch_safe(&output, model);
     }
@@ -108,5 +114,5 @@ fn web_analytics_incremental_models_classify_as_safe() {
     // The planner derives its 1-day lookback from that filter, so it
     // classifies as bounded_safe rather than fully_batch_safe.  Both are
     // safe; the assertion accepts either to guard against silent downgrades.
-    assert_incremental_and_safe(&output, "identity_forward_only");
+    assert_incremental_and_safe(&output, "gold.identity_forward_only");
 }

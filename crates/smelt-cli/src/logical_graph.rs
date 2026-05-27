@@ -79,20 +79,17 @@ impl LogicalGraph {
 
         // Collect unresolved (raw-path) deps alongside each model in a single pass.
         // Deps are resolved to canonical node-name keys in a second pass once all
-        // models are in `nodes` and the `address_index` is built.
+        // models are in `nodes`.
         struct PendingNode {
-            model: ModelFile,
+            canonical_key: String,
             raw_dep_paths: Vec<Vec<String>>, // each element: one ref's path segments
         }
 
         let mut pending: Vec<PendingNode> = Vec::with_capacity(models.len());
 
-        // Pass 1: insert all models into `nodes` and build the address index.
-        // `address_index` maps `address_segments.join(".")` → `model.name` so that
-        // directory-qualified refs like `smelt.staging.stg_orders` can be resolved
-        // to the model registered as `"stg_orders"`.
-        let mut address_index: HashMap<String, String> = HashMap::new();
-
+        // Pass 1: insert all models into `nodes` keyed by canonical_path().
+        // canonical_path() == address_segments.join("."), e.g. "silver.events_parsed".
+        // For flat models (single segment), canonical_path() == model.name.
         for model in models {
             // Collect raw ref paths (pre-resolution).
             let raw_dep_paths: Vec<Vec<String>> = model
@@ -123,6 +120,7 @@ impl LogicalGraph {
 
             let metadata = model.metadata.as_ref().map(|b| b.as_ref());
 
+            // Config lookups use model.name (leaf name as declared in smelt.yml models: block).
             let materialization = config.get_materialization_with_metadata(&model.name, metadata);
             let target = config.get_target(&model.name, metadata, default_target);
             let timeseries = config
@@ -133,26 +131,33 @@ impl LogicalGraph {
                 .cloned();
             let tags = config.get_tags(&model.name, metadata);
 
-            if let Some(existing) = nodes.get(&model.name) {
+            // The graph key is the canonical dot-path (address_segments.join(".")).
+            // Fall back to model.name when address_segments is empty (e.g. Python models
+            // pending Phase 5 address computation).
+            let canonical_key = {
+                let cp = model.canonical_path();
+                if cp.is_empty() {
+                    model.name.clone()
+                } else {
+                    cp
+                }
+            };
+
+            if let Some(existing) = nodes.get(&canonical_key) {
                 let existing: &LogicalNode = existing;
                 tracing::warn!(
-                    "Duplicate model name '{}'. Model at {} overwrites model at {}.",
-                    model.name,
+                    "Duplicate model '{}'. Model at {} overwrites model at {}.",
+                    canonical_key,
                     model.path.display(),
                     existing.model_file.path.display()
                 );
             }
 
-            // Build address index entry: address_segments.join(".") → name.
-            let addr_key = model.address_segments.join(".");
-            if !addr_key.is_empty() && addr_key != model.name {
-                address_index.insert(addr_key, model.name.clone());
-            }
-
             nodes.insert(
-                model.name.clone(),
+                canonical_key.clone(),
                 LogicalNode {
-                    name: model.name.clone(),
+                    // LogicalNode.name is the canonical path (same as the map key).
+                    name: canonical_key.clone(),
                     // Placeholder — filled in during pass 2.
                     dependencies: Vec::new(),
                     materialization,
@@ -160,7 +165,7 @@ impl LogicalGraph {
                     incremental,
                     target,
                     tags,
-                    model_file: model.clone(),
+                    model_file: model,
                     // Hand-authored models have no generator provenance.
                     // Generator-emitted models are populated separately when
                     // the generator pipeline feeds into the logical graph.
@@ -170,17 +175,18 @@ impl LogicalGraph {
             );
 
             pending.push(PendingNode {
-                model,
+                canonical_key,
                 raw_dep_paths,
             });
         }
 
         // Pass 2: resolve raw dep paths to canonical node-name keys.
         //
-        // Resolution order:
-        //   1. Full dotted path as-is (e.g. "cohorts.us_west") — matches emitted models.
-        //   2. address_index lookup (e.g. "staging.stg_orders" → "stg_orders").
-        //   3. Leaf segment only (e.g. "stg_orders") — legacy and simple workspaces.
+        // Each dep_path is a Vec<String> of path segments from the ref call.
+        // Joining them with "." gives the canonical key directly — no address
+        // index needed. For a single-segment ref like `smelt.stg_orders` the
+        // key is `"stg_orders"` (flat model). For a qualified ref like
+        // `smelt.silver.events_parsed` the key is `"silver.events_parsed"`.
         //
         // Unresolved deps are kept as their full dotted path so `validate()` can
         // surface a useful "references undefined model" error.
@@ -190,30 +196,16 @@ impl LogicalGraph {
                 .into_iter()
                 .map(|segs| {
                     let full = segs.join(".");
-                    // 1. Exact match in nodes (emitted models, or exact-name refs).
+                    // Canonical key exact match.
                     if nodes.contains_key(&full) {
                         return full;
-                    }
-                    // 2. Address index (directory-qualified refs like smelt.staging.stg_orders).
-                    if let Some(resolved) = address_index.get(&full) {
-                        return resolved.clone();
-                    }
-                    // 3. Leaf fallback (simple refs like smelt.stg_orders in old workspaces).
-                    if let Some(leaf) = segs.last() {
-                        if nodes.contains_key(leaf.as_str()) {
-                            return leaf.clone();
-                        }
-                        // Also try address_index by leaf alone.
-                        if let Some(resolved) = address_index.get(leaf.as_str()) {
-                            return resolved.clone();
-                        }
                     }
                     // Unresolvable: return full path for a meaningful validate() error.
                     full
                 })
                 .collect();
 
-            if let Some(node) = nodes.get_mut(&p.model.name) {
+            if let Some(node) = nodes.get_mut(&p.canonical_key) {
                 node.dependencies = deps;
             }
         }
@@ -880,5 +872,82 @@ mod tests {
             err.to_string().contains("does_not_exist"),
             "validation error should mention the missing ref name: {err}"
         );
+    }
+
+    /// Spec Constraint 9: LogicalGraph must key nodes by canonical dot-paths,
+    /// not by leaf names. Same-leaf models in different layers must coexist.
+    #[test]
+    fn logical_graph_keys_by_canonical_path() {
+        use smelt_core::ModelId;
+
+        // Build two models with the same leaf name "events" but different layers.
+        fn make_layered_model(layer: &str, leaf: &str, deps: Vec<&str>) -> ModelFile {
+            let refs = deps
+                .into_iter()
+                .map(|dep| RefInfo {
+                    model_name: dep.to_string(),
+                    has_named_params: false,
+                    range: TextRange::default(),
+                    smelt_ref: smelt_core::refs::SmeltRef::Path(vec![dep.to_string()]),
+                })
+                .collect();
+
+            let path: std::path::PathBuf = format!("models/{}/{}.sql", layer, leaf).into();
+            ModelFile {
+                name: leaf.to_string(),
+                model_id: ModelId::from_path(path.clone()),
+                path,
+                content: String::new(),
+                refs,
+                parse_errors: Vec::new(),
+                metadata: None,
+                kind: ModelKind::Sql,
+                // address_segments drive canonical_path()
+                address_segments: vec![layer.to_string(), leaf.to_string()],
+            }
+        }
+
+        let silver_events = make_layered_model("silver", "events", vec![]);
+        let bronze_events = make_layered_model("bronze", "events", vec![]);
+
+        let config = make_test_config();
+        let graph = LogicalGraph::build(
+            vec![silver_events, bronze_events],
+            None,
+            &[],
+            &config,
+            "dev",
+        )
+        .expect("build graph");
+
+        // Canonical-path keys must be accessible.
+        assert!(
+            graph.get_model("silver.events").is_ok(),
+            "silver.events should be in graph"
+        );
+        assert!(
+            graph.get_model("bronze.events").is_ok(),
+            "bronze.events should be in graph"
+        );
+
+        // Leaf-only lookup must fail (no longer resolves).
+        assert!(
+            graph.get_model("events").is_err(),
+            "bare leaf 'events' should not resolve after canonical-path rekey"
+        );
+
+        // all_model_names() must return canonical paths.
+        let names = graph.all_model_names();
+        assert!(
+            names.contains("silver.events"),
+            "all_model_names should contain 'silver.events', got {:?}",
+            names
+        );
+        assert!(
+            names.contains("bronze.events"),
+            "all_model_names should contain 'bronze.events', got {:?}",
+            names
+        );
+        assert_eq!(names.len(), 2, "should be exactly two models");
     }
 }

@@ -1336,12 +1336,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         // Update interval tracking for incremental models.
         //
-        // `result.model_name` is the db-form (e.g. "silver_events_parsed"), but
-        // LogicalGraph::get_model keys by the leaf bare name. For nested models
-        // those forms differ, so a direct get_model lookup fails. Resolve by
-        // matching db_name across the graph as a fallback. (Flat-layout models
-        // hit the fast path because leaf == db_name.)
+        // `result.model_name` is the db-form (e.g. "silver_events_parsed") from
+        // CompiledModel.name (which uses db_name_owned()). LogicalGraph keys by
+        // canonical path (e.g. "silver.events_parsed"), so we must resolve via
+        // db_name_owned() scan. Flat-layout models hit the fast path because
+        // their canonical path == db_name.
         if let Some(ref range) = tr {
+            // Try canonical path as key first (flat models: "events" == db_name).
             let model = graph.get_model(&result.model_name).or_else(|_| {
                 graph
                     .iter_models()

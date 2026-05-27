@@ -525,18 +525,19 @@ mod tests {
     fn make_model(name: &str, deps: Vec<&str>) -> ModelFile {
         let refs = deps
             .into_iter()
-            .map(|dep| RefInfo {
-                model_name: dep.to_string(),
-                has_named_params: false,
-                range: TextRange::default(),
-                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
-                    "models".to_string(),
-                    dep.to_string(),
-                ]),
+            .map(|dep| {
+                // Split dep canonical path into segments so segs.join(".") == dep.
+                let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
+                RefInfo {
+                    model_name: dep.to_string(),
+                    has_named_params: false,
+                    range: TextRange::default(),
+                    smelt_ref: smelt_core::refs::SmeltRef::Path(segs),
+                }
             })
             .collect();
 
-        let path: std::path::PathBuf = format!("{}.sql", name).into();
+        let path: std::path::PathBuf = format!("models/{}.sql", name).into();
         ModelFile {
             name: name.to_string(),
             model_id: smelt_core::ModelId::from_path(path.clone()),
@@ -546,9 +547,8 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
-            // TODO Phase 5: compute address_segments from the synthetic model
-            // name so canonical_path() returns the correct dot-path.
-            address_segments: Vec::new(),
+            // Single-segment address: canonical_path() == name.
+            address_segments: vec![name.to_string()],
         }
     }
 
