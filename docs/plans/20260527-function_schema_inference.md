@@ -62,10 +62,10 @@ You are executing this plan from the start of a new session. Drive it to complet
 |-------|----------|--------|------|
 | 1     | done     | 7d61882f | 2026-05-27 |
 | 2     | done     | 4b8911f5 | 2026-05-27 |
-| 3     | done     |        | 2026-05-27 |
-| 4     | pending  |        |      |
-| 5     | pending  |        |      |
-| 6     | pending  |        |      |
+| 3     | done     | c228d3f0 | 2026-05-27 |
+| 4     | deferred |        | 2026-05-27 |
+| 5     | deferred |        | 2026-05-27 |
+| 6     | done     | (with Phase 1) | 2026-05-27 |
 
 ---
 
@@ -256,6 +256,8 @@ You are executing this plan from the start of a new session. Drive it to complet
 (Append-only.)
 
 - **Phase 1 — `.field` single-field projection and row-tail (`..r`) struct-spread descoped.** The call surface has no field-postfix on a function call (`SMELT_PATH_CALL` only carries `.*` via `SMELT_PATH_CALL_STAR`), so `f(x).field` is not implementable without parser work. Row-tail struct-spread expansion at the schema layer diverges from codegen (`expand_smelt_path_call_star` falls back to verbatim on `SPREAD_ITEM`), which would violate the schema/codegen-agreement invariant. Phase 1 ships closed-struct `.*` only; both sub-cases are recorded in the spec's Known Divergences. Unifying schema + codegen for row-tail, and adding `.field`, are future work.
+
+- **Phases 4–5 — `Unknown` reason-discriminant and `ColumnTypeUnresolved` enforcement deferred.** After Phases 1–3 there are zero function-derived `Unknown` columns in any green example, so enforcement has no real consumer — only a synthetic broken fixture could exercise it. The faithful implementation needs a design decision that an unsupervised pass should not make: (a) how to construct a minimal *function-derived* `Unresolved` column for the broken fixture without inventing new surface — the natural existing constructs are a `TableExpr` function with multiple `TableExpr` params and a bare-`*` body (spec rule 3 → `Unresolved`), which requires the emitter to cover the `TableExpr`-FROM case, not just struct-spread; and (b) whether the reason-discriminant is carried on column metadata or computed at the emission site. An initial attempt scoped the emitter to struct-spread only and, to build its fixture, added a bare `Struct<{…}>` *return-type* parsing surface (`smelt-parser`, `smelt-types`) that is not in any spec — that attempt was reverted rather than shipped, to preserve spec-first discipline and avoid an unspecified language-surface addition. The spec's §Known Divergences (rule 6 not yet enforced) and `types.md`'s silent-`Unknown` divergence remain in place. Resume by deciding the fixture/emitter scope and the discriminant representation (see spec §Semantics rule 6, `types.md` §"Strict-by-default doctrine"), then implementing the general function-derived case (struct-spread + `TableExpr`-FROM) behind the all-green gate. Note: the meta-language silent unknowns (`per_cohort_union`, `meta_columns`, `meta_*`) are separately deferred to `meta_language.md` and must stay non-erroring.
 
 ## Verification
 
