@@ -22,7 +22,8 @@ pub use config::{
     Materialization, ModelConfig, Target, Weekday,
 };
 pub use discovery::{
-    discover_function_file_paths, ModelDiscovery, ModelFile, ModelKind, PythonModelQuery,
+    discover_function_file_paths, parse_sql_file, ModelDiscovery, ModelFile, ModelKind,
+    PythonModelQuery,
 };
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{

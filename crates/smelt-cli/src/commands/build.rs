@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::{BuildArgs, RunArgs, SeedArgs};
 
-pub async fn build(args: BuildArgs) -> Result<()> {
+pub async fn build(args: BuildArgs, scope: Option<&str>) -> Result<()> {
     if args.show_plan {
         return show_plan(args);
     }
@@ -15,7 +15,7 @@ pub async fn build(args: BuildArgs) -> Result<()> {
         show_results: false,
         select: Vec::new(),
     };
-    super::seed::run_seed(seed_args).await?;
+    super::seed::run_seed(seed_args, scope).await?;
 
     // Step 2: Run
     let run_args = RunArgs {
@@ -38,7 +38,7 @@ pub async fn build(args: BuildArgs) -> Result<()> {
         allow_full_refresh: false,
         allow_downgrade: args.allow_downgrade,
     };
-    super::run::run(run_args).await
+    super::run::run(run_args, scope).await
 }
 
 fn show_plan(args: BuildArgs) -> Result<()> {

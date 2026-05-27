@@ -7,12 +7,14 @@ use salsa::Accumulator;
 use smelt_parser::{self, File as AstFile};
 use smelt_types::{parse_type, DataType};
 
-use crate::queries::parse::{model_path_refs, model_refs, model_sources, parse_file, parse_model};
+use crate::queries::parse::{model_path_refs, model_sources, parse_file, parse_model};
 use crate::queries::schema::{
     model_input_constraints, model_schema, resolved_model_schema, type_context, typed_model_schema,
 };
 use crate::type_inference;
-use crate::{find_project, resolve_ref, DiagnosticAcc, Position, Range, SourceFile, Workspace};
+use crate::{
+    find_project, resolve_ref_leaf, DiagnosticAcc, Position, Range, SourceFile, Workspace,
+};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
 // ============================================================================
@@ -143,17 +145,12 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         return;
     }
 
-    let refs = model_refs(db, file);
     let sources = model_sources(db, file);
-    // Phase 4: also include path-form refs that point to MODELS, SEEDS, or
-    // SOURCES (smelt.models.* / smelt.seeds.* / smelt.sources.*) in the
+    // Include path-form refs that point to MODELS, SEEDS, or SOURCES
+    // (smelt.models.* / smelt.seeds.* / smelt.sources.*) in the
     // "has any upstream dependency" guard. Without this, a model that uses
-    // ONLY path-form refs (no legacy smelt.ref()/smelt.source()) would be
-    // skipped by the early-return and never get column checks.
-    //
-    // Phase 4: path refs to models/seeds/sources bypass the early-return so
-    // column checks run for models that use only path-form refs (no legacy
-    // smelt.ref()/smelt.source()).
+    // ONLY path-form refs would be skipped by the early-return and never
+    // get column checks.
     //
     // Note: smelt.functions.* path refs in SELECT position (not FROM) are
     // excluded — they expand inline and don't bring FROM-scope columns.
@@ -180,7 +177,7 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Files that have ONLY smelt.functions.* calls in FROM (no direct data refs)
     // skip the CannotInferType check since type inference for function return
     // schemas is intentionally limited. They still run check_undeclared_columns.
-    let has_direct_data_refs = !refs.is_empty() || !sources.is_empty() || has_data_path_refs;
+    let has_direct_data_refs = !sources.is_empty() || has_data_path_refs;
     if !has_direct_data_refs && !has_from_position_path_calls {
         return;
     }
@@ -261,7 +258,7 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     let input_constraints = model_input_constraints(db, workspace, file);
     for constraint in input_constraints.iter() {
         let upstream = match project
-            .and_then(|p| resolve_ref(db, workspace, p, constraint.ref_name.clone()))
+            .and_then(|p| resolve_ref_leaf(db, workspace, p, constraint.ref_name.clone()))
         {
             Some(p) => p,
             None => continue,
@@ -305,8 +302,7 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Detect cycles: base schema has content but resolved is empty OR all
     // types are Unknown → cycle recovery fired.
     //
-    // Phase 4: `model_refs` always returns empty (legacy syntax is a parse
-    // error). Check path-form refs (smelt.models.*) instead.
+    // Check path-form refs (smelt.models.*) for cycles.
     for path_loc in model_path_refs(db, file).iter() {
         // Only model refs can form cycles.
         if path_loc.path.first().map(|s| s.as_str()) != Some("models") {
@@ -316,8 +312,11 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             Some(n) => n.clone(),
             None => continue,
         };
+        // Use the project-scoped leaf resolver so cycle detection works in
+        // test environments that use relative project roots (strip_prefix
+        // for `"."` fails in `resolve_ref_path`).
         if let Some(upstream) =
-            project.and_then(|p| resolve_ref(db, workspace, p, model_name.clone()))
+            project.and_then(|p| resolve_ref_leaf(db, workspace, p, model_name.clone()))
         {
             let upstream_base = model_schema(db, upstream);
             let upstream_resolved = resolved_model_schema(db, workspace, upstream);

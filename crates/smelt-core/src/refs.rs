@@ -39,13 +39,11 @@ impl SmeltRef {
 
 #[derive(Debug, Clone)]
 pub struct RefInfo {
-    /// Legacy field — preserved for backwards compatibility with the
-    /// existing string-keyed `DependencyGraph::build` code path. New
-    /// callers should consume [`smelt_ref`](RefInfo::smelt_ref).
-    pub model_name: String,
     pub has_named_params: bool,
     pub range: TextRange,
-    /// Unified ref carrier (Phase 2a).
+    /// Unified ref carrier. Callers derive the leaf name via
+    /// `smelt_ref.leaf_name()` and the full dot-path via
+    /// `smelt_ref.to_path().join(".")`.
     pub smelt_ref: SmeltRef,
 }
 
@@ -82,9 +80,7 @@ pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
             }
 
             let segments = path_ref.segments();
-            let leaf = segments.last().cloned().unwrap_or_default();
             out.push(RefInfo {
-                model_name: leaf,
                 has_named_params: false,
                 range: path_ref.text_range(),
                 smelt_ref: SmeltRef::Path(segments),
@@ -103,9 +99,7 @@ pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
                         .any(|n| n.kind() == smelt_parser::SyntaxKind::NAMED_PARAM)
                 })
                 .unwrap_or(false);
-            let leaf = segments.last().cloned().unwrap_or_default();
             out.push(RefInfo {
-                model_name: leaf,
                 has_named_params,
                 range: path_call.text_range(),
                 smelt_ref: SmeltRef::Path(segments),
@@ -149,7 +143,7 @@ GROUP BY user_id
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "raw_events");
+        assert_eq!(refs[0].smelt_ref.to_path().join("."), "models.raw_events");
         assert!(!refs[0].has_named_params);
         assert!(matches!(refs[0].smelt_ref, SmeltRef::Path(_)));
     }
@@ -169,8 +163,8 @@ INNER JOIN smelt.models.model_b b ON a.id = b.id
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].model_name, "model_a");
-        assert_eq!(refs[1].model_name, "model_b");
+        assert_eq!(refs[0].smelt_ref.to_path().join("."), "models.model_a");
+        assert_eq!(refs[1].smelt_ref.to_path().join("."), "models.model_b");
     }
 
     #[test]

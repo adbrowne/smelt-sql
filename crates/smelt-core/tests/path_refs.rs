@@ -4,7 +4,7 @@
 //!   - extract path-form refs from a parsed file with kind dispatch decided
 //!     by the workspace file format,
 //!   - dispatch `smelt.seeds.*` to seeds and `smelt.sources.*` to sources,
-//!   - build a path-tuple-keyed dependency graph from the workspace.
+//!   - build a canonical-path-keyed dependency graph from the workspace.
 //!
 //! Tests use `examples/test_workspace/` as a real-fixture oracle and ad-hoc
 //! tempdirs for shape-only cases. They drive `extract_refs` through the new
@@ -73,10 +73,9 @@ JOIN smelt.sources.raw.events e ON s.id = e.user_id
 
 #[test]
 fn path_refs_dependency_graph() {
-    // `DependencyGraph::build_from_workspace` keys edges on path tuples.
+    // `DependencyGraph::build` keys edges on canonical dot-paths.
     // We use the test_workspace fixture (which already contains `path_demo.sql`
-    // referencing `smelt.users` along with legacy `smelt.ref` /
-    // `smelt.source` files).
+    // referencing `smelt.users` along with other SQL files).
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -99,21 +98,19 @@ fn path_refs_dependency_graph() {
     let _seeds = discover_seed_infos(&workspace_root, &["seeds".to_string()]);
 
     let graph =
-        DependencyGraph::build_from_workspace(models, Some(&sources_config), &workspace_root)
-            .expect("build path-tuple graph");
+        DependencyGraph::build(models, Some(&sources_config)).expect("build canonical-path graph");
 
-    // Every dependency edge must be path-tuple keyed (Vec<String>), not a
-    // bare model name. Look up the path-form fixture's dependency on
-    // `smelt.users` — it must appear as a path tuple `["users"]` in the
-    // graph's edges (Phase 2: no namespace prefix in unified paths).
-    let path_demo_key = vec!["models".to_string(), "path_demo".to_string()];
+    // Every model in test_workspace must be discoverable by its canonical path.
+    // path_demo.sql lives at models/path_demo.sql → canonical "path_demo".
+    // Verify it has at least one dep (on "users", canonical "users").
     let deps = graph
-        .path_dependencies(&path_demo_key)
-        .unwrap_or_else(|| panic!("path_demo not in path-tuple graph"));
+        .get_upstream("path_demo")
+        .into_iter()
+        .collect::<Vec<_>>();
 
-    let users_tuple = vec!["users".to_string()];
+    // path_demo.sql references smelt.users — dep key must be canonical "users".
     assert!(
-        deps.iter().any(|d| d == &users_tuple),
-        "path_demo should depend on smelt.users — got {deps:#?}"
+        deps.iter().any(|d| d == "users"),
+        "path_demo should depend on users — got {deps:#?}"
     );
 }

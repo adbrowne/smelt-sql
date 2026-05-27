@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
-use smelt_cli::{find_project_root, seed, Config};
+use smelt_cli::{
+    argument_resolution::{compute_scope, resolve_selector_args},
+    find_project_root, seed, Config,
+};
 
 use tracing::info;
 
 use crate::helpers::create_backend;
 use crate::SeedArgs;
 
-pub async fn run_seed(args: SeedArgs) -> Result<()> {
+pub async fn run_seed(args: SeedArgs, scope: Option<&str>) -> Result<()> {
     // 1. Find project root and load config
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
@@ -41,9 +44,32 @@ pub async fn run_seed(args: SeedArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 4. Filter by --select if provided
+    // 4. Filter by --select if provided.
+    // Route through resolve_selector_args so bare-leaf with no scope errors per
+    // spec (instead of silently passing the raw string to a substring filter).
     if !args.select.is_empty() {
-        seeds = seed::filter_seeds(seeds, &args.select);
+        // Build a lightweight Salsa DB (no SQL model files) so resolve_argument
+        // can call smelt_db::resolve_ref_path, which finds seeds via project_seeds.
+        let mut db = smelt_db::Database::default();
+        let project = db.set_project_input(project_dir.clone(), String::new());
+        db.set_workspace(vec![], vec![project]);
+        let ws = db.workspace();
+
+        // Compute the active scope.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+        let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+
+        // Resolve selectors → canonical seed paths (address_segments joined by ".").
+        let resolved_select =
+            resolve_selector_args(&db, ws, project, active_scope.as_ref(), &args.select)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Keep only seeds whose canonical path matches a resolved selector.
+        seeds.retain(|s| {
+            let canonical = s.address_segments.join(".");
+            resolved_select.contains(&canonical)
+        });
+
         if seeds.is_empty() {
             info!("No seeds matched selectors: {}", args.select.join(", "));
             return Ok(());

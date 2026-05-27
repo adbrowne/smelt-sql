@@ -4,36 +4,7 @@ use crate::selector::{SelectionMethod, Selector};
 use crate::SourcesConfig;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
 use thiserror::Error;
-
-/// Compute the workspace-relative path tuple for a model file.
-///
-/// `examples/test_workspace/models/users.sql` with workspace root
-/// `examples/test_workspace/` becomes `["models", "users"]`. The leaf
-/// segment is the model's `name` (which already accounts for
-/// multi-model files where the leaf is taken from frontmatter rather
-/// than the filename); intermediate segments are the parent directory
-/// components from the workspace root down to the file's parent.
-fn path_tuple_for_model(workspace_root: &Path, model: &ModelFile) -> Vec<String> {
-    let source_path = model.model_id.source_path();
-    let parent = source_path.parent().unwrap_or(Path::new(""));
-    // Try to strip the workspace root from the parent to get a workspace-
-    // relative directory. If `parent` is not a descendant of `workspace_root`
-    // (e.g. the model came from a tempdir or virtual path) fall back to the
-    // parent's components verbatim — the resulting tuple is still unique
-    // because the leaf model name is appended.
-    let rel_dir = parent.strip_prefix(workspace_root).unwrap_or(parent);
-    let mut tuple: Vec<String> = rel_dir
-        .components()
-        .filter_map(|c| match c {
-            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    tuple.push(model.name.clone());
-    tuple
-}
 
 #[derive(Debug, Error)]
 pub enum GraphError {
@@ -45,19 +16,29 @@ pub enum GraphError {
 }
 
 pub struct DependencyGraph {
-    /// model_name -> dependencies (model names it references)
+    /// canonical_path -> dependencies (canonical paths it references)
+    ///
+    /// Keys and values are canonical dot-path strings, e.g. `"silver.events"`.
+    /// This is the structural enforcement of Invariant 9: the graph is keyed
+    /// exclusively on canonical paths; leaf-only names are not stored here.
     dependencies: HashMap<String, Vec<String>>,
-    /// model_name -> ModelFile
+    /// canonical_path -> ModelFile
     models: HashMap<String, ModelFile>,
     /// External sources (from sources.yml)
     sources: HashSet<String>,
-    /// Path-tuple keyed dependency edges (Phase 2a). Empty when the
-    /// graph was built via the legacy `build` constructor; populated
-    /// by [`DependencyGraph::build_from_workspace`].
-    path_dependencies: HashMap<Vec<String>, Vec<Vec<String>>>,
 }
 
 impl DependencyGraph {
+    /// Build a `DependencyGraph` from a list of `ModelFile`s.
+    ///
+    /// Both `dependencies` and `models` maps are keyed by canonical dot-path
+    /// strings (e.g. `"silver.events"`). This enforces Invariant 9: leaf-only
+    /// model names exist only as a parsed-out field of `ModelFile` for
+    /// diagnostic context, not as a resolution key.
+    ///
+    /// Dep edges are also canonical dot-paths: a ref `smelt.silver.events`
+    /// produces segments `["silver", "events"]` which join to `"silver.events"`.
+    /// Refs whose first segment is `"functions"` or `"sources"` are excluded.
     pub fn build(models: Vec<ModelFile>, sources: Option<&SourcesConfig>) -> Result<Self> {
         let mut dependencies = HashMap::new();
         let mut models_map: HashMap<String, ModelFile> = HashMap::new();
@@ -73,10 +54,10 @@ impl DependencyGraph {
         }
 
         // Build dependency map from path-form refs. Any SmeltRef::Path whose
-        // first segment is not "functions" or "sources" is treated as a model
-        // dependency; the leaf segment is used as the model name. Path-tuple
-        // resolution is also available via `build_from_workspace`.
+        // first segment is not "functions", "sources", or "seeds" is treated
+        // as a model dependency; the full dot-joined path is used as the key.
         for model in models {
+            let canonical = model.canonical_path();
             let deps: Vec<String> = model
                 .refs
                 .iter()
@@ -85,74 +66,34 @@ impl DependencyGraph {
                     if segs.is_empty() {
                         return None;
                     }
-                    // Exclude function call refs (smelt.functions.*) and source
-                    // refs (smelt.sources.*); everything else is a model dep.
+                    // Exclude function call refs (smelt.functions.*), source
+                    // refs (smelt.sources.*), and seed refs (smelt.seeds.*);
+                    // everything else is a model dep.
                     let first = segs[0].as_str();
-                    if first == "functions" || first == "sources" {
+                    if first == "functions" || first == "sources" || first == "seeds" {
                         return None;
                     }
-                    segs.last().cloned()
+                    Some(segs.join("."))
                 })
                 .collect();
 
-            if let Some(existing) = models_map.get(&model.name) {
+            if let Some(existing) = models_map.get(&canonical) {
                 eprintln!(
-                    "Warning: Duplicate model name '{}'. Model at {} overwrites model at {}.",
-                    model.name,
+                    "Warning: Duplicate canonical path '{}'. Model at {} overwrites model at {}.",
+                    canonical,
                     model.path.display(),
                     existing.path.display()
                 );
             }
-            dependencies.insert(model.name.clone(), deps);
-            models_map.insert(model.name.clone(), model);
+            dependencies.insert(canonical.clone(), deps);
+            models_map.insert(canonical, model);
         }
 
         Ok(Self {
             dependencies,
             models: models_map,
             sources: source_set,
-            path_dependencies: HashMap::new(),
         })
-    }
-
-    /// Build a path-tuple keyed dependency graph from a workspace.
-    ///
-    /// Every `smelt.<path>` reference is keyed by the workspace-relative
-    /// path tuple of its referent. The path tuple is derived from each
-    /// model's location relative to the workspace root:
-    /// `models/users.sql` becomes `["models", "users"]`.
-    pub fn build_from_workspace(
-        models: Vec<ModelFile>,
-        sources: Option<&SourcesConfig>,
-        workspace_root: &Path,
-    ) -> Result<Self> {
-        // First, compute path-tuple edges per model.
-        let mut path_dependencies: HashMap<Vec<String>, Vec<Vec<String>>> = HashMap::new();
-        for model in &models {
-            let model_tuple = path_tuple_for_model(workspace_root, model);
-            let edges: Vec<Vec<String>> =
-                model.refs.iter().map(|r| r.smelt_ref.to_path()).collect();
-            path_dependencies.insert(model_tuple, edges);
-        }
-
-        // Then construct the legacy string-keyed graph for compatibility.
-        let mut graph = Self::build(models, sources)?;
-        graph.path_dependencies = path_dependencies;
-        Ok(graph)
-    }
-
-    /// Returns the path-tuple keyed dependencies for a model, if the
-    /// graph was built via [`build_from_workspace`].
-    pub fn path_dependencies(&self, key: &[String]) -> Option<&[Vec<String>]> {
-        self.path_dependencies.get(key).map(|v| v.as_slice())
-    }
-
-    /// Iterate over the path-tuple keyed dependency map. Empty if the
-    /// graph was built via [`build`] rather than [`build_from_workspace`].
-    pub fn iter_path_dependencies(&self) -> impl Iterator<Item = (&[String], &[Vec<String>])> {
-        self.path_dependencies
-            .iter()
-            .map(|(k, v)| (k.as_slice(), v.as_slice()))
     }
 
     /// Validate all references exist (either as models or sources)
@@ -494,18 +435,28 @@ mod tests {
     use crate::discovery::RefInfo;
     use rowan::TextRange;
 
+    /// Make a flat model (no layer prefix). canonical_path() == name.
+    ///
+    /// Each dep in `deps` is expected to be a canonical path string (dot-joined).
+    /// The ref path is split on `.` to produce segments matching `segs.join(".")`.
     fn make_model(name: &str, deps: Vec<&str>) -> ModelFile {
         let refs = deps
             .into_iter()
-            .map(|dep| RefInfo {
-                model_name: dep.to_string(),
-                has_named_params: false,
-                range: TextRange::default(),
-                smelt_ref: crate::refs::SmeltRef::Path(vec!["models".to_string(), dep.to_string()]),
+            .map(|dep| {
+                // Split the dep canonical path into segments so that
+                // `segs.join(".")` == dep. Single-segment deps like "A"
+                // produce `["A"]`; layered deps like "silver.events" produce
+                // `["silver", "events"]`.
+                let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
+                RefInfo {
+                    has_named_params: false,
+                    range: TextRange::default(),
+                    smelt_ref: crate::refs::SmeltRef::Path(segs),
+                }
             })
             .collect();
 
-        let path: std::path::PathBuf = format!("{}.sql", name).into();
+        let path: std::path::PathBuf = format!("models/{}.sql", name).into();
         ModelFile {
             name: name.to_string(),
             model_id: crate::model_id::ModelId::from_path(path.clone()),
@@ -515,7 +466,24 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
-            address_segments: Vec::new(),
+            // Single-segment address: canonical_path() == name.
+            address_segments: vec![name.to_string()],
+        }
+    }
+
+    /// Make a model with a layer prefix. canonical_path() == "<layer>.<name>".
+    fn make_layered_model(layer: &str, name: &str) -> ModelFile {
+        let path: std::path::PathBuf = format!("models/{}/{}.sql", layer, name).into();
+        ModelFile {
+            name: name.to_string(),
+            model_id: crate::model_id::ModelId::from_path(path.clone()),
+            path,
+            content: String::new(),
+            refs: Vec::new(),
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            address_segments: vec![layer.to_string(), name.to_string()],
         }
     }
 
@@ -581,6 +549,8 @@ mod tests {
 
     #[test]
     fn test_undefined_reference() {
+        // make_model wraps deps in ["models", dep], so the canonical dep key
+        // will be "models.nonexistent".
         let models = vec![make_model("A", vec!["nonexistent"])];
 
         let graph = DependencyGraph::build(models, None).unwrap();
@@ -593,31 +563,30 @@ mod tests {
     }
 
     /// Layer-prefix refs like `smelt.silver.events_parsed` produce segments
-    /// `["silver", "events_parsed"]`. The graph must capture these as model
-    /// dependencies so that UI edges and execution order are correct.
+    /// `["silver", "events_parsed"]`. The graph must capture these as canonical
+    /// dot-path deps so that UI edges and execution order are correct.
     #[test]
     fn test_layer_prefix_refs_captured_as_deps() {
-        // Simulate smelt.silver.events_parsed / smelt.bronze.raw_events style refs.
+        // Simulate smelt.silver.events_parsed / smelt.bronze.raw_events style
+        // refs. Models are keyed by canonical path (layer.name).
         let make_layer_ref = |layer: &str, model: &str| RefInfo {
-            model_name: model.to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec![layer.to_string(), model.to_string()]),
         };
         let make_function_ref = |name: &str| RefInfo {
-            model_name: name.to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec!["functions".to_string(), name.to_string()]),
         };
 
-        let mut raw_events = make_model("raw_events", vec![]);
-        let mut events_parsed = make_model("events_parsed", vec![]);
+        let mut raw_events = make_layered_model("bronze", "raw_events");
+        let mut events_parsed = make_layered_model("silver", "events_parsed");
         events_parsed.refs = vec![
             make_layer_ref("bronze", "raw_events"),
             make_function_ref("parse_event_payload"), // should be excluded
         ];
-        let mut sessions = make_model("sessions", vec![]);
+        let mut sessions = make_layered_model("gold", "sessions");
         sessions.refs = vec![make_layer_ref("silver", "events_parsed")];
         raw_events.refs = vec![];
 
@@ -625,26 +594,38 @@ mod tests {
             DependencyGraph::build(vec![raw_events, events_parsed, sessions], None).unwrap();
 
         let order = graph.execution_order().unwrap();
-        assert_eq!(order[0], "raw_events");
-        assert_eq!(order[1], "events_parsed");
-        assert_eq!(order[2], "sessions");
+        assert_eq!(order[0], "bronze.raw_events");
+        assert_eq!(order[1], "silver.events_parsed");
+        assert_eq!(order[2], "gold.sessions");
 
-        let deps = graph.get_upstream("events_parsed");
-        assert_eq!(deps, vec!["raw_events"]);
+        let deps = graph.get_upstream("silver.events_parsed");
+        assert_eq!(deps, vec!["bronze.raw_events"]);
 
-        let deps2 = graph.get_upstream("sessions");
-        assert_eq!(deps2, vec!["events_parsed"]);
+        let deps2 = graph.get_upstream("gold.sessions");
+        assert_eq!(deps2, vec!["silver.events_parsed"]);
     }
 
     #[test]
     fn test_source_reference() {
         use crate::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
 
-        let models = vec![make_model("A", vec!["source.events"])];
+        // A model that refs smelt.sources.src.events — the "sources" prefix
+        // excludes it from model dep tracking, so validate() should succeed
+        // even though there's no model named "src.events".
+        let mut model_a = make_model("A", vec![]);
+        model_a.refs = vec![RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "sources".to_string(),
+                "src".to_string(),
+                "events".to_string(),
+            ]),
+        }];
 
         let source_config = SourcesConfig {
             sources: vec![SourceDef {
-                name: "source".to_string(),
+                name: "src".to_string(),
                 database: None,
                 schema: None,
                 description: None,
@@ -662,18 +643,20 @@ mod tests {
             }],
         };
 
-        let graph = DependencyGraph::build(models, Some(&source_config)).unwrap();
+        let graph = DependencyGraph::build(vec![model_a], Some(&source_config)).unwrap();
         assert!(graph.validate().is_ok());
     }
 
     fn make_model_with_tags(name: &str, deps: Vec<&str>, tags: Vec<&str>) -> ModelFile {
         let refs = deps
             .into_iter()
-            .map(|dep| RefInfo {
-                model_name: dep.to_string(),
-                has_named_params: false,
-                range: TextRange::default(),
-                smelt_ref: crate::refs::SmeltRef::Path(vec!["models".to_string(), dep.to_string()]),
+            .map(|dep| {
+                let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
+                RefInfo {
+                    has_named_params: false,
+                    range: TextRange::default(),
+                    smelt_ref: crate::refs::SmeltRef::Path(segs),
+                }
             })
             .collect();
 
@@ -686,7 +669,7 @@ mod tests {
             }))
         };
 
-        let path: std::path::PathBuf = format!("{}.sql", name).into();
+        let path: std::path::PathBuf = format!("models/{}.sql", name).into();
         ModelFile {
             name: name.to_string(),
             model_id: crate::model_id::ModelId::from_path(path.clone()),
@@ -696,7 +679,8 @@ mod tests {
             parse_errors: Vec::new(),
             metadata,
             kind: crate::discovery::ModelKind::Sql,
-            address_segments: Vec::new(),
+            // Single-segment address: canonical_path() == name.
+            address_segments: vec![name.to_string()],
         }
     }
 
@@ -948,5 +932,90 @@ mod tests {
 
         // Independent models on different targets have no cross-backend edges
         assert!(graph.find_cross_backend_edges(&assignments).is_empty());
+    }
+
+    // ----- canonical-path rekey tests (Phase 3) -------------------------
+
+    /// Two models with the same leaf name but different layer prefixes must
+    /// coexist as distinct entries in the graph, keyed by canonical path.
+    #[test]
+    fn same_leaf_distinct_canonical_paths_coexist() {
+        let silver_events = make_layered_model("silver", "events");
+        let bronze_events = make_layered_model("bronze", "events");
+        let graph = DependencyGraph::build(vec![silver_events, bronze_events], None).unwrap();
+
+        // Both canonical paths must be present.
+        assert!(
+            graph.get_model("silver.events").is_ok(),
+            "silver.events not found"
+        );
+        assert!(
+            graph.get_model("bronze.events").is_ok(),
+            "bronze.events not found"
+        );
+
+        // They must be distinct models.
+        let s = graph.get_model("silver.events").unwrap();
+        let b = graph.get_model("bronze.events").unwrap();
+        assert_ne!(
+            s.path, b.path,
+            "silver.events and bronze.events should be distinct models"
+        );
+
+        assert_eq!(graph.model_count(), 2);
+    }
+
+    /// A model at `models/gold/daily.sql` (canonical `"gold.daily"`) with a
+    /// ref `smelt.silver.events_parsed` must record the dep as canonical path
+    /// `"silver.events_parsed"` in `graph.dependencies()`.
+    #[test]
+    fn dependencies_use_canonical_paths() {
+        let mut daily = make_layered_model("gold", "daily");
+        // Add ref to silver.events_parsed
+        daily.refs = vec![RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "silver".to_string(),
+                "events_parsed".to_string(),
+            ]),
+        }];
+        let events_parsed = make_layered_model("silver", "events_parsed");
+        let graph = DependencyGraph::build(vec![daily, events_parsed], None).unwrap();
+
+        // The dep for "gold.daily" must be the canonical path "silver.events_parsed".
+        let deps: Vec<String> = graph.get_upstream("gold.daily");
+        assert_eq!(
+            deps,
+            vec!["silver.events_parsed".to_string()],
+            "dep key must be canonical path, got: {deps:?}"
+        );
+    }
+
+    /// `execution_order()` returns canonical dot-paths in DAG order.
+    #[test]
+    fn execution_order_uses_canonical_paths() {
+        // bronze.raw → silver.parsed → gold.summary
+        let raw = make_layered_model("bronze", "raw");
+        let mut parsed = make_layered_model("silver", "parsed");
+        parsed.refs = vec![RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec!["bronze".to_string(), "raw".to_string()]),
+        }];
+        let mut summary = make_layered_model("gold", "summary");
+        summary.refs = vec![RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "silver".to_string(),
+                "parsed".to_string(),
+            ]),
+        }];
+
+        let graph = DependencyGraph::build(vec![raw, parsed, summary], None).unwrap();
+        let order = graph.execution_order().unwrap();
+
+        assert_eq!(order, vec!["bronze.raw", "silver.parsed", "gold.summary"],);
     }
 }

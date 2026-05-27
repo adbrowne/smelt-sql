@@ -127,8 +127,13 @@ pub fn load_workspace(project_root: &Path) -> LoadedWorkspace {
     // models so each becomes a `SourceFile` and the function-signature query
     // (`functions_in_file`) can index it. The `functions/` directory is
     // hardcoded (see `discover_function_file_paths` docs).
+    //
+    // Pass `project_root` as the scan root so that address_segments retains
+    // the full workspace-relative path (e.g. `["functions", "sessionize"]`
+    // for `functions/sessionize.sql`). Function files are NOT in `config.paths`
+    // so their scan-root prefix is never stripped — per the architecture spec.
     for fn_path in discover_function_file_paths(project_root) {
-        match parse_sql_file(&fn_path) {
+        match parse_sql_file(&fn_path, Some(project_root)) {
             Ok(parsed) => sql_files.extend(parsed),
             Err(e) => {
                 errors

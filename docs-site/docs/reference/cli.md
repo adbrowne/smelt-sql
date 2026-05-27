@@ -22,6 +22,69 @@ The following flags appear on most subcommands:
 | `--project-dir` | path | `.` | Path to the smelt project root (directory containing `smelt.yml`) |
 | `--database` | path | _(from smelt.yml)_ | Override the DuckDB database file path |
 | `--target` | string | `dev` | Target environment name as defined in `smelt.yml` |
+| `--scope` | string | _(cwd-derived)_ | Dot-path prefix for expanding bare model names. Pass `--scope ''` to disable auto-scoping. |
+
+---
+
+## Argument resolution and `--scope`
+
+Every command that takes an entity identifier — a model name in `--select`, a positional model argument to `smelt type`, `smelt table`, `smelt status`, etc. — resolves it using a three-shape input rule.
+
+### The three input shapes
+
+| Shape | Example | What happens |
+|-------|---------|--------------|
+| **Full path** | `silver.events_parsed` | Resolved as-is against the project. Always works. |
+| **Scoped shorthand** | `events_parsed` (with scope `silver`) | Expanded to `silver.events_parsed` and resolved. Falls back to the bare argument if the expanded form does not exist. |
+| **No-scope bare leaf** | `events_parsed` (no scope set) | Resolved as a full path. Errors if no entity with that exact path exists, even if a same-named entity exists in a sub-namespace. |
+
+All smelt output — model lists, type signatures, `smelt explain --json` keys, log lines — uses the full canonical dot-path (e.g. `silver.events_parsed`) regardless of how you typed the identifier. Scope changes what you type; it never changes what smelt prints.
+
+### Scope sources (highest precedence first)
+
+1. **`--scope <prefix>` flag.** Pass a dot-path such as `silver` or `marts.daily`. Whitespace and the literal `smelt.` prefix are rejected.
+2. **Working-directory derivation (auto).** When your current directory is inside a project's scan root (`models/` by default), smelt derives the scope from the path components between the scan root and your cwd. For example, `models/silver/` auto-scopes to `silver`; `models/marts/daily/` auto-scopes to `marts.daily`. Being at or above the scan root produces no auto-scope.
+3. **No scope.** The argument must be a full path. Bare leaves error unless they are themselves full paths.
+
+`--scope ''` (empty string) forces no scope regardless of cwd. Use this in scripts and CI where the working directory should not influence resolution.
+
+### Worked examples — `web_analytics` project
+
+The `web_analytics` example has a `models/silver/events_parsed.sql` model. All three forms below resolve to the same entity and produce identical output:
+
+```bash
+# 1. Full path — works from anywhere inside the project
+smelt type silver.events_parsed
+
+# 2. Explicit scope flag — same result without typing the namespace
+smelt --scope silver type events_parsed
+
+# 3. Cwd auto-scope — smelt derives "silver" from the working directory
+cd models/silver
+smelt type events_parsed --project-dir <project-root>
+```
+
+All three print the canonical path in their output:
+
+```
+silver.events_parsed:
+  (raw_events: {...})
+  -> {event_id: BIGINT, device_id: INTEGER, ...}
+```
+
+### Bare-leaf error and the `did you mean` hint
+
+Running `smelt type events_parsed` from the project root (no auto-scope, no `--scope` flag) errors:
+
+```
+Error: Model 'events_parsed' not found. Did you mean 'silver.events_parsed'?
+```
+
+When the leaf matches multiple entities (e.g. both `silver.events_parsed` and `bronze.events_parsed` exist), the error lists all candidates and suggests using `--scope` or the full path.
+
+### Selectors and `--scope`
+
+`--select` and `--exclude` values are expanded through the same resolution rule. A bare name like `--select events_parsed` with scope `silver` active is expanded to `--select silver.events_parsed` before the selector engine runs. Tag selectors (`tag:staging`, `tag:revenue+`, etc.) contain a `:` and are passed through unchanged — they are not entity identifiers.
 
 ---
 
@@ -61,11 +124,14 @@ smelt run [OPTIONS]
 
 The `--select` and `--exclude` flags support graph-aware selection:
 
-- `model_name` -- select a single model by name
+- `model_name` -- select a single model by name (subject to scope resolution; see [Argument resolution and `--scope`](#argument-resolution-and-scope))
+- `silver.model_name` -- select by full canonical path (always unambiguous)
 - `tag:analytics` -- select all models with the `analytics` tag
 - `+model_name` -- select the model and all its upstream dependencies
 - `model_name+` -- select the model and all its downstream dependents
 - `+model_name+` -- select the model, its upstreams, and its downstreams
+
+Tag selectors (`tag:...`) are not subject to scope expansion and are passed through unchanged.
 
 **Examples:**
 
@@ -75,6 +141,12 @@ smelt run
 
 # Run with incremental time range
 smelt run --start 2026-01-01 --end 2026-01-08
+
+# Run a specific model by full canonical path
+smelt run --select silver.events_parsed
+
+# Run with scope shorthand (equivalent to the above when scope is silver)
+smelt --scope silver run --select events_parsed
 
 # Run only models with the "staging" tag, showing compiled SQL
 smelt run --select tag:staging --verbose
@@ -102,7 +174,7 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<SELECTOR>` | yes | Target model selector (e.g., `+daily_revenue`, `model_name`) |
+| `<SELECTOR>` | yes | Target model selector (e.g., `+marts.daily_revenue`, `silver.events_parsed`). Bare names are subject to scope resolution; see [Argument resolution and `--scope`](#argument-resolution-and-scope). |
 
 **Flags:**
 
@@ -122,14 +194,17 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 **Examples:**
 
 ```bash
-# Backbuild daily_revenue and all its upstreams for January
-smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
+# Backbuild a model and all its upstreams for January (canonical path form)
+smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
+
+# Same using scope shorthand (equivalent when scope is marts)
+smelt --scope marts backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
 
 # Preview what would be executed
-smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
+smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
 
 # Backbuild with per-partition execution
-smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
+smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
 ```
 
 ---
@@ -194,8 +269,11 @@ smelt build
 # Seed and run with incremental time range
 smelt build --event-time-start 2026-01-01 --event-time-end 2026-01-08
 
-# Seed and run only selected models
-smelt build --select daily_revenue --select transactions
+# Seed and run only selected models (canonical path form)
+smelt build --select marts.daily_revenue --select marts.transactions
+
+# Same with scope shorthand
+smelt --scope marts build --select daily_revenue --select transactions
 ```
 
 ---
@@ -357,8 +435,11 @@ Risk assessment:
 # Show all schema changes
 smelt diff
 
-# Show changes for a specific model
-smelt diff --select daily_revenue
+# Show changes for a specific model (canonical path form)
+smelt diff --select marts.daily_revenue
+
+# Show changes using scope shorthand
+smelt --scope marts diff --select daily_revenue
 
 # Show changes for all models with a tag
 smelt diff --select tag:staging
@@ -546,14 +627,17 @@ duckdb my-project.duckdb -c 'DESCRIBE <model>'
 **Examples:**
 
 ```bash
-# Show column types for a model
-smelt table daily_revenue
+# Show column types for a model (canonical path form)
+smelt table marts.daily_revenue
+
+# Using scope shorthand
+smelt --scope marts table daily_revenue
 
 # Output as JSON
-smelt table daily_revenue --format json
+smelt table marts.daily_revenue --format json
 
 # Inspect a model in a different project
-smelt table users --project-dir ./my-project
+smelt table silver.users --project-dir ./my-project
 ```
 
 ---
@@ -586,8 +670,16 @@ smelt type [OPTIONS] [MODEL_NAME]
 # Show type signatures of all models
 smelt type
 
-# Show type signature of a specific model
-smelt type daily_revenue
+# Show type signature of a specific model (canonical path form)
+smelt type silver.events_parsed
+
+# Using scope shorthand
+smelt --scope silver type events_parsed
+
+# All output uses canonical paths regardless of how you typed the name:
+# silver.events_parsed:
+#   (raw_events: {...})
+#   -> {event_id: BIGINT, device_id: INTEGER, ...}
 ```
 
 ---
@@ -622,11 +714,14 @@ smelt status [OPTIONS] [MODEL_NAME]
 # Show status of all incremental models
 smelt status
 
-# Show status for a specific model
-smelt status daily_revenue
+# Show status for a specific model (canonical path form)
+smelt status silver.sessions
+
+# Using scope shorthand
+smelt --scope silver status sessions
 
 # Check for gaps in a specific time range
-smelt status daily_revenue --since 2026-01-01 --until 2026-03-01
+smelt status silver.sessions --since 2026-01-01 --until 2026-03-01
 ```
 
 ---
@@ -663,8 +758,8 @@ smelt history
 # Show last 20 runs
 smelt history --limit 20
 
-# Show history for a specific model
-smelt history daily_revenue
+# Show history for a specific model (canonical path form)
+smelt history silver.sessions
 ```
 
 ---
@@ -698,8 +793,11 @@ smelt explain
 # Output as JSON for scripting
 smelt explain --json
 
-# Explain only selected models and their dependencies
-smelt explain --select +daily_revenue --json
+# Explain only selected models and their dependencies (canonical path form)
+smelt explain --select +marts.daily_revenue --json
+
+# Using scope shorthand
+smelt --scope marts explain --select +daily_revenue --json
 ```
 
 ---

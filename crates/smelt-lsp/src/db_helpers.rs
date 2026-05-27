@@ -39,19 +39,27 @@ pub(crate) fn lookup_project(db: &Database, root: &Path) -> Option<ProjectInput>
     db.project_input(root)
 }
 
-/// Resolve a model name to the file that defines it (within `project`).
+/// Resolve a model leaf name to the file that defines it, scoped to the
+/// project rooted at `project_root`.
 ///
-/// Project-scoped per the project isolation rule — callers must pass the
-/// project containing the file under analysis. `project_root` is the
-/// project root path on disk (as recorded on the `SourceFile` input).
-pub(crate) fn resolve_ref_path(
+/// This mirrors `smelt_db::resolve_ref_leaf` — it is the leaf-only resolver
+/// used by the schema-inference subsystem (`RowExtension.ref_name`,
+/// `InputConstraint.ref_name`) and the LSP's column-goto-definition.
+/// Because `RowExtension.ref_name` carries only the file-stem (leaf) of an
+/// upstream model, a full canonical-path lookup via `smelt_db::resolve_ref_path`
+/// would fail for models in subdirectories (e.g. `models/silver/events.sql`
+/// has leaf `"events"` but canonical path `["silver", "events"]`).
+///
+/// This is a Known Divergence; see `docs/specs/architecture.md` under
+/// "Schema-inference subsystem still uses leaf names for column-origin tracking".
+pub(crate) fn resolve_ref_leaf(
     db: &Database,
     project_root: &Path,
     model_name: &str,
 ) -> Option<PathBuf> {
     let ws = Workspace::try_get(db)?;
-    let project = lookup_project(db, project_root)?;
-    smelt_db::resolve_ref(db, ws, project, model_name.to_string()).map(|f| f.path(db).clone())
+    let project = db.project_input(project_root)?;
+    smelt_db::resolve_ref_leaf(db, ws, project, model_name.to_string()).map(|f| f.path(db).clone())
 }
 
 /// Shorthand for calling the `file_diagnostics` query given a file path.

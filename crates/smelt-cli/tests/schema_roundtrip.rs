@@ -144,7 +144,13 @@ fn stale_schema_cleaned_after_model_deleted() {
     );
 }
 
-/// Phase 3: `smelt build --select` matching no models must emit a diagnostic to stderr.
+/// Phase 3: `smelt build --select` with a non-existent model name must fail
+/// with a non-zero exit code and a diagnostic message.
+///
+/// Since Phase 4 canonical addressing: bare-leaf `--select` args that don't
+/// exist in the workspace produce a resolution error (exit non-zero). The
+/// previous "exit 0 with 'no models matched'" behavior was replaced by strict
+/// argument resolution per `docs/specs/cli.md` §"Argument resolution algorithm".
 #[test]
 fn no_match_select_emits_stderr_message() {
     let tmp = TempDir::new().unwrap();
@@ -155,16 +161,15 @@ fn no_match_select_emits_stderr_message() {
     let build = run_smelt(&["build"], dir);
     assert!(build.status.success());
 
-    // Run with a selector that matches nothing
+    // Run with a selector that matches nothing — now errors per strict resolution.
     let out = run_smelt(&["build", "--select", "nonexistent_model_xyz"], dir);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.success(),
-        "smelt build with non-matching --select should exit 0, got: {:?}",
-        out.status
+        !out.status.success(),
+        "smelt build with non-existent --select should exit non-zero (strict resolution), got exit 0\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("no models matched"),
-        "expected 'no models matched' in stderr, got: {stderr}"
+        stderr.contains("nonexistent_model_xyz") || stderr.contains("not found"),
+        "expected model name or 'not found' in stderr, got: {stderr}"
     );
 }

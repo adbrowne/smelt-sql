@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use smelt_backend::PartitionRange;
 use smelt_cli::{
-    compiler::UpstreamSchemas, compute_backbuild_plans, discover_python_models, executor,
-    find_project_root, format_plan_summary, init_db, inject_time_filter, parse_selector,
-    BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization,
-    ModelDiscovery, PhysicalGraphBuilder, SourcesConfig, TimeRange,
+    argument_resolution::{compute_scope, resolve_argument},
+    compiler::UpstreamSchemas,
+    compute_backbuild_plans, discover_python_models, executor, find_project_root,
+    format_plan_summary, init_db, inject_time_filter, parse_selector, BackendRegistry,
+    BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery,
+    PhysicalGraphBuilder, SourcesConfig, TimeRange,
 };
 use smelt_planner::Frontmatter;
 use std::collections::{HashMap, HashSet};
@@ -16,7 +18,7 @@ use tracing::{debug, info};
 use crate::helpers::strategy_label;
 use crate::BackbuildArgs;
 
-pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
+pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     // 1. Find project root
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
@@ -87,6 +89,14 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         ));
     }
 
+    // Initialise the Salsa DB early so scope resolution can delegate to
+    // smelt_db::resolve_ref_path / leaf_did_you_mean.
+    let scope_db = init_db(&project_dir, &models);
+    let scope_ws = smelt_db::Workspace::try_get(&scope_db).expect("workspace not initialized");
+    let scope_project = scope_db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+
     // 4. Build logical graph
     let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
@@ -96,8 +106,19 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         .with_context(|| "Dependency validation failed")?;
 
     // 5. Parse selector — backbuild always includes upstream (+model)
-    let selector = parse_selector(&args.selector)
-        .with_context(|| format!("Invalid selector: {}", args.selector))?;
+    // Resolve the selector through scope before parsing.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let resolved_selector = resolve_argument(
+        &scope_db,
+        scope_ws,
+        scope_project,
+        active_scope.as_ref(),
+        &args.selector,
+    )
+    .unwrap_or_else(|_| args.selector.clone()); // fall back for tag/special selectors
+    let selector = parse_selector(&resolved_selector)
+        .with_context(|| format!("Invalid selector: {}", resolved_selector))?;
 
     // Force upstream inclusion for backbuild
     let selectors = vec![smelt_cli::Selector {

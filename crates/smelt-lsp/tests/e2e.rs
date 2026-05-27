@@ -92,6 +92,25 @@ impl TestWorkspaceDir {
         std::fs::write(&file_path, sql).unwrap();
     }
 
+    /// Add a model in a subdirectory under `models/`.
+    /// E.g. `add_model_in_subdir("silver", "upstream", sql)` writes to
+    /// `models/silver/upstream.sql` — canonical path `smelt.silver.upstream`.
+    fn add_model_in_subdir(&self, subdir: &str, name: &str, sql: &str) {
+        let dir = self.path.join("models").join(subdir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{}.sql", name)), sql).unwrap();
+    }
+
+    /// URI for a model in a subdirectory.
+    fn model_uri_in_subdir(&self, subdir: &str, name: &str) -> String {
+        let p = self
+            .path
+            .join("models")
+            .join(subdir)
+            .join(format!("{}.sql", name));
+        format!("file://{}", p.display())
+    }
+
     fn add_function(&self, name: &str, sql: &str) {
         let functions_dir = self.path.join("functions");
         std::fs::create_dir_all(&functions_dir).unwrap();
@@ -748,6 +767,48 @@ async fn test_goto_definition_column() {
     assert!(
         result_str.contains("upstream"),
         "goto-definition should point to upstream.sql, got: {}",
+        result_str
+    );
+
+    client.shutdown().await;
+}
+
+/// Goto-definition for a column traces through to an upstream definition when
+/// the upstream lives in a subdirectory (canonical path `smelt.silver.upstream`).
+/// This exercises `resolve_ref_leaf` via the leaf name `"upstream"` that
+/// `RowExtension.ref_name` / `InputConstraint.ref_name` carry — the former
+/// single-segment path-wrapping approach failed for subdirectory models.
+#[tokio::test]
+async fn test_goto_definition_column_for_nested_upstream() {
+    let ws = TestWorkspaceDir::new();
+    // upstream lives at models/silver/upstream.sql
+    ws.add_model_in_subdir("silver", "upstream", "SELECT 1 AS id, 'hello' AS name");
+    // downstream references it by canonical path smelt.silver.upstream
+    ws.add_model_in_subdir(
+        "gold",
+        "downstream",
+        "SELECT u.id FROM smelt.silver.upstream u",
+    );
+
+    let upstream_uri = ws.model_uri_in_subdir("silver", "upstream");
+    let downstream_uri = ws.model_uri_in_subdir("gold", "downstream");
+
+    let mut client = TestClient::new(ws.path()).await;
+    client
+        .open_file(&upstream_uri, "SELECT 1 AS id, 'hello' AS name")
+        .await;
+    client
+        .open_file(&downstream_uri, "SELECT u.id FROM smelt.silver.upstream u")
+        .await;
+    client.collect_diagnostics(1000).await;
+
+    // Goto-definition on "id" in "u.id" — "id" starts at col 9
+    let result = client.goto_definition(&downstream_uri, 0, 9).await;
+    let result_str = serde_json::to_string(&result).unwrap();
+
+    assert!(
+        result_str.contains("upstream"),
+        "goto-definition should point to models/silver/upstream.sql, got: {}",
         result_str
     );
 

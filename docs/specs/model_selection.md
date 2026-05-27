@@ -1,7 +1,7 @@
 ---
 feature: model_selection
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-27
 owners: [andrew]
 ---
 
@@ -84,7 +84,7 @@ If no model in the project has the given tag, the selector matches nothing (no e
 
 The selection methods are `ModelName`, `Tag`, and `GeneratorFile`. There is no glob, regex, or directory-based selection.
 
-A `ModelName` selector that names a model not in the project matches nothing (no error). The resulting working set may be empty.
+A `ModelName` selector value is an entity identifier and is resolved through the CLI argument-resolution algorithm (`cli.md` §"Argument resolution algorithm"): the value is treated as a dot-path argument, expanded against the active scope (`--scope` or cwd-derived), and matched against the workspace's canonical `smelt.<path>` set. A selector that resolves to no entity matches nothing (no error). A bare-leaf selector value with no active scope that matches **multiple** entities by leaf is an error (the same ambiguity diagnostic CLI argument resolution emits), so `--select events_parsed` never silently picks one of two `events_parsed` models.
 
 A `GeneratorFile` selector takes a workspace-relative path to a generator file (a `.sql` file whose YAML frontmatter declares `generates: models` per `meta_language.md` §"Multi-model production") and matches every model the file emits during workspace-shape resolution. The match set is computed at selector-evaluation time against the post-W3 workspace shape (per `meta_language.md` §"Multi-model production" rule 4); generator-emitted models that lost a collision (`ModelDefHandAuthoredCollision`) are not in the match set. A `GeneratorFile` selector pointing at a path that is not a generator file (a hand-authored model, a missing file, a non-`.sql` file) matches nothing (no error).
 

@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-27
 owners: [andrew]
 ---
 
@@ -48,6 +48,35 @@ owners: [andrew]
 | `--project-dir` | `.` | Root directory containing `smelt.yml` |
 | `--target` | `dev` | Named target from `smelt.yml` |
 | `--database` | from config | Override DuckDB database file path (DuckDB targets only) |
+| `--scope` | cwd-derived | Dot-path prefix used to expand bare argument names into full `smelt.<path>` addresses. See §"Argument resolution and `--scope`". `--scope ''` disables auto-scoping. |
+
+### Argument resolution and `--scope`
+
+Every CLI command that takes an entity identifier (a model, function, seed, source, or test) accepts a **dot-path argument** matching the universal addressing scheme defined in `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme". The argument never carries the leading `smelt.` prefix — that prefix is implicit at the CLI surface — but the remainder is the same path tuple the resolver matches against.
+
+Three input shapes are accepted:
+
+| Shape | Example | Resolution |
+|-------|---------|------------|
+| **Full path** | `silver.events_parsed` | Resolved as-is against the workspace. Always works. |
+| **Scoped shorthand** | `events_parsed` (with scope `silver`) | Expanded to `<scope>.<arg>` (`silver.events_parsed`) and resolved. Falls back to the bare argument if the scoped expansion does not exist. |
+| **No-scope bare leaf** | `events_parsed` (no scope set) | Resolved as a full path. Errors if no entity at that exact path exists, even if a same-named entity exists in a sub-namespace. |
+
+**Scope sources, in precedence order:**
+
+1. **`--scope <prefix>` flag** (explicit). The flag value is a dot-path (e.g. `silver`, `marts.daily`); whitespace and the literal `smelt.` prefix are rejected.
+2. **Working-directory derivation** (auto). If the process's current working directory is under `<project>/<scan_root>/<segs...>` for some scan root in `paths:`, the auto-scope is `<segs joined by .>`. If `cwd` is the project root, above the project, or inside a `scan_root` itself, no auto-scope applies.
+3. **No scope.** The argument must be a full path; bare leaves resolve only against entities whose full path is exactly the leaf.
+
+`--scope ''` (empty string) forces "no scope" regardless of cwd. This is the explicit opt-out for scripts that want to be cwd-insensitive.
+
+**Disambiguation rules:**
+
+- **Scope expansion fall-through** is silent: if `<scope>.<arg>` resolves, use it; otherwise try `<arg>`. The fall-through is one-shot — there is no recursive search up the scope hierarchy.
+- **Ambiguity at no-scope resolution.** When the user passes a bare leaf (e.g. `events_parsed`) with no scope and the leaf matches multiple entities (`silver.events_parsed`, `bronze.events_parsed`), the command exits non-zero with a diagnostic listing all matches and a hint to use `--scope` or the full path. The CLI does not silently pick one.
+- **Cross-scope full paths.** A full-path argument (`bronze.raw_events`) is honored regardless of the active scope. Scope narrows input, never output or cross-references.
+
+**Canonical-display rule.** Every CLI command's output uses the full canonical `smelt.<path>` form for every entity it names — model lists, type signatures, diagnostics, JSON output keys, log lines. Scope changes how the user *types* an identifier; it never changes how the CLI *prints* one. Copy-pasting any printed identifier back into a `--select`, into a model `FROM` clause, or into another command must produce the same resolution.
 
 ### Exit codes
 
@@ -203,6 +232,31 @@ If `.smelt/schemas/` does not exist, all models appear as "new".
 
 Both commands derive output from SQL parsing and type inference only. No database connection is required. Results match what the LSP and `smelt diff` see; they may differ from the live database schema if the last `smelt run` used a different model version.
 
+### Argument resolution algorithm
+
+For each user-supplied entity identifier `arg`:
+
+1. **Determine the active scope.** If `--scope` was passed, use its value (treating `--scope ''` as "no scope"). Otherwise compute the cwd-derived scope per §"Argument resolution and `--scope`". The active scope is either a `Vec<String>` of path segments or `None`.
+2. **Build the candidate path tuples.**
+   - If the active scope is `Some(s)`, the candidates are `[s ++ arg_segs, arg_segs]` in that order.
+   - If `None`, the only candidate is `arg_segs`.
+3. **Resolve each candidate** against the workspace via `resolve_ref_path` (the same resolver `smelt.<path>` references use inside model SQL — `architecture.md` §"Resolution"). The first candidate that resolves wins.
+4. **No candidate resolves** → emit a "not found" diagnostic that lists every entity whose leaf segment matches `arg_segs.last()`. If exactly one such entity exists, the diagnostic includes `did you mean '<full path>'?`.
+5. **No candidate resolves and the arg itself is a bare leaf with no scope active**, but multiple entities have that leaf → emit the "ambiguous" diagnostic listing all matches.
+
+Selectors passed to `--select` / `--exclude` are expanded through the same algorithm: each selector value is treated as a bare identifier and substituted with its resolved full path before the selection engine runs. Selectors that already contain a `:` (selector grammar such as `tag:revenue`, `path:models/silver`) are passed through unchanged — they are not entity identifiers.
+
+### Cwd-derived scope computation
+
+Given the resolved project root `<project>` and the configured scan-root list `paths:` (which defaults to `["models"]`):
+
+1. Compute `rel = cwd.strip_prefix(<project>)`. If `cwd` is not under the project root, no auto-scope applies.
+2. For each `scan_root` in `paths:`, in declaration order, check whether `rel.starts_with(scan_root)`. The first match wins.
+3. If a match is found, the auto-scope segments are `rel.strip_prefix(scan_root)`'s components, joined by `.`. An empty result (cwd *is* the scan root itself) is "no scope".
+4. If no scan root matches, no auto-scope applies.
+
+The cwd-derived scope is informational at command start and does not change mid-run. It is also surfaced on the first line of the `--verbose` log so users can see which scope is active.
+
 ### `smelt test` isolation
 
 `smelt test` compiles each test into a standalone SQL query and executes it against an **in-memory DuckDB instance** using mock data declared in the test's frontmatter. No connection to the project's target database is made. Tests always run on DuckDB regardless of the project's configured target(s).
@@ -235,6 +289,12 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 
 **`--verbose` logs per executed model, not per discovered model.** Logging every discovered model would flood the output on incremental runs where most models are skipped. Emission scaling with work done matches the user's mental model.
 
+**Scope is input shorthand, never resolution policy.** The CLI accepts shorthand identifiers because typing `silver.events_parsed` from inside `models/silver/` is tedious for the common iteration loop. But shorthand stops at the CLI boundary: the resolver inside model SQL always sees the canonical `smelt.<path>`, the dependency graph and run manifest key on the canonical path, and command output always prints canonical paths. This keeps two invariants intact at once — the spec's "identity falls out of structure" principle (model bodies don't depend on where the user happened to be standing) and the requirement that any printed identifier round-trips cleanly back into any other command or into a `.sql` file.
+
+**Cwd auto-scope, not config-driven default.** A workspace-config `default_scope:` would tie ergonomics to a config edit and create a fixed convention across all developers on a project; cwd derivation is per-shell-session and matches how `git`, `kubectl`, and most shell-context tools work. The `--scope` flag is the explicit override for scripts and CI where cwd is not a meaningful signal.
+
+**Bare leaves with no scope are a hard error, not a fallback search.** When the user runs `smelt type events_parsed` from the project root (no auto-scope) and the workspace contains `silver.events_parsed`, the command must error rather than silently picking the only candidate. This is what makes ambiguity safe: adding a second `bronze.events_parsed` later will never change the behaviour of a passing command. The error includes a `did you mean '<full path>'?` hint for the single-match case so the failure is one keystroke from a fix.
+
 ## Constraints & Invariants
 
 1. **`smelt build` is idempotent.** Re-running on the same inputs produces the same final state.
@@ -246,6 +306,8 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt backbuild` only.
 8. **`--show-plan` requires a positional model-file argument.** Absence is a hard error, not a fallback to project-wide mode.
 9. **Multi-value flags are repetition-based.** `--select`, `--exclude`, and similar flags must not silently split internal whitespace into multiple values.
+10. **All CLI output is canonical `smelt.<path>`.** Model lists, type signatures, diagnostics, `smelt explain --json` keys, log lines, and any other identifier-bearing output must use the full canonical path. `--scope` adjusts input parsing only.
+11. **Argument resolution uses the same resolver as model SQL.** Every entity argument flows through `resolve_ref_path` after scope expansion; there is no parallel leaf-only resolver in the CLI surface. The dependency graph and run manifest are keyed by canonical paths only.
 
 ## Known Divergences / Open Questions
 
