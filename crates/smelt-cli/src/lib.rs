@@ -1,3 +1,4 @@
+pub mod argument_resolution;
 pub mod backend_registry;
 pub mod backfill;
 pub mod compiler;

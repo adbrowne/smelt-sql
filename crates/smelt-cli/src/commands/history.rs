@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
-use smelt_cli::find_project_root;
+use smelt_cli::{
+    argument_resolution::{compute_scope, resolve_argument},
+    find_project_root, init_db, Config, ModelDiscovery,
+};
 use smelt_state::file_store::FileStore;
 use smelt_state::history::HistoryQuery;
 
 use crate::HistoryArgs;
 
-pub async fn history(args: HistoryArgs) -> Result<()> {
+pub async fn history(args: HistoryArgs, scope: Option<&str>) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -21,7 +24,30 @@ pub async fn history(args: HistoryArgs) -> Result<()> {
 
     let query = HistoryQuery::new(&manifests);
 
-    if let Some(ref model_name) = args.model_name {
+    // If a model name was given, resolve it via scope.
+    let resolved_model_name: Option<String> = if let Some(ref name) = args.model_name {
+        let config =
+            Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+        let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+        let models = discovery
+            .discover_models()
+            .with_context(|| "Failed to discover models")?;
+        let db = init_db(&project_dir, &models);
+        let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+        let project = db
+            .project_input(&project_dir)
+            .expect("project not initialized");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+        let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+        match resolve_argument(&db, ws, project, active_scope.as_ref(), name) {
+            Ok(canonical) => Some(canonical),
+            Err(_) => Some(name.clone()), // fall back to raw name for history lookup
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref model_name) = resolved_model_name {
         let summaries = query.for_model(model_name);
         if summaries.is_empty() {
             println!("No runs found for model '{}'", model_name);

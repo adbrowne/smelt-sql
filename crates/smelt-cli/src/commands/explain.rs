@@ -1,15 +1,16 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
+    argument_resolution::{compute_scope, resolve_selector_args},
     build_explain_output, build_physical_explain, discover_emitted_model_files,
-    discover_python_models, find_project_root, init_db, Config, LogicalGraph, ModelDiscovery,
-    ModelFile, PhysicalGraphBuilder, SourcesConfig,
+    discover_python_models, find_project_root, init_db, parse_selector, Config, LogicalGraph,
+    ModelDiscovery, ModelFile, PhysicalGraphBuilder, SourcesConfig,
 };
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
 use std::collections::HashMap;
 
 use crate::ExplainArgs;
 
-pub async fn explain(args: ExplainArgs) -> Result<()> {
+pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -27,8 +28,14 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
         .with_context(|| "Failed to discover models")?;
 
     // Build Salsa DB from all raw SQL files (including generator files) so
-    // the emitted-models pipeline can run via `smelt_db::emitted_models()`.
+    // the emitted-models pipeline can run via `smelt_db::emitted_models()`,
+    // and so scope resolution can call smelt_db::resolve_ref_path /
+    // leaf_did_you_mean.
     let db = init_db(&project_dir, &sql_models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
 
     // Discover generator-emitted models and their provenance.
     let (emitted_model_files, origins) =
@@ -80,10 +87,38 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
+    // Apply --select filtering if provided.  Must happen before
+    // build_explain_output so the output reflects the filtered model set.
+    let execution_order: Vec<String> = if args.select.is_empty() {
+        graph.execution_order()?
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+        let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+        let resolved_select =
+            resolve_selector_args(&db, ws, project, active_scope.as_ref(), &args.select)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let selectors: Vec<_> = resolved_select
+            .iter()
+            .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
+            .collect::<Result<_, _>>()?;
+        let selected = graph
+            .select_models(&selectors)
+            .with_context(|| "Failed to select models")?;
+        graph
+            .filtered_execution_order(&selected)
+            .with_context(|| "Failed to determine execution order")?
+    };
+
     let mut output = build_explain_output(&graph)?;
+    // Narrow the output's execution_order to the filtered set so the
+    // human-readable and JSON output reflects --select.
+    output.execution_order = execution_order.clone();
+    // Also filter the models map to only the selected set.
+    output
+        .models
+        .retain(|name, _| execution_order.contains(name));
 
     // Build physical graph via planner (no backends needed for explain)
-    let execution_order = graph.execution_order()?;
     let mut opt_graph = ModelGraph::new();
     for model_name in &execution_order {
         let model = graph.get_model(model_name)?;
