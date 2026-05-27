@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779918347751,
+  "lastUpdate": 1779918350284,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23096,6 +23096,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.460988701717547,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "85aacd316d00dc26e5203fad5191a19ed90712f5",
+          "message": "Merge pull request #124 from adbrowne/worktree-unknown_types\n\nFunction schema inference: UNKNOWN type investigation, spec, and fixes",
+          "timestamp": "2026-05-28T07:44:06+10:00",
+          "tree_id": "f3de11deb2638d52dc89cacd26f9519b1377578f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/85aacd316d00dc26e5203fad5191a19ed90712f5"
+        },
+        "date": 1779918349842,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.553967024158542,
             "unit": "MB/s"
           }
         ]
