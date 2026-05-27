@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779914821229,
+  "lastUpdate": 1779914823971,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -22973,6 +22973,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.222048779285778,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0a2bacc1b414958692e520bad91d3814ccff9449",
+          "message": "Canonical smelt.<path> addressing + CLI --scope shorthand (#125)\n\n* docs(spec): canonical smelt.<path> addressing + CLI --scope shorthand\n\nSpecs:\n- cli.md: --scope flag, argument resolution algorithm, cwd-derived scope,\n  canonical-display rule, single-resolver invariant.\n- architecture.md: Constraint & Invariant 9 (canonical-address invariant —\n  smelt.<path> is the only resolution key in non-display layers).\n- model_selection.md: ModelName selectors flow through CLI argument\n  resolution; ambiguous bare leaves are a hard error.\n\nPlan: docs/plans/20260527-canonical-addressing-and-scope.md — 7 phases\nimplementing the spec changes: canonical_path() accessor, strict full-path\nrefs in model SQL, DependencyGraph rekey, CLI --scope + arg resolution,\nUI canonical paths, delete legacy leaf resolver, user-docs update.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* feat(core): add canonical_path() accessor on ModelFile\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* feat(db): strict full-path resolution for smelt.<path> refs in model SQL\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* feat(core): rekey DependencyGraph by canonical smelt.<path>\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* feat(cli): --scope flag + canonical argument resolution\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* feat(ui): canonical smelt.<path> identifiers in API and React surface\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* refactor(db): delete legacy leaf-only resolver and model_refs query\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(cli): --scope, canonical paths in worked examples\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-28T06:42:10+10:00",
+          "tree_id": "8d5c551687e9ef68808d04f27371c9379dc6f436",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0a2bacc1b414958692e520bad91d3814ccff9449"
+        },
+        "date": 1779914823056,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.460988701717547,
             "unit": "MB/s"
           }
         ]
