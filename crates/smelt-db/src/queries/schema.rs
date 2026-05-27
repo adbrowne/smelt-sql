@@ -250,6 +250,13 @@ pub struct SalsaRefSchemaProvider<'a> {
     /// should always supply a project. When `None`, function resolution
     /// returns `None` (no cross-project signature leak).
     project: Option<crate::ProjectInput>,
+    /// Cycle guard for `resolve_smelt_path_call_schema`. Holds the set of
+    /// function names currently being resolved on the call stack. When a
+    /// callee is already in this set, the resolver short-circuits (returns
+    /// `None`) instead of recursing infinitely. Uses `RefCell` so the guard
+    /// can be updated through the shared `&self` reference that closures
+    /// capture.
+    visiting: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> SalsaRefSchemaProvider<'a> {
@@ -265,6 +272,7 @@ impl<'a> SalsaRefSchemaProvider<'a> {
             db,
             workspace,
             project,
+            visiting: std::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -323,15 +331,41 @@ impl SalsaRefSchemaProvider<'_> {
         &self,
         call: &smelt_parser::ast::SmeltPathCall,
     ) -> Option<Vec<(String, TypedColumn)>> {
+        let segments = call.segments();
+        let name = segments.last()?.clone();
+
+        // Cycle guard: if we are already resolving `name` further up the call
+        // stack (mutual or direct recursion), short-circuit rather than
+        // recursing infinitely. The workspace emits `FunctionCallCycle` for
+        // such code; this guard prevents a stack overflow when the resolver
+        // runs on in-progress (invalid) code where the diagnostic path hasn't
+        // fired yet. We return `None` (unresolved / opaque columns) — callers
+        // treat this identically to an unknown function call.
+        {
+            let mut vis = self.visiting.borrow_mut();
+            if vis.contains(&name) {
+                return None;
+            }
+            vis.insert(name.clone());
+        }
+
+        // Project isolation rule: only consider signatures declared in the
+        // same project as the file whose schema we're computing.
+        let result = self.resolve_smelt_path_call_schema_inner(call, &name);
+        self.visiting.borrow_mut().remove(&name);
+        result
+    }
+
+    fn resolve_smelt_path_call_schema_inner(
+        &self,
+        call: &smelt_parser::ast::SmeltPathCall,
+        name: &str,
+    ) -> Option<Vec<(String, TypedColumn)>> {
         use smelt_parser::ast::Expr as AstExpr;
         use smelt_types::signatures::SmeltType;
 
-        let segments = call.segments();
-        let name = segments.last()?.clone();
-        // Project isolation rule: only consider signatures declared in the
-        // same project as the file whose schema we're computing.
         let project = self.project?;
-        let sig_arc = resolve_function(self.db, self.workspace, project, name)?;
+        let sig_arc = resolve_function(self.db, self.workspace, project, name.to_string())?;
         let sig: &smelt_types::signatures::FunctionSig = sig_arc.as_ref();
 
         // Only `TableExpr`-returning functions contribute a FROM schema.
@@ -410,6 +444,7 @@ impl SalsaRefSchemaProvider<'_> {
                         continue;
                     }
                     // Walk the arg expression for a smelt.<path> ref.
+                    let mut seeded = false;
                     for node in arg_expr.syntax().descendants() {
                         if node.kind() == smelt_parser::SyntaxKind::SMELT_PATH_REF {
                             if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
@@ -421,8 +456,27 @@ impl SalsaRefSchemaProvider<'_> {
                                     .or_else(|| self.seed_columns(&seed_key))
                                 {
                                     body_ctx.add_tableexpr_param(&param.name, &cols);
+                                    seeded = true;
                                     break;
                                 }
+                            }
+                        }
+                    }
+
+                    // If the argument is a bare identifier that names a CTE or
+                    // derived table in the CALLER's WITH clause, resolve that
+                    // CTE's column schema and seed the body context with it.
+                    // This handles the pattern:
+                    //   WITH x AS (SELECT … AS revenue, … AS cost)
+                    //   SELECT col FROM smelt.functions.f(x)
+                    if !seeded {
+                        if let Some(cte_name) = arg_expr
+                            .as_column_ref()
+                            .filter(|cr| cr.qualifier().is_none())
+                            .map(|cr| cr.name().to_string())
+                        {
+                            if let Some(cols) = cte_columns_from_caller_select(&cte_name, call) {
+                                body_ctx.add_tableexpr_param(&param.name, &cols);
                             }
                         }
                     }
@@ -454,8 +508,24 @@ impl SalsaRefSchemaProvider<'_> {
         // `infer_tableexpr_return_schema` can resolve bare column references
         // from CTE-derived rows. Cycle diagnostics are discarded — they're
         // surfaced separately by `cte_cycle_diagnostics_for_file`.
+        //
+        // Pass a resolver so that CTE bodies of the form
+        // `SELECT * FROM smelt.functions.<name>(args)` have their nested
+        // call's output schema resolved and seeded into the CTE context.
+        // Without this, `SELECT *` produces a synthetic `col1: Unknown` and
+        // any column the inner call adds (e.g. `session_id` from `sessionize`)
+        // remains unresolved in the outer body (§Semantics rule 4).
+        let path_call_resolver =
+            |call: &smelt_parser::ast::SmeltPathCall| -> Option<Vec<(String, TypedColumn)>> {
+                self.resolve_smelt_path_call_schema(call)
+            };
         let (body_ctx_with_ctes, _cycle_diags) =
-            function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
+            function_body_check::extract_function_body_cte_schemas(
+                &body_select,
+                &body_ctx,
+                "",
+                Some(&path_call_resolver),
+            );
         let mut body_ctx = body_ctx_with_ctes;
 
         // Seed JOIN-aliased schemas so that `infer_tableexpr_return_schema`
@@ -966,6 +1036,196 @@ pub fn type_context(
     Arc::new(ctx)
 }
 
+/// Pure helper: given a bare CTE name and the `SmeltPathCall` node that is
+/// using it as a `TableExpr` argument, find the CTE in the CALLER's `WITH`
+/// clause and return its resolved column schema.
+///
+/// This handles the pattern:
+///   WITH x AS (SELECT CAST(100 AS DECIMAL(18,2)) AS revenue, …)
+///   SELECT col FROM smelt.functions.f(x)
+///
+/// Steps:
+///   1. Walk up ancestors of `call` to find the nearest `SELECT_STMT`.
+///   2. Find the CTE named `cte_name` in the WITH clause.
+///   3. Process any preceding CTEs first (so forward references in the target
+///      CTE can resolve), then call `infer_cte_columns` on the target CTE.
+///
+/// Pure — no Salsa access.
+fn cte_columns_from_caller_select(
+    cte_name: &str,
+    call: &smelt_parser::ast::SmeltPathCall,
+) -> Option<Vec<(String, TypedColumn)>> {
+    use smelt_parser::ast::{Cte, SelectStmt, WithClause};
+    use smelt_parser::SyntaxKind::SELECT_STMT;
+
+    // Walk up to find the nearest SELECT_STMT ancestor (the caller's select).
+    let caller_select = call
+        .syntax()
+        .ancestors()
+        .find(|n| n.kind() == SELECT_STMT)
+        .and_then(SelectStmt::cast)?;
+
+    let with_clause: WithClause = caller_select.with_clause()?;
+
+    // Collect all CTEs in order; process them in order so that each CTE can
+    // reference preceding ones.
+    let all_ctes: Vec<Cte> = with_clause.ctes().collect();
+
+    // Build a TypeContext by processing preceding CTEs in order, then the
+    // target CTE.
+    let mut ctx = TypeContext::new();
+    for cte in &all_ctes {
+        let name = match cte.name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let cols = infer_cte_columns(cte, &ctx);
+        for (col_name, typed_col) in &cols {
+            ctx.add_cte_column(&name, col_name, typed_col.clone());
+        }
+        ctx.add_alias(&name, &name);
+        if name == cte_name {
+            // Found the target CTE — return its columns.
+            return Some(cols);
+        }
+    }
+
+    // CTE name not found in the WITH clause.
+    None
+}
+
+/// Walk a syntax node for the first `SMELT_PATH_CALL_STAR` child and return the
+/// `SmeltPathCall` it wraps.
+///
+/// The SELECT-item structure for `smelt.functions.<f>(args).*` is:
+///   `SELECT_ITEM → EXPRESSION → SMELT_PATH_CALL_STAR → SMELT_PATH_CALL`
+///
+/// Pure — no Salsa access.
+fn find_inner_path_call_of_star(
+    expr_node: &smelt_parser::syntax_kind::SyntaxNode,
+) -> Option<smelt_parser::ast::SmeltPathCall> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::{SMELT_PATH_CALL, SMELT_PATH_CALL_STAR};
+
+    // expr_node is the EXPRESSION node. Look for a SMELT_PATH_CALL_STAR child.
+    for child in expr_node.children() {
+        if child.kind() == SMELT_PATH_CALL_STAR {
+            // The SMELT_PATH_CALL_STAR contains the inner SMELT_PATH_CALL.
+            for inner in child.children() {
+                if inner.kind() == SMELT_PATH_CALL {
+                    return SmeltPathCall::cast(inner);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pure helper: scan a SELECT statement's items for `smelt.functions.<f>(args).*`
+/// (`SMELT_PATH_CALL_STAR`) spread expressions and expand the function's struct
+/// return fields into `Column` entries.
+///
+/// This implements §"Struct returns and `.*` spread" from
+/// `docs/specs/function_schema_inference.md`: the schema layer must expand
+/// `<name>(args).*` into the declared struct fields (in declared order) rather
+/// than recording zero columns for the spread.
+///
+/// `infer_smelt_path_call_type` handles row-tail (`Struct<{…, ..r}>`) binding
+/// from the call-site `TypeContext` — the extras are already folded into the
+/// returned `DataType::Struct`.
+///
+/// Pure — no Salsa access; obeys the smelt-db pure-function rule.
+fn collect_struct_spread_columns(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<Column> {
+    use crate::type_inference::function_call::infer_smelt_path_call_type;
+    use smelt_types::signatures::{SmeltType, StructRowTail};
+
+    let Some(select_list) = select_stmt.select_list() else {
+        return vec![];
+    };
+
+    let mut cols = Vec::new();
+
+    for item in select_list.items() {
+        // Wildcard items (`*` or `table.*`) are handled via row_extensions.
+        if item.is_wildcard() {
+            continue;
+        }
+        // Regular named columns are already captured in the base schema.
+        // SMELT_PATH_CALL_STAR items have no resolvable column name because
+        // `infer_name()` cannot produce a name for the `.*` construct.
+        if item.column_name().is_some() {
+            continue;
+        }
+
+        // Find a SMELT_PATH_CALL_STAR inside the expression node.
+        let Some(expr) = item.expression() else {
+            continue;
+        };
+        let Some(inner_call) = find_inner_path_call_of_star(expr.syntax()) else {
+            continue;
+        };
+
+        // Guard: only expand CLOSED structs at the schema layer.
+        //
+        // A row-tail (`Struct<{…, ..r}>`) return means the codegen expander
+        // (`expand_smelt_path_call_star`) falls back to verbatim SQL when a
+        // SPREAD_ITEM is present in the function body. Expanding at the schema
+        // layer while codegen falls back to verbatim would violate invariant 2
+        // (schema-layer/codegen agreement). Until codegen and schema expansion
+        // are unified for row-tail structs, skip expansion and contribute zero
+        // columns — matching the pre-existing verbatim-fallback behaviour.
+        //
+        // Closed-struct check: consult the function signature in the TypeContext.
+        // `infer_smelt_path_call_type` has already folded row-tail extras into a
+        // concrete `DataType::Struct`, so we cannot distinguish closed from tail
+        // from the return value alone — we must read the signature.
+        let fn_name = inner_call.segments().last().cloned().unwrap_or_default();
+        let is_closed_struct = if let Some(sig) = ctx.lookup_function_signature(&fn_name) {
+            matches!(
+                &sig.return_type,
+                Some(Ok(SmeltType::Struct {
+                    tail: StructRowTail::None,
+                    ..
+                }))
+            )
+        } else {
+            // Signature not found — cannot confirm closed; skip expansion.
+            false
+        };
+        if !is_closed_struct {
+            continue;
+        }
+
+        // Resolve the call's return type. For a closed `Struct<{f1: T1, …, fN: TN}>`,
+        // `infer_smelt_path_call_type` returns a concrete `DataType::Struct`.
+        let Some(typed_col) = infer_smelt_path_call_type(&inner_call, ctx) else {
+            continue;
+        };
+
+        if let DataType::Struct(fields) = typed_col.data_type {
+            for (field_name, field_type) in fields {
+                cols.push(Column {
+                    name: field_name,
+                    alias: None,
+                    source: ColumnSource::Computed,
+                    expression: String::new(),
+                    range: item.range(),
+                    data_type: Some(TypedColumn {
+                        data_type: field_type,
+                        nullable: true,
+                    }),
+                });
+            }
+        }
+        // Non-struct or unresolved return → no columns contributed (no panic).
+    }
+
+    cols
+}
+
 #[salsa::tracked(cycle_initial = typed_model_schema_initial)]
 pub fn typed_model_schema(
     db: &dyn salsa::Database,
@@ -997,6 +1257,13 @@ pub fn typed_model_schema(
         }
         typed_columns.push(col);
     }
+
+    // Append columns contributed by `smelt.functions.<f>(args).*` struct spreads.
+    // These are not in `base_schema.columns` (they were skipped by `model_schema`
+    // because the `.*` item has no single resolvable column name), so we detect
+    // them separately and append their struct fields in declared order.
+    let spread_cols = collect_struct_spread_columns(&select_stmt, &ctx);
+    typed_columns.extend(spread_cols);
 
     Arc::new(ModelSchema {
         columns: typed_columns,

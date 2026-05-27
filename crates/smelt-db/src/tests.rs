@@ -5451,3 +5451,320 @@ fn smelt_record_declarations_query_collects_workspace_decls() {
         names
     );
 }
+
+// ============================================================
+// Phase 1: Struct-spread `.*` / `.field` schema expansion tests
+// ============================================================
+
+/// Build a TestDb containing one function-definition file and one model file,
+/// both scoped to the same project root ".".
+///
+/// `function_sql` is the raw text of a `smelt.define` file.
+/// `model_sql` is the SELECT-body of the caller model.
+fn setup_struct_spread_db(function_sql: &str, model_sql: &str) -> (TestDb, PathBuf) {
+    let mut db = TestDb::default();
+
+    let fn_path = PathBuf::from("functions/f.sql");
+    db.set_file_text(fn_path.clone(), Arc::new(function_sql.to_string()));
+    db.set_file_project_root(fn_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/caller.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![fn_path, model_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    (db, model_path)
+}
+
+/// `SELECT id, f(x).*` where `f -> Expr<Struct<{a: Text, b: Text}>>` must
+/// resolve the output schema to `{id, a: Text, b: Text}`.
+///
+/// Currently only `{id}` is produced (the struct-spread is silently dropped).
+#[test]
+fn struct_spread_star_expands_fields_into_schema() {
+    let function_sql = r#"smelt.define f(
+    x: Expr<Integer>
+) -> Expr<Struct<{a: Text, b: Text}>> AS ({
+    CAST(x AS TEXT) AS a,
+    CAST(x AS TEXT) AS b
+})"#;
+
+    let model_sql = "SELECT id, smelt.functions.f(id).* FROM smelt.sources.raw.t";
+
+    let (mut db, model_path) = setup_struct_spread_db(function_sql, model_sql);
+    let schema = db.typed_model_schema(model_path);
+
+    let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        col_names.contains(&"id"),
+        "schema must contain `id`; got {:?}",
+        col_names
+    );
+    assert!(
+        col_names.contains(&"a"),
+        "struct-spread `.*` must expand field `a` into schema; got {:?}",
+        col_names
+    );
+    assert!(
+        col_names.contains(&"b"),
+        "struct-spread `.*` must expand field `b` into schema; got {:?}",
+        col_names
+    );
+
+    // Column types must be Text (from the declared struct field types).
+    // smelt normalises the `Text` keyword to `Varchar { max_length: None }` internally,
+    // so both variants are acceptable.
+    let a_col = schema.columns.iter().find(|c| c.name == "a").unwrap();
+    assert!(
+        matches!(
+            a_col.data_type.as_ref().map(|tc| &tc.data_type),
+            Some(smelt_types::DataType::Text) | Some(smelt_types::DataType::Varchar { .. })
+        ),
+        "field `a` must have type Text/Varchar; got {:?}",
+        a_col.data_type
+    );
+    let b_col = schema.columns.iter().find(|c| c.name == "b").unwrap();
+    assert!(
+        matches!(
+            b_col.data_type.as_ref().map(|tc| &tc.data_type),
+            Some(smelt_types::DataType::Text) | Some(smelt_types::DataType::Varchar { .. })
+        ),
+        "field `b` must have type Text/Varchar; got {:?}",
+        b_col.data_type
+    );
+}
+
+/// Row-tail (`Struct<{…, ..r}>`) returns are NOT expanded at the schema layer.
+///
+/// The codegen expander (`expand_smelt_path_call_star`) falls back to verbatim
+/// SQL when the function body contains a `SPREAD_ITEM` (`..r`). Expanding at the
+/// schema layer while codegen uses verbatim would violate the schema-layer/codegen
+/// agreement invariant. Until the two layers are unified for row-tail structs, a
+/// `.*` spread over a row-tail return contributes zero columns at the schema layer.
+///
+/// This test documents the boundary: the caller model's schema must be empty
+/// (zero columns) when the only SELECT item is a row-tail struct spread.
+#[test]
+fn struct_spread_row_tail_not_expanded_at_schema_layer() {
+    // Function with a row-tail in both parameter and return.
+    let function_sql = r#"smelt.define tag_row(
+    s: Expr<Struct<{id: Integer, ..r}>>
+) -> Expr<Struct<{tag: Text, ..r}>> AS ({
+    'tagged' AS tag,
+    ..s
+})"#;
+
+    let upstream_sql = "SELECT 1 AS id, 'hello' AS extra1 FROM smelt.sources.raw.t";
+    let model_sql = "SELECT smelt.functions.tag_row(t).* FROM smelt.models.t AS t";
+
+    let mut db = TestDb::default();
+
+    let fn_path = PathBuf::from("functions/tag_row.sql");
+    db.set_file_text(fn_path.clone(), Arc::new(function_sql.to_string()));
+    db.set_file_project_root(fn_path.clone(), PathBuf::from("."));
+
+    let upstream_path = PathBuf::from("models/t.sql");
+    db.set_file_text(upstream_path.clone(), Arc::new(upstream_sql.to_string()));
+    db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/caller.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![fn_path, upstream_path, model_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let schema = db.typed_model_schema(model_path);
+
+    let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+
+    // Row-tail structs are NOT expanded at the schema layer: no columns from
+    // `tag_row(t).*` should appear. The boundary holds until codegen and schema
+    // expansion are unified.
+    assert!(
+        !col_names.contains(&"tag"),
+        "row-tail spread must NOT be expanded at the schema layer; `tag` must be absent; got {:?}",
+        col_names
+    );
+    assert!(
+        !col_names.contains(&"extra1"),
+        "row-tail spread must NOT be expanded at the schema layer; `extra1` must be absent; got {:?}",
+        col_names
+    );
+}
+
+// ============================================================
+// Phase 2: CTE-argument seeding for TableExpr-returning functions
+// ============================================================
+
+/// A model that passes a local CTE as a `TableExpr` argument must seed the
+/// function body's type context with the CTE's column schema.
+///
+/// Pattern:
+///   WITH x AS (SELECT CAST(100 AS DECIMAL(18,2)) AS revenue,
+///                     CAST(30  AS DECIMAL(18,2)) AS cost)
+///   SELECT margin FROM smelt.functions.add_margin(x)
+///
+/// `add_margin` computes `revenue - cost AS margin`. Without CTE seeding the
+/// body ctx has no `revenue`/`cost`, so `margin` resolves to Unknown.
+/// After this phase it must resolve to a non-Unknown Decimal/Double.
+#[test]
+fn cte_arg_tableexpr_param_resolves_body_columns() {
+    let function_sql = r#"smelt.define add_margin(
+    source: TableExpr<{revenue: Numeric, cost: Numeric}>
+) -> TableExpr AS (
+    SELECT source.*, revenue - cost AS margin FROM source
+)"#;
+
+    // Model: CTE `x` supplies revenue + cost; passed by bare name into add_margin.
+    let model_sql = r#"WITH x AS (
+  SELECT
+    CAST(100 AS DECIMAL(18, 2)) AS revenue,
+    CAST(30  AS DECIMAL(18, 2)) AS cost
+)
+SELECT margin
+FROM smelt.functions.add_margin(x)"#;
+
+    let mut db = TestDb::default();
+
+    let fn_path = PathBuf::from("functions/add_margin.sql");
+    db.set_file_text(fn_path.clone(), Arc::new(function_sql.to_string()));
+    db.set_file_project_root(fn_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/margin_via_cte.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![fn_path, model_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let schema = db.typed_model_schema(model_path);
+
+    let margin_col = schema.columns.iter().find(|c| c.name == "margin");
+    assert!(
+        margin_col.is_some(),
+        "schema must contain a `margin` column; got {:?}",
+        schema
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let margin_type = margin_col
+        .and_then(|c| c.data_type.as_ref())
+        .map(|tc| &tc.data_type);
+
+    assert!(
+        !matches!(margin_type, Some(DataType::Unknown) | None),
+        "margin column must resolve to a non-Unknown type when CTE arg is seeded; got {:?}",
+        margin_type
+    );
+}
+
+// ============================================================
+// Phase 3: Cycle guard for nested smelt.functions.* body CTE resolution
+// ============================================================
+
+/// Two mutually-recursive `TableExpr` functions — `alpha` calls `beta` and
+/// `beta` calls `alpha` in their body CTEs — must NOT cause a stack overflow
+/// when the schema resolver walks the call graph. The cycle guard in
+/// `resolve_smelt_path_call_schema` must detect the back-edge and short-circuit
+/// (returning `None` / opaque columns) rather than recursing infinitely.
+///
+/// Correctness requirements:
+/// - Calling `typed_model_schema` (which drives schema resolution) on a model
+///   that calls `alpha` must TERMINATE without panicking.
+/// - The columns returned may be `Unknown`/empty (the cycle is unresolvable),
+///   but the process must not crash.
+/// - A `FunctionCallCycle` diagnostic must still be emitted for both `alpha`
+///   and `beta` (the cycle guard must not suppress the diagnostic path).
+///
+/// **RED state before fix**: `typed_model_schema` overflows the stack and the
+/// test binary crashes with a SIGSEGV / "thread has overflowed its stack".
+/// **GREEN state after fix**: returns normally; assertions about diagnostics pass.
+#[test]
+fn mutual_recursion_body_cte_terminates_without_stack_overflow() {
+    // `alpha` body: CTE `x` selects from `smelt.functions.beta(data)` which
+    // creates the A→B dependency.
+    let alpha_sql = r#"smelt.define alpha(
+    data: TableExpr<{id: Integer}>
+) -> TableExpr AS (
+    WITH x AS (SELECT * FROM smelt.functions.beta(data))
+    SELECT id FROM x
+)"#;
+
+    // `beta` body: CTE `y` selects from `smelt.functions.alpha(data)` which
+    // creates the B→A back-edge, completing the cycle.
+    let beta_sql = r#"smelt.define beta(
+    data: TableExpr<{id: Integer}>
+) -> TableExpr AS (
+    WITH y AS (SELECT * FROM smelt.functions.alpha(data))
+    SELECT id FROM y
+)"#;
+
+    // The caller model passes a source table into `alpha`.
+    let model_sql = "SELECT id FROM smelt.functions.alpha(smelt.sources.raw.t)";
+
+    let mut db = TestDb::default();
+
+    let alpha_path = PathBuf::from("functions/alpha.sql");
+    db.set_file_text(alpha_path.clone(), Arc::new(alpha_sql.to_string()));
+    db.set_file_project_root(alpha_path.clone(), PathBuf::from("."));
+
+    let beta_path = PathBuf::from("functions/beta.sql");
+    db.set_file_text(beta_path.clone(), Arc::new(beta_sql.to_string()));
+    db.set_file_project_root(beta_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/caller.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![
+        alpha_path.clone(),
+        beta_path.clone(),
+        model_path.clone(),
+    ]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    // This must terminate (not stack-overflow).  The exact schema may be
+    // empty or opaque — the cycle is logically unresolvable — but the
+    // resolver must return without crashing.
+    let schema = db.typed_model_schema(model_path.clone());
+    let _ = schema; // result may be empty/opaque; the assertion is TERMINATION
+
+    // The `FunctionCallCycle` diagnostic must still fire for both functions.
+    // (The cycle guard in the schema resolver must not suppress the diagnostic
+    // path, which runs independently via `function_call_cycle_fn_ids`.)
+    let alpha_diags = db.file_diagnostics(alpha_path);
+    let beta_diags = db.file_diagnostics(beta_path);
+
+    let has_cycle_diag = |diags: &[Diagnostic]| {
+        diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::FunctionCallCycle))
+    };
+
+    assert!(
+        has_cycle_diag(&alpha_diags),
+        "alpha must have a FunctionCallCycle diagnostic; got {:?}",
+        alpha_diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        has_cycle_diag(&beta_diags),
+        "beta must have a FunctionCallCycle diagnostic; got {:?}",
+        beta_diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}

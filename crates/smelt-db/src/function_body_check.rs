@@ -89,6 +89,16 @@ pub enum BodyShape {
 pub type NestedPathCallHandler<'a> =
     dyn Fn(&SmeltPathCall, &TypeContext, &str) -> Vec<Diagnostic> + 'a;
 
+/// Callback type for resolving a `smelt.functions.*` path-call in a CTE FROM
+/// clause to its output column schema. Used by
+/// [`extract_function_body_cte_schemas`] to expand `SELECT *` wildcards in
+/// body CTEs whose source is a nested function call.
+///
+/// Returns `None` when the call cannot be resolved (unknown function, non-
+/// `TableExpr` return, or no resolver available).
+pub type SmeltPathCallSchemaResolver<'a> =
+    dyn Fn(&SmeltPathCall) -> Option<Vec<(String, smelt_types::TypedColumn)>> + 'a;
+
 /// Check a single `smelt.define` body, producing Phase-5 diagnostics.
 ///
 /// Arguments:
@@ -1567,7 +1577,7 @@ pub fn check_smelt_path_call(
             }
 
             let (body_ctx_with_ctes, _cycle_diags) =
-                extract_function_body_cte_schemas(select_stmt, &body_ctx, &body_text);
+                extract_function_body_cte_schemas(select_stmt, &body_ctx, &body_text, None);
             let body_ctx = body_ctx_with_ctes;
 
             let mut body_diags = check_function_select_body(
@@ -2118,6 +2128,17 @@ struct CteDfs<'a> {
     seed_ctx: &'a TypeContext,
     /// Source text for anchoring diagnostics.
     text: &'a str,
+    /// Optional resolver for `smelt.functions.*` path-call schema in CTE FROM
+    /// clauses. When `Some`, a CTE body of the form
+    /// `SELECT * FROM smelt.functions.<name>(args)` is resolved through this
+    /// callback so the wildcard can expand to the function's output columns
+    /// rather than falling back to a synthetic `col1: Unknown`.
+    smelt_path_call_resolver: Option<&'a SmeltPathCallSchemaResolver<'a>>,
+    /// CTE names whose schema was successfully resolved via
+    /// `smelt_path_call_resolver` during `visit`. Recorded here so the
+    /// post-loop opaque-marking pass can determine "was this CTE resolved?"
+    /// without invoking the resolver a second time.
+    resolved_by_path_call: std::collections::HashSet<String>,
 }
 
 impl<'a> CteDfs<'a> {
@@ -2173,7 +2194,38 @@ impl<'a> CteDfs<'a> {
         }
 
         // Infer this CTE's schema.
-        if let Some(cte) = self.ctes.get(name) {
+        //
+        // Special case: if the CTE body is `SELECT * FROM smelt.functions.<name>(args)`
+        // and we have a path-call schema resolver, the nested call's output schema IS the
+        // CTE's column set (the `*` expands to exactly the function's output columns).
+        // `infer_cte_columns` cannot do this because `infer_select_output_schema` does
+        // not expand wildcards from the FROM scope — it emits a synthetic `col1: Unknown`.
+        // We short-circuit by resolving the nested call directly and using those columns
+        // as the CTE output (§Semantics rule 4: TableExpr output propagates structurally).
+        let resolved_direct = if let Some(resolver) = self.smelt_path_call_resolver {
+            self.ctes
+                .get(name)
+                .and_then(|cte| cte.query()?.select_stmt())
+                .and_then(|select| {
+                    // Only match `SELECT *` (single bare wildcard, no alias).
+                    let items: Vec<_> = select.select_list()?.items().collect();
+                    if items.len() != 1 || !items[0].is_wildcard() {
+                        return None;
+                    }
+                    // FROM clause must have exactly one smelt path call.
+                    let from_clause = select.from_clause()?;
+                    let table_ref = from_clause.table_refs().next()?;
+                    let path_call = table_ref.smelt_path_call()?;
+                    resolver(&path_call)
+                })
+        } else {
+            None
+        };
+
+        if let Some(cols) = resolved_direct {
+            self.resolved_by_path_call.insert(name.to_string());
+            self.topo.push((name.to_string(), cols));
+        } else if let Some(cte) = self.ctes.get(name) {
             let cols = infer_cte_columns(cte, &ctx);
             self.topo.push((name.to_string(), cols));
         }
@@ -2220,12 +2272,16 @@ fn find_cte_table_deps(cte: &Cte, all_names: &std::collections::HashSet<String>)
 ///
 /// When a CTE body has the shape `SELECT * FROM smelt.functions.<name>(<args>)`,
 /// the CTE is marked opaque so outer bare-column references don't fire
-/// spurious `UnknownIdentifier` diagnostics. Full schema resolution for
-/// path-call CTE sources is deferred to a follow-on phase.
-pub fn extract_function_body_cte_schemas(
+/// spurious `UnknownIdentifier` diagnostics. When `smelt_path_call_resolver`
+/// is `Some`, the nested call is resolved through it and its output schema is
+/// seeded into the CTE context so `SELECT *` expands to the correct columns
+/// (§Semantics rule 4: TableExpr output schema propagates structurally through
+/// CTEs/subqueries).
+pub fn extract_function_body_cte_schemas<'a>(
     select: &SelectStmt,
-    seed_ctx: &TypeContext,
-    text: &str,
+    seed_ctx: &'a TypeContext,
+    text: &'a str,
+    smelt_path_call_resolver: Option<&'a SmeltPathCallSchemaResolver<'a>>,
 ) -> (TypeContext, Vec<Diagnostic>) {
     let Some(with_clause) = select.with_clause() else {
         return (seed_ctx.clone(), vec![]);
@@ -2251,6 +2307,8 @@ pub fn extract_function_body_cte_schemas(
         diagnostics: vec![],
         seed_ctx,
         text,
+        smelt_path_call_resolver,
+        resolved_by_path_call: std::collections::HashSet::new(),
     };
 
     for name in names_iter {
@@ -2267,27 +2325,36 @@ pub fn extract_function_body_cte_schemas(
 
         // If the CTE source is a `smelt.functions.*` path call
         // (SMELT_PATH_CALL), mark the CTE opaque so outer bare-column
-        // references don't fire spurious `UnknownIdentifier` diagnostics.
-        // Full schema resolution for path-call CTE sources is deferred to a
-        // follow-on phase.
+        // references don't fire spurious `UnknownIdentifier` diagnostics
+        // — UNLESS the resolver successfully expanded the call's schema
+        // (recorded in `dfs.resolved_by_path_call` during `visit`), in
+        // which case the CTE has known columns and should not be opaque.
         {
-            let has_path_call_source = dfs
+            let has_path_call_source: bool = dfs
                 .ctes
                 .get(cte_name)
                 .and_then(|c| c.query())
                 .and_then(|q| q.select_stmt())
-                .and_then(|s| {
+                .map(|s| {
                     let has_wildcard = s
                         .select_list()
                         .map(|sl| sl.items().any(|item| item.is_wildcard()))
                         .unwrap_or(false);
                     if !has_wildcard {
-                        return None;
+                        return false;
                     }
                     s.from_clause()
                         .and_then(|fc| fc.table_refs().find_map(|tr| tr.smelt_path_call()))
+                        .is_some()
                 })
-                .is_some();
+                .unwrap_or(false);
+
+            // "Resolved" means `visit` successfully expanded the schema via the
+            // resolver — recorded in `resolved_by_path_call` at resolution time.
+            // Using this flag (rather than calling the resolver again) avoids a
+            // second invocation whose `any(is_wildcard)` selectivity can differ
+            // from the `len==1 && is_wildcard` selectivity used in `visit`.
+            let resolved_by_resolver = dfs.resolved_by_path_call.contains(cte_name);
 
             // Bare `smelt.functions.*(...) PASSING ...` CTE body shape:
             // no SELECT_STMT child in the CTE, but a SMELT_PATH_CALL exists.
@@ -2308,7 +2375,7 @@ pub fn extract_function_body_cte_schemas(
                     .unwrap_or(false)
             };
 
-            if has_path_call_source || has_path_call_direct {
+            if (has_path_call_source && !resolved_by_resolver) || has_path_call_direct {
                 ctx.mark_cte_opaque(cte_name);
             }
         }
