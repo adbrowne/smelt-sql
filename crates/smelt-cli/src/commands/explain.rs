@@ -126,7 +126,11 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
         opt_graph.add_model(ModelInfo {
             name: model.name.clone(),
             sql: model.content.clone(),
-            refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            refs: model
+                .refs
+                .iter()
+                .map(|r| r.smelt_ref.to_path().join("."))
+                .collect(),
             timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
             incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
         });

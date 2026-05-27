@@ -535,8 +535,8 @@ def union_model(project):
         assert_eq!(python_models[0].name, "union_model");
         // Verify refs were extracted from the generated SQL
         assert_eq!(python_models[0].refs.len(), 2);
-        assert_eq!(python_models[0].refs[0].model_name, "table_a");
-        assert_eq!(python_models[0].refs[1].model_name, "table_b");
+        assert_eq!(python_models[0].refs[0].smelt_ref.leaf_name(), "table_a");
+        assert_eq!(python_models[0].refs[1].smelt_ref.leaf_name(), "table_b");
     }
 
     // --- New tests for PR review fixes ---

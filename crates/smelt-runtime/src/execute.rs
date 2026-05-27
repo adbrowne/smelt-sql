@@ -191,7 +191,11 @@ pub async fn execute_project(
                 let model_info = ModelInfo {
                     name: model_name.clone(),
                     sql: model.content.clone(),
-                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    refs: model
+                        .refs
+                        .iter()
+                        .map(|r| r.smelt_ref.to_path().join("."))
+                        .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
                 };

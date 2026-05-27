@@ -20,7 +20,7 @@ use crate::queries::parse::parse_file;
 use crate::queries::project::{project_seeds, project_sources, sources_config};
 use crate::schema::{self, Column, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema};
 use crate::type_inference::{self, infer_cte_columns, infer_select_column_types, TypeContext};
-use crate::{find_project, resolve_ref, SourceFile, Workspace};
+use crate::{find_project, resolve_ref_leaf, SourceFile, Workspace};
 
 use smelt_core::{SourceInfo, SourcesConfig};
 
@@ -157,8 +157,8 @@ pub fn available_columns(
                         let segs = path_ref.segments();
                         if segs.first().map(|s| s.as_str()) == Some("models") {
                             if let Some(model_name) = segs.last().cloned() {
-                                if let Some(upstream) =
-                                    project.and_then(|p| resolve_ref(db, workspace, p, model_name))
+                                if let Some(upstream) = project
+                                    .and_then(|p| resolve_ref_leaf(db, workspace, p, model_name))
                                 {
                                     let upstream_schema = model_schema(db, upstream);
                                     for col in upstream_schema.columns.iter() {
@@ -498,7 +498,7 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
         // types in. See lib.rs::resolve_ref and the standing CI gate in
         // crates/smelt-lsp/tests/example_workspaces.rs.
         let project = self.project?;
-        let upstream = resolve_ref(self.db, self.workspace, project, model_name.to_string())?;
+        let upstream = resolve_ref_leaf(self.db, self.workspace, project, model_name.to_string())?;
         let resolved = resolved_model_schema(self.db, self.workspace, upstream);
         Some(
             resolved
@@ -1029,7 +1029,7 @@ pub fn resolved_model_schema(
 
     for ext in &typed_schema.row_extensions {
         if let Some(upstream) =
-            project.and_then(|p| resolve_ref(db, workspace, p, ext.ref_name.clone()))
+            project.and_then(|p| resolve_ref_leaf(db, workspace, p, ext.ref_name.clone()))
         {
             let upstream_resolved = resolved_model_schema(db, workspace, upstream);
             for col in &upstream_resolved.columns {
@@ -1088,7 +1088,7 @@ pub fn columns_of_for_table_expr(
     model_name: String,
 ) -> Result<Arc<Vec<smelt_types::ColumnRefValue>>, ()> {
     // Resolve the model name to a SourceFile via the existing resolution machinery.
-    let file = match resolve_ref(db, workspace, project, model_name.clone()) {
+    let file = match resolve_ref_leaf(db, workspace, project, model_name.clone()) {
         Some(f) => f,
         None => return Err(()),
     };

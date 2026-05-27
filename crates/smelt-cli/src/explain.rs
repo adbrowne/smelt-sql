@@ -266,7 +266,7 @@ fn compute_batch_safety_label(
         refs: model_file
             .refs
             .iter()
-            .map(|r| r.model_name.clone())
+            .map(|r| r.smelt_ref.to_path().join("."))
             .collect(),
         incremental_config: Some(inc.clone()),
         timeseries_config: Some(ts.clone()),
@@ -298,7 +298,6 @@ mod tests {
         let refs = deps
             .into_iter()
             .map(|dep| RefInfo {
-                model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
                 smelt_ref: smelt_core::refs::SmeltRef::Path(vec![

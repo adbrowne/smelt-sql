@@ -88,7 +88,7 @@ This plan closes the gap in seven phases. Phase order is chosen so each phase ca
 | 3 — Rekey `DependencyGraph` by canonical path. Update `smelt-runtime`, `smelt-cli`, `smelt-ui` callers. | done | 35fd2aec | 2026-05-27 |
 | 4 — CLI `--scope` flag + argument-resolution module. Every entity-taking command resolves through it; output emits canonical paths. | done | a67607c8 | 2026-05-27 |
 | 5 — UI surface emits canonical paths in API and React. | done | c4983d56 | 2026-05-27 |
-| 6 — Delete legacy `resolve_ref(leaf)` and `model_refs` Salsa query. Update remaining callers (tests, test_harness) to canonical resolvers. | pending |  |  |
+| 6 — Delete legacy `resolve_ref(leaf)` and `model_refs` Salsa query. Update remaining callers (tests, test_harness) to canonical resolvers. | done | c279b646 | 2026-05-27 |
 | 7 — User docs: `docs-site/docs/reference/cli.md` documents `--scope`; guide pages use canonical-path examples. | pending |  |  |
 
 ---

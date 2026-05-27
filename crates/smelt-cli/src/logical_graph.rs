@@ -592,7 +592,6 @@ mod tests {
         let refs = deps
             .into_iter()
             .map(|dep| RefInfo {
-                model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
                 smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
@@ -620,7 +619,6 @@ mod tests {
         let refs = deps
             .into_iter()
             .map(|dep| RefInfo {
-                model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
                 smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
@@ -885,7 +883,6 @@ mod tests {
             let refs = deps
                 .into_iter()
                 .map(|dep| RefInfo {
-                    model_name: dep.to_string(),
                     has_named_params: false,
                     range: TextRange::default(),
                     smelt_ref: smelt_core::refs::SmeltRef::Path(vec![dep.to_string()]),

@@ -541,7 +541,6 @@ mod tests {
                 // Split dep canonical path into segments so segs.join(".") == dep.
                 let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
                 RefInfo {
-                    model_name: dep.to_string(),
                     has_named_params: false,
                     range: TextRange::default(),
                     smelt_ref: smelt_core::refs::SmeltRef::Path(segs),

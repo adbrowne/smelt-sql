@@ -392,7 +392,7 @@ GROUP BY user_id
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "raw_events");
+        assert_eq!(refs[0].smelt_ref.to_path().join("."), "models.raw_events");
         assert!(!refs[0].has_named_params);
     }
 
@@ -409,7 +409,7 @@ FROM raw_events
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "format_date");
+        assert_eq!(refs[0].smelt_ref.leaf_name(), "format_date");
         assert!(refs[0].has_named_params);
     }
 
@@ -453,7 +453,10 @@ SELECT * FROM smelt.models.staging_events
         assert!(cleaned.model_id.is_multi_model);
         assert!(cleaned.content.contains("smelt.models.staging_events"));
         assert_eq!(cleaned.refs.len(), 1);
-        assert_eq!(cleaned.refs[0].model_name, "staging_events");
+        assert_eq!(
+            cleaned.refs[0].smelt_ref.to_path().join("."),
+            "models.staging_events"
+        );
 
         // Virtual paths should be different
         assert_ne!(staging.path, cleaned.path);
@@ -517,8 +520,8 @@ INNER JOIN smelt.models.model_b b ON a.id = b.id
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].model_name, "model_a");
-        assert_eq!(refs[1].model_name, "model_b");
+        assert_eq!(refs[0].smelt_ref.to_path().join("."), "models.model_a");
+        assert_eq!(refs[1].smelt_ref.to_path().join("."), "models.model_b");
     }
 
     // ----- canonical_path() tests (Phase 1) --------------------------------

@@ -10,7 +10,7 @@ use smelt_db::{Database, Workspace};
 use smelt_parser::ast::File as AstFile;
 use smelt_types::TypedColumn;
 
-use crate::db_helpers::{file_project_root, lookup_file, lookup_project, resolve_ref_path};
+use crate::db_helpers::{file_project_root, lookup_file, lookup_project, resolve_ref_leaf};
 
 pub(crate) fn format_type(typed_col: &TypedColumn) -> String {
     let nullable_suffix = if typed_col.nullable { "?" } else { "" };
@@ -328,7 +328,7 @@ fn find_column_in_ctes(
                                 path_ref.segments().last().cloned().unwrap_or_default();
                             if !model_name.is_empty() {
                                 if let Some(upstream_path) =
-                                    resolve_ref_path(db, project_root, &model_name)
+                                    resolve_ref_leaf(db, project_root, &model_name)
                                 {
                                     find_column_in_model_chain(
                                         db,
@@ -372,7 +372,7 @@ fn find_column_in_models(
     };
 
     for model_name in &model_names {
-        if let Some(upstream_path) = resolve_ref_path(db, project_root, model_name) {
+        if let Some(upstream_path) = resolve_ref_leaf(db, project_root, model_name) {
             if find_column_in_model_chain(
                 db,
                 &upstream_path,
@@ -425,7 +425,7 @@ fn find_column_in_model_chain(
 
     // If not found in explicit columns, check wildcard extensions
     for ext in &schema.row_extensions {
-        if let Some(upstream_path) = resolve_ref_path(db, project_root, &ext.ref_name) {
+        if let Some(upstream_path) = resolve_ref_leaf(db, project_root, &ext.ref_name) {
             if find_column_in_model_chain(
                 db,
                 &upstream_path,
@@ -619,7 +619,7 @@ fn trace_upstream_column_chain(
         // Check wildcard extensions (SELECT *)
         let schema = smelt_db::model_schema(db, up_file_input);
         for ext in &schema.row_extensions {
-            if let Some(upstream_path) = resolve_ref_path(db, project_root, &ext.ref_name) {
+            if let Some(upstream_path) = resolve_ref_leaf(db, project_root, &ext.ref_name) {
                 if trace_upstream_column_chain(
                     db,
                     &upstream_path,

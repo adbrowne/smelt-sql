@@ -449,7 +449,6 @@ mod tests {
                 // `["silver", "events"]`.
                 let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
                 RefInfo {
-                    model_name: dep.to_string(),
                     has_named_params: false,
                     range: TextRange::default(),
                     smelt_ref: crate::refs::SmeltRef::Path(segs),
@@ -571,13 +570,11 @@ mod tests {
         // Simulate smelt.silver.events_parsed / smelt.bronze.raw_events style
         // refs. Models are keyed by canonical path (layer.name).
         let make_layer_ref = |layer: &str, model: &str| RefInfo {
-            model_name: model.to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec![layer.to_string(), model.to_string()]),
         };
         let make_function_ref = |name: &str| RefInfo {
-            model_name: name.to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec!["functions".to_string(), name.to_string()]),
@@ -617,7 +614,6 @@ mod tests {
         // even though there's no model named "src.events".
         let mut model_a = make_model("A", vec![]);
         model_a.refs = vec![RefInfo {
-            model_name: "events".to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec![
@@ -657,7 +653,6 @@ mod tests {
             .map(|dep| {
                 let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
                 RefInfo {
-                    model_name: dep.to_string(),
                     has_named_params: false,
                     range: TextRange::default(),
                     smelt_ref: crate::refs::SmeltRef::Path(segs),
@@ -978,7 +973,6 @@ mod tests {
         let mut daily = make_layered_model("gold", "daily");
         // Add ref to silver.events_parsed
         daily.refs = vec![RefInfo {
-            model_name: "events_parsed".to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec![
@@ -1005,14 +999,12 @@ mod tests {
         let raw = make_layered_model("bronze", "raw");
         let mut parsed = make_layered_model("silver", "parsed");
         parsed.refs = vec![RefInfo {
-            model_name: "raw".to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec!["bronze".to_string(), "raw".to_string()]),
         }];
         let mut summary = make_layered_model("gold", "summary");
         summary.refs = vec![RefInfo {
-            model_name: "parsed".to_string(),
             has_named_params: false,
             range: TextRange::default(),
             smelt_ref: crate::refs::SmeltRef::Path(vec![

@@ -108,7 +108,11 @@ fn test_compile_with_function_call() {
 #[test]
 fn test_compile_with_ephemeral_dep() {
     // Downstream model that references an ephemeral upstream.
-    let downstream_sql = "SELECT * FROM smelt.models.upstream_ephemeral";
+    // The ephemeral's canonical path is "upstream_ephemeral" (single-segment
+    // address_segments), so the correct ref form is `smelt.upstream_ephemeral`.
+    // The path_key used for ephemeral matching is `to_path().join("_")` =
+    // `"upstream_ephemeral"`, which matches the ephemeral name exactly.
+    let downstream_sql = "SELECT * FROM smelt.upstream_ephemeral";
     let downstream = make_model("downstream", downstream_sql);
 
     let compiler = SqlCompiler::new(test_config(), &duckdb_target());

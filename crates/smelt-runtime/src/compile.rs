@@ -802,8 +802,6 @@ impl SqlCompiler {
                 let path_key = r.smelt_ref.to_path().join("_");
                 if resolver.ephemeral_names.contains(&path_key) {
                     Some(path_key)
-                } else if resolver.ephemeral_names.contains(&r.model_name) {
-                    Some(r.model_name.clone())
                 } else {
                     None
                 }
@@ -1329,8 +1327,6 @@ impl SqlCompiler {
                 let path_key = r.smelt_ref.to_path().join("_");
                 if resolver.ephemeral_names.contains(&path_key) {
                     Some(path_key)
-                } else if resolver.ephemeral_names.contains(&r.model_name) {
-                    Some(r.model_name.clone())
                 } else {
                     None
                 }
@@ -1548,7 +1544,6 @@ JOIN smelt.model_b b ON a.id = b.id
         let sql = "SELECT user_id FROM smelt.raw_events";
 
         let named_ref = RefInfo {
-            model_name: "raw_events".to_string(),
             has_named_params: true,
             range: rowan::TextRange::new(0.into(), 1.into()),
             smelt_ref: SmeltRef::Path(vec!["functions".to_string(), "my_fn".to_string()]),
