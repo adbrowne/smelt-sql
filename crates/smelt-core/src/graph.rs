@@ -515,6 +515,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         }
     }
@@ -696,6 +697,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata,
             kind: crate::discovery::ModelKind::Sql,
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         }
     }

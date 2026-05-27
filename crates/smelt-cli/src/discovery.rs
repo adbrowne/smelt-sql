@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 pub use smelt_core::extract_refs;
 pub use smelt_core::RefInfo;
-use smelt_core::{extract_file_metadata, FileMetadata, Materialization, ModelId, ModelMetadata};
+use smelt_core::{
+    extract_file_metadata, parse_sql_file, FileMetadata, Materialization, ModelId, ModelMetadata,
+};
 use smelt_db::EmittedModelDef;
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
@@ -187,7 +189,18 @@ impl ModelDiscovery {
     pub fn discover_function_files(&self) -> Result<Vec<ModelFile>> {
         let mut files = Vec::new();
         for path in smelt_core::discover_function_file_paths(&self.project_root) {
-            files.extend(self.parse_model_file(&path)?);
+            // Use `parse_sql_file` with `project_root` as the scan root so
+            // that `address_segments` retains the full workspace-relative path
+            // (e.g. `["functions", "patterns", "sessionize"]` for
+            // `functions/patterns/sessionize.sql`). This mirrors what
+            // `smelt_core::workspace::load_workspace` does — required by the
+            // Workspace Loading Parity rule (CLI ↔ LSP).
+            match parse_sql_file(&path, Some(&self.project_root)) {
+                Ok(parsed) => files.extend(parsed),
+                Err(e) => {
+                    tracing::warn!("Failed to parse function file {}: {}", path.display(), e);
+                }
+            }
         }
         Ok(files)
     }
@@ -380,5 +393,35 @@ INNER JOIN smelt.models.model_b b ON a.id = b.id
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].model_name, "model_a");
         assert_eq!(refs[1].model_name, "model_b");
+    }
+
+    /// `discover_function_files` must populate `address_segments` using
+    /// `project_root` as the scan root, so that the canonical path includes
+    /// the `functions` prefix.
+    ///
+    /// `<dir>/functions/patterns/sessionize.sql` → canonical_path() ==
+    /// `"functions.patterns.sessionize"`.
+    #[test]
+    fn cli_discover_function_files_populates_address_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let patterns_dir = dir.path().join("functions").join("patterns");
+        std::fs::create_dir_all(&patterns_dir).unwrap();
+        std::fs::write(
+            patterns_dir.join("sessionize.sql"),
+            "smelt.define sessionize(e: Expr<Integer>) -> Expr<Integer> AS SELECT 1",
+        )
+        .unwrap();
+
+        // empty paths is fine — function discovery doesn't consult `paths:`
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec![]);
+        let files = discovery.discover_function_files().unwrap();
+
+        assert_eq!(files.len(), 1, "expected exactly one function file");
+        assert_eq!(
+            files[0].canonical_path(),
+            "functions.patterns.sessionize",
+            "address_segments must be populated; got {:?}",
+            files[0].address_segments
+        );
     }
 }

@@ -546,6 +546,8 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
+            // TODO Phase 5: compute address_segments from the synthetic model
+            // name so canonical_path() returns the correct dot-path.
             address_segments: Vec::new(),
         }
     }

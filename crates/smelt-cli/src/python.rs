@@ -553,6 +553,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
         let model_b = ModelFile {
@@ -564,6 +565,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -583,6 +585,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
         let model_b = ModelFile {
@@ -594,6 +597,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1179,6 +1183,7 @@ def colliding(project):
                 }],
             },
             model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1220,6 +1225,7 @@ def colliding(project):
                 }],
             },
             model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
