@@ -184,7 +184,11 @@ pub fn build_model_details(
                 let model_info = ModelInfo {
                     name: name.to_string(),
                     sql: model.content.clone(),
-                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    refs: model
+                        .refs
+                        .iter()
+                        .map(|r| r.smelt_ref.to_path().join("."))
+                        .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
                 };
@@ -248,7 +252,11 @@ pub fn build_model_details(
                 tags,
                 owner: metadata.and_then(|m| m.owner.clone()),
                 description: metadata.and_then(|m| m.description.clone()),
-                refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                refs: model
+                    .refs
+                    .iter()
+                    .map(|r| r.smelt_ref.to_path().join("."))
+                    .collect(),
                 columns,
                 incremental,
                 batch_safety,
@@ -367,7 +375,11 @@ pub fn build_run_plan(
                 let model_info = ModelInfo {
                     name: model_name.clone(),
                     sql: model.content.clone(),
-                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    refs: model
+                        .refs
+                        .iter()
+                        .map(|r| r.smelt_ref.to_path().join("."))
+                        .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
                 };
