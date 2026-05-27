@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-05-16
+last_reviewed: 2026-05-27
 owners: [andrew]
 ---
 
@@ -23,7 +23,7 @@ The single SQL-type vocabulary. Users write these names in `CAST(... AS T)`, sou
 | Binary    | `Blob` |
 | Temporal  | `Date`, `Time`, `Timestamp [WITH TIME ZONE]`, `Interval` |
 | Composite | `Array(T)`, `Struct({field: T, …})`, `Map(K, V)` |
-| Internal  | `Null`, `Unknown` (compiler-only — surface only via diagnostics) |
+| Internal  | `Null`, `Unknown` (compiler-only — surface only via diagnostics; `Unknown` carries a reason — see §"Strict-by-default doctrine") |
 
 Aliases the parser accepts (canonicalised on input): `INT`/`INT4` → `Integer`; `INT2`/`TINYINT` → `SmallInt`; `INT8`/`LONG` → `BigInt`; `INT16`/`HUGEINT` → `BigInt`; `REAL`/`FLOAT4` → `Float`; `STRING` → `Text`; `TIMESTAMPTZ` → `Timestamp WITH TIME ZONE`; `BOOL` → `Boolean`; `BYTEA`/`BINARY` → `Blob`.
 
@@ -84,7 +84,9 @@ Trailing variadic `...` on the final argument is allowed in built-ins / `smelt.e
 
 Type-related codes from `crates/smelt-db/src/lib.rs::DiagnosticCode`. These are the spec's checkable anchor points:
 
-`TypeMismatch`, `CannotInferType`, `UnknownCastType`, `UnrecognizedFunction`, `SourceTypeError`, `WindowInScalarContext`, `AmbiguousColumn`, `UndeclaredColumn`, `ArgTypeMismatch`, `FunctionBodyTypeMismatch`, `ReturnTypeMismatch`, `InvalidFunctionTypeRef`, `MissingArgument`, `RowRequirementUnsatisfied`, `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `ParameterShadowsColumn` (warning).
+`TypeMismatch`, `CannotInferType`, `UnknownCastType`, `UnrecognizedFunction`, `SourceTypeError`, `WindowInScalarContext`, `AmbiguousColumn`, `UndeclaredColumn`, `ColumnTypeUnresolved`, `ArgTypeMismatch`, `FunctionBodyTypeMismatch`, `ReturnTypeMismatch`, `InvalidFunctionTypeRef`, `MissingArgument`, `RowRequirementUnsatisfied`, `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `ParameterShadowsColumn` (warning).
+
+`ColumnTypeUnresolved` is the schema-layer instance of the no-silent-`Unknown` rule (§"Strict-by-default doctrine"): it fires when a resolved column's type degrades to `Unknown` for a compiler-resolvable reason rather than a genuinely dynamic one. The schema-propagation rules that produce it for `smelt.functions.*`-derived columns live in `function_schema_inference.md`.
 
 ### Hover
 
@@ -101,6 +103,16 @@ Cross-family operations must produce `Unknown` and emit a diagnostic. The compil
 - UNION / INTERSECT / EXCEPT branches with incompatible families → `Unknown` + diagnostic.
 
 The user must write an explicit `CAST` to bridge families. The LSP provides quick-fixes; committed code is strict.
+
+**No silent `Unknown`.** The cross-family rule above is one instance of a general invariant: every `Unknown` that surfaces in a resolved column schema or expression type **must** be accompanied by a diagnostic. `Unknown` is the compiler's "we already told you about this" type, never a quiet fallback. To make this enforceable without a cascade of duplicate errors, `Unknown` carries a **reason**:
+
+| Reason | Meaning | Diagnostic |
+|---|---|---|
+| `Unresolved` | A compiler-resolvable gap or unbound type the inference failed to determine (cross-family op; an `smelt.functions.*`-derived column the schema rules cannot type). | **Yes**, at the origin (`TypeMismatch`, `ColumnTypeUnresolved`, …). |
+| `Dynamic` | A legitimately unknowable type (`Expr<Any>` return, dynamic SQL). Not a defect. | No. |
+| `Propagated` | `Unknown` only because an upstream value was already `Unknown` and reported. | No — reporting is origin-only. |
+
+Reporting is **origin-only**: a `Propagated` `Unknown` re-emits nothing, preserving the single-primary-span contract (`gradual_typing.md`). Only `Unresolved` at its origin produces a diagnostic; `Dynamic` never does. There is no opt-out: as with cross-family strictness, the diagnostics fire by default and are not configurable.
 
 ### 2. Numeric promotion chain
 
@@ -240,6 +252,8 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 **Strict-by-default, no implicit cross-family coercion.** The Semantics §"Strict-by-default doctrine" rule — `42 + '3'` is a `TypeMismatch`, not a silent string-to-int coercion — is the single most user-visible decision in the type system. It is doctrine because every alternative we considered traded near-term ergonomics for far-more-expensive long-term debugging. *Implicit coercion across families* (the SQL-92 / MySQL shape) was rejected because it lets schema drift hide for months: a column that quietly turns from `INTEGER` to `VARCHAR` upstream still type-checks downstream and silently corrupts joins. *Configurable strictness* (a `--strict` flag, or per-project lenient mode) was rejected because once strict diagnostics are optional, large projects negotiate them away and the framework loses its strongest correctness lever. The strict rule is paid back in two ways: the LSP offers one-click `CAST` quick-fixes, and committed code has a single, documented, mechanical answer to "why did this expression infer `Unknown`?".
 
+**The `Unknown` reason-discriminant exists to make "no silent `Unknown`" enforceable without cascades.** The doctrine wants every `Unknown` to carry a diagnostic, but a naive rule ("error on any `Unknown` column") fails two ways: it would flag legitimately-dynamic values (`Expr<Any>`), and it would report one root gap once per downstream consumer (an unresolved upstream column lights up every model that reads it). The three-way reason (`Unresolved` / `Dynamic` / `Propagated`) resolves both: only `Unresolved` at its origin reports, `Dynamic` is silent by design, and `Propagated` suppresses re-emission so the error appears once at its source. *Banning the `Unknown` value outright* was rejected because `Unknown` is load-bearing as the inference lattice's bottom — the signal worth surfacing is "an `Unknown` we should have resolved", which is exactly what the discriminant encodes. *An opt-in `strict_types` flag with a warning→error ramp* was rejected for the same reason configurable strictness was rejected above: an optional correctness diagnostic gets negotiated away. The migration cost (existing silent `Unknown`s, e.g. unexpanded struct-spread schemas) is paid by **sequencing** — close the inference gaps so the legitimate cases resolve, then the residual `Unresolved` columns surface by default — not by a permanent opt-out.
+
 **Single `DataType` vocabulary across all backends.** `DataType` is one enum in one crate (`smelt-types`); backend-specific names (`HUGEINT`, `STRING`, `TIMESTAMPTZ`) parse into the enum on input, and `to_backend_sql()` is the only path that emits an engine-specific name. *Per-backend type vocabularies* (one `DataType` for DuckDB, another for Spark, another for Postgres) was rejected because cross-backend reasoning — incremental models that read DuckDB and write Spark, function signatures portable across engines, type-aware diagnostics in the LSP — would require a translation layer at every boundary, and translation layers are where correctness goes to die. The trade-off is that adding an engine-native type that no other backend supports requires either a new `DataType` variant (semi-permanent) or a `<backend>.<type>(...)` opt-in (the `postgres.sum(...)` shape from §"Canonical built-in returns"). That cost is paid by the few projects that need it, not by the ecosystem as a whole.
 
 **Engine-alias normalisation is a parser concern, not an inference concern.** The aliases `INT`, `INT4`, `STRING`, `BOOL`, `BYTEA`, `TIMESTAMPTZ` are normalised on input by `crates/smelt-types/src/parse.rs`; type inference operates only on canonical `DataType` values. *Carrying alias spellings through inference* was rejected because it doubles the surface every inference rule has to handle ("does `Integer + Int` unify? does `Text + String` round-trip?") with no semantic value — every such pair is the same type. Normalising at the boundary keeps the inference rules clean and means the test surface for type inference doesn't have to enumerate alias permutations.
@@ -251,6 +265,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - The `DataType` enum in `crates/smelt-types/src/lib.rs` is the single SQL-type vocabulary; backend-specific names (HUGEINT, STRING, TIMESTAMPTZ) parse into it on input, and `to_backend_sql()` is the only emission path that produces an engine-specific name.
 - `crates/smelt-db/src/type_inference.rs` and `crates/smelt-types/src/signatures.rs` contain pure functions (no Salsa imports). Salsa queries are thin wrappers — see CLAUDE.md "Pure Function Rule".
 - Function call inference is **local**: row-variable unification, generic binding, and constraint discharge all happen at the call site without cross-module constraint solving.
+- **No silent `Unknown`.** Every `Unknown` with reason `Unresolved` surfacing in a resolved schema or expression type is accompanied by an origin diagnostic. `Dynamic` and `Propagated` unknowns are diagnostic-free by construction. The set of `Unknown` reasons (`Unresolved`, `Dynamic`, `Propagated`) is closed; adding a reason requires a spec edit.
 - `Numeric ⊂ Ordered` is structural — callers do not need to restate constraints.
 - Adding a type to `Ordered` is non-breaking; removing one is breaking.
 - Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record lifting rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain subtyping rules; no further branching is permitted without a spec edit. `ModelDef` participates in no subtyping rule — it is neither a subtype nor a supertype of any other sort.
@@ -266,6 +281,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - **`Float` as a distinct DataType.** `DataType::Float` exists in code; research treats Float as Double. This spec aligns with research and lists `Float` collapsing into `Double` as the normative rule. `Float` may be removed from the enum in a future plan.
 - **`docs/type_semantics.md` overlap.** The legacy quasi-spec contains backend-divergence material that is still useful (DuckDB/Spark divergence registry). Recommendation: keep it as a backend-divergence appendix referenced from this spec; over time, fold or trim.
 - **`Map<K,V>` rules.** `DataType::Map` exists in the vocabulary but research is silent on its semantics. This spec marks `Map` as non-`Ordered`; broader rules for Map equality, ordering, and arithmetic remain open.
+- **Silent `Unknown`s exist today; the reason-discriminant and `ColumnTypeUnresolved` are not yet enforced.** The `Unknown` value is currently undiscriminated, and several inference gaps produce `Unknown` columns with no diagnostic — violating the no-silent-`Unknown` invariant: unexpanded `smelt.functions.*` struct-spread schemas (`function_schema_inference.md`), generator-emitted and `smelt.columns_of`-reflected model schemas, and meta-language HOF values placed in SQL column position (`meta_language.md`). Enforcement is sequenced after those gaps close, so the diagnostic flags genuine defects rather than known-deferred ones. Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
@@ -299,6 +315,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
 - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
 - `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; `ModelDef` field rules, generator-file body semantics, and construction restrictions; this spec registers the type vocabulary entries, the meta-language spec owns the rules.
+- `docs/specs/function_schema_inference.md` — how `smelt.functions.*` calls contribute columns/types to a caller's schema; owns the `ColumnTypeUnresolved` schema-propagation rules; this spec owns the `Unknown` reason-discriminant and the no-silent-`Unknown` doctrine it consumes.
 
 ### Backend divergence appendix
 
