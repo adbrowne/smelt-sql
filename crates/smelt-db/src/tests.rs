@@ -5666,3 +5666,105 @@ FROM smelt.functions.add_margin(x)"#;
         margin_type
     );
 }
+
+// ============================================================
+// Phase 3: Cycle guard for nested smelt.functions.* body CTE resolution
+// ============================================================
+
+/// Two mutually-recursive `TableExpr` functions — `alpha` calls `beta` and
+/// `beta` calls `alpha` in their body CTEs — must NOT cause a stack overflow
+/// when the schema resolver walks the call graph. The cycle guard in
+/// `resolve_smelt_path_call_schema` must detect the back-edge and short-circuit
+/// (returning `None` / opaque columns) rather than recursing infinitely.
+///
+/// Correctness requirements:
+/// - Calling `typed_model_schema` (which drives schema resolution) on a model
+///   that calls `alpha` must TERMINATE without panicking.
+/// - The columns returned may be `Unknown`/empty (the cycle is unresolvable),
+///   but the process must not crash.
+/// - A `FunctionCallCycle` diagnostic must still be emitted for both `alpha`
+///   and `beta` (the cycle guard must not suppress the diagnostic path).
+///
+/// **RED state before fix**: `typed_model_schema` overflows the stack and the
+/// test binary crashes with a SIGSEGV / "thread has overflowed its stack".
+/// **GREEN state after fix**: returns normally; assertions about diagnostics pass.
+#[test]
+fn mutual_recursion_body_cte_terminates_without_stack_overflow() {
+    // `alpha` body: CTE `x` selects from `smelt.functions.beta(data)` which
+    // creates the A→B dependency.
+    let alpha_sql = r#"smelt.define alpha(
+    data: TableExpr<{id: Integer}>
+) -> TableExpr AS (
+    WITH x AS (SELECT * FROM smelt.functions.beta(data))
+    SELECT id FROM x
+)"#;
+
+    // `beta` body: CTE `y` selects from `smelt.functions.alpha(data)` which
+    // creates the B→A back-edge, completing the cycle.
+    let beta_sql = r#"smelt.define beta(
+    data: TableExpr<{id: Integer}>
+) -> TableExpr AS (
+    WITH y AS (SELECT * FROM smelt.functions.alpha(data))
+    SELECT id FROM y
+)"#;
+
+    // The caller model passes a source table into `alpha`.
+    let model_sql = "SELECT id FROM smelt.functions.alpha(smelt.sources.raw.t)";
+
+    let mut db = TestDb::default();
+
+    let alpha_path = PathBuf::from("functions/alpha.sql");
+    db.set_file_text(alpha_path.clone(), Arc::new(alpha_sql.to_string()));
+    db.set_file_project_root(alpha_path.clone(), PathBuf::from("."));
+
+    let beta_path = PathBuf::from("functions/beta.sql");
+    db.set_file_text(beta_path.clone(), Arc::new(beta_sql.to_string()));
+    db.set_file_project_root(beta_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/caller.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![
+        alpha_path.clone(),
+        beta_path.clone(),
+        model_path.clone(),
+    ]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    // This must terminate (not stack-overflow).  The exact schema may be
+    // empty or opaque — the cycle is logically unresolvable — but the
+    // resolver must return without crashing.
+    let schema = db.typed_model_schema(model_path.clone());
+    let _ = schema; // result may be empty/opaque; the assertion is TERMINATION
+
+    // The `FunctionCallCycle` diagnostic must still fire for both functions.
+    // (The cycle guard in the schema resolver must not suppress the diagnostic
+    // path, which runs independently via `function_call_cycle_fn_ids`.)
+    let alpha_diags = db.file_diagnostics(alpha_path);
+    let beta_diags = db.file_diagnostics(beta_path);
+
+    let has_cycle_diag = |diags: &[Diagnostic]| {
+        diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::FunctionCallCycle))
+    };
+
+    assert!(
+        has_cycle_diag(&alpha_diags),
+        "alpha must have a FunctionCallCycle diagnostic; got {:?}",
+        alpha_diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        has_cycle_diag(&beta_diags),
+        "beta must have a FunctionCallCycle diagnostic; got {:?}",
+        beta_diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}

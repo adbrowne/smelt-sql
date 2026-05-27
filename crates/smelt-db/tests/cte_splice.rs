@@ -75,7 +75,7 @@ fn cte_schema_extracted_from_body() {
 
     let select = get_body_select(&db, files[0]);
     let text = smelt_parser::strip_frontmatter(files[0].text(&db));
-    let (ctx, cycle_diags) = extract_function_body_cte_schemas(&select, &seed_ctx, &text);
+    let (ctx, cycle_diags) = extract_function_body_cte_schemas(&select, &seed_ctx, &text, None);
 
     assert!(
         cycle_diags.is_empty(),

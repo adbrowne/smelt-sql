@@ -1812,6 +1812,7 @@ pub fn cte_cycle_diagnostics_for_file(
             &select,
             &empty_ctx,
             &clean_text,
+            None,
         );
         out.extend(cycle_diags);
     }

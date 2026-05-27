@@ -250,6 +250,13 @@ pub struct SalsaRefSchemaProvider<'a> {
     /// should always supply a project. When `None`, function resolution
     /// returns `None` (no cross-project signature leak).
     project: Option<crate::ProjectInput>,
+    /// Cycle guard for `resolve_smelt_path_call_schema`. Holds the set of
+    /// function names currently being resolved on the call stack. When a
+    /// callee is already in this set, the resolver short-circuits (returns
+    /// `None`) instead of recursing infinitely. Uses `RefCell` so the guard
+    /// can be updated through the shared `&self` reference that closures
+    /// capture.
+    visiting: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> SalsaRefSchemaProvider<'a> {
@@ -265,6 +272,7 @@ impl<'a> SalsaRefSchemaProvider<'a> {
             db,
             workspace,
             project,
+            visiting: std::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -323,15 +331,41 @@ impl SalsaRefSchemaProvider<'_> {
         &self,
         call: &smelt_parser::ast::SmeltPathCall,
     ) -> Option<Vec<(String, TypedColumn)>> {
+        let segments = call.segments();
+        let name = segments.last()?.clone();
+
+        // Cycle guard: if we are already resolving `name` further up the call
+        // stack (mutual or direct recursion), short-circuit rather than
+        // recursing infinitely. The workspace emits `FunctionCallCycle` for
+        // such code; this guard prevents a stack overflow when the resolver
+        // runs on in-progress (invalid) code where the diagnostic path hasn't
+        // fired yet. We return `None` (unresolved / opaque columns) — callers
+        // treat this identically to an unknown function call.
+        {
+            let mut vis = self.visiting.borrow_mut();
+            if vis.contains(&name) {
+                return None;
+            }
+            vis.insert(name.clone());
+        }
+
+        // Project isolation rule: only consider signatures declared in the
+        // same project as the file whose schema we're computing.
+        let result = self.resolve_smelt_path_call_schema_inner(call, &name);
+        self.visiting.borrow_mut().remove(&name);
+        result
+    }
+
+    fn resolve_smelt_path_call_schema_inner(
+        &self,
+        call: &smelt_parser::ast::SmeltPathCall,
+        name: &str,
+    ) -> Option<Vec<(String, TypedColumn)>> {
         use smelt_parser::ast::Expr as AstExpr;
         use smelt_types::signatures::SmeltType;
 
-        let segments = call.segments();
-        let name = segments.last()?.clone();
-        // Project isolation rule: only consider signatures declared in the
-        // same project as the file whose schema we're computing.
         let project = self.project?;
-        let sig_arc = resolve_function(self.db, self.workspace, project, name)?;
+        let sig_arc = resolve_function(self.db, self.workspace, project, name.to_string())?;
         let sig: &smelt_types::signatures::FunctionSig = sig_arc.as_ref();
 
         // Only `TableExpr`-returning functions contribute a FROM schema.
@@ -474,8 +508,24 @@ impl SalsaRefSchemaProvider<'_> {
         // `infer_tableexpr_return_schema` can resolve bare column references
         // from CTE-derived rows. Cycle diagnostics are discarded — they're
         // surfaced separately by `cte_cycle_diagnostics_for_file`.
+        //
+        // Pass a resolver so that CTE bodies of the form
+        // `SELECT * FROM smelt.functions.<name>(args)` have their nested
+        // call's output schema resolved and seeded into the CTE context.
+        // Without this, `SELECT *` produces a synthetic `col1: Unknown` and
+        // any column the inner call adds (e.g. `session_id` from `sessionize`)
+        // remains unresolved in the outer body (§Semantics rule 4).
+        let path_call_resolver =
+            |call: &smelt_parser::ast::SmeltPathCall| -> Option<Vec<(String, TypedColumn)>> {
+                self.resolve_smelt_path_call_schema(call)
+            };
         let (body_ctx_with_ctes, _cycle_diags) =
-            function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
+            function_body_check::extract_function_body_cte_schemas(
+                &body_select,
+                &body_ctx,
+                "",
+                Some(&path_call_resolver),
+            );
         let mut body_ctx = body_ctx_with_ctes;
 
         // Seed JOIN-aliased schemas so that `infer_tableexpr_return_schema`

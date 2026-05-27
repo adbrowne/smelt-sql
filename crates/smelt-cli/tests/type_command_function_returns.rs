@@ -126,3 +126,28 @@ fn margin_via_cte_resolves_to_non_unknown() {
         dt
     );
 }
+
+/// Real-fixture: `rollup_dashboard.session_id` must resolve to a non-Unknown type.
+///
+/// `rollup_dashboard` selects `sr.session_id` from
+/// `smelt.functions.session_rollup(...)`. Inside `session_rollup`'s body there
+/// is a CTE `sessionized AS (SELECT * FROM smelt.functions.sessionize(...))`.
+/// `session_id` is added by `sessionize`'s body. The schema resolver must
+/// expand the nested `sessionize(...)` call's output schema when processing
+/// `sessionized`'s wildcard SELECT so that `session_id` propagates through the
+/// CTE into `session_rollup`'s return schema.
+#[test]
+fn rollup_dashboard_session_id_not_unknown() {
+    let dt = inferred_output_type("examples/functions_demo", "rollup_dashboard", "session_id");
+    assert!(
+        dt.is_some(),
+        "rollup_dashboard must have a `session_id` output column in its schema"
+    );
+    assert!(
+        !matches!(dt, Some(DataType::Unknown)),
+        "rollup_dashboard.session_id must not be Unknown; the nested smelt.functions.sessionize \
+         call inside session_rollup's body CTE must be resolved so session_id propagates; \
+         got {:?}",
+        dt
+    );
+}
