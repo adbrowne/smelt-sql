@@ -115,7 +115,7 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ### User docs
 
-- `docs-site/docs/concepts/functions.md` — function authoring and call surface; to be reconciled via `/smelt:validate function_schema_inference`
+- `docs-site/docs/reference/language.md` — `smelt.functions` call surface and `smelt.as_struct`; the `.*` struct-spread schema-projection surface is not yet documented here (to be reconciled via `/smelt:validate function_schema_inference`)
 
 ### Plans (history) — oldest → newest
 
