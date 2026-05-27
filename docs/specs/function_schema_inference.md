@@ -53,7 +53,7 @@ A `TableExpr`-returning function in a FROM or JOIN slot contributes its **output
 - A bare `*` in the body expands against the sole `TableExpr` parameter when there is exactly one; with multiple `TableExpr` parameters a bare `*` is `Unresolved`.
 - An explicit body projection (with or without alias, including computed columns and window expressions) is typed by inferring its expression under the body's type context, which is seeded from each `TableExpr` argument's resolved schema and the workspace function signatures.
 
-The `TableExpr` argument's schema is resolved from a `smelt.<path>` model/source reference, or recursively from a nested `smelt.functions.<name>(...)` call in argument position.
+The `TableExpr` argument's schema is resolved from a `smelt.<path>` model/source reference, recursively from a nested `smelt.functions.<name>(...)` call in argument position, or from a local CTE or derived table named in the caller's `WITH` clause.
 
 ### 4. Propagation through CTEs, subqueries, and joins
 
@@ -87,7 +87,6 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ## Known Divergences / Open Questions
 
-- **A `TableExpr` argument that is a local CTE or derived table is not seeded.** When the `TableExpr` argument is a reference to a CTE defined in the caller (rather than a `smelt.<path>` ref or nested function call), the body context is not seeded with that CTE's schema, so body-computed columns resolve to `Unknown` (`examples/functions_demo/models/margin_via_cte.sql` — `margin` is `Unknown`). Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
 - **Occasional body-computed column not inferred.** Some explicit body projections in `TableExpr` bodies do not infer (`examples/functions_demo/models/rollup_dashboard.sql` — `session_id` is `Unknown` while its siblings resolve). The failing expression forms should be enumerated and folded into rule 3.
 - **`ColumnTypeUnresolved` and the no-silent-`Unknown` invariant (rules 6, 4) are not yet enforced.** They are sequenced after the three gaps above are closed — until the legitimate cases resolve, firing the diagnostic would flag known-deferred gaps in `examples/` rather than genuine defects. The reason-discriminant in `types.md` is the prerequisite. Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
 - **Single-field projection `smelt.functions.<f>(...).field` is not supported.** The parser has no field-postfix syntax on a function call — only `.*` exists via `SMELT_PATH_CALL_STAR`. To access a single field, project the whole struct with `.*` and reference the field downstream. Tracked in `docs/plans/20260527-function_schema_inference.md`.

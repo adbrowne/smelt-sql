@@ -106,3 +106,23 @@ fn web_analytics_events_parsed_struct_spread_expands_into_schema() {
         url_dt
     );
 }
+
+/// Real-fixture: `margin_via_cte.margin` must resolve to a non-Unknown numeric
+/// type. The model passes a local CTE named `x` (with `revenue` + `cost`
+/// DECIMAL columns) into `smelt.functions.add_margin(x)`, which computes
+/// `revenue - cost AS margin`. Without CTE-argument seeding the body context
+/// has no schema for `x`, so `margin` falls back to `Unknown`.
+#[test]
+fn margin_via_cte_resolves_to_non_unknown() {
+    let dt = inferred_output_type("examples/functions_demo", "margin_via_cte", "margin");
+    assert!(
+        dt.is_some(),
+        "margin_via_cte must have a `margin` output column in its schema"
+    );
+    assert!(
+        !matches!(dt, Some(DataType::Unknown)),
+        "margin_via_cte.margin must not be Unknown; CTE argument `x` must be seeded into \
+         add_margin's body context so `revenue - cost` resolves; got {:?}",
+        dt
+    );
+}

@@ -60,8 +60,8 @@ You are executing this plan from the start of a new session. Drive it to complet
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     |        | 2026-05-27 |
-| 2     | pending  |        |      |
+| 1     | done     | 7d61882f | 2026-05-27 |
+| 2     | done     |        | 2026-05-27 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |

@@ -410,6 +410,7 @@ impl SalsaRefSchemaProvider<'_> {
                         continue;
                     }
                     // Walk the arg expression for a smelt.<path> ref.
+                    let mut seeded = false;
                     for node in arg_expr.syntax().descendants() {
                         if node.kind() == smelt_parser::SyntaxKind::SMELT_PATH_REF {
                             if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
@@ -421,8 +422,27 @@ impl SalsaRefSchemaProvider<'_> {
                                     .or_else(|| self.seed_columns(&seed_key))
                                 {
                                     body_ctx.add_tableexpr_param(&param.name, &cols);
+                                    seeded = true;
                                     break;
                                 }
+                            }
+                        }
+                    }
+
+                    // If the argument is a bare identifier that names a CTE or
+                    // derived table in the CALLER's WITH clause, resolve that
+                    // CTE's column schema and seed the body context with it.
+                    // This handles the pattern:
+                    //   WITH x AS (SELECT … AS revenue, … AS cost)
+                    //   SELECT col FROM smelt.functions.f(x)
+                    if !seeded {
+                        if let Some(cte_name) = arg_expr
+                            .as_column_ref()
+                            .filter(|cr| cr.qualifier().is_none())
+                            .map(|cr| cr.name().to_string())
+                        {
+                            if let Some(cols) = cte_columns_from_caller_select(&cte_name, call) {
+                                body_ctx.add_tableexpr_param(&param.name, &cols);
                             }
                         }
                     }
@@ -964,6 +984,64 @@ pub fn type_context(
     }
 
     Arc::new(ctx)
+}
+
+/// Pure helper: given a bare CTE name and the `SmeltPathCall` node that is
+/// using it as a `TableExpr` argument, find the CTE in the CALLER's `WITH`
+/// clause and return its resolved column schema.
+///
+/// This handles the pattern:
+///   WITH x AS (SELECT CAST(100 AS DECIMAL(18,2)) AS revenue, …)
+///   SELECT col FROM smelt.functions.f(x)
+///
+/// Steps:
+///   1. Walk up ancestors of `call` to find the nearest `SELECT_STMT`.
+///   2. Find the CTE named `cte_name` in the WITH clause.
+///   3. Process any preceding CTEs first (so forward references in the target
+///      CTE can resolve), then call `infer_cte_columns` on the target CTE.
+///
+/// Pure — no Salsa access.
+fn cte_columns_from_caller_select(
+    cte_name: &str,
+    call: &smelt_parser::ast::SmeltPathCall,
+) -> Option<Vec<(String, TypedColumn)>> {
+    use smelt_parser::ast::{Cte, SelectStmt, WithClause};
+    use smelt_parser::SyntaxKind::SELECT_STMT;
+
+    // Walk up to find the nearest SELECT_STMT ancestor (the caller's select).
+    let caller_select = call
+        .syntax()
+        .ancestors()
+        .find(|n| n.kind() == SELECT_STMT)
+        .and_then(SelectStmt::cast)?;
+
+    let with_clause: WithClause = caller_select.with_clause()?;
+
+    // Collect all CTEs in order; process them in order so that each CTE can
+    // reference preceding ones.
+    let all_ctes: Vec<Cte> = with_clause.ctes().collect();
+
+    // Build a TypeContext by processing preceding CTEs in order, then the
+    // target CTE.
+    let mut ctx = TypeContext::new();
+    for cte in &all_ctes {
+        let name = match cte.name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let cols = infer_cte_columns(cte, &ctx);
+        for (col_name, typed_col) in &cols {
+            ctx.add_cte_column(&name, col_name, typed_col.clone());
+        }
+        ctx.add_alias(&name, &name);
+        if name == cte_name {
+            // Found the target CTE — return its columns.
+            return Some(cols);
+        }
+    }
+
+    // CTE name not found in the WITH clause.
+    None
 }
 
 /// Walk a syntax node for the first `SMELT_PATH_CALL_STAR` child and return the

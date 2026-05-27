@@ -5596,3 +5596,73 @@ fn struct_spread_row_tail_not_expanded_at_schema_layer() {
         col_names
     );
 }
+
+// ============================================================
+// Phase 2: CTE-argument seeding for TableExpr-returning functions
+// ============================================================
+
+/// A model that passes a local CTE as a `TableExpr` argument must seed the
+/// function body's type context with the CTE's column schema.
+///
+/// Pattern:
+///   WITH x AS (SELECT CAST(100 AS DECIMAL(18,2)) AS revenue,
+///                     CAST(30  AS DECIMAL(18,2)) AS cost)
+///   SELECT margin FROM smelt.functions.add_margin(x)
+///
+/// `add_margin` computes `revenue - cost AS margin`. Without CTE seeding the
+/// body ctx has no `revenue`/`cost`, so `margin` resolves to Unknown.
+/// After this phase it must resolve to a non-Unknown Decimal/Double.
+#[test]
+fn cte_arg_tableexpr_param_resolves_body_columns() {
+    let function_sql = r#"smelt.define add_margin(
+    source: TableExpr<{revenue: Numeric, cost: Numeric}>
+) -> TableExpr AS (
+    SELECT source.*, revenue - cost AS margin FROM source
+)"#;
+
+    // Model: CTE `x` supplies revenue + cost; passed by bare name into add_margin.
+    let model_sql = r#"WITH x AS (
+  SELECT
+    CAST(100 AS DECIMAL(18, 2)) AS revenue,
+    CAST(30  AS DECIMAL(18, 2)) AS cost
+)
+SELECT margin
+FROM smelt.functions.add_margin(x)"#;
+
+    let mut db = TestDb::default();
+
+    let fn_path = PathBuf::from("functions/add_margin.sql");
+    db.set_file_text(fn_path.clone(), Arc::new(function_sql.to_string()));
+    db.set_file_project_root(fn_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/margin_via_cte.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![fn_path, model_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let schema = db.typed_model_schema(model_path);
+
+    let margin_col = schema.columns.iter().find(|c| c.name == "margin");
+    assert!(
+        margin_col.is_some(),
+        "schema must contain a `margin` column; got {:?}",
+        schema
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let margin_type = margin_col
+        .and_then(|c| c.data_type.as_ref())
+        .map(|tc| &tc.data_type);
+
+    assert!(
+        !matches!(margin_type, Some(DataType::Unknown) | None),
+        "margin column must resolve to a non-Unknown type when CTE arg is seeded; got {:?}",
+        margin_type
+    );
+}
