@@ -8,10 +8,16 @@ These flags are available on `smelt run`, `smelt build`, and `smelt explain`.
 
 ### By name
 
-Select a single model by its name:
+Select a single model by its full canonical path:
 
 ```bash
-smelt run --select daily_revenue
+smelt run --select marts.daily_revenue
+```
+
+When working from inside a namespace directory, use `--scope` or rely on cwd auto-scoping to shorten the name (see [Argument resolution and `--scope`](../reference/cli.md#argument-resolution-and-scope)):
+
+```bash
+smelt --scope marts run --select daily_revenue
 ```
 
 ### By tag
@@ -43,18 +49,18 @@ SELECT ...
 Prefix with `+` to include the selected model(s) and all their upstream dependencies:
 
 ```bash
-smelt run --select +daily_revenue
+smelt run --select +marts.daily_revenue
 smelt run --select +tag:revenue
 ```
 
-This ensures that every model `daily_revenue` depends on is also run, in the correct order.
+This ensures that every model `marts.daily_revenue` depends on is also run, in the correct order.
 
 ### Include downstream dependents
 
 Suffix with `+` to include the selected model(s) and everything that depends on them:
 
 ```bash
-smelt run --select daily_revenue+
+smelt run --select marts.daily_revenue+
 smelt run --select tag:staging+
 ```
 
@@ -63,23 +69,23 @@ smelt run --select tag:staging+
 Combine the prefix and suffix:
 
 ```bash
-smelt run --select +daily_revenue+
+smelt run --select +marts.daily_revenue+
 ```
 
-This selects `daily_revenue`, all its upstream dependencies, and all its downstream dependents.
+This selects `marts.daily_revenue`, all its upstream dependencies, and all its downstream dependents.
 
 ### Multiple selectors
 
 The `--select` flag is repeatable. All selectors are combined (union):
 
 ```bash
-smelt run --select daily_revenue --select user_activity
+smelt run --select marts.daily_revenue --select silver.user_activity
 ```
 
 Short form with `-s`:
 
 ```bash
-smelt run -s daily_revenue -s user_activity
+smelt run -s marts.daily_revenue -s silver.user_activity
 ```
 
 ## Excluding models
@@ -88,7 +94,7 @@ The `--exclude` flag uses the same syntax as `--select` but removes models from 
 
 ```bash
 smelt run --exclude tag:expensive
-smelt run --exclude staging_legacy
+smelt run --exclude silver.staging_legacy
 ```
 
 Exclusions are applied after selections. If you use `--select` and `--exclude` together, smelt first builds the selected set, then removes the excluded models.
@@ -98,13 +104,13 @@ Exclusions are applied after selections. If you use `--select` and `--exclude` t
 ### Run a single model
 
 ```bash
-smelt run --select daily_revenue
+smelt run --select marts.daily_revenue
 ```
 
 ### Run a model and all its dependencies
 
 ```bash
-smelt run --select +daily_revenue
+smelt run --select +marts.daily_revenue
 ```
 
 ### Run everything downstream of staging
@@ -122,13 +128,13 @@ smelt run --exclude tag:expensive
 ### Run a specific model with dependencies, excluding one branch
 
 ```bash
-smelt run --select +daily_revenue --exclude user_activity
+smelt run --select +marts.daily_revenue --exclude silver.user_activity
 ```
 
 ### Explain selected models
 
 ```bash
-smelt explain --select +daily_revenue
+smelt explain --select +marts.daily_revenue
 smelt explain --select tag:revenue --json
 ```
 
@@ -141,6 +147,24 @@ smelt explain --select tag:revenue --json
 
 !!! tip
     During development, use `--select +model_name` to run just the model you are working on along with its dependencies. This is much faster than running the entire project.
+
+## Selector names and scope resolution
+
+Selector values that are plain model names (not `tag:...` or `path:...` selectors) go through the same scope resolution as other CLI arguments. A bare `--select events_parsed` expands to `--select silver.events_parsed` when the active scope is `silver`. An unresolvable bare selector with multiple matches is an error — smelt never silently picks one.
+
+The safest form for scripts and CI is the full canonical path:
+
+```bash
+smelt run --select silver.events_parsed --select gold.eventstream_with_identity
+```
+
+When working interactively from inside a namespace directory, use `--scope` to shorten repeated names:
+
+```bash
+smelt --scope silver run --select events_parsed --select sessions
+```
+
+All smelt output — including selector match lists and run summaries — always uses the canonical dot-path (e.g. `silver.events_parsed`) regardless of how you specified the selector. Copy-pasting a printed name back into a subsequent command always works.
 
 ## Further reading
 
