@@ -61,3 +61,48 @@ fn safe_divide_scalar_call_infers_double() {
         dt
     );
 }
+
+/// Real-fixture assertion: `events_parsed` in `examples/web_analytics` ends
+/// with `smelt.functions.parse_event_payload(payload).*`.
+/// `parse_event_payload` declares `-> Expr<Struct<{event_name: Text, platform: Text, url: Text}>>`.
+/// After Phase 1 struct-spread expansion the model's output schema must include
+/// `event_name: TEXT, platform: TEXT, url: TEXT`.
+#[test]
+fn web_analytics_events_parsed_struct_spread_expands_into_schema() {
+    fn check_col(example_dir: &str, model: &str, col: &str) -> Option<DataType> {
+        inferred_output_type(example_dir, model, col)
+    }
+
+    // smelt normalises the `Text` keyword to `Varchar { max_length: None }` internally,
+    // so both variants are acceptable here.
+    let event_name_dt = check_col("examples/web_analytics", "events_parsed", "event_name");
+    assert!(
+        matches!(
+            event_name_dt,
+            Some(DataType::Text) | Some(DataType::Varchar { .. })
+        ),
+        "events_parsed.event_name must resolve to Text/Varchar (from parse_event_payload struct spread); \
+         got {:?} — struct-spread fields are missing from the schema layer",
+        event_name_dt
+    );
+
+    let platform_dt = check_col("examples/web_analytics", "events_parsed", "platform");
+    assert!(
+        matches!(
+            platform_dt,
+            Some(DataType::Text) | Some(DataType::Varchar { .. })
+        ),
+        "events_parsed.platform must resolve to Text/Varchar; got {:?}",
+        platform_dt
+    );
+
+    let url_dt = check_col("examples/web_analytics", "events_parsed", "url");
+    assert!(
+        matches!(
+            url_dt,
+            Some(DataType::Text) | Some(DataType::Varchar { .. })
+        ),
+        "events_parsed.url must resolve to Text/Varchar; got {:?}",
+        url_dt
+    );
+}

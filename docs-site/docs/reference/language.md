@@ -87,7 +87,15 @@ SELECT * FROM smelt.functions.sessionize(
 SELECT *
 FROM smelt.functions.session_rollup(smelt.events, user_id, event_time)
 PASSING metrics AS (COUNT(*) AS events, SUM(amount) AS total)
+
+-- Struct spread: project all fields of an Expr<Struct<{...}>> return as columns
+SELECT smelt.functions.parse_event_payload(payload).*
+FROM smelt.sources.raw.events
 ```
+
+When a function declares `-> Expr<Struct<{field1: Type1, field2: Type2, …}>>`, the `.*` suffix expands the struct fields into individual columns in the model's output schema. Each field becomes a separately named column with its declared type. This expansion is visible to downstream models and the LSP — hover, diagnostics, and completions all reflect the struct's declared fields.
+
+Row-polymorphic functions (`Struct<{…, ..r}>`) expand declared fields plus any extras bound from the call-site argument's schema.
 
 ### smelt.extern — external function declarations
 

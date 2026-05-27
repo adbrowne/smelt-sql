@@ -60,7 +60,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-05-27 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -254,6 +254,8 @@ You are executing this plan from the start of a new session. Drive it to complet
 ## Deferred during implementation
 
 (Append-only.)
+
+- **Phase 1 — `.field` single-field projection and row-tail (`..r`) struct-spread descoped.** The call surface has no field-postfix on a function call (`SMELT_PATH_CALL` only carries `.*` via `SMELT_PATH_CALL_STAR`), so `f(x).field` is not implementable without parser work. Row-tail struct-spread expansion at the schema layer diverges from codegen (`expand_smelt_path_call_star` falls back to verbatim on `SPREAD_ITEM`), which would violate the schema/codegen-agreement invariant. Phase 1 ships closed-struct `.*` only; both sub-cases are recorded in the spec's Known Divergences. Unifying schema + codegen for row-tail, and adding `.field`, are future work.
 
 ## Verification
 

@@ -22,8 +22,7 @@ A model body, a `smelt.define` body, and a function body are all `SELECT`-shaped
 | Call form | Return sort of `<name>` | Columns contributed to the caller |
 |---|---|---|
 | `<name>(args) AS c` (SELECT scalar) | `Expr<T>` / `AggExpr<T>` / `WindowExpr<T>` | one column `c` of type `T` |
-| `<name>(args).field` (SELECT) | `Expr<Struct<{…, field: T, …}>>` | one column of `field`'s declared type |
-| `<name>(args).*` (SELECT) | `Expr<Struct<{f1: T1, …, fN: TN}>>` | `N` columns `f1…fN`, in declared field order, with their declared types |
+| `<name>(args).*` (SELECT) | `Expr<Struct<{f1: T1, …, fN: TN}>>` (closed struct) | `N` columns `f1…fN`, in declared field order, with their declared types |
 | `FROM <name>(args) [AS a]` | `TableExpr` / `TableExpr<{…}>` | the function's resolved output schema, as the schema of alias `a` (or unqualified FROM scope) |
 
 The contributed columns are observable via `smelt type` (the `inputs -> outputs` signature) and LSP hover, and they flow into every downstream consumer of the model's `ModelSchema` (further inference, `schema_evolution.md` diffs, `data_catalog.md`).
@@ -44,11 +43,7 @@ A `smelt.functions.<name>(args)` call in scalar position contributes one column 
 
 ### 2. Struct returns and `.*` spread
 
-A function returning `Expr<Struct<{f1: T1, …, fN: TN}>>` contributes columns by field:
-
-- `<name>(args).*` expands to **all** `N` declared fields, in declared order, each typed by its declared field type. The expansion happens at the schema layer — the contributed `ModelSchema` columns are the struct fields — not only in generated SQL.
-- `<name>(args).field` contributes the single named field's column, typed by its declared field type. A `field` not in the declared field set is `ColumnTypeUnresolved`.
-- A row-tail (`Struct<{…, ..r}>`) binds the extras from the corresponding struct argument's call-site schema (`types.md` §"TableExpr row polymorphism" applies to struct rows); the spread then contributes the declared fields plus the bound extras.
+A function returning a closed `Expr<Struct<{f1: T1, …, fN: TN}>>` (no row-tail marker) contributes columns via `<name>(args).*`: the spread expands to all `N` declared fields, in declared order, each typed by its declared field type. The expansion happens at the schema layer — the contributed `ModelSchema` columns are the struct fields — not only in generated SQL.
 
 ### 3. `TableExpr` returns in FROM
 
@@ -92,10 +87,11 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ## Known Divergences / Open Questions
 
-- **Struct-spread `.*` is not expanded into the schema layer.** A `smelt.functions.<f>(...).*` over an `Expr<Struct<{…}>>`-returning function contributes zero columns to the model's resolved schema today, so the fields read as `Unknown` at every downstream consumer (`examples/web_analytics/models/silver/events_parsed.sql` loses `event_name` / `platform` / `url`, which cascades into `eventstream_with_identity` and `sessions.platform`). The SQL codegen for the spread is implemented; the schema-layer expansion (rule 2) is not. Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
 - **A `TableExpr` argument that is a local CTE or derived table is not seeded.** When the `TableExpr` argument is a reference to a CTE defined in the caller (rather than a `smelt.<path>` ref or nested function call), the body context is not seeded with that CTE's schema, so body-computed columns resolve to `Unknown` (`examples/functions_demo/models/margin_via_cte.sql` — `margin` is `Unknown`). Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
 - **Occasional body-computed column not inferred.** Some explicit body projections in `TableExpr` bodies do not infer (`examples/functions_demo/models/rollup_dashboard.sql` — `session_id` is `Unknown` while its siblings resolve). The failing expression forms should be enumerated and folded into rule 3.
 - **`ColumnTypeUnresolved` and the no-silent-`Unknown` invariant (rules 6, 4) are not yet enforced.** They are sequenced after the three gaps above are closed — until the legitimate cases resolve, firing the diagnostic would flag known-deferred gaps in `examples/` rather than genuine defects. The reason-discriminant in `types.md` is the prerequisite. Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
+- **Single-field projection `smelt.functions.<f>(...).field` is not supported.** The parser has no field-postfix syntax on a function call — only `.*` exists via `SMELT_PATH_CALL_STAR`. To access a single field, project the whole struct with `.*` and reference the field downstream. Tracked in `docs/plans/20260527-function_schema_inference.md`.
+- **Row-tail (`..r`) struct returns are not expanded by `.*` at the schema layer.** Only closed `Expr<Struct<{f1: T1, …, fN: TN}>>` returns (no tail marker) are expanded. A row-tail return contributes zero columns from the spread at the schema layer; the `.*` passes through to generated SQL verbatim until codegen and schema expansion are unified. Tracked in `docs/plans/20260527-function_schema_inference.md`.
 
 ## References
 
@@ -115,7 +111,7 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ### User docs
 
-- `docs-site/docs/reference/language.md` — `smelt.functions` call surface and `smelt.as_struct`; the `.*` struct-spread schema-projection surface is not yet documented here (to be reconciled via `/smelt:validate function_schema_inference`)
+- `docs-site/docs/reference/language.md` — `smelt.functions` call surface and `smelt.as_struct`; the `.*` struct-spread schema-projection surface
 
 ### Plans (history) — oldest → newest
 

@@ -5451,3 +5451,148 @@ fn smelt_record_declarations_query_collects_workspace_decls() {
         names
     );
 }
+
+// ============================================================
+// Phase 1: Struct-spread `.*` / `.field` schema expansion tests
+// ============================================================
+
+/// Build a TestDb containing one function-definition file and one model file,
+/// both scoped to the same project root ".".
+///
+/// `function_sql` is the raw text of a `smelt.define` file.
+/// `model_sql` is the SELECT-body of the caller model.
+fn setup_struct_spread_db(function_sql: &str, model_sql: &str) -> (TestDb, PathBuf) {
+    let mut db = TestDb::default();
+
+    let fn_path = PathBuf::from("functions/f.sql");
+    db.set_file_text(fn_path.clone(), Arc::new(function_sql.to_string()));
+    db.set_file_project_root(fn_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/caller.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![fn_path, model_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    (db, model_path)
+}
+
+/// `SELECT id, f(x).*` where `f -> Expr<Struct<{a: Text, b: Text}>>` must
+/// resolve the output schema to `{id, a: Text, b: Text}`.
+///
+/// Currently only `{id}` is produced (the struct-spread is silently dropped).
+#[test]
+fn struct_spread_star_expands_fields_into_schema() {
+    let function_sql = r#"smelt.define f(
+    x: Expr<Integer>
+) -> Expr<Struct<{a: Text, b: Text}>> AS ({
+    CAST(x AS TEXT) AS a,
+    CAST(x AS TEXT) AS b
+})"#;
+
+    let model_sql = "SELECT id, smelt.functions.f(id).* FROM smelt.sources.raw.t";
+
+    let (mut db, model_path) = setup_struct_spread_db(function_sql, model_sql);
+    let schema = db.typed_model_schema(model_path);
+
+    let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        col_names.contains(&"id"),
+        "schema must contain `id`; got {:?}",
+        col_names
+    );
+    assert!(
+        col_names.contains(&"a"),
+        "struct-spread `.*` must expand field `a` into schema; got {:?}",
+        col_names
+    );
+    assert!(
+        col_names.contains(&"b"),
+        "struct-spread `.*` must expand field `b` into schema; got {:?}",
+        col_names
+    );
+
+    // Column types must be Text (from the declared struct field types).
+    // smelt normalises the `Text` keyword to `Varchar { max_length: None }` internally,
+    // so both variants are acceptable.
+    let a_col = schema.columns.iter().find(|c| c.name == "a").unwrap();
+    assert!(
+        matches!(
+            a_col.data_type.as_ref().map(|tc| &tc.data_type),
+            Some(smelt_types::DataType::Text) | Some(smelt_types::DataType::Varchar { .. })
+        ),
+        "field `a` must have type Text/Varchar; got {:?}",
+        a_col.data_type
+    );
+    let b_col = schema.columns.iter().find(|c| c.name == "b").unwrap();
+    assert!(
+        matches!(
+            b_col.data_type.as_ref().map(|tc| &tc.data_type),
+            Some(smelt_types::DataType::Text) | Some(smelt_types::DataType::Varchar { .. })
+        ),
+        "field `b` must have type Text/Varchar; got {:?}",
+        b_col.data_type
+    );
+}
+
+/// Row-tail (`Struct<{…, ..r}>`) returns are NOT expanded at the schema layer.
+///
+/// The codegen expander (`expand_smelt_path_call_star`) falls back to verbatim
+/// SQL when the function body contains a `SPREAD_ITEM` (`..r`). Expanding at the
+/// schema layer while codegen uses verbatim would violate the schema-layer/codegen
+/// agreement invariant. Until the two layers are unified for row-tail structs, a
+/// `.*` spread over a row-tail return contributes zero columns at the schema layer.
+///
+/// This test documents the boundary: the caller model's schema must be empty
+/// (zero columns) when the only SELECT item is a row-tail struct spread.
+#[test]
+fn struct_spread_row_tail_not_expanded_at_schema_layer() {
+    // Function with a row-tail in both parameter and return.
+    let function_sql = r#"smelt.define tag_row(
+    s: Expr<Struct<{id: Integer, ..r}>>
+) -> Expr<Struct<{tag: Text, ..r}>> AS ({
+    'tagged' AS tag,
+    ..s
+})"#;
+
+    let upstream_sql = "SELECT 1 AS id, 'hello' AS extra1 FROM smelt.sources.raw.t";
+    let model_sql = "SELECT smelt.functions.tag_row(t).* FROM smelt.models.t AS t";
+
+    let mut db = TestDb::default();
+
+    let fn_path = PathBuf::from("functions/tag_row.sql");
+    db.set_file_text(fn_path.clone(), Arc::new(function_sql.to_string()));
+    db.set_file_project_root(fn_path.clone(), PathBuf::from("."));
+
+    let upstream_path = PathBuf::from("models/t.sql");
+    db.set_file_text(upstream_path.clone(), Arc::new(upstream_sql.to_string()));
+    db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+
+    let model_path = PathBuf::from("models/caller.sql");
+    db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+    db.set_file_project_root(model_path.clone(), PathBuf::from("."));
+
+    db.set_all_files(Arc::new(vec![fn_path, upstream_path, model_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let schema = db.typed_model_schema(model_path);
+
+    let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+
+    // Row-tail structs are NOT expanded at the schema layer: no columns from
+    // `tag_row(t).*` should appear. The boundary holds until codegen and schema
+    // expansion are unified.
+    assert!(
+        !col_names.contains(&"tag"),
+        "row-tail spread must NOT be expanded at the schema layer; `tag` must be absent; got {:?}",
+        col_names
+    );
+    assert!(
+        !col_names.contains(&"extra1"),
+        "row-tail spread must NOT be expanded at the schema layer; `extra1` must be absent; got {:?}",
+        col_names
+    );
+}

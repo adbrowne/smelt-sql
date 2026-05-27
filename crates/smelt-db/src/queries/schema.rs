@@ -966,6 +966,138 @@ pub fn type_context(
     Arc::new(ctx)
 }
 
+/// Walk a syntax node for the first `SMELT_PATH_CALL_STAR` child and return the
+/// `SmeltPathCall` it wraps.
+///
+/// The SELECT-item structure for `smelt.functions.<f>(args).*` is:
+///   `SELECT_ITEM → EXPRESSION → SMELT_PATH_CALL_STAR → SMELT_PATH_CALL`
+///
+/// Pure — no Salsa access.
+fn find_inner_path_call_of_star(
+    expr_node: &smelt_parser::syntax_kind::SyntaxNode,
+) -> Option<smelt_parser::ast::SmeltPathCall> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::{SMELT_PATH_CALL, SMELT_PATH_CALL_STAR};
+
+    // expr_node is the EXPRESSION node. Look for a SMELT_PATH_CALL_STAR child.
+    for child in expr_node.children() {
+        if child.kind() == SMELT_PATH_CALL_STAR {
+            // The SMELT_PATH_CALL_STAR contains the inner SMELT_PATH_CALL.
+            for inner in child.children() {
+                if inner.kind() == SMELT_PATH_CALL {
+                    return SmeltPathCall::cast(inner);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pure helper: scan a SELECT statement's items for `smelt.functions.<f>(args).*`
+/// (`SMELT_PATH_CALL_STAR`) spread expressions and expand the function's struct
+/// return fields into `Column` entries.
+///
+/// This implements §"Struct returns and `.*` spread" from
+/// `docs/specs/function_schema_inference.md`: the schema layer must expand
+/// `<name>(args).*` into the declared struct fields (in declared order) rather
+/// than recording zero columns for the spread.
+///
+/// `infer_smelt_path_call_type` handles row-tail (`Struct<{…, ..r}>`) binding
+/// from the call-site `TypeContext` — the extras are already folded into the
+/// returned `DataType::Struct`.
+///
+/// Pure — no Salsa access; obeys the smelt-db pure-function rule.
+fn collect_struct_spread_columns(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<Column> {
+    use crate::type_inference::function_call::infer_smelt_path_call_type;
+    use smelt_types::signatures::{SmeltType, StructRowTail};
+
+    let Some(select_list) = select_stmt.select_list() else {
+        return vec![];
+    };
+
+    let mut cols = Vec::new();
+
+    for item in select_list.items() {
+        // Wildcard items (`*` or `table.*`) are handled via row_extensions.
+        if item.is_wildcard() {
+            continue;
+        }
+        // Regular named columns are already captured in the base schema.
+        // SMELT_PATH_CALL_STAR items have no resolvable column name because
+        // `infer_name()` cannot produce a name for the `.*` construct.
+        if item.column_name().is_some() {
+            continue;
+        }
+
+        // Find a SMELT_PATH_CALL_STAR inside the expression node.
+        let Some(expr) = item.expression() else {
+            continue;
+        };
+        let Some(inner_call) = find_inner_path_call_of_star(expr.syntax()) else {
+            continue;
+        };
+
+        // Guard: only expand CLOSED structs at the schema layer.
+        //
+        // A row-tail (`Struct<{…, ..r}>`) return means the codegen expander
+        // (`expand_smelt_path_call_star`) falls back to verbatim SQL when a
+        // SPREAD_ITEM is present in the function body. Expanding at the schema
+        // layer while codegen falls back to verbatim would violate invariant 2
+        // (schema-layer/codegen agreement). Until codegen and schema expansion
+        // are unified for row-tail structs, skip expansion and contribute zero
+        // columns — matching the pre-existing verbatim-fallback behaviour.
+        //
+        // Closed-struct check: consult the function signature in the TypeContext.
+        // `infer_smelt_path_call_type` has already folded row-tail extras into a
+        // concrete `DataType::Struct`, so we cannot distinguish closed from tail
+        // from the return value alone — we must read the signature.
+        let fn_name = inner_call.segments().last().cloned().unwrap_or_default();
+        let is_closed_struct = if let Some(sig) = ctx.lookup_function_signature(&fn_name) {
+            matches!(
+                &sig.return_type,
+                Some(Ok(SmeltType::Struct {
+                    tail: StructRowTail::None,
+                    ..
+                }))
+            )
+        } else {
+            // Signature not found — cannot confirm closed; skip expansion.
+            false
+        };
+        if !is_closed_struct {
+            continue;
+        }
+
+        // Resolve the call's return type. For a closed `Struct<{f1: T1, …, fN: TN}>`,
+        // `infer_smelt_path_call_type` returns a concrete `DataType::Struct`.
+        let Some(typed_col) = infer_smelt_path_call_type(&inner_call, ctx) else {
+            continue;
+        };
+
+        if let DataType::Struct(fields) = typed_col.data_type {
+            for (field_name, field_type) in fields {
+                cols.push(Column {
+                    name: field_name,
+                    alias: None,
+                    source: ColumnSource::Computed,
+                    expression: String::new(),
+                    range: item.range(),
+                    data_type: Some(TypedColumn {
+                        data_type: field_type,
+                        nullable: true,
+                    }),
+                });
+            }
+        }
+        // Non-struct or unresolved return → no columns contributed (no panic).
+    }
+
+    cols
+}
+
 #[salsa::tracked(cycle_initial = typed_model_schema_initial)]
 pub fn typed_model_schema(
     db: &dyn salsa::Database,
@@ -997,6 +1129,13 @@ pub fn typed_model_schema(
         }
         typed_columns.push(col);
     }
+
+    // Append columns contributed by `smelt.functions.<f>(args).*` struct spreads.
+    // These are not in `base_schema.columns` (they were skipped by `model_schema`
+    // because the `.*` item has no single resolvable column name), so we detect
+    // them separately and append their struct fields in declared order.
+    let spread_cols = collect_struct_spread_columns(&select_stmt, &ctx);
+    typed_columns.extend(spread_cols);
 
     Arc::new(ModelSchema {
         columns: typed_columns,
