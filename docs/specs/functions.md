@@ -1,7 +1,7 @@
 ---
 feature: functions
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-28
 owners: [andrew]
 ---
 
@@ -163,7 +163,7 @@ User-visible codes anchored to the surface above. Full descriptions live alongsi
 | `ArgTypeMismatch` | Argument's type fails the parameter's `TypeConstraint`. |
 | `FunctionBodyTypeMismatch` | Type error inside a `smelt.define` body. |
 | `ReturnTypeMismatch` | Tier 3 body's synthesised return type disagrees with declared `-> <Type>`. |
-| `InvalidFunctionTypeRef` | Type annotation does not parse into a `SmeltType`. |
+| `InvalidFunctionTypeRef` | Type annotation does not parse into a `SmeltType`, including an unrecognized type name nested in a composite type (struct field, array element, map key/value). |
 | `FunctionCallCycle` | Transparent-function call graph contains a cycle. |
 | `ExternCollidesWithBuiltin` | `smelt.extern` name shadows the canonical built-in registry. |
 | `ExternFragmentParamUnsupported` | `smelt.extern` declares a fragment-sort parameter (`SelectItems`, `OrderSpec`). |
@@ -186,7 +186,7 @@ These rules are normative.
 7. **Backend-namespace calls are explicit.** A function body that calls `duckdb.read_parquet(...)` declares its DuckDB-only nature in the type system. Function bodies are otherwise written in canonical SQL — engine-agnostic by construction. The `backends:` set is inferred from the body as the intersection of the backends of every backend-namespace call (canonical calls contribute the universal set). A declared `backends:` may **narrow** that inferred set but never widen it; widening is an error (`BackendsWideningNotAllowed`).
 8. **Parameter list constraints.**
    - Parameter names must be unique within a signature (`DuplicateParameterName`).
-   - Type annotations must parse into a `SmeltType` (`InvalidFunctionTypeRef`).
+   - Type annotations must parse into a `SmeltType`, and validation recurses into composite positions: an unrecognized type name nested in a struct field type, array element type, or map key/value type fires `InvalidFunctionTypeRef` at the annotation rather than being absorbed as `Unknown`. The check fires at the declaration — the origin where the unresolvable type was written — so a caller that projects such a return observes the resulting `Unknown` column as a downstream consequence, not a fresh call-site diagnostic.
    - `smelt.extern` parameters must be non-fragment sorts — `Expr<T>` and `TableExpr` are accepted, `SelectItems` and `OrderSpec` emit `ExternFragmentParamUnsupported`. Fragment-sort parameters are only meaningful with `PASSING` clauses, which `smelt.extern` does not support in v1.
 9. **Default values are self-contained** (research §16 #20). A default expression must not reference other parameters. Defaults are type-checked against the parameter's declared sort (and concrete type, in Tier 2/3) at definition time. Tier 1 functions have no declared parameter types, so the default's synthesised type becomes the parameter's type when the argument is omitted.
    - List-valued fragment sorts (`SelectItems`, `OrderSpec`) do not acquire an implicit empty default — an author who wants "splice nothing" writes `= ()` explicitly. Empty list-splice points elide adjacent commas at codegen (so `SELECT id, name, metrics` with `metrics = ()` becomes `SELECT id, name`).
@@ -257,6 +257,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 - **End-to-end `smelt build` execution of struct-returning function calls is restricted to DuckDB and to `.*` projection.** When a function returns `Expr<Struct<{…}>>` and is called in SELECT-list position, only `<call>.*` lowers to per-field projections today; single-field access (`<call>.field_name`) and Spark struct-literal lowering remain on the roadmap. See `docs/plans/20260519-functions-meta-gaps.md` Phase 3 for cross-engine codegen.
 - **Frontmatter validation depth — divergent from doctrine.** Function frontmatter is user-authored, so under `architecture.md` §"Constraints & Invariants" §8 (the unknown-key doctrine) it should reject unknown keys with an error, like model frontmatter does. The current implementation emits `FrontmatterParseError` at Warning severity instead, which means typos like `deterministc: true` are silently accepted past the warning. Aligning with the doctrine (escalating to Error) is a straightforward future change once an audit confirms no in-the-wild function frontmatter relies on the lenient behaviour.
 - **Workspace-wide vs. directory-scoped name uniqueness.** The implementation today applies `DuplicateFunctionDefinition` workspace-wide. The research originally framed it directory-scoped; the workspace rule is stricter and matches the single canonical-namespace doctrine, but the spec author should confirm this is intended before treating it as final.
+- **Nested unrecognized type names are absorbed as `Unknown` rather than flagged.** Type-annotation validation fires `InvalidFunctionTypeRef` only when the *whole* annotation fails to parse; an unrecognized type name nested inside a composite type (e.g. the `b` field type in `Expr<Struct<{a: Integer, b: Bogus}>>`) is silently absorbed as `Unknown`, so neither the declaration nor any call site reports it. The recursive validation in Semantics §8 closes this. Tracked in `docs/plans/20260528-struct-field-type-validation.md`.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References

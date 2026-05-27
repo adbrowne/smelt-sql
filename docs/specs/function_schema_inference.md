@@ -1,7 +1,7 @@
 ---
 feature: function_schema_inference
 status: experimental
-last_reviewed: 2026-05-27
+last_reviewed: 2026-05-28
 owners: [andrew]
 ---
 
@@ -87,7 +87,7 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ## Known Divergences / Open Questions
 
-- **`ColumnTypeUnresolved` and the no-silent-`Unknown` invariant (rules 6, 4) are not yet enforced.** The function-derived inference gaps that previously produced silent unknowns are closed — struct-spread `.*` expansion, `TableExpr` schema propagation through CTEs/subqueries, and nested-call body CTEs all resolve — so no function-derived column resolves to `Unknown` in the current examples. Enforcement is deferred pending a design decision: how to construct a minimal function-derived `Unresolved` fixture without introducing new surface (the natural candidate is a multi-`TableExpr`-parameter bare-`*` body, which requires the emitter to cover the `TableExpr`-FROM case as well as struct-spread), and whether the reason-discriminant is carried on column metadata or computed at the emission site. Tracked in `docs/plans/20260527-function_schema_inference.md`.
+- **`ColumnTypeUnresolved` is reserved and not yet minted; the no-silent-`Unknown` invariant is enforced at the declaration instead.** The function-derived inference gaps that previously produced silent unknowns are closed — struct-spread `.*` expansion, `TableExpr` schema propagation through CTEs/subqueries, and nested-call body CTEs all resolve — so a column produced by a *well-formed* function signature never resolves to `Unknown`. The one remaining way a function contributes an `Unknown` column is a *malformed* signature: an unrecognized type name nested in the return annotation (e.g. a struct field type). That is a declaration defect and is reported at its origin via `InvalidFunctionTypeRef` (`functions.md` §Semantics 8), which makes the caller's column `Propagated` and correctly silent — so no call-site `ColumnTypeUnresolved` is needed for it. `ColumnTypeUnresolved` therefore has no trigger today and stays reserved for a future genuinely caller-specific unresolvable case (a well-formed signature a particular call still cannot type); it will be minted when such a case exists. Tracked in `docs/plans/20260528-struct-field-type-validation.md` (declaration-side enforcement) and `docs/plans/20260527-function_schema_inference.md` (deferral history).
 - **Single-field projection `smelt.functions.<f>(...).field` is not supported.** The parser has no field-postfix syntax on a function call — only `.*` exists via `SMELT_PATH_CALL_STAR`. To access a single field, project the whole struct with `.*` and reference the field downstream. Tracked in `docs/plans/20260527-function_schema_inference.md`.
 - **Row-tail (`..r`) struct returns are not expanded by `.*` at the schema layer.** Only closed `Expr<Struct<{f1: T1, …, fN: TN}>>` returns (no tail marker) are expanded. A row-tail return contributes zero columns from the spread at the schema layer; the `.*` passes through to generated SQL verbatim until codegen and schema expansion are unified. Tracked in `docs/plans/20260527-function_schema_inference.md`.
 
