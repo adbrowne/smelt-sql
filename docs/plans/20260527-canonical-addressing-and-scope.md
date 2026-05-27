@@ -84,7 +84,7 @@ This plan closes the gap in seven phases. Phase order is chosen so each phase ca
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1 — Add `canonical_path()` accessor on `ModelFile`; populate `address_segments` everywhere it is constructed. | done | d2d0772f | 2026-05-27 |
-| 2 — Strict full-path refs in model SQL: `file_diagnostics` calls only `resolve_ref_path`; leaf-only refs emit `UndefinedModelRef` with "did you mean" hint. | pending |  |  |
+| 2 — Strict full-path refs in model SQL: `file_diagnostics` calls only `resolve_ref_path`; leaf-only refs emit `UndefinedModelRef` with "did you mean" hint. | done | 38311551 | 2026-05-27 |
 | 3 — Rekey `DependencyGraph` by canonical path. Update `smelt-runtime`, `smelt-cli`, `smelt-ui` callers. | pending |  |  |
 | 4 — CLI `--scope` flag + argument-resolution module. Every entity-taking command resolves through it; output emits canonical paths. | pending |  |  |
 | 5 — UI surface emits canonical paths in API and React. | pending |  |  |
