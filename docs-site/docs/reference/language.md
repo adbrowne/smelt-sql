@@ -97,6 +97,8 @@ When a function declares `-> Expr<Struct<{field1: Type1, field2: Type2, …}>>`,
 
 Row-polymorphic functions (`Struct<{…, ..r}>`) expand declared fields plus any extras bound from the call-site argument's schema.
 
+An unrecognized type name in any struct field position of a function annotation is an `InvalidFunctionTypeRef` error anchored at the declaration. For example, `-> Expr<Struct<{a: Integer, b: Bogus}>>` where `Bogus` is not a known type emits `InvalidFunctionTypeRef` at the return-type annotation. The error fires at the declaration so that callers projecting the struct's fields observe the resulting `Unknown` column as a downstream consequence rather than receiving a separate call-site diagnostic.
+
 ### smelt.extern — external function declarations
 
 Declare a backend-native function so smelt can type-check call sites:

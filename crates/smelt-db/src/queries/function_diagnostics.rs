@@ -1591,30 +1591,66 @@ pub fn smelt_fn_call_diagnostics_for_file(
     out
 }
 
+/// Check whether a `SmeltType` is a struct annotation containing at least one
+/// field with an unrecognized type name (i.e., a field resolved to
+/// `DataType::Unknown`).
+///
+/// The `SmeltType::Struct { fields, tail }` variant is produced by the
+/// CST-aware extractor (`struct_expr_type_from_cst`) for `Expr<Struct<{…}>>` /
+/// `Struct<{…}>` annotations. It calls `parse_type` for each field's type
+/// text and falls back to `DataType::Unknown` on failure. Because `parse_type`
+/// never produces `Ok(DataType::Unknown)` for any recognised type, every
+/// `Unknown` field in the resolved struct originates from an unrecognised type
+/// name in the source annotation — there is no other production path.
+///
+/// Row-tail markers (`..` / `..r`) live in the `tail` field and are never
+/// placed in `fields`, so they are not flagged here.
+///
+/// Returns `true` when the annotation should emit `InvalidFunctionTypeRef`.
+fn struct_annotation_has_unknown_field(smelt_ty: &smelt_types::signatures::SmeltType) -> bool {
+    use smelt_types::signatures::SmeltType;
+    use smelt_types::DataType;
+    match smelt_ty {
+        SmeltType::Struct { fields, .. } => fields.iter().any(|(_, dt)| *dt == DataType::Unknown),
+        _ => false,
+    }
+}
+
 /// Per-file diagnostics for malformed `smelt.define` parameter / return type
-/// annotations (Phase 4). Iterates `functions_in_file(file)` and emits a
-/// diagnostic for each [`ParamSpec::type_ref`] or
-/// [`FunctionSig::return_type`] that carries a parse error.
+/// annotations. Iterates `functions_in_file(file)` and emits a diagnostic for
+/// each [`ParamSpec::type_ref`] or [`FunctionSig::return_type`] that:
+///
+/// - Carries a parse error (`Some(Err(_))`), OR
+/// - Successfully parses as a struct type (`Some(Ok(SmeltType::Struct{…}))`)
+///   but contains an unrecognized field type (a field resolved to
+///   `DataType::Unknown`).
+///
+/// The second case captures `Expr<Struct<{a: Integer, b: Bogus}>>` where `Bogus`
+/// is not a known `DataType`. The CST-aware extractor absorbs such names as
+/// `DataType::Unknown` rather than producing a parse error, so they would
+/// otherwise pass silently through the `Some(Err(_))` gate. Detecting them here
+/// at the declaration is the spec-faithful fix: the caller's projected `Unknown`
+/// column becomes a downstream consequence of a known-bad declaration, not a
+/// fresh call-site diagnostic.
 ///
 /// Pure-function-rule note: the heavy lifting lives on
-/// `smelt_types::signatures` — this helper is just a thin reader over the
+/// `smelt_types::signatures` — this helper is a thin reader over the
 /// signature query's cached output.
 pub fn invalid_function_type_ref_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
     use smelt_types::signatures::SmeltTypeParseError;
-    // Phase 13: the parser accepts `TableExpr`, `AggExpr`, `WindowExpr`, and
-    // `SelectItems` sort heads in parameter / return positions so the Step 3
-    // fixtures can land. `smelt-types::parse_smelt_type` still rejects those
-    // sorts (full type-system wiring is Phases 14+), so we filter out known
-    // Phase-13-deferred shapes here to keep `example_diagnostics` green:
+    // The parser accepts `TableExpr`, `AggExpr`, `WindowExpr`, and
+    // `SelectItems` sort heads in parameter / return positions. The type
+    // parser still rejects those sorts, so we filter out the known
+    // deferred shapes here:
     //   - `TableExpr`, `AggExpr`, `WindowExpr`, `SelectItems` in a tagged
     //     `UnsupportedSort` (forms with `<...>`),
     //   - the same heads with no angle brackets (surface as `Malformed`
     //     with leading identifier `TableExpr` / etc.). The bare form is
-    //     legal per the plan (e.g. `-> TableExpr`), so a malformed whose
-    //     source starts with one of these heads is deferred too.
+    //     legal (e.g. `-> TableExpr`), so a malformed whose source starts
+    //     with one of these heads is deferred too.
     // Any *other* `UnsupportedSort` (e.g. `FooExpr<T>`) or any
     // `UnknownInner` / `NestedExpr` error still surfaces.
     let is_phase13_deferred_sort_name = |sort: &str| -> bool {
@@ -1642,30 +1678,64 @@ pub fn invalid_function_type_ref_diagnostics_for_file(
     let mut out = Vec::new();
     for sig in sigs.iter() {
         for param in &sig.params {
-            if let (Some(Err(err)), Some(range)) = (&param.type_ref, param.type_ref_range) {
+            match (&param.type_ref, param.type_ref_range) {
+                (Some(Err(err)), Some(range)) => {
+                    if is_deferred_phase13_sort(err) {
+                        continue;
+                    }
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("Invalid type for parameter `{}`: {}", param.name, err),
+                        range,
+                        code: Some(DiagnosticCode::InvalidFunctionTypeRef),
+                        data: None,
+                    });
+                }
+                (Some(Ok(smelt_ty)), Some(range))
+                    if struct_annotation_has_unknown_field(smelt_ty) =>
+                {
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Invalid type for parameter `{}` in `{}`: \
+                             struct annotation contains an unrecognized field type",
+                            param.name, sig.name
+                        ),
+                        range,
+                        code: Some(DiagnosticCode::InvalidFunctionTypeRef),
+                        data: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        match (&sig.return_type, sig.return_type_range) {
+            (Some(Err(err)), Some(range)) => {
                 if is_deferred_phase13_sort(err) {
                     continue;
                 }
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Error,
-                    message: format!("Invalid type for parameter `{}`: {}", param.name, err),
+                    message: format!("Invalid return type for function `{}`: {}", sig.name, err),
                     range,
                     code: Some(DiagnosticCode::InvalidFunctionTypeRef),
                     data: None,
                 });
             }
-        }
-        if let (Some(Err(err)), Some(range)) = (&sig.return_type, sig.return_type_range) {
-            if is_deferred_phase13_sort(err) {
-                continue;
+            (Some(Ok(smelt_ty)), Some(range)) if struct_annotation_has_unknown_field(smelt_ty) => {
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Invalid return type for function `{}`: \
+                         struct annotation contains an unrecognized field type",
+                        sig.name
+                    ),
+                    range,
+                    code: Some(DiagnosticCode::InvalidFunctionTypeRef),
+                    data: None,
+                });
             }
-            out.push(Diagnostic {
-                severity: DiagnosticSeverity::Error,
-                message: format!("Invalid return type for function `{}`: {}", sig.name, err),
-                range,
-                code: Some(DiagnosticCode::InvalidFunctionTypeRef),
-                data: None,
-            });
+            _ => {}
         }
     }
     out

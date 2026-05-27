@@ -1,0 +1,13 @@
+name: functions_broken_struct_field_type
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
