@@ -55,7 +55,7 @@ pub use transformer::{
 
 use anyhow::Context as _;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Build a [`LogicalGraph`] from a project directory, handling generator-emitted
 /// models automatically.
@@ -134,8 +134,29 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
     };
     let project = db.set_project_input(project_dir.to_path_buf(), sources_yaml);
 
-    let mut source_files = Vec::with_capacity(models.len());
-    for model in models {
+    // Register the caller-supplied model files plus the project's `functions/`
+    // definitions. Function-file discovery happens here so that *every* CLI
+    // command that builds a db through `init_db` (type, build, run, …) sees
+    // `smelt.define`/`smelt.extern` signatures — without each command having
+    // to remember to discover them. See `docs/specs/architecture.md` →
+    // "Workspace loading parity rule (CLI ↔ LSP)". Registration is keyed on
+    // path (`set_source_file` dedupes), so callers that already extended their
+    // model list with function files produce no duplicate workspace entries.
+    let mut function_files: Vec<ModelFile> = Vec::new();
+    {
+        let discovery = ModelDiscovery::new(project_dir.to_path_buf(), Vec::new());
+        match discovery.discover_function_files() {
+            Ok(files) => function_files = files,
+            Err(err) => tracing::warn!("Failed to discover function files: {err}"),
+        }
+    }
+
+    let mut source_files = Vec::with_capacity(models.len() + function_files.len());
+    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for model in models.iter().chain(function_files.iter()) {
+        if !seen_paths.insert(model.path.clone()) {
+            continue;
+        }
         let sf = db.set_source_file(
             model.path.clone(),
             model.content.clone(),
