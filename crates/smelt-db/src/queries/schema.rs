@@ -1552,6 +1552,43 @@ pub fn columns_to_column_ref_values(
         .collect()
 }
 
+/// Collect `alias → entity_name` mappings for all smelt path references in a single
+/// `SelectStmt`'s FROM clause and JOINs.  This is a pure CST walk — no Salsa calls.
+fn collect_from_aliases(select_stmt: &smelt_parser::ast::SelectStmt) -> HashMap<String, String> {
+    let mut alias_to_ref: HashMap<String, String> = HashMap::new();
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if let Some(path_ref) = table_ref.smelt_path_ref() {
+                let segs = path_ref.segments();
+                if let Some(entity_name) = segs.last().cloned() {
+                    if !entity_name.is_empty() {
+                        alias_to_ref.insert(entity_name.clone(), entity_name.clone());
+                        if let Some(alias) = table_ref.alias() {
+                            alias_to_ref.insert(alias, entity_name);
+                        }
+                    }
+                }
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                if let Some(path_ref) = table_ref.smelt_path_ref() {
+                    let segs = path_ref.segments();
+                    if let Some(entity_name) = segs.last().cloned() {
+                        if !entity_name.is_empty() {
+                            alias_to_ref.insert(entity_name.clone(), entity_name.clone());
+                            if let Some(alias) = table_ref.alias() {
+                                alias_to_ref.insert(alias, entity_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    alias_to_ref
+}
+
 #[salsa::tracked]
 pub fn model_input_constraints(
     db: &dyn salsa::Database,
@@ -1574,48 +1611,37 @@ pub fn model_input_constraints(
         None => return Arc::new(vec![]),
     };
 
-    let mut alias_to_ref: HashMap<String, String> = HashMap::new();
-    if let Some(from_clause) = select_stmt.from_clause() {
-        for table_ref in from_clause.table_refs() {
-            // smelt.<path> table references in FROM position.
-            if let Some(path_ref) = table_ref.smelt_path_ref() {
-                let segs = path_ref.segments();
-                if let Some(entity_name) = segs.last().cloned() {
-                    if !entity_name.is_empty() {
-                        alias_to_ref.insert(entity_name.clone(), entity_name.clone());
-                        if let Some(alias) = table_ref.alias() {
-                            alias_to_ref.insert(alias, entity_name);
-                        }
-                    }
-                }
-            }
-        }
-        for join in from_clause.joins() {
-            if let Some(table_ref) = join.table_ref() {
-                // smelt.<path> table references in JOIN position.
-                if let Some(path_ref) = table_ref.smelt_path_ref() {
-                    let segs = path_ref.segments();
-                    if let Some(entity_name) = segs.last().cloned() {
-                        if !entity_name.is_empty() {
-                            alias_to_ref.insert(entity_name.clone(), entity_name.clone());
-                            if let Some(alias) = table_ref.alias() {
-                                alias_to_ref.insert(alias, entity_name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // Collect all branches of the set-operation chain (UNION / INTERSECT / EXCEPT).
+    // Each branch owns its own alias map — unqualified column refs in branch N are
+    // attributed to branch N's unique FROM ref (if there is exactly one).
+    let mut branches: Vec<(smelt_parser::ast::SelectStmt, HashMap<String, String>)> = Vec::new();
+    let mut current: Option<smelt_parser::ast::SelectStmt> = Some(select_stmt);
+    while let Some(branch) = current {
+        let local_aliases = collect_from_aliases(&branch);
+        let next = branch.set_operation_select();
+        branches.push((branch, local_aliases));
+        current = next;
     }
 
-    if alias_to_ref.is_empty() {
+    // Early-out: no branch has any smelt FROM ref.
+    let any_ref = branches.iter().any(|(_, aliases)| !aliases.is_empty());
+    if !any_ref {
         return Arc::new(vec![]);
     }
 
-    let mut constraints_map: HashMap<String, HashMap<String, ColumnConstraint>> = HashMap::new();
+    let mut constraints_map: HashMap<String, std::collections::BTreeMap<String, ColumnConstraint>> =
+        HashMap::new();
 
-    let mut record_constraint =
-        |ref_name: &str, col_name: &str, expected_type: Option<TypedColumn>, range: TextRange| {
+    for (branch_stmt, alias_to_ref) in &branches {
+        if alias_to_ref.is_empty() {
+            // This branch has no smelt FROM refs; skip column walking for it.
+            continue;
+        }
+
+        let mut record_constraint = |ref_name: &str,
+                                     col_name: &str,
+                                     expected_type: Option<TypedColumn>,
+                                     range: TextRange| {
             let entry = constraints_map
                 .entry(ref_name.to_string())
                 .or_default()
@@ -1630,7 +1656,6 @@ pub fn model_input_constraints(
             entry.usage_sites.push(range);
         };
 
-    {
         let mut visitor = |qualifier: Option<&str>,
                            col_name: &str,
                            type_hint: Option<&TypedColumn>,
@@ -1661,16 +1686,18 @@ pub fn model_input_constraints(
             }
         };
 
-        type_inference::walk_select_columns_with_visitor(&select_stmt, &ctx, None, &mut visitor);
+        type_inference::walk_select_columns_with_visitor(branch_stmt, &ctx, None, &mut visitor);
     }
 
-    let constraints: Vec<InputConstraint> = constraints_map
+    let mut constraints: Vec<InputConstraint> = constraints_map
         .into_iter()
         .map(|(ref_name, required_columns)| InputConstraint {
             ref_name,
             required_columns,
         })
         .collect();
+    // Sort by ref_name for deterministic output regardless of HashMap iteration order.
+    constraints.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
 
     Arc::new(constraints)
 }
