@@ -2458,3 +2458,70 @@ fn cte_broken_alias_arity_emits_arity_mismatch() {
         "models/broken_arity.sql",
     );
 }
+
+// ===== Generator-emission typed schema TDD tests =====
+
+/// Regression: each of `cohorts.us_west`, `cohorts.us_east`, and `cohorts.eu`
+/// emitted by `examples/per_cohort_union/models/cohorts.gen.sql` must have
+/// five typed (non-Unknown) columns after Phase 1 lands.
+///
+/// Prior to Phase 1 the emitted-model typed-schema query did not exist and
+/// emitted models carried no column type information.
+#[test]
+fn per_cohort_union_emitted_cohorts_have_typed_schemas() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::Workspace;
+    use std::path::Path;
+
+    let example_dir = "examples/per_cohort_union";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let gen_path = path.join("models").join("cohorts.gen.sql");
+    let gen_file = db
+        .source_file(&gen_path)
+        .expect("cohorts.gen.sql registered in workspace");
+
+    // Each cohort emission must have 5 typed (non-Unknown) columns.
+    let emission_names = ["us_west", "us_east", "eu"];
+    for name in &emission_names {
+        let schema = smelt_db::emitted_model_typed_schema(&db, ws, gen_file, name.to_string());
+        assert_eq!(
+            schema.columns.len(),
+            5,
+            "emission '{}' should have 5 columns, got {}: {:?}",
+            name,
+            schema.columns.len(),
+            schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        for col in &schema.columns {
+            let dt = col
+                .data_type
+                .as_ref()
+                .map(|tc| tc.data_type.clone())
+                .unwrap_or(smelt_db::DataType::Unknown);
+            assert_ne!(
+                dt,
+                smelt_db::DataType::Unknown,
+                "emission '{}' column '{}' should be concrete, got Unknown",
+                name,
+                col.name
+            );
+        }
+    }
+}

@@ -12,20 +12,30 @@ use rowan::TextRange;
 use serde::Deserialize;
 use smelt_core::metadata::{extract_file_metadata, FileMetadata};
 use smelt_parser::ast::{Expr, RecordLiteral};
+use smelt_parser::File as AstFile;
 use smelt_types::parse_type;
 
 use crate::config_vars;
+use crate::queries::functions::file_signature_inputs;
 use crate::queries::loader::{loader_resolved_value, LoaderCallSiteId};
 use crate::queries::parse::{parse_file, parse_model};
-use crate::type_inference::{
-    check_generator_body_reflection_forbid, infer_generator_file_body, TypeContext,
+use crate::queries::schema::{
+    add_source_info_to_type_context, build_type_context, RefSchemaProvider, SalsaRefSchemaProvider,
 };
-use crate::{DiagnosticCode, LoaderFileInput, Model, ProjectInput, SourceFile, Workspace};
+use crate::schema::{Column, ColumnSource, ModelSchema};
+use crate::type_inference::{
+    check_generator_body_reflection_forbid, infer_generator_file_body, infer_select_column_types,
+    TypeContext,
+};
+use crate::{
+    find_project, DiagnosticCode, LoaderFileInput, Model, ProjectInput, SourceFile, Workspace,
+};
 
 pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{IncrementalConfig, SeedInfo, SourceInfo, SourcesConfig};
+use smelt_types::signatures::FunctionSig;
 
 /// YAML parse error with location information
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1540,6 +1550,216 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
         survivors,
         discarded,
     })
+}
+
+/// Pure helper: synthesise a typed `ModelSchema` from an emission body SQL.
+///
+/// All Salsa calls are made by the caller (`emitted_model_typed_schema`); this
+/// function is Salsa-free and satisfies the pure-function rule (CLAUDE.md
+/// §"Pure Function Rule (smelt-db)").
+///
+/// # Source resolution
+///
+/// Spec rule 6 requires emission bodies to type-check under the same regime as
+/// hand-authored models, including source resolution. Two complementary paths:
+///
+/// - Legacy `sources.yml`: `legacy_sources` is passed to `build_type_context`
+///   (mirrors how `type_context()` passes the result of `sources_config(db, p)`).
+/// - Per-entity `sources/*.yml`: `per_entity_sources` is passed to
+///   `add_source_info_to_type_context` after the context is built (mirrors how
+///   `type_context()` calls `add_source_info_to_type_context` for Phase 6).
+///
+/// When `per_entity_sources` is non-empty the caller passes `legacy_sources` as
+/// empty (matching the `type_context()` precedence rule: per-entity wins).
+///
+/// # Parameters
+///
+/// - `body_sql` — raw SQL text of the `ModelDef.body` field value.
+/// - `refs` — `RefSchemaProvider` scoped to the generator file's project (resolves
+///   `FROM smelt.orders` references against upstream model schemas).
+/// - `legacy_sources` — `SourcesConfig` parsed from `sources.yml` (pass default
+///   when per-entity sources are present, matching `type_context()` precedence).
+/// - `per_entity_sources` — per-entity source infos (pass empty slice when using
+///   legacy sources only).
+/// - `all_function_sigs` — one `Vec<FunctionSig>` per workspace file, in
+///   path-sorted order; each `FunctionSig` is added to the context so that
+///   `smelt.functions.*` calls in the body resolve their return types.
+///
+/// Returns an empty `ModelSchema` when `body_sql` cannot be parsed as a SELECT
+/// statement (no panic, graceful degradation).
+pub(crate) fn synthesise_emission_schema(
+    body_sql: &str,
+    refs: &dyn RefSchemaProvider,
+    legacy_sources: &SourcesConfig,
+    per_entity_sources: &[SourceInfo],
+    all_function_sigs: &[Arc<Vec<FunctionSig>>],
+) -> ModelSchema {
+    // Re-parse the body SQL as a standalone file.
+    let parse = smelt_parser::parse(body_sql);
+    let syntax = parse.syntax();
+
+    let ast = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return ModelSchema::empty(),
+    };
+
+    let select_stmt = match ast.select_stmt() {
+        Some(s) => s,
+        None => return ModelSchema::empty(),
+    };
+
+    // Build a TypeContext using the same two-path source resolution as
+    // `type_context()`:
+    //   - Legacy `sources.yml` columns via `build_type_context`.
+    //   - Per-entity sources/*.yml columns via `add_source_info_to_type_context`.
+    let mut ctx = build_type_context(&ast, legacy_sources, refs);
+    add_source_info_to_type_context(per_entity_sources, &mut ctx);
+
+    // Seed workspace function signatures so any smelt.functions.* call in
+    // the body resolves its return type correctly.
+    for sigs in all_function_sigs {
+        for sig in sigs.iter() {
+            ctx.add_function_signature(&sig.name, sig.clone());
+        }
+    }
+
+    // Extract column names from the SELECT list.
+    let select_list = match select_stmt.select_list() {
+        Some(l) => l,
+        None => return ModelSchema::empty(),
+    };
+
+    // Collect FROM refs for column-source tracking.
+    let from_refs: Vec<String> = if let Some(from_clause) = select_stmt.from_clause() {
+        from_clause
+            .table_refs()
+            .filter_map(|table_ref| {
+                table_ref
+                    .smelt_path_ref()
+                    .and_then(|pr| pr.segments().last().cloned())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let inferred_types = infer_select_column_types(&select_stmt, &ctx);
+
+    let mut columns: Vec<Column> = Vec::new();
+    let mut row_extensions = Vec::new();
+
+    for (i, item) in select_list.items().enumerate() {
+        if item.is_wildcard() {
+            for ref_name in &from_refs {
+                row_extensions.push(crate::schema::RowExtension {
+                    ref_name: ref_name.clone(),
+                    excluded_columns: vec![],
+                    range: item.range(),
+                });
+            }
+            continue;
+        }
+
+        let name_str = match item.column_name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let alias = item.alias();
+        let expression = item.expression().map(|e| e.text()).unwrap_or_default();
+
+        let data_type = inferred_types.get(i).cloned();
+
+        columns.push(Column {
+            name: name_str,
+            alias,
+            source: ColumnSource::Computed,
+            expression,
+            range: item.range(),
+            data_type,
+        });
+    }
+
+    ModelSchema {
+        columns,
+        row_extensions,
+        input_constraints: Vec::new(),
+    }
+}
+
+/// Synthesise a typed `ModelSchema` for a single generator-emitted model.
+///
+/// Given the `generator_file` that produced the emission and the emission's
+/// `name` (the `ModelDef.name` field value), this query:
+///
+/// 1. Finds the `EmittedModelDef` whose `name` matches.
+/// 2. Gathers the project's source config (legacy `sources.yml` + per-entity
+///    `sources/*.yml` files) and function signatures from the workspace, using
+///    the same precedence rule as `type_context()`.
+/// 3. Delegates all parsing / inference to the pure `synthesise_emission_schema`
+///    helper — this query is a thin Salsa wrapper.
+/// 4. Returns the assembled `ModelSchema`.
+///
+/// Returns an empty `ModelSchema` when the emission is not found (e.g. it
+/// was discarded by W3 collision detection), or when the body cannot be
+/// parsed as a `SelectStmt`.
+///
+/// Salsa-cached. Invalidated when `generator_file`'s text changes (via
+/// `evaluate_generator`'s dependency edge) or when any upstream model
+/// whose schema the body references changes (via `resolved_model_schema`
+/// edges through `SalsaRefSchemaProvider`).
+#[salsa::tracked]
+pub fn emitted_model_typed_schema(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    generator_file: SourceFile,
+    name: String,
+) -> Arc<ModelSchema> {
+    // Find the emission by name from the W2 evaluation of this generator file.
+    let evaluated = evaluate_generator(db, workspace, generator_file);
+    let emission = match evaluated.emissions.iter().find(|e| e.name == name) {
+        Some(e) => e,
+        None => return Arc::new(ModelSchema::empty()),
+    };
+    let body_sql = emission.body_text.clone();
+
+    // Gather sources using the same two-path resolution as `type_context()`:
+    // per-entity sources/*.yml take precedence; fall back to legacy sources.yml.
+    let project_root = generator_file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    let per_entity_sources: Arc<Vec<SourceInfo>> = project
+        .map(|p| project_sources(db, p))
+        .unwrap_or_else(|| Arc::new(Vec::new()));
+
+    let legacy_sources: Arc<SourcesConfig> = if per_entity_sources.is_empty() {
+        project
+            .map(|p| sources_config(db, p))
+            .unwrap_or_else(|| Arc::new(SourcesConfig::default()))
+    } else {
+        Arc::new(SourcesConfig::default())
+    };
+
+    // Build the SalsaRefSchemaProvider scoped to this generator file's project.
+    // This ensures `FROM smelt.orders` resolves against the correct project's models.
+    let provider = SalsaRefSchemaProvider::new_for_file(db, workspace, generator_file);
+
+    // Gather all workspace function signatures (path-sorted for determinism).
+    let mut wsp_files: Vec<SourceFile> = workspace.files(db).to_vec();
+    wsp_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    let all_function_sigs: Vec<Arc<Vec<FunctionSig>>> = wsp_files
+        .iter()
+        .map(|f| file_signature_inputs(db, *f))
+        .collect();
+
+    // Delegate all parse / inference work to the pure helper.
+    let schema = synthesise_emission_schema(
+        &body_sql,
+        &provider,
+        &legacy_sources,
+        &per_entity_sources,
+        &all_function_sigs,
+    );
+    Arc::new(schema)
 }
 
 /// Pure helper: materialise a `ModelRefValue` from an `EmittedModelDef`.
