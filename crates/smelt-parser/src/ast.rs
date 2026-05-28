@@ -1488,6 +1488,19 @@ impl TableRef {
     pub fn subquery(&self) -> Option<Subquery> {
         self.0.children().find_map(Subquery::cast)
     }
+
+    /// Get the column names from the optional alias column list, e.g. `AS t(c1, c2, …)`.
+    /// Returns `Some(names)` when an `ALIAS_COLUMN_LIST` node is present, `None` otherwise.
+    pub fn alias_column_names(&self) -> Option<Vec<String>> {
+        let acl = self.0.children().find(|n| n.kind() == ALIAS_COLUMN_LIST)?;
+        let names = acl
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .collect();
+        Some(names)
+    }
 }
 
 /// WHERE clause
@@ -2563,6 +2576,24 @@ impl TypeSpec {
     }
 }
 
+/// VALUES clause: `VALUES (expr, …), …`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValuesClause(SyntaxNode);
+
+impl ValuesClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == VALUES_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
 /// Subquery (SELECT statement in parentheses)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Subquery(SyntaxNode);
@@ -2576,9 +2607,14 @@ impl Subquery {
         }
     }
 
-    /// Get the SELECT statement
+    /// Get the SELECT statement (returns `None` for VALUES subqueries).
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// Get the VALUES clause if this is a `(VALUES …)` subquery.
+    pub fn values_clause(&self) -> Option<ValuesClause> {
+        self.0.children().find_map(ValuesClause::cast)
     }
 }
 
@@ -3047,31 +3083,19 @@ impl Cte {
         self.0.children().find_map(Subquery::cast)
     }
 
-    /// Get the column names from the optional column list
+    /// Get the column names from the optional column list, e.g. `cte(a, b, c) AS (…)`.
+    /// Returns an empty `Vec` when no column list is declared.
+    /// Reads from the `ALIAS_COLUMN_LIST` child node produced by the parser.
     pub fn column_names(&self) -> Vec<String> {
-        // Extract column names between first LPAREN and RPAREN (before AS)
-        let mut in_column_list = false;
-        let mut found_as = false;
-        let mut columns = Vec::new();
-
-        for child in self.0.children_with_tokens() {
-            if let Some(token) = child.as_token() {
-                match token.kind() {
-                    LPAREN if !found_as => in_column_list = true,
-                    RPAREN if in_column_list && !found_as => in_column_list = false,
-                    AS_KW => {
-                        found_as = true;
-                        in_column_list = false;
-                    }
-                    IDENT if in_column_list => {
-                        columns.push(token.text().to_string());
-                    }
-                    _ => {}
-                }
-            }
+        match self.0.children().find(|n| n.kind() == ALIAS_COLUMN_LIST) {
+            None => Vec::new(),
+            Some(acl) => acl
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == IDENT)
+                .map(|t| t.text().to_string())
+                .collect(),
         }
-
-        columns
     }
 }
 

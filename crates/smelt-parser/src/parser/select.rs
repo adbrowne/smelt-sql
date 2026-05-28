@@ -426,6 +426,28 @@ impl<'a> super::Parser<'a> {
             self.advance();
             self.skip_trivia();
             self.expect(IDENT);
+            // Optional column list: AS t(c1, c2, …)
+            self.skip_trivia();
+            if self.at(LPAREN) {
+                self.start_node(ALIAS_COLUMN_LIST);
+                self.advance(); // consume LPAREN
+                self.skip_trivia();
+                loop {
+                    if !self.at(IDENT) {
+                        break;
+                    }
+                    self.advance();
+                    self.skip_trivia();
+                    if self.at(COMMA) {
+                        self.advance();
+                        self.skip_trivia();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(RPAREN);
+                self.finish_node(); // ALIAS_COLUMN_LIST
+            }
         } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
             // Implicit alias (no AS keyword)
             // Only consume if it's not a keyword that would end the table ref
@@ -830,27 +852,24 @@ impl<'a> super::Parser<'a> {
         }
 
         // Optional column list: name(col1, col2)
-        // For now, we'll parse it simply - if we see LPAREN followed by IDENT, it might be a column list
+        // We see LPAREN before AS — this is the column list, not the query.
         self.skip_trivia();
         if self.at(LPAREN) {
-            // Peek ahead to see if this looks like a column list
-            // Column list: (ident, ident, ...) followed by AS
-            // Query: (SELECT ...) - but this is after AS
-            // So if we see LPAREN and it's NOT preceded by AS, check if it's a column list
-
+            // Peek at the token after LPAREN to decide:
+            //   IDENT → column list; SELECT/WITH → should not happen here (query comes after AS)
+            // We wrap the column list in ALIAS_COLUMN_LIST.
+            self.start_node(ALIAS_COLUMN_LIST);
             self.advance(); // consume LPAREN
             self.skip_trivia();
 
-            // If we see IDENT (not SELECT/WITH), assume it's a column list
             if self.at(IDENT) {
-                // Parse column list
+                // Parse column list: ident (, ident)*
                 loop {
                     if !self.at(IDENT) {
                         break;
                     }
                     self.advance();
                     self.skip_trivia();
-
                     if self.at(COMMA) {
                         self.advance();
                         self.skip_trivia();
@@ -858,24 +877,11 @@ impl<'a> super::Parser<'a> {
                         break;
                     }
                 }
-                self.expect(RPAREN);
-                self.skip_trivia();
-            } else if self.at(SELECT_KW) || self.at(WITH_KW) {
-                // This is actually the AS clause query, not a column list
-                // Parse the subquery
-                self.start_node(SUBQUERY);
-                self.parse_select_stmt();
-                self.finish_node();
-                self.expect(RPAREN);
-
-                // Done with CTE
-                self.finish_node();
-                return;
-            } else {
-                // Empty or unexpected
-                self.expect(RPAREN);
-                self.skip_trivia();
             }
+            // For SELECT/WITH or other unexpected tokens, just finish with what we have.
+            self.expect(RPAREN);
+            self.finish_node(); // ALIAS_COLUMN_LIST
+            self.skip_trivia();
         }
 
         // AS (query)
