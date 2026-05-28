@@ -124,6 +124,7 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 4. The source YAML grammar is a strict subset of the seed sidecar grammar plus the source-only `name:` override.
 5. The cross-path uniqueness rule (`architecture.md` §"Resolution") applies — a source's address is unique across all `paths:` roots.
 6. Aggregate `sources.yml` at the project root is no longer recognised; its presence produces a clear migration error.
+7. **A `smelt.sources.<path>` reference resolves under the sources namespace.** A model whose leaf name happens to collide with a source's leaf segment does not shadow the source schema for that reference; the path prefix is dispositive. For example, when both `models/orders.sql` and `models/sources/raw/orders.yml` exist in the same project, `FROM smelt.sources.raw.orders` uses the source's declared column types — not the model's inferred schema — regardless of evaluation order.
 
 ## Known Divergences / Open Questions
 

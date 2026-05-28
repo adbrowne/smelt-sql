@@ -806,7 +806,28 @@ fn process_table_ref_pure(
         let segments = path_ref.segments();
         let model_name = segments.last().cloned().unwrap_or_default();
         let seed_key = segments.join("_");
-        // Try seed first, then model.
+
+        // `smelt.sources.*` path refs take priority over the seed/model fallback.
+        //
+        // A `smelt.sources.<path>` reference resolves under the sources
+        // namespace; a model whose leaf name happens to collide with a source's
+        // leaf segment must not shadow the source schema. Source columns are
+        // installed into `ctx` by `add_source_info_to_type_context` (called
+        // after this builder returns). We register only the alias here so that
+        // `lookup_identifier` can resolve `alias → entity_name` and correctly
+        // validate qualified column refs like `alias.col_name`.
+        //
+        // Not consulting `refs.resolved_columns` here is intentional: doing so
+        // would look up the model of the same leaf name and write its
+        // (potentially Unknown) columns into `ctx.model_columns`, shadowing the
+        // correctly-typed source entries that land in `ctx.source_columns`.
+        if segments.first().map(|s| s.as_str()) == Some("sources") {
+            let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
+            ctx.add_alias(&bind_to, &model_name);
+            return;
+        }
+
+        // For seeds and model refs: try seed first, then model.
         if let Some((entity_name, cols)) = refs
             .seed_columns(&seed_key)
             .map(|c| (seed_key.clone(), c))
@@ -820,16 +841,6 @@ fn process_table_ref_pure(
             }
             let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
             ctx.add_alias(&bind_to, &entity_name);
-        } else if segments.first().map(|s| s.as_str()) == Some("sources") {
-            // smelt.sources.<source_name>.<table_name> path refs. The source
-            // columns were already seeded into `ctx` by `build_type_context`
-            // (via `add_source_column`). We just need to register the alias
-            // so that `lookup_identifier` can resolve `alias → entity_name`
-            // and correctly validate qualified refs like `alias.col_name`
-            // as well as bare alias references (e.g. `smelt.functions.f(e)`
-            // where `e` is an alias for a source table).
-            let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
-            ctx.add_alias(&bind_to, &model_name);
         }
         return;
     }
