@@ -73,7 +73,7 @@ The downstream `all_cohorts_unioned` model and the generator-emitted cohort mode
 |-------|----------|--------|------|
 | 1     | done     | 86f755fe | 2026-05-28 |
 | 2     | done     | 01fc027f | 2026-05-28 |
-| 3     | done     |        | 2026-05-28 |
+| 3     | done     | 47d874a4 | 2026-05-28 |
 
 ---
 
