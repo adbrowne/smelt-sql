@@ -74,7 +74,7 @@ The structural asymmetry with `smelt.sources.*` (commit `1ed38a1e`) is informati
 |-------|----------|--------|------|
 | 1     | done     | 3100af45 | 2026-05-28 |
 | 2     | done     | 37bc3845 | 2026-05-28 |
-| 3     | done     |        | 2026-05-28 |
+| 3     | done     | c3827ce7 | 2026-05-28 |
 
 ---
 
