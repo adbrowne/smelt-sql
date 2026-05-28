@@ -83,7 +83,7 @@ This violates `sources.md` §Semantics #2 ("Schema is the contract: when a model
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     |        | 2026-05-28 |
+| 1     | done     | 1ed38a1e | 2026-05-28 |
 
 ---
 
