@@ -42,6 +42,14 @@ sources:
 
 `type` strings use the vocabulary above (or any accepted alias).
 
+### VALUES-derived tables
+
+A `(VALUES (e₁, e₂, …), …) AS alias(c₁, c₂, …)` derived table produces a typed schema using the following rules:
+
+- **Column-wise LUB.** Each column's type is the least upper bound of the corresponding element across all rows, computed by the numeric promotion chain (§"Numeric promotion chain") and the string/temporal family rules (§"String unification", §5).
+- **Alias column list.** When `AS alias(c₁, c₂, …)` provides an explicit column list, the inferred types are bound to those names positionally. When the list is omitted, the columns are named `col1`, `col2`, … (1-indexed).
+- **Empty VALUES (zero rows).** A `VALUES` clause with no rows produces no columns. The compiler currently treats this as producing an empty schema silently rather than flagging it as an error (see Known Divergences).
+
 ### `smelt.define` type annotations
 
 Parameter and return positions accept fragment sorts:
@@ -281,7 +289,8 @@ This section captures the load-bearing rationale behind the type system's shape 
 - **`Float` as a distinct DataType.** `DataType::Float` exists in code; research treats Float as Double. This spec aligns with research and lists `Float` collapsing into `Double` as the normative rule. `Float` may be removed from the enum in a future plan.
 - **`docs/type_semantics.md` overlap.** The legacy quasi-spec contains backend-divergence material that is still useful (DuckDB/Spark divergence registry). Recommendation: keep it as a backend-divergence appendix referenced from this spec; over time, fold or trim.
 - **`Map<K,V>` rules.** `DataType::Map` exists in the vocabulary but research is silent on its semantics. This spec marks `Map` as non-`Ordered`; broader rules for Map equality, ordering, and arithmetic remain open.
-- **Silent `Unknown`s exist today; the reason-discriminant and `ColumnTypeUnresolved` are not yet enforced.** The `Unknown` value is currently undiscriminated, and several inference gaps produce `Unknown` columns with no diagnostic — violating the no-silent-`Unknown` invariant: generator-emitted and `smelt.columns_of`-reflected model schemas, and meta-language HOF values placed in SQL column position (`meta_language.md`). Function-derived columns (`smelt.functions.*` struct-spread and `TableExpr` results) now resolve — see `function_schema_inference.md` — so they are no longer a silent-`Unknown` source; what remains is the meta-language surface. Enforcement is sequenced after those gaps close, so the diagnostic flags genuine defects rather than known-deferred ones. Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
+- **Silent `Unknown`s exist today; the reason-discriminant and `ColumnTypeUnresolved` are not yet enforced.** The `Unknown` value is currently undiscriminated, and several inference gaps produce `Unknown` columns with no diagnostic — violating the no-silent-`Unknown` invariant: generator-emitted and `smelt.columns_of`-reflected model schemas, and meta-language HOF values placed in SQL column position (`meta_language.md`). Function-derived columns (`smelt.functions.*` struct-spread and `TableExpr` results) now resolve — see `function_schema_inference.md` — so they are no longer a silent-`Unknown` source. `(VALUES …) AS t(c₁, …)` derived-table columns now also resolve to concrete types. What remains is the meta-language surface. Enforcement is sequenced after those gaps close, so the diagnostic flags genuine defects rather than known-deferred ones. Tracked in `docs/plans/20260519-functions-meta-gaps.md`.
+- **Empty VALUES produces no diagnostic today.** A `(VALUES) AS alias(…)` clause with zero rows currently yields an empty schema silently rather than being flagged as a schema error. The no-silent-`Unknown` doctrine (§"Strict-by-default doctrine") calls for a dedicated diagnostic here; until that diagnostic is added, empty-VALUES clauses fail silently. Tracked in `docs/plans/20260528-values-derived-table-typing.md`.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References

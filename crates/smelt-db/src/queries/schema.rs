@@ -19,7 +19,9 @@ use crate::queries::functions::{file_signature_inputs, resolve_function};
 use crate::queries::parse::parse_file;
 use crate::queries::project::{project_seeds, project_sources, sources_config};
 use crate::schema::{self, Column, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema};
-use crate::type_inference::{self, infer_cte_columns, infer_select_column_types, TypeContext};
+use crate::type_inference::{
+    self, infer_cte_columns, infer_select_column_types, infer_values_columns, TypeContext,
+};
 use crate::{find_project, resolve_ref, SourceFile, Workspace};
 
 use smelt_core::{SourceInfo, SourcesConfig};
@@ -908,6 +910,26 @@ fn process_table_ref_pure(
                         ctx.add_cte_column(&alias, &col_name, typed_col);
                     }
 
+                    ctx.add_alias(&alias, &alias);
+                }
+            } else if let Some(values_clause) = subquery.values_clause() {
+                // `(VALUES (e1, e2, …), …) AS t(c1, c2, …)` — infer column
+                // types by unifying row elements column-wise via the existing
+                // promotion lattice.  When the VALUES clause is empty we fall
+                // through without binding, deferring the diagnostic to Phase 3.
+                if let Ok(column_types) = infer_values_columns(&values_clause, ctx) {
+                    // Column names: prefer the explicit alias column list from
+                    // `AS t(c1, c2, …)`; fall back to `col1`, `col2`, … when
+                    // the list is absent.
+                    let alias_names = table_ref.alias_column_names();
+                    for (i, typed_col) in column_types.into_iter().enumerate() {
+                        let col_name = alias_names
+                            .as_ref()
+                            .and_then(|names| names.get(i))
+                            .cloned()
+                            .unwrap_or_else(|| format!("col{}", i + 1));
+                        ctx.add_cte_column(&alias, &col_name, typed_col);
+                    }
                     ctx.add_alias(&alias, &alias);
                 }
             }
