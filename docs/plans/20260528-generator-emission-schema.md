@@ -73,7 +73,7 @@ The structural asymmetry with `smelt.sources.*` (commit `1ed38a1e`) is informati
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 3100af45 | 2026-05-28 |
-| 2     | done     | (pending commit) | 2026-05-28 |
+| 2     | done     | 37bc3845 | 2026-05-28 |
 | 3     | pending  |        |      |
 
 ---
