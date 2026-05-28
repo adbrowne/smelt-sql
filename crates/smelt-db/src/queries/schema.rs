@@ -228,6 +228,28 @@ pub trait RefSchemaProvider {
     /// loop wants to distinguish them (CSV files don't participate in
     /// SELECT * schema resolution, etc.).
     fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+    /// Returns the typed columns for a `smelt.<path>` reference identified by
+    /// its full path segments, including generator-emitted models.
+    ///
+    /// The default implementation delegates to `resolved_columns` using the
+    /// last segment (the leaf name). `SalsaRefSchemaProvider` overrides this
+    /// to also consult the emission registry via `emitted_model_typed_schema`
+    /// after the hand-authored lookup returns `None` — preserving the
+    /// `ModelDefHandAuthoredCollision` tie-break rule (hand-authored wins).
+    ///
+    /// The `entity_name` out-parameter is set to the name that should be used
+    /// as the key for `ctx.add_model_column` and `ctx.add_alias`. For
+    /// hand-authored models this is the leaf segment; for emitted models it is
+    /// the full dot-joined path (the smelt path), which matches how `resolve_ref`
+    /// keys them.
+    fn resolved_columns_for_path(
+        &self,
+        segments: &[String],
+    ) -> Option<(String, Vec<(String, TypedColumn)>)> {
+        let model_name = segments.last()?.clone();
+        self.resolved_columns(&model_name)
+            .map(|cols| (model_name, cols))
+    }
     /// Returns the typed columns for the `smelt.functions.<name>(...)` call in
     /// FROM position, by resolving the function's `TableExpr` return schema.
     /// The default implementation returns `None`; `SalsaRefSchemaProvider`
@@ -306,12 +328,17 @@ impl SalsaRefSchemaProvider<'_> {
         }
 
         // smelt.<path> value-form in FROM/JOIN position.
+        // Consult the full-path resolver (which covers hand-authored models
+        // and generator-emitted models) as well as seeds.
         if let Some(path_ref) = table_ref.smelt_path_ref() {
             let segs = path_ref.segments();
-            let model_name = segs.last().cloned().unwrap_or_default();
             let seed_key = segs.join("_");
+            // resolved_columns_for_path returns (entity_name, cols); we only
+            // need cols here (the entity_name is used for ctx binding in
+            // process_table_ref_pure, not needed for the join-schema resolver).
             return self
-                .resolved_columns(&model_name)
+                .resolved_columns_for_path(&segs)
+                .map(|(_, cols)| cols)
                 .or_else(|| self.seed_columns(&seed_key));
         }
 
@@ -612,6 +639,87 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
         None
     }
 
+    /// Resolve a `smelt.<path>` reference by its full path segments.
+    ///
+    /// Resolution order (preserves `ModelDefHandAuthoredCollision` tie-break rule):
+    ///   1. Hand-authored model lookup via `resolve_ref` (leaf name, project-scoped).
+    ///      If found, return its schema.
+    ///   2. Generator-emitted model lookup via `emitted_model_typed_schema`.
+    ///      The W3 collision pass already discards any emission whose smelt path
+    ///      collides with a hand-authored model, so step 2 can never shadow step 1
+    ///      even without an explicit guard here. We keep the ordered fallback for
+    ///      clarity and future safety.
+    ///
+    /// The returned `entity_name` is the full dot-joined smelt path for emitted
+    /// models, matching the key used by `ctx.add_model_column` / `ctx.add_alias`
+    /// in `process_table_ref_pure`.
+    fn resolved_columns_for_path(
+        &self,
+        segments: &[String],
+    ) -> Option<(String, Vec<(String, TypedColumn)>)> {
+        let model_name = segments.last()?.clone();
+
+        // Step 1: hand-authored lookup (project-scoped via `resolve_ref`).
+        if let Some(cols) = self.resolved_columns(&model_name) {
+            return Some((model_name, cols));
+        }
+
+        // Step 2: generator-emitted model lookup.
+        // Find the project root so we can scope the search.
+        let project = self.project?;
+        let project_root = project.root(self.db).clone();
+        let scan_roots = crate::queries::project::project_paths(self.db, project);
+
+        let emitted = crate::queries::project::emitted_models(self.db, self.workspace);
+        for emitted_model in &emitted.survivors {
+            // Project isolation: only consider emissions from this project.
+            if !emitted_model.generator_file.starts_with(&project_root) {
+                continue;
+            }
+            let smelt_name = crate::queries::project::emitted_model_smelt_path(
+                &emitted_model.generator_file,
+                &project_root,
+                scan_roots.as_slice(),
+                &emitted_model.name,
+            );
+            let emitted_path: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+            if emitted_path == segments {
+                // Found a matching emission — look up its generator SourceFile
+                // so we can call `emitted_model_typed_schema`.
+                let gen_file = self
+                    .workspace
+                    .files(self.db)
+                    .iter()
+                    .copied()
+                    .find(|f| f.path(self.db) == &emitted_model.generator_file)?;
+
+                let schema = crate::queries::project::emitted_model_typed_schema(
+                    self.db,
+                    self.workspace,
+                    gen_file,
+                    emitted_model.name.clone(),
+                );
+                let cols: Vec<(String, TypedColumn)> = schema
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        });
+                        (col.name.clone(), typed_col)
+                    })
+                    .collect();
+                // Use the full smelt path as the entity name so that
+                // `ctx.add_model_column(entity_name, …)` and
+                // `ctx.add_alias(bind_to, entity_name)` use a stable, unique key.
+                return Some((smelt_name, cols));
+            }
+        }
+
+        None
+    }
+
     fn smelt_path_call_columns(
         &self,
         call: &smelt_parser::ast::SmeltPathCall,
@@ -829,19 +937,27 @@ fn process_table_ref_pure(
             return;
         }
 
-        // For seeds and model refs: try seed first, then model.
+        // For seeds, hand-authored models, and generator-emitted models:
+        // try seed first, then consult `resolved_columns_for_path` which
+        // handles both hand-authored models (via `resolve_ref`) and
+        // generator-emitted models (via `emitted_model_typed_schema`).
+        // The `resolved_columns_for_path` default and the `SalsaRefSchemaProvider`
+        // override both preserve the `ModelDefHandAuthoredCollision` tie-break:
+        // hand-authored models are checked first; emitted models are only
+        // consulted when no hand-authored model matches.
         if let Some((entity_name, cols)) = refs
             .seed_columns(&seed_key)
             .map(|c| (seed_key.clone(), c))
-            .or_else(|| {
-                refs.resolved_columns(&model_name)
-                    .map(|c| (model_name.clone(), c))
-            })
+            .or_else(|| refs.resolved_columns_for_path(&segments))
         {
             for (col_name, typed_col) in &cols {
                 ctx.add_model_column(&entity_name, col_name, typed_col.clone());
             }
-            let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
+            // Bind the alias (or the last path segment, for unaliased refs).
+            // For emitted models, `entity_name` is the full smelt path;
+            // an unaliased `smelt.cohorts.us_west` binds `us_west` → the entity_name
+            // so that `SELECT id FROM smelt.cohorts.us_west` works without a qualifier.
+            let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
             ctx.add_alias(&bind_to, &entity_name);
         }
         return;
