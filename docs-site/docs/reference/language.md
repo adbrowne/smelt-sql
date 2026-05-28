@@ -164,6 +164,15 @@ SELECT a, b FROM cte
 
 When the column list is omitted, the inner SELECT's own aliases are used unchanged.
 
+When the declared column count does not match the inner SELECT's actual column count, smelt emits `AliasColumnArityMismatch` anchored at the column-list span. Alias names are applied positionally up to whichever list is shorter; any remaining columns retain their inferred names:
+
+```sql
+-- Error: alias list has 1 name but SELECT produces 2 columns
+WITH cte(a) AS (SELECT CAST(1 AS INTEGER), CAST(2 AS INTEGER))
+SELECT a FROM cte
+-- AliasColumnArityMismatch at (a)
+```
+
 ## Set operations
 
 ```sql
@@ -241,6 +250,14 @@ SELECT x FROM (VALUES (CAST(1 AS INTEGER)), (CAST(2.0 AS DOUBLE))) AS t(x)
 
 -- Without an alias column list, columns are named col1, col2, …
 SELECT col1, col2 FROM (VALUES (1, 2)) AS t
+```
+
+When the alias column list has a different length from the number of VALUES columns, smelt emits `AliasColumnArityMismatch` anchored at the column-list span:
+
+```sql
+-- Error: alias list has 1 name but VALUES produces 2 columns per row
+SELECT a FROM (VALUES (CAST(1 AS INTEGER), CAST(2 AS INTEGER))) AS t(a)
+-- AliasColumnArityMismatch at (a)
 ```
 
 ## Type casting

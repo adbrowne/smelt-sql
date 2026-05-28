@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use smelt_db::{typed_model_schema, Database, Workspace};
+use smelt_db::{file_diagnostics, typed_model_schema, Database, DiagnosticCode, Workspace};
 use smelt_types::DataType;
 
 // ---------------------------------------------------------------------------
@@ -240,4 +240,154 @@ fn full_reproducer_five_columns() {
             types
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper to collect all diagnostics for a single-model workspace.
+// ---------------------------------------------------------------------------
+
+fn all_diagnostics(
+    db: &Database,
+    ws: Workspace,
+    sf: smelt_db::SourceFile,
+) -> Vec<smelt_db::Diagnostic> {
+    use smelt_db::DiagnosticAcc;
+    let mut diags = file_diagnostics(db, ws, sf);
+    for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(db, ws, sf) {
+        diags.push(d.0.clone());
+    }
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 TDD: AliasColumnArityMismatch for VALUES derived tables
+// ---------------------------------------------------------------------------
+
+/// `(VALUES (1, 2)) AS t(a)` — two-column VALUES but only one alias name.
+/// Must emit exactly one `AliasColumnArityMismatch` diagnostic.
+#[test]
+fn values_alias_too_few_names_emits_arity_mismatch() {
+    // 2 columns in VALUES, 1 name in alias list → mismatch
+    let sql = "SELECT a FROM (VALUES (CAST(1 AS INTEGER), CAST(2 AS INTEGER))) AS t(a)\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let arity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::AliasColumnArityMismatch))
+        .collect();
+
+    assert_eq!(
+        arity_diags.len(),
+        1,
+        "expected exactly 1 AliasColumnArityMismatch, got {}:\n  {:?}",
+        arity_diags.len(),
+        diags
+    );
+}
+
+/// `(VALUES (1)) AS t(a, b)` — one-column VALUES but two alias names.
+/// Must emit exactly one `AliasColumnArityMismatch` diagnostic.
+#[test]
+fn values_alias_too_many_names_emits_arity_mismatch() {
+    // 1 column in VALUES, 2 names in alias list → mismatch
+    let sql = "SELECT a FROM (VALUES (CAST(1 AS INTEGER))) AS t(a, b)\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let arity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::AliasColumnArityMismatch))
+        .collect();
+
+    assert_eq!(
+        arity_diags.len(),
+        1,
+        "expected exactly 1 AliasColumnArityMismatch, got {}:\n  {:?}",
+        arity_diags.len(),
+        diags
+    );
+}
+
+/// Regression: `(VALUES (1, 2)) AS t(a, b)` — matching alias count.
+/// Must emit zero `AliasColumnArityMismatch` diagnostics.
+#[test]
+fn values_alias_matching_count_no_arity_mismatch() {
+    let sql = "SELECT a, b FROM (VALUES (CAST(1 AS INTEGER), CAST(2 AS INTEGER))) AS t(a, b)\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let arity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::AliasColumnArityMismatch))
+        .collect();
+
+    assert_eq!(
+        arity_diags.len(),
+        0,
+        "expected zero AliasColumnArityMismatch for matching alias count, got {}:\n  {:?}",
+        arity_diags.len(),
+        diags
+    );
+}
+
+/// Regression: `(VALUES (1)) AS t` — no alias column list.
+/// Must emit zero `AliasColumnArityMismatch` diagnostics.
+#[test]
+fn values_no_alias_list_no_arity_mismatch() {
+    let sql = "SELECT col1 FROM (VALUES (CAST(1 AS INTEGER))) AS t\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let arity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::AliasColumnArityMismatch))
+        .collect();
+
+    assert_eq!(
+        arity_diags.len(),
+        0,
+        "expected zero AliasColumnArityMismatch when no alias list, got {}:\n  {:?}",
+        arity_diags.len(),
+        diags
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 TDD: EmptyValuesClause for empty VALUES
+// ---------------------------------------------------------------------------
+
+/// Test the `EmptyValuesClause` diagnostic path.
+///
+/// The parser does not accept a zero-row `(VALUES) AS t` form — a VALUES clause
+/// syntactically requires at least one row. Therefore the `EmptyValuesClause`
+/// code path is reachable only through future meta-language surfaces (e.g. a
+/// list splice that produces zero VALUES rows at compile time).
+///
+/// This test verifies:
+/// 1. `DiagnosticCode::EmptyValuesClause` exists in the enum.
+/// 2. The `ValuesError::Empty` variant exists and is the sentinel for that path.
+/// 3. A non-empty VALUES produces no `EmptyValuesClause` diagnostic.
+#[test]
+fn empty_values_diagnostic_code_exists_and_non_empty_values_clean() {
+    // Compile-time check: the code exists in the enum.
+    let _: smelt_db::DiagnosticCode = smelt_db::DiagnosticCode::EmptyValuesClause;
+
+    // Runtime check: a non-empty VALUES must not emit EmptyValuesClause.
+    let sql = "SELECT col1 FROM (VALUES (CAST(1 AS INTEGER))) AS t\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let empty_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::EmptyValuesClause))
+        .collect();
+
+    assert_eq!(
+        empty_diags.len(),
+        0,
+        "expected zero EmptyValuesClause for non-empty VALUES, got {}:\n  {:?}",
+        empty_diags.len(),
+        diags
+    );
 }

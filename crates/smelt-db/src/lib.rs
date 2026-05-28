@@ -1156,6 +1156,41 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // VALUES / CTE alias-column arity checks.
+    //
+    // Walk all TABLE_REF and CTE nodes in the file's CST and emit:
+    //   - `AliasColumnArityMismatch` when the alias column list length does not
+    //     match the underlying relation's column count.
+    //   - `EmptyValuesClause` when a VALUES derived table has zero rows.
+    //
+    // These are pure structural checks that do not require schema resolution.
+    // They run unconditionally (before the `parse_model.is_none()` early-return)
+    // so that function files also surface them.
+    {
+        use smelt_parser::ast::{Cte, TableRef};
+        use smelt_parser::SyntaxKind::{CTE, TABLE_REF};
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+
+        // VALUES derived-table checks: scan all TABLE_REF nodes.
+        for node in syntax.descendants().filter(|n| n.kind() == TABLE_REF) {
+            if let Some(tr) = TableRef::cast(node) {
+                for diag in type_inference::check_table_ref_values_arity(&tr, text) {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+        }
+
+        // CTE alias-list checks: scan all CTE nodes.
+        for node in syntax.descendants().filter(|n| n.kind() == CTE) {
+            if let Some(cte) = Cte::cast(node) {
+                for diag in type_inference::check_cte_alias_arity(&cte, text) {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+        }
+    }
+
     // Check if model is valid
     if parse_model(db, file).is_none() {
         let path_str = path.to_str().unwrap_or("");

@@ -598,6 +598,19 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
     MalformedTimeseries,
+
+    // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
+    /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or
+    /// `WITH cte(c₁, c₂, …) AS (SELECT …)` has a different length from the
+    /// underlying relation's actual column count.  Anchored at the
+    /// `ALIAS_COLUMN_LIST` span (the parenthesised column-name list).
+    /// Message: "alias column list has {alias_count} name(s) but the relation
+    /// has {col_count} column(s)"
+    AliasColumnArityMismatch,
+    /// Emitted when a `(VALUES …)` derived table contains no rows and therefore
+    /// cannot produce a typed schema.  Anchored at the VALUES clause span.
+    /// Message: "VALUES clause has no rows; cannot infer column types"
+    EmptyValuesClause,
 }
 
 /// Structured metadata attached to diagnostics for code actions

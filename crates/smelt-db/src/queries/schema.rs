@@ -915,8 +915,9 @@ fn process_table_ref_pure(
             } else if let Some(values_clause) = subquery.values_clause() {
                 // `(VALUES (e1, e2, …), …) AS t(c1, c2, …)` — infer column
                 // types by unifying row elements column-wise via the existing
-                // promotion lattice.  When the VALUES clause is empty we fall
-                // through without binding, deferring the diagnostic to Phase 3.
+                // promotion lattice.  When the VALUES clause is empty,
+                // `infer_values_columns` returns `Err`; the `EmptyValuesClause`
+                // diagnostic is emitted by `check_table_ref_values_arity`.
                 if let Ok(column_types) = infer_values_columns(&values_clause, ctx) {
                     // Column names: prefer the explicit alias column list from
                     // `AS t(c1, c2, …)`; fall back to `col1`, `col2`, … when

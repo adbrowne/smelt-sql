@@ -352,6 +352,9 @@ impl Backend {
                 // Timeseries frontmatter validation diagnostic codes.
                 DbCode::TimeseriesRequiredForIncremental => "timeseries-required-for-incremental",
                 DbCode::MalformedTimeseries => "malformed-timeseries",
+                // VALUES / CTE alias-column-list diagnostic codes.
+                DbCode::AliasColumnArityMismatch => "alias-column-arity-mismatch",
+                DbCode::EmptyValuesClause => "empty-values-clause",
             };
             NumberOrString::String(code_str.to_string())
         });

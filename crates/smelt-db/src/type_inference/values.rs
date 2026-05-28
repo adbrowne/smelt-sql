@@ -10,9 +10,12 @@
 //! Every item in this module is a pure function — no Salsa imports, no
 //! `#[salsa::tracked]`.
 
-use smelt_parser::ast::{Expr, ValuesClause};
+use smelt_parser::ast::{Cte, Expr, SelectItem, SelectStmt, TableRef, ValuesClause};
 use smelt_parser::SyntaxKind;
 use smelt_types::{DataType, TypedColumn};
+
+use crate::diagnostics_types::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
+use smelt_parser::ast::text_range_to_range;
 
 use super::dispatch::{infer_expression_type, promote_types};
 use super::type_context::TypeContext;
@@ -94,4 +97,168 @@ pub fn infer_values_columns(
     }
 
     Ok(column_types)
+}
+
+// ─── Arity-mismatch and empty-VALUES diagnostic checks ───────────────────────
+
+/// Count the number of VALUES rows' first row column count.
+/// Returns `None` when the VALUES clause has no rows.
+pub fn values_column_count(values: &ValuesClause) -> Option<usize> {
+    use SyntaxKind::VALUES_ROW;
+    let first_row = values
+        .syntax()
+        .children()
+        .find(|n| n.kind() == VALUES_ROW)?;
+    let count = first_row.children().filter_map(Expr::cast).count();
+    if count == 0 {
+        None
+    } else {
+        Some(count)
+    }
+}
+
+/// Count the non-wildcard SELECT items in a SELECT statement.
+/// Returns `None` when there are no items or when any item is a wildcard
+/// (`SELECT *`), because wildcard counts depend on upstream schema.
+pub fn select_non_wildcard_item_count(select: &smelt_parser::ast::SelectStmt) -> Option<usize> {
+    let list = select.select_list()?;
+    let items: Vec<SelectItem> = list.items().collect();
+    if items.is_empty() {
+        return None;
+    }
+    // If any item is a wildcard, we can't count statically.
+    if items.iter().any(|item| item.is_wildcard()) {
+        return None;
+    }
+    Some(items.len())
+}
+
+/// Check a single `TABLE_REF` node for VALUES derived-table arity mismatches
+/// and emit zero or one `AliasColumnArityMismatch` or `EmptyValuesClause`
+/// diagnostics.
+///
+/// Returns a `Vec<Diagnostic>` (empty when no issue is found).
+pub fn check_table_ref_values_arity(table_ref: &TableRef, text: &str) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::ALIAS_COLUMN_LIST;
+    let mut out = Vec::new();
+
+    let subquery = match table_ref.subquery() {
+        Some(s) => s,
+        None => return out,
+    };
+
+    let values_clause = match subquery.values_clause() {
+        Some(v) => v,
+        None => return out,
+    };
+
+    // Empty VALUES check: zero rows → EmptyValuesClause.
+    let col_count = match values_column_count(&values_clause) {
+        Some(n) => n,
+        None => {
+            // values_column_count returns None for zero rows.
+            let span = values_clause.syntax().text_range();
+            let range = text_range_to_range(text, span);
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: "VALUES clause has no rows; cannot infer column types".to_string(),
+                range,
+                code: Some(DiagnosticCode::EmptyValuesClause),
+                data: None,
+            });
+            return out;
+        }
+    };
+
+    // Arity check: only when an explicit alias column list is present.
+    let alias_names = match table_ref.alias_column_names() {
+        Some(names) => names,
+        None => return out, // no alias list → no check
+    };
+
+    if alias_names.len() == col_count {
+        return out; // matching → no diagnostic
+    }
+
+    // Mismatch: anchor at the ALIAS_COLUMN_LIST span.
+    let acl_node = table_ref
+        .syntax()
+        .children()
+        .find(|n| n.kind() == ALIAS_COLUMN_LIST);
+    let range = if let Some(acl) = acl_node {
+        text_range_to_range(text, acl.text_range())
+    } else {
+        // Fallback to the whole TABLE_REF span.
+        text_range_to_range(text, table_ref.syntax().text_range())
+    };
+
+    out.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+            "alias column list has {} name(s) but the relation has {} column(s)",
+            alias_names.len(),
+            col_count
+        ),
+        range,
+        code: Some(DiagnosticCode::AliasColumnArityMismatch),
+        data: None,
+    });
+    out
+}
+
+/// Check a single `CTE` node for alias-column-list arity mismatches.
+///
+/// Returns a `Vec<Diagnostic>` (empty when no issue is found).
+pub fn check_cte_alias_arity(cte: &Cte, text: &str) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::ALIAS_COLUMN_LIST;
+    let mut out = Vec::new();
+
+    let explicit_names = cte.column_names();
+    if explicit_names.is_empty() {
+        return out; // no column list declared → no check
+    }
+
+    // Get the inner SELECT statement.
+    let select_stmt: SelectStmt = match cte.query().and_then(|q| q.select_stmt()) {
+        Some(s) => s,
+        None => return out, // no SELECT body (e.g. VALUES CTE) → skip
+    };
+
+    // Count inner SELECT items; skip if wildcard SELECT.
+    let inner_count = match select_non_wildcard_item_count(&select_stmt) {
+        Some(n) => n,
+        None => return out, // wildcard or empty → can't statically check
+    };
+
+    if explicit_names.len() == inner_count {
+        return out; // matching → no diagnostic
+    }
+
+    // Mismatch: anchor at the ALIAS_COLUMN_LIST span.
+    let acl_node = cte
+        .syntax()
+        .children()
+        .find(|n| n.kind() == ALIAS_COLUMN_LIST);
+    let range = if let Some(acl) = acl_node {
+        text_range_to_range(text, acl.text_range())
+    } else {
+        // Fallback to the CTE name range.
+        let fallback = cte
+            .name_range()
+            .unwrap_or_else(|| cte.syntax().text_range());
+        text_range_to_range(text, fallback)
+    };
+
+    out.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+            "alias column list has {} name(s) but the relation has {} column(s)",
+            explicit_names.len(),
+            inner_count
+        ),
+        range,
+        code: Some(DiagnosticCode::AliasColumnArityMismatch),
+        data: None,
+    });
+    out
 }

@@ -108,4 +108,6 @@ pub use ternary::{
     ShortCircuitHint, TernaryResult, TernarySentinel,
 };
 
-pub use values::{infer_values_columns, ValuesError};
+pub use values::{
+    check_cte_alias_arity, check_table_ref_values_arity, infer_values_columns, ValuesError,
+};
