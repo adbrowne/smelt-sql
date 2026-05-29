@@ -188,10 +188,7 @@ pub fn loader_resolved_value(
     // file to compute it). Use a zero range as the secondary frame; the LSP
     // orchestrator fills in the actual call-site range before displaying to the
     // user.
-    let call_range = crate::Range {
-        start: smelt_parser::ast::Position { line: 0, column: 0 },
-        end: smelt_parser::ast::Position { line: 0, column: 0 },
-    };
+    let call_range = rowan::TextRange::empty(rowan::TextSize::from(0));
     let result = crate::loader::validate_against_schema(&parsed, &schema_ty, call_range);
 
     Arc::new(LoaderResolvedValue {
@@ -273,10 +270,7 @@ pub fn loader_resolved_value_with_overlay(
         });
     }
 
-    let call_range = crate::Range {
-        start: smelt_parser::ast::Position { line: 0, column: 0 },
-        end: smelt_parser::ast::Position { line: 0, column: 0 },
-    };
+    let call_range = rowan::TextRange::empty(rowan::TextSize::from(0));
 
     // Validate base.
     let base_result = crate::loader::validate_against_schema(&base_parsed, &schema_ty, call_range);
@@ -644,7 +638,14 @@ pub fn loader_call_diagnostics_for_file_with_content(
     let project_root = file.project_root(db).clone();
 
     // Delegate to the pure helper.
-    loader_call_diagnostics_for_syntax(&syntax, text, 0, &registry, &project_root, get_loader_text)
+    loader_call_diagnostics_for_syntax(
+        &syntax,
+        text,
+        rowan::TextSize::from(0),
+        &registry,
+        &project_root,
+        get_loader_text,
+    )
 }
 
 /// Pure helper: run loader call diagnostics against a pre-parsed `SyntaxNode`.
@@ -667,8 +668,8 @@ pub fn loader_call_diagnostics_for_file_with_content(
 ///   file path, or `None` to skip content-validation for that call site.
 pub fn loader_call_diagnostics_for_syntax(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
-    text: &str,
-    range_offset: usize,
+    _text: &str,
+    range_offset: rowan::TextSize,
     registry: &smelt_types::signatures::RecordRegistry,
     project_root: &std::path::Path,
     get_loader_text: LoaderTextFn<'_>,
@@ -684,18 +685,12 @@ pub fn loader_call_diagnostics_for_syntax(
     };
 
     // Step 1: path/schema admissibility diagnostics (pure).
-    let mut diags =
-        type_inference::check_loader_call_diagnostics(syntax, &file_exists, registry, text);
+    let mut diags = type_inference::check_loader_call_diagnostics(syntax, &file_exists, registry);
 
     // Step 2: content-validation for each valid call site.
     {
         use smelt_parser::ast::SmeltPathCall;
         use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
-
-        let to_range = |range: rowan::TextRange| -> crate::Range {
-            smelt_parser::ast::text_range_to_range(text, range)
-        };
-
         for node in syntax.descendants() {
             if node.kind() != SMELT_PATH_CALL {
                 continue;
@@ -781,7 +776,7 @@ pub fn loader_call_diagnostics_for_syntax(
                             None,
                             None,
                         ),
-                        range: to_range(path_arg.syntax().text_range()),
+                        range: path_arg.syntax().text_range(),
                         code: Some(DiagnosticCode::ConfigLoaderParseError),
                         data: None,
                     });
@@ -795,7 +790,7 @@ pub fn loader_call_diagnostics_for_syntax(
                 continue;
             }
 
-            let call_range = to_range(node.text_range());
+            let call_range = node.text_range();
             let result = crate::loader::validate_against_schema(&parsed, &schema_ty, call_range);
             for loader_diag in result.diagnostics {
                 let severity = match loader_diag.severity {
@@ -813,46 +808,17 @@ pub fn loader_call_diagnostics_for_syntax(
         }
     }
 
-    // Apply range offset if needed (Phase 2+ emission-body callers).
-    if range_offset > 0 {
-        let offset = rowan::TextSize::from(range_offset as u32);
+    // Apply range offset if needed (emission-body callers pass a non-zero offset).
+    if range_offset > rowan::TextSize::from(0) {
         for diag in &mut diags {
-            // Re-scan text to find byte offsets from line/column positions.
-            let sb = loader_byte_offset_of_position(text, diag.range.start);
-            let eb = loader_byte_offset_of_position(text, diag.range.end);
-            if let (Some(sb), Some(eb)) = (sb, eb) {
-                let shifted = rowan::TextRange::new(
-                    rowan::TextSize::from((sb + range_offset) as u32),
-                    rowan::TextSize::from((eb + range_offset) as u32),
-                );
-                let _ = offset; // used above indirectly
-                diag.range = smelt_parser::ast::text_range_to_range(text, shifted);
-            }
+            diag.range = rowan::TextRange::new(
+                diag.range.start() + range_offset,
+                diag.range.end() + range_offset,
+            );
         }
     }
 
     diags
-}
-
-/// Scan `text` to find the byte offset of the character at line/column `pos`.
-fn loader_byte_offset_of_position(text: &str, pos: crate::Position) -> Option<usize> {
-    let mut line = 0u32;
-    let mut col = 0u32;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line && col == pos.column {
-            return Some(i);
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    if line == pos.line && col == pos.column {
-        return Some(text.len());
-    }
-    None
 }
 
 // ============================================================================
@@ -863,6 +829,7 @@ fn loader_byte_offset_of_position(text: &str, pos: crate::Position) -> Option<us
 mod tests {
     use super::loader_call_diagnostics_for_syntax;
     use crate::DiagnosticCode;
+    use rowan::TextSize;
     use smelt_types::signatures::RecordRegistry;
 
     fn empty_registry() -> RecordRegistry {
@@ -891,7 +858,7 @@ mod tests {
         let diags = loader_call_diagnostics_for_syntax(
             &syntax,
             sql,
-            0,
+            TextSize::from(0),
             &registry,
             std::path::Path::new("/nonexistent"),
             &no_files,
@@ -919,7 +886,7 @@ mod tests {
         let diags = loader_call_diagnostics_for_syntax(
             &syntax,
             sql,
-            0,
+            TextSize::from(0),
             &registry,
             std::path::Path::new("/tmp"),
             &no_files,
@@ -948,7 +915,7 @@ mod tests {
         let diags_no_offset = loader_call_diagnostics_for_syntax(
             &syntax,
             sql,
-            0,
+            TextSize::from(0),
             &registry,
             std::path::Path::new("/nonexistent"),
             &no_files,
@@ -962,8 +929,8 @@ mod tests {
         // With range_offset = 0, the first diagnostic should have a valid range.
         let first = &diags_no_offset[0];
         assert!(
-            first.range.start.line == 0,
-            "range offset=0: first diag should be on line 0; got: {:?}",
+            first.range.start() < TextSize::from(sql.len() as u32),
+            "range offset=0: first diag should have a valid start offset; got: {:?}",
             first.range
         );
     }

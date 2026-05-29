@@ -649,15 +649,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
             let Some(src_file) = type_db.source_file(&model.path) else {
                 continue;
             };
-            // Shadow-mode boundary converter: validates LineIndex parity under
-            // debug_assertions; compiles away in release builds.
-            let model_text = src_file.text(&type_db).clone();
-            let terminal_converter =
-                smelt_cli::diagnostics_terminal::TerminalConverter::new(&model_text);
             let diags = smelt_db::file_diagnostics(&type_db, workspace, src_file);
             for diag in &diags {
-                // Shadow assertion fires under debug_assertions only.
-                let _ = terminal_converter.start(diag, &model_text);
                 if diag.code == Some(smelt_db::DiagnosticCode::UnknownSmeltFn) {
                     fn_path_errors.push(format!("model '{}': {}", model.name, diag.message));
                 }

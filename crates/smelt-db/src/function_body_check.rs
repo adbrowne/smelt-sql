@@ -18,7 +18,6 @@ use rowan::TextRange;
 use smelt_parser::ast::{
     BinaryExpr, Cte, Expr, FunctionCall, Lambda, SelectStmt, SmeltPathCall, TableRef,
 };
-use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, column_ref_field, unify_call, ContextRef, ExprKind, FrameInfo,
     FunctionSig, ModelOrigin, ParamSpec, SchemaMismatch, SchemaRequirement, Signature, SmeltType,
@@ -35,7 +34,7 @@ use crate::type_inference::{
     infer_expression_type, walk_expression_columns_with_visitor, walk_select_columns_with_visitor,
     TypeContext,
 };
-use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
 /// Discriminates the three type-checking tiers (§8) inside
 /// `check_function_body` and `check_smelt_path_call`.
@@ -177,7 +176,7 @@ pub fn walk_hof_lambda_body_with_anonymous_frame(
     lambda_ctx: &TypeContext,
     text: &str,
     hof_name: &str,
-    call_range: Option<Range>,
+    call_range: Option<rowan::TextRange>,
     nested: Option<&NestedPathCallHandler<'_>>,
 ) -> Vec<Diagnostic> {
     let mut inner_diags = Vec::new();
@@ -233,7 +232,7 @@ pub fn walk_hof_lambda_body_with_anonymous_frame_and_origin(
     lambda_ctx: &TypeContext,
     text: &str,
     hof_name: &str,
-    call_range: Option<Range>,
+    call_range: Option<rowan::TextRange>,
     nested: Option<&NestedPathCallHandler<'_>>,
     column_origin: Option<TextRange>,
 ) -> Vec<Diagnostic> {
@@ -298,7 +297,7 @@ pub fn walk_hof_lambda_body_with_wide_reflection_frame(
     lambda_ctx: &TypeContext,
     text: &str,
     hof_name: &str,
-    call_range: Option<Range>,
+    call_range: Option<rowan::TextRange>,
     nested: Option<&NestedPathCallHandler<'_>>,
     model_origin: Option<ModelOrigin>,
     source_origin: Option<SourceOrigin>,
@@ -351,30 +350,15 @@ pub fn walk_hof_lambda_body_with_wide_reflection_frame(
 /// - `fn_id` = `None` (no user-declared function identity)
 /// - `decl_path` = `Some(generator_file_path)` — the generator `.sql` file
 /// - `decl_range` = `None` (no single declaration site in the body)
-/// - `call_site_range` = the range of the file's body expression, converted via
-///   `offset_to_position` using the supplied `file_text`; `None` when the text
-///   slice cannot be converted (e.g. range outside the text bounds).
+/// - `call_site_range` = `Some(body_range)` — the byte range of the body expression.
 /// - `param` = `""` (anonymous, no binding parameter)
 ///
 /// This function is pure — no Salsa dependency.
 pub fn make_generator_frame(
     generator_file_path: &std::path::Path,
     body_range: TextRange,
-    file_text: &str,
 ) -> FrameInfo {
-    // Convert the body TextRange to a smelt Range (line/column) using the file
-    // text. `offset_to_position` is always defined (no Out-of-Bounds; it
-    // clamps to the end of the text). We only emit None when the text is empty
-    // (no range context to attach).
-    let call_site_range = if file_text.is_empty() {
-        None
-    } else {
-        let start_offset: usize = body_range.start().into();
-        let end_offset: usize = body_range.end().into();
-        let start = offset_to_position(file_text, start_offset);
-        let end = offset_to_position(file_text, end_offset);
-        Some(crate::Range { start, end })
-    };
+    let call_site_range = Some(body_range);
 
     FrameInfo {
         function: "<generator>".to_string(),
@@ -714,7 +698,7 @@ fn row_requirement_diagnostic(
     mismatch: &SchemaMismatch,
     fn_name: &str,
     param_name: &str,
-    arg_range: Range,
+    arg_range: rowan::TextRange,
 ) -> Diagnostic {
     let message = match mismatch {
         SchemaMismatch::MissingColumn { column, required } => format!(
@@ -756,7 +740,7 @@ fn struct_field_diagnostic(
     mismatch: &SchemaMismatch,
     fn_name: &str,
     param_name: &str,
-    arg_range: Range,
+    arg_range: rowan::TextRange,
 ) -> Diagnostic {
     let message = match mismatch {
         SchemaMismatch::MissingColumn { column, required } => format!(
@@ -785,14 +769,6 @@ fn struct_field_diagnostic(
         range: arg_range,
         code: Some(DiagnosticCode::RowRequirementUnsatisfied),
         data: None,
-    }
-}
-
-/// Convert a Rowan [`TextRange`] to a line/column [`Range`] against `text`.
-fn to_range(tr: TextRange, text: &str) -> Range {
-    Range {
-        start: offset_to_position(text, usize::from(tr.start())),
-        end: offset_to_position(text, usize::from(tr.end())),
     }
 }
 
@@ -863,7 +839,7 @@ fn walk_body(
                             "Unknown identifier `{}` — not a parameter or in any enclosing scope",
                             col_ref.name()
                         ),
-                        range: to_range(expr.text_range(), text),
+                        range: expr.text_range(),
                         code: Some(DiagnosticCode::UnknownIdentifier),
                         data: None,
                     });
@@ -941,7 +917,7 @@ fn walk_binary(
                         "Cannot apply `{}` to `{}` and `{}` in function body",
                         op, l.data_type, r.data_type
                     ),
-                    range: to_range(expr.text_range(), text),
+                    range: expr.text_range(),
                     code: Some(DiagnosticCode::FunctionBodyTypeMismatch),
                     data: None,
                 });
@@ -1012,7 +988,7 @@ fn has_expr_children(expr: &Expr) -> bool {
 pub fn check_smelt_path_call(
     call: &SmeltPathCall,
     ctx: &TypeContext,
-    text: &str,
+    _text: &str,
     sig_lookup: &dyn Fn(&str) -> Option<FunctionSig>,
     builtin_lookup: &dyn Fn(&str) -> Option<&'static Signature>,
     lub: &dyn Fn(&DataType, &DataType) -> DataType,
@@ -1037,8 +1013,8 @@ pub fn check_smelt_path_call(
     //    `["functions", "foo"]`. The leaf name is used for lookup; the full
     //    path is used in diagnostic messages.
     let path_range = match call.call_path_range() {
-        Some(r) => to_range(r, text),
-        None => to_range(call.text_range(), text),
+        Some(r) => r,
+        None => call.text_range(),
     };
     let segments = call.segments();
     let Some(name) = segments.last().cloned() else {
@@ -1115,7 +1091,7 @@ pub fn check_smelt_path_call(
                 }) => {
                     let arg_range = arg_exprs
                         .get(position.saturating_sub(1))
-                        .map(|e| to_range(e.text_range(), text))
+                        .map(|e| e.text_range())
                         .unwrap_or(path_range);
                     diagnostics.push(Diagnostic {
                         severity: DiagnosticSeverity::Error,
@@ -1139,7 +1115,7 @@ pub fn check_smelt_path_call(
                     let anchor_pos = positions.get(1).copied().unwrap_or(1);
                     let arg_range = arg_exprs
                         .get(anchor_pos.saturating_sub(1))
-                        .map(|e| to_range(e.text_range(), text))
+                        .map(|e| e.text_range())
                         .unwrap_or(path_range);
                     let type_list = types
                         .iter()
@@ -1242,10 +1218,7 @@ pub fn check_smelt_path_call(
         };
         let param_exists = sig.params.iter().any(|p| p.name == clause_name);
         if !param_exists {
-            let clause_range = clause
-                .name_range()
-                .map(|r| to_range(r, text))
-                .unwrap_or(path_range);
+            let clause_range = clause.name_range().unwrap_or(path_range);
             diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!(
@@ -1286,7 +1259,7 @@ pub fn check_smelt_path_call(
                             display_path,
                             arg_expr.text().to_string().trim()
                         ),
-                        range: to_range(*arg_range, text),
+                        range: *arg_range,
                         code: Some(DiagnosticCode::ArgTypeMismatch),
                         data: None,
                     });
@@ -1312,7 +1285,7 @@ pub fn check_smelt_path_call(
                                 &mismatch,
                                 &sig.name,
                                 &param.name,
-                                to_range(*arg_range, text),
+                                *arg_range,
                             ));
                             frame_bindings
                                 .push((param.name.clone(), "<row-req-failed>".to_string()));
@@ -1395,7 +1368,7 @@ pub fn check_smelt_path_call(
                                     &mismatch,
                                     &sig.name,
                                     &param.name,
-                                    to_range(*arg_range, text),
+                                    *arg_range,
                                 ));
                                 frame_bindings
                                     .push((param.name.clone(), "<struct-req-failed>".to_string()));
@@ -1460,7 +1433,7 @@ pub fn check_smelt_path_call(
                             expected_text,
                             sig.name
                         ),
-                        range: to_range(*arg_range, text),
+                        range: *arg_range,
                         code: Some(DiagnosticCode::ArgTypeMismatch),
                         data: None,
                     });
@@ -1594,7 +1567,6 @@ pub fn check_smelt_path_call(
                 &body_ctx,
                 ctx,
                 &bindings,
-                text,
             ));
             body_diags
         }
@@ -1921,7 +1893,7 @@ pub(crate) fn check_function_select_body(
                 "Unknown identifier `{}` — not a parameter or in any enclosing scope",
                 info.column_name
             ),
-            range: to_range(info.range, text),
+            range: info.range,
             code: Some(DiagnosticCode::UnknownIdentifier),
             data: None,
         });
@@ -1944,7 +1916,7 @@ pub(crate) fn check_function_select_body(
                 "Unknown identifier `{}` — not a parameter or in any enclosing scope",
                 info.column_name
             ),
-            range: to_range(info.range, text),
+            range: info.range,
             code: Some(DiagnosticCode::UnknownIdentifier),
             data: None,
         });
@@ -1959,7 +1931,7 @@ pub(crate) fn check_function_select_body(
     //     qualified references to avoid double-diagnostics) and step 1b (which
     //     handles the valid `c.name` lift). Only *unrecognised* fields reach
     //     this check.
-    for diag in check_column_ref_field_diagnostics(select_stmt, body_ctx, text) {
+    for diag in check_column_ref_field_diagnostics(select_stmt, body_ctx) {
         diagnostics.push(diag);
     }
 
@@ -1973,7 +1945,7 @@ pub(crate) fn check_function_select_body(
     //     `smelt.models.with_tag(42)` inside a function body gets
     //     `WithTagRequiresText`, and `smelt.models.bogus()` gets
     //     `WideReflectionUnknownAccessor`.
-    for diag in check_model_ref_source_ref_field_diagnostics(select_stmt, body_ctx, text) {
+    for diag in check_model_ref_source_ref_field_diagnostics(select_stmt, body_ctx) {
         diagnostics.push(diag);
     }
     for diag in check_wide_reflection_diagnostics(select_stmt, body_ctx, text) {
@@ -2126,8 +2098,6 @@ struct CteDfs<'a> {
     diagnostics: Vec<Diagnostic>,
     /// The seed context — parameters and outer CTEs already in scope.
     seed_ctx: &'a TypeContext,
-    /// Source text for anchoring diagnostics.
-    text: &'a str,
     /// Optional resolver for `smelt.functions.*` path-call schema in CTE FROM
     /// clauses. When `Some`, a CTE body of the form
     /// `SELECT * FROM smelt.functions.<name>(args)` is resolved through this
@@ -2154,11 +2124,7 @@ impl<'a> CteDfs<'a> {
                 .ctes
                 .get(name)
                 .and_then(|c| c.name_range())
-                .map(|tr| to_range(tr, self.text))
-                .unwrap_or(Range {
-                    start: smelt_parser::Position { line: 0, column: 0 },
-                    end: smelt_parser::Position { line: 0, column: 0 },
-                });
+                .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
             self.diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!(
@@ -2280,7 +2246,7 @@ fn find_cte_table_deps(cte: &Cte, all_names: &std::collections::HashSet<String>)
 pub fn extract_function_body_cte_schemas<'a>(
     select: &SelectStmt,
     seed_ctx: &'a TypeContext,
-    text: &'a str,
+    _text: &'a str,
     smelt_path_call_resolver: Option<&'a SmeltPathCallSchemaResolver<'a>>,
 ) -> (TypeContext, Vec<Diagnostic>) {
     let Some(with_clause) = select.with_clause() else {
@@ -2306,7 +2272,6 @@ pub fn extract_function_body_cte_schemas<'a>(
         topo: vec![],
         diagnostics: vec![],
         seed_ctx,
-        text,
         smelt_path_call_resolver,
         resolved_by_path_call: std::collections::HashSet::new(),
     };
@@ -2668,8 +2633,6 @@ fn is_bare_fragment_param_ref(expr: &Expr, ctx: &TypeContext) -> bool {
 /// (as `check_smelt_path_call` does before calling this function).
 /// `caller_ctx` is the context at the call site — used for kind inference of
 /// argument expressions, which live in the caller's scope (Phase 44b).
-/// `text` is the call-site source text used to convert [`TextRange`]s to
-/// [`Range`]s.
 ///
 /// Pure — does not touch Salsa.
 pub fn check_fragment_context_bindings(
@@ -2678,7 +2641,6 @@ pub fn check_fragment_context_bindings(
     body_ctx: &TypeContext,
     caller_ctx: &TypeContext,
     bindings: &std::collections::HashMap<String, (Expr, TextRange)>,
-    text: &str,
 ) -> Vec<Diagnostic> {
     let inferred = infer_splice_contexts(sig, select, body_ctx);
     let mut out = Vec::new();
@@ -2728,7 +2690,7 @@ pub fn check_fragment_context_bindings(
                                  but found {}-kind expression",
                                 param.name, sig.name, req_str, found_str
                             ),
-                            range: to_range(*arg_range, text),
+                            range: *arg_range,
                             code: Some(DiagnosticCode::FragmentKindMismatch),
                             data: None,
                         });
@@ -2796,7 +2758,7 @@ pub fn check_fragment_context_bindings(
                                 sig.name,
                                 wider.join(", ")
                             ),
-                            range: to_range(*arg_range, text),
+                            range: *arg_range,
                             code: Some(DiagnosticCode::AnnotationTooWide),
                             data: None,
                         });
@@ -2832,7 +2794,7 @@ pub fn check_fragment_context_bindings(
                                  in `{}`",
                                 col_name, param.name, sig.name
                             ),
-                            range: to_range(col_range, text),
+                            range: col_range,
                             code: Some(DiagnosticCode::FragmentColumnMissing),
                             data: None,
                         });
@@ -2857,7 +2819,7 @@ pub fn check_fragment_context_bindings(
 /// constraint.
 ///
 /// Pure — no Salsa dependency.
-pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr, text: &str) -> Vec<Diagnostic> {
+pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr) -> Vec<Diagnostic> {
     use smelt_types::signatures::Tier;
 
     // Only Tier 3 has a declared return type.
@@ -2897,7 +2859,7 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr, text: &str) -> Ve
     }
 
     // Mismatch — anchor at the body expression.
-    let body_range = to_range(body.text_range(), text);
+    let body_range = body.text_range();
     let declared_text = sig
         .return_type_text
         .as_deref()
@@ -3009,10 +2971,7 @@ pub use smelt_planner::lowering::{as_struct_to_sql, backend_supports_struct_lite
 ///    or `is_numeric`.
 ///
 /// Pure function — no Salsa dependency.
-pub fn check_hof_column_ref_field_diagnostics(
-    select_stmt: &SelectStmt,
-    text: &str,
-) -> Vec<Diagnostic> {
+pub fn check_hof_column_ref_field_diagnostics(select_stmt: &SelectStmt) -> Vec<Diagnostic> {
     use smelt_parser::SyntaxKind::{DOT, FUNCTION_CALL, IDENT, SMELT_PATH_CALL};
 
     let mut diags = Vec::new();
@@ -3118,10 +3077,6 @@ pub fn check_hof_column_ref_field_diagnostics(
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
 
-        let to_range = |range: rowan::TextRange| -> Range {
-            smelt_parser::ast::text_range_to_range(text, range)
-        };
-
         for body_node in body_root.descendants() {
             let expr = match Expr::cast(body_node.clone()) {
                 Some(e) => e,
@@ -3188,7 +3143,7 @@ pub fn check_hof_column_ref_field_diagnostics(
                     None,
                     Some(field_name),
                 ),
-                range: to_range(field_token_range),
+                range: field_token_range,
                 code: Some(DiagnosticCode::ColumnRefFieldUnknown),
                 data: None,
             });
@@ -3219,7 +3174,6 @@ pub fn check_hof_column_ref_field_diagnostics(
 /// Pure function — no Salsa dependency.
 pub fn check_hof_model_ref_source_ref_field_diagnostics(
     select_stmt: &SelectStmt,
-    text: &str,
 ) -> Vec<Diagnostic> {
     use smelt_parser::SyntaxKind::{DOT, FUNCTION_CALL, IDENT, SMELT_PATH_CALL};
     use smelt_types::signatures::{model_ref_field, source_ref_field, SmeltType};
@@ -3338,10 +3292,6 @@ pub fn check_hof_model_ref_source_ref_field_diagnostics(
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
 
-        let to_range = |range: rowan::TextRange| -> Range {
-            smelt_parser::ast::text_range_to_range(text, range)
-        };
-
         for body_node in body_root.descendants() {
             let expr = match smelt_parser::ast::Expr::cast(body_node.clone()) {
                 Some(e) => e,
@@ -3416,7 +3366,7 @@ pub fn check_hof_model_ref_source_ref_field_diagnostics(
             diags.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: crate::meta_reflection_diagnostic_message(code, None, Some(field_name)),
-                range: to_range(field_token_range),
+                range: field_token_range,
                 code: Some(code),
                 data: None,
             });
@@ -3881,10 +3831,7 @@ mod tests {
         let drop_diag = crate::Diagnostic {
             severity: crate::DiagnosticSeverity::Error,
             message: msg.clone(),
-            range: crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            },
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
             code: Some(crate::DiagnosticCode::ColumnsOfUnresolvableSchema),
             data: None,
         };
@@ -4188,7 +4135,6 @@ mod tests {
     /// Test 1 from the plan TDD spec.
     #[test]
     fn generator_frame_stamps_at_generator_body_range() {
-        use smelt_parser::ast::Position;
         use std::path::Path;
 
         let generator_path = Path::new("models/cohorts.gen.sql");
@@ -4205,7 +4151,7 @@ mod tests {
         // body_range covers bytes 30..50, which lands inside the file_text above.
         let body_range = rowan::TextRange::new(30.into(), 50.into());
 
-        let frame = make_generator_frame(generator_path, body_range, file_text);
+        let frame = make_generator_frame(generator_path, body_range);
 
         // Primary assertions: all spec-required fields.
         assert_eq!(
@@ -4221,47 +4167,31 @@ mod tests {
         assert!(frame.decl_range.is_none(), "decl_range must be None");
         assert_eq!(frame.param, "", "param must be empty string");
 
-        // call_site_range must be Some when file_text is non-empty.
-        let range = frame
-            .call_site_range
-            .expect("call_site_range must be Some when file_text is non-empty");
-
-        // The byte offset 30 in file_text is after "---\ngenerates: models\n---\n\n\n"
-        // (4+19+4+1+1 = 29 bytes → offset 29 ends after the second '\n').
-        // Compute expected positions by counting newlines up to offsets 30 and 50.
-        let expected_start = smelt_parser::offset_to_position(file_text, 30);
-        let expected_end = smelt_parser::offset_to_position(file_text, 50);
+        // call_site_range is always Some — it directly stores the TextRange.
+        let range = frame.call_site_range.expect("call_site_range must be Some");
 
         assert_eq!(
-            range.start,
-            Position {
-                line: expected_start.line,
-                column: expected_start.column
-            },
-            "call_site_range.start must match byte offset 30 in file_text"
+            range.start(),
+            rowan::TextSize::from(30u32),
+            "call_site_range.start must be byte offset 30"
         );
         assert_eq!(
-            range.end,
-            Position {
-                line: expected_end.line,
-                column: expected_end.column
-            },
-            "call_site_range.end must match byte offset 50 in file_text"
+            range.end(),
+            rowan::TextSize::from(50u32),
+            "call_site_range.end must be byte offset 50"
         );
     }
 
-    /// Degenerate case: `make_generator_frame` with empty `file_text` produces
-    /// `call_site_range = None` (no byte-to-line context available).
-    ///
-    /// Kept as a companion to ensure the empty-text edge-case remains covered.
+    /// `make_generator_frame` always stores the body range in `call_site_range`
+    /// regardless of whether `file_text` is empty.
     #[test]
-    fn generator_frame_with_empty_text_yields_none_call_site_range() {
+    fn generator_frame_with_empty_text_yields_call_site_range() {
         use std::path::Path;
 
         let generator_path = Path::new("models/cohorts.gen.sql");
         let body_range = rowan::TextRange::new(30.into(), 80.into());
 
-        let frame = make_generator_frame(generator_path, body_range, "");
+        let frame = make_generator_frame(generator_path, body_range);
 
         assert_eq!(
             frame.function, "<generator>",
@@ -4276,8 +4206,9 @@ mod tests {
         assert!(frame.decl_range.is_none(), "decl_range must be None");
         assert_eq!(frame.param, "", "param must be empty string");
         assert_eq!(
-            frame.call_site_range, None,
-            "call_site_range must be None when file_text is empty"
+            frame.call_site_range,
+            Some(body_range),
+            "call_site_range must be Some(body_range)"
         );
     }
 
@@ -4309,10 +4240,7 @@ mod tests {
         let mut inner_diag = Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: "RecordFieldUnknown: c.bogus".to_string(),
-            range: crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 5 },
-            },
+            range: rowan::TextRange::new(rowan::TextSize::from(0), rowan::TextSize::from(5)),
             code: None,
             data: Some(DiagnosticData::ExpansionFrames(vec![hof_frame.clone()])),
         };
@@ -4321,7 +4249,7 @@ mod tests {
         // innermost-first ordering).
         let gen_path = Path::new("models/cohorts.gen.sql");
         let body_range = rowan::TextRange::new(0.into(), 10.into());
-        let gen_frame = make_generator_frame(gen_path, body_range, "");
+        let gen_frame = make_generator_frame(gen_path, body_range);
         stamp_generator_frame_onto(&mut inner_diag, gen_frame);
 
         let frames = match &inner_diag.data {

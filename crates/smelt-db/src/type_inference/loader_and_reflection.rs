@@ -26,31 +26,16 @@ use super::*;
 /// - If the argument resolves to a YAML `null` value → `ConfigVarNullCoercion` (Warning).
 ///
 /// `vars_map` is the parsed `vars:` block from `smelt.yml` (pass empty map when absent).
-/// `text` is the raw source file text (used for span → range conversion; pass `""`
-/// in tests where range accuracy is not needed).
 ///
 /// Pure function — no Salsa dependency.
 pub fn check_config_var_call_diagnostics(
     root: &smelt_parser::syntax_kind::SyntaxNode,
     vars_map: &std::collections::BTreeMap<String, serde_yaml::Value>,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::ast::SmeltPathCall;
     use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
 
     let mut diags = Vec::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     for node in root.descendants() {
         if node.kind() != SMELT_PATH_CALL {
             continue;
@@ -67,7 +52,7 @@ pub fn check_config_var_call_diagnostics(
             continue;
         }
 
-        let call_range = to_range(node.text_range());
+        let call_range = node.text_range();
 
         // Extract the first positional argument expression.
         let first_arg = call
@@ -98,7 +83,7 @@ pub fn check_config_var_call_diagnostics(
 
         // Check: is the argument a string literal?
         if !crate::config_vars::is_string_literal_expr(&arg_expr) {
-            let arg_range = to_range(arg_expr.syntax().text_range());
+            let arg_range = arg_expr.syntax().text_range();
             diags.push(crate::Diagnostic {
                 severity: crate::DiagnosticSeverity::Error,
                 message: crate::meta_hof_diagnostic_message(
@@ -211,22 +196,22 @@ const REFLECTION_WITNESS_TYPE_NAMES: &[&str] = &["ColumnRef", "ModelRef", "Sourc
 #[derive(Debug, Clone)]
 pub enum LoaderPathOutcome {
     /// Path is not a string literal — emit `ConfigLoaderPathNotLiteral`.
-    NotLiteral { arg_range: crate::Range },
+    NotLiteral { arg_range: rowan::TextRange },
     /// Path contains `\` — emit `ConfigLoaderPathBackslash`.
     Backslash {
         path: String,
-        call_range: crate::Range,
+        call_range: rowan::TextRange,
     },
     /// Path is absolute, escapes the workspace, or has a scheme prefix —
     /// emit `ConfigLoaderPathEscapesWorkspace`.
     EscapesWorkspace {
         path: String,
-        call_range: crate::Range,
+        call_range: rowan::TextRange,
     },
     /// Path is valid but the file was not found — emit `ConfigLoaderFileNotFound`.
     FileNotFound {
         path: String,
-        arg_range: crate::Range,
+        arg_range: rowan::TextRange,
     },
     /// Path is valid and the file exists.
     Valid { path: String },
@@ -243,8 +228,8 @@ pub enum LoaderPathOutcome {
 /// Pure — no Salsa dependency, no I/O.
 pub fn check_loader_path(
     path_value: &str,
-    path_range: crate::Range,
-    call_range: crate::Range,
+    path_range: rowan::TextRange,
+    call_range: rowan::TextRange,
     file_exists: &dyn Fn(&str) -> bool,
 ) -> LoaderPathOutcome {
     // 1. Backslash check.
@@ -525,32 +510,16 @@ pub fn infer_loader_call_smelt_type(call: &SmeltPathCall, ctx: &TypeContext) -> 
 ///
 /// `registry` supplies the workspace `RecordRegistry` for named-schema lookup.
 ///
-/// `text` is the raw source file text (used for span → range conversion; pass
-/// `""` in tests where range accuracy is not needed).
-///
 /// Pure — no Salsa dependency.
 pub fn check_loader_call_diagnostics(
     root: &smelt_parser::syntax_kind::SyntaxNode,
     file_exists: &dyn Fn(&str) -> bool,
     registry: &RecordRegistry,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::ast::SmeltPathCall;
     use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
 
     let mut diags = Vec::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     for node in root.descendants() {
         if node.kind() != SMELT_PATH_CALL {
             continue;
@@ -570,7 +539,7 @@ pub fn check_loader_call_diagnostics(
             continue;
         }
 
-        let call_range = to_range(node.text_range());
+        let call_range = node.text_range();
 
         // ─── load_toml: reserved ─────────────────────────────────────────
         if loader_name == "load_toml" {
@@ -639,7 +608,7 @@ pub fn check_loader_call_diagnostics(
             Some(arg_expr) => {
                 // Is the path argument a string literal?
                 if !crate::config_vars::is_string_literal_expr(arg_expr) {
-                    let arg_range = to_range(arg_expr.syntax().text_range());
+                    let arg_range = arg_expr.syntax().text_range();
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_loader_diagnostic_message(
@@ -670,7 +639,7 @@ pub fn check_loader_call_diagnostics(
                     Some(v) => v,
                     None => continue,
                 };
-                let arg_range = to_range(arg_expr.syntax().text_range());
+                let arg_range = arg_expr.syntax().text_range();
 
                 // Check path well-formedness.
                 match check_loader_path(&path_value, arg_range, call_range, file_exists) {
@@ -762,7 +731,7 @@ pub fn check_loader_call_diagnostics(
                 // ── Argument 2: schema ────────────────────────────────────
                 let schema_arg = positional_args.get(1);
                 if let Some(schema_expr) = schema_arg {
-                    let schema_range = to_range(schema_expr.syntax().text_range());
+                    let schema_range = schema_expr.syntax().text_range();
                     let schema_text = schema_expr.syntax().text().to_string();
                     if !schema_arg_text_is_admissible(&schema_text, registry) {
                         diags.push(crate::Diagnostic {
@@ -812,29 +781,15 @@ pub fn check_loader_call_diagnostics(
 /// The function always synthesises `List<ColumnRef>` (recoverable) regardless
 /// of errors — that is handled by `infer_smelt_path_call_type`.
 ///
-/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
-/// span positions are not under test.
+/// Pure — no Salsa dependency.
 pub fn check_columns_of_diagnostics(
     select_stmt: &smelt_parser::ast::SelectStmt,
     ctx: &TypeContext,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::ast::SmeltPathCall;
     use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
 
     let mut diags = Vec::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     let root = select_stmt.syntax();
 
     for node in root.descendants() {
@@ -861,7 +816,7 @@ pub fn check_columns_of_diagnostics(
         // Any NAMED_PARAM in the arg list is invalid; emit one diagnostic
         // per named arg, anchored at the named-arg node span.
         for named in arg_list.named_params() {
-            let named_range = to_range(named.text_range());
+            let named_range = named.text_range();
             diags.push(crate::Diagnostic {
                 severity: crate::DiagnosticSeverity::Error,
                 message: crate::meta_reflection_diagnostic_message(
@@ -925,7 +880,7 @@ pub fn check_columns_of_diagnostics(
                 let is_clearly_non_table =
                     !matches!(tc.data_type, DataType::Unknown | DataType::Null);
                 if is_clearly_non_table {
-                    let arg_range = to_range(pos_arg.syntax().text_range());
+                    let arg_range = pos_arg.syntax().text_range();
                     let actual_str = tc.data_type.to_string();
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
@@ -952,12 +907,10 @@ pub fn check_columns_of_diagnostics(
 /// closed `COLUMN_REF_FIELDS` set. Unknown fields emit
 /// [`DiagnosticCode::ColumnRefFieldUnknown`] anchored at the field-name span.
 ///
-/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
-/// span positions are not under test.
+/// Pure — no Salsa dependency.
 pub fn check_column_ref_field_diagnostics(
     select_stmt: &smelt_parser::ast::SelectStmt,
     ctx: &TypeContext,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_types::signatures::column_ref_field;
 
@@ -965,18 +918,6 @@ pub fn check_column_ref_field_diagnostics(
     // Track seen (qualifier, field) pairs to avoid duplicate diagnostics from
     // nested EXPRESSION nodes that wrap the same column reference text.
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     let root = select_stmt.syntax();
 
     for node in root.descendants() {
@@ -1056,7 +997,7 @@ pub fn check_column_ref_field_diagnostics(
                 None,
                 Some(field_name),
             ),
-            range: to_range(field_token_range),
+            range: field_token_range,
             code: Some(crate::DiagnosticCode::ColumnRefFieldUnknown),
             data: None,
         });
@@ -1162,18 +1103,6 @@ pub fn check_wide_reflection_diagnostics(
     use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
 
     let mut diags = Vec::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     let root = select_stmt.syntax();
 
     for node in root.descendants() {
@@ -1224,7 +1153,7 @@ pub fn check_wide_reflection_diagnostics(
             if let Some(al) = &arg_list {
                 let full_accessor = format!("smelt.{ns}.all");
                 for pos_arg in al.positional_args() {
-                    let arg_range = to_range(pos_arg.syntax().text_range());
+                    let arg_range = pos_arg.syntax().text_range();
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_reflection_diagnostic_message(
@@ -1238,7 +1167,7 @@ pub fn check_wide_reflection_diagnostics(
                     });
                 }
                 for named_arg in al.named_params() {
-                    let arg_range = to_range(named_arg.text_range());
+                    let arg_range = named_arg.text_range();
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_reflection_diagnostic_message(
@@ -1259,7 +1188,7 @@ pub fn check_wide_reflection_diagnostics(
         if let Some(al) = &arg_list {
             // Named arguments are not supported.
             for named_arg in al.named_params() {
-                let arg_range = to_range(named_arg.text_range());
+                let arg_range = named_arg.text_range();
                 diags.push(crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message: crate::meta_reflection_diagnostic_message(
@@ -1280,7 +1209,7 @@ pub fn check_wide_reflection_diagnostics(
                     let actual_str = infer_expression_type(&pos_arg, ctx)
                         .map(|tc| tc.data_type.to_string())
                         .unwrap_or_else(|| "?".to_string());
-                    let arg_range = to_range(pos_arg.syntax().text_range());
+                    let arg_range = pos_arg.syntax().text_range();
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_reflection_diagnostic_message(
@@ -1311,7 +1240,10 @@ pub fn check_wide_reflection_diagnostics(
 ///
 /// For `smelt.models.bogus(...)` returns the span of `bogus`.
 /// Falls back to the node's own range when a more precise span cannot be found.
-fn find_last_segment_range(call: &smelt_parser::ast::SmeltPathCall, text: &str) -> crate::Range {
+fn find_last_segment_range(
+    call: &smelt_parser::ast::SmeltPathCall,
+    _text: &str,
+) -> rowan::TextRange {
     use smelt_parser::SyntaxKind::IDENT;
 
     // Walk the path's IDENT tokens to find the last one (the accessor name).
@@ -1330,15 +1262,7 @@ fn find_last_segment_range(call: &smelt_parser::ast::SmeltPathCall, text: &str) 
             .last()
     });
 
-    let raw_range = last_ident_range.unwrap_or_else(|| call.syntax().text_range());
-    if text.is_empty() {
-        crate::Range {
-            start: smelt_parser::ast::Position { line: 0, column: 0 },
-            end: smelt_parser::ast::Position { line: 0, column: 0 },
-        }
-    } else {
-        smelt_parser::ast::text_range_to_range(text, raw_range)
-    }
+    last_ident_range.unwrap_or_else(|| call.syntax().text_range())
 }
 
 /// Walk all expression descendants of `select_stmt`. For every expression of
@@ -1348,29 +1272,15 @@ fn find_last_segment_range(call: &smelt_parser::ast::SmeltPathCall, text: &str) 
 /// Unknown fields emit [`DiagnosticCode::ModelRefFieldUnknown`] /
 /// [`DiagnosticCode::SourceRefFieldUnknown`] anchored at the field-name span.
 ///
-/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
-/// span positions are not under test.
+/// Pure — no Salsa dependency.
 pub fn check_model_ref_source_ref_field_diagnostics(
     select_stmt: &smelt_parser::ast::SelectStmt,
     ctx: &TypeContext,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_types::signatures::{model_ref_field, source_ref_field, SmeltType};
 
     let mut diags = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     let root = select_stmt.syntax();
 
     for node in root.descendants() {
@@ -1445,7 +1355,7 @@ pub fn check_model_ref_source_ref_field_diagnostics(
         diags.push(crate::Diagnostic {
             severity: crate::DiagnosticSeverity::Error,
             message: crate::meta_reflection_diagnostic_message(code, None, Some(field_name)),
-            range: to_range(field_token_range),
+            range: field_token_range,
             code: Some(code),
             data: None,
         });

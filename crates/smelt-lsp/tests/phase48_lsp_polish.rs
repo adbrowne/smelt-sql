@@ -362,17 +362,11 @@ impl Phase48Workspace {
 /// test.
 #[test]
 fn multi_level_frame_trace_in_message_body() {
-    use smelt_db::{DiagnosticCode, DiagnosticSeverity as DbSeverityT, Range as DbRange};
-    use smelt_parser::ast::Position as DbPosition;
+    use rowan::{TextRange, TextSize};
+    use smelt_db::{DiagnosticCode, DiagnosticSeverity as DbSeverityT};
 
-    fn make_db_range(line: u32, col: u32) -> DbRange {
-        DbRange {
-            start: DbPosition { line, column: col },
-            end: DbPosition {
-                line,
-                column: col + 1,
-            },
-        }
+    fn make_text_range(start: u32, end: u32) -> TextRange {
+        TextRange::new(TextSize::from(start), TextSize::from(end))
     }
 
     fn make_frame(function: &str, param: &str, bound_type: &str) -> FrameInfo {
@@ -382,8 +376,8 @@ fn multi_level_frame_trace_in_message_body() {
             param: param.to_string(),
             bound_type: bound_type.to_string(),
             decl_path: Some(path),
-            decl_range: Some(make_db_range(1, 0)),
-            call_site_range: Some(make_db_range(2, 0)),
+            decl_range: Some(make_text_range(10, 11)),
+            call_site_range: Some(make_text_range(20, 21)),
             fn_id: Some(function.to_string()),
             element_index: None,
             column_origin: None,
@@ -401,7 +395,7 @@ fn multi_level_frame_trace_in_message_body() {
     let diag = DbDiagnosticT {
         severity: DbSeverityT::Error,
         message: "Type mismatch".to_string(),
-        range: make_db_range(0, 0),
+        range: make_text_range(0, 1),
         code: Some(DiagnosticCode::UnknownIdentifier),
         data: Some(DiagnosticData::ExpansionFrames(frames)),
     };

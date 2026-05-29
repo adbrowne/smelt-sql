@@ -2,7 +2,7 @@
 //!
 //! Pure data types and pure functions. No Salsa dependency.
 
-use crate::Range;
+use rowan::TextRange;
 
 /// Diagnostic codes for pattern-matching in code actions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -661,7 +661,7 @@ pub enum DiagnosticData {
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
-    pub range: Range,
+    pub range: TextRange,
     pub code: Option<DiagnosticCode>,
     pub data: Option<DiagnosticData>,
 }

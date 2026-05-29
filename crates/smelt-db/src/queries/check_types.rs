@@ -12,37 +12,20 @@ use crate::queries::schema::{
     model_input_constraints, model_schema, resolved_model_schema, type_context, typed_model_schema,
 };
 use crate::type_inference;
-use crate::{find_project, resolve_ref, DiagnosticAcc, Range, SourceFile, Workspace};
+use crate::{find_project, resolve_ref, DiagnosticAcc, SourceFile, Workspace};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
 // ============================================================================
 // Type compatibility + expression / construct checks
 // ============================================================================
 
-/// Shift a `Range` by adding `byte_offset` bytes to the start of the source
-/// text. Used by `_for_select` pure helpers to remap ranges from a body
-/// fragment back to the enclosing file's coordinate space.
-///
-/// When `byte_offset == 0` this is a no-op (same result as calling
-/// `text_range_to_range` directly).
-fn shifted_range(text: &str, range: rowan::TextRange, byte_offset: usize) -> Range {
-    if byte_offset == 0 {
-        return smelt_parser::ast::text_range_to_range(text, range);
-    }
-    let offset = rowan::TextSize::from(byte_offset as u32);
-    let shifted = rowan::TextRange::new(range.start() + offset, range.end() + offset);
-    smelt_parser::ast::text_range_to_range(text, shifted)
-}
-
 /// Pure helper: walk a single `Expr` node and collect CAST/function-name
-/// diagnostics into `out`. `text` is the full source text of the enclosing
-/// file (used for byte-offset → line/column conversion). `range_offset` is
-/// the byte offset of the body fragment within that file: `0` for
-/// hand-authored callers, `body_span.start()` for emission-body callers.
+/// diagnostics into `out`. `range_offset` is added to each diagnostic's
+/// `TextRange` so that body-fragment ranges map into the enclosing file's
+/// byte space. Pass `TextSize::from(0)` for hand-authored callers.
 pub(crate) fn collect_expression_type_diagnostics(
     expr: &smelt_parser::ast::Expr,
-    text: &str,
-    range_offset: usize,
+    range_offset: rowan::TextSize,
     out: &mut Vec<Diagnostic>,
 ) {
     if let Some(cast_expr) = expr.as_cast() {
@@ -52,7 +35,7 @@ pub(crate) fn collect_expression_type_diagnostics(
                 // Use the enclosing cast expression's span as the diagnostic
                 // range (TypeSpec does not expose a syntax() accessor; the
                 // full cast expression is a precise-enough anchor).
-                let range = shifted_range(text, expr.syntax().text_range(), range_offset);
+                let range = expr.syntax().text_range() + range_offset;
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: format!(
@@ -66,7 +49,7 @@ pub(crate) fn collect_expression_type_diagnostics(
             }
         }
         if let Some(inner) = cast_expr.expression() {
-            collect_expression_type_diagnostics(&inner, text, range_offset, out);
+            collect_expression_type_diagnostics(&inner, range_offset, out);
         }
     }
 
@@ -80,7 +63,7 @@ pub(crate) fn collect_expression_type_diagnostics(
                 && func.namespace().is_none()
                 && smelt_types::SqlFunction::from_name(&upper_name).is_none()
             {
-                let range = shifted_range(text, func.syntax().text_range(), range_offset);
+                let range = func.syntax().text_range() + range_offset;
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: format!(
@@ -98,31 +81,27 @@ pub(crate) fn collect_expression_type_diagnostics(
 
 /// Pure helper: walk the select list of a `SelectStmt` and collect
 /// CAST/function-name diagnostics. Returns the same diagnostics that the
-/// Salsa-accumulator path would emit. `range_offset` is `0` for hand-authored
-/// callers; emission-body callers pass the body span's byte start.
+/// Salsa-accumulator path would emit. `range_offset` is `TextSize::from(0)`
+/// for hand-authored callers; emission-body callers pass the body span's
+/// byte start as a `TextSize`.
 pub fn check_expression_types_for_select(
     select_stmt: &smelt_parser::ast::SelectStmt,
-    text: &str,
-    range_offset: usize,
+    range_offset: rowan::TextSize,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     if let Some(select_list) = select_stmt.select_list() {
         for item in select_list.items() {
             if let Some(expr) = item.expression() {
-                collect_expression_type_diagnostics(&expr, text, range_offset, &mut out);
+                collect_expression_type_diagnostics(&expr, range_offset, &mut out);
             }
         }
     }
     out
 }
 
-pub(crate) fn check_expression_types(
-    expr: &smelt_parser::ast::Expr,
-    text: &str,
-    db: &dyn salsa::Database,
-) {
+pub(crate) fn check_expression_types(expr: &smelt_parser::ast::Expr, db: &dyn salsa::Database) {
     let mut out = Vec::new();
-    collect_expression_type_diagnostics(expr, text, 0, &mut out);
+    collect_expression_type_diagnostics(expr, rowan::TextSize::from(0), &mut out);
     for diag in out {
         DiagnosticAcc(diag).accumulate(db);
     }
@@ -130,13 +109,12 @@ pub(crate) fn check_expression_types(
 
 /// Pure helper: walk a `ModelSchema` and collect `CannotInferType`
 /// diagnostics for every column whose type is `Unknown` or absent.
-/// `range_offset` is `0` for hand-authored callers; emission-body callers
-/// pass the body span's byte start so that column ranges are remapped to the
-/// enclosing file.
+/// `range_offset` is `TextSize::from(0)` for hand-authored callers;
+/// emission-body callers pass the body span's byte start so that column
+/// ranges are remapped to the enclosing file.
 pub fn cannot_infer_type_for_schema(
     typed_schema: &crate::ModelSchema,
-    text: &str,
-    range_offset: usize,
+    range_offset: rowan::TextSize,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for col in &typed_schema.columns {
@@ -145,7 +123,7 @@ pub fn cannot_infer_type_for_schema(
         }
         match &col.data_type {
             Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown) => {
-                let range = shifted_range(text, col.range, range_offset);
+                let range = col.range + range_offset;
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: format!(
@@ -160,7 +138,7 @@ pub fn cannot_infer_type_for_schema(
                 });
             }
             None => {
-                let range = shifted_range(text, col.range, range_offset);
+                let range = col.range + range_offset;
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: format!(
@@ -182,7 +160,6 @@ pub fn cannot_infer_type_for_schema(
 
 pub(crate) fn check_unsupported_constructs(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
-    text: &str,
     db: &dyn salsa::Database,
 ) {
     use smelt_parser::SyntaxKind::{PIVOT_CLAUSE, UNPIVOT_CLAUSE};
@@ -193,14 +170,13 @@ pub(crate) fn check_unsupported_constructs(
             UNPIVOT_CLAUSE => ("UNPIVOT", node.text_range()),
             _ => continue,
         };
-        let range = smelt_parser::ast::text_range_to_range(text, node_range);
         DiagnosticAcc(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!(
                 "{} is not supported \u{2014} output columns depend on data values and cannot be determined at compile time",
                 kind_name
             ),
-            range,
+            range: node_range,
             code: Some(DiagnosticCode::UnsupportedConstruct),
             data: None,
         })
@@ -290,11 +266,9 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         return;
     }
 
-    let text = file.text(db);
-
     if has_direct_data_refs {
         let typed_schema = typed_model_schema(db, workspace, file);
-        for diag in cannot_infer_type_for_schema(&typed_schema, text, 0) {
+        for diag in cannot_infer_type_for_schema(&typed_schema, rowan::TextSize::from(0)) {
             DiagnosticAcc(diag).accumulate(db);
         }
     } // end if has_direct_data_refs
@@ -306,11 +280,10 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             let ctx = type_context(db, workspace, file);
             let undeclared = type_inference::check_undeclared_columns(&select_stmt, &ctx);
             for info in undeclared {
-                let range = smelt_parser::ast::text_range_to_range(text, info.range);
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: info.message,
-                    range,
+                    range: info.range,
                     code: Some(DiagnosticCode::UndeclaredColumn),
                     data: Some(DiagnosticData::UndeclaredColumn {
                         qualifier: info.qualifier,
@@ -344,14 +317,13 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 if let Some(actual) = &col.data_type {
                     if !types_compatible(&expected.data_type, &actual.data_type) {
                         for site in &col_constraint.usage_sites {
-                            let range = smelt_parser::ast::text_range_to_range(text, *site);
                             DiagnosticAcc(Diagnostic {
                                 severity: DiagnosticSeverity::Warning,
                                 message: format!(
                                     "Column '{}' from '{}' has type {} but is used where {} is expected",
                                     col_name, constraint.ref_name, actual.data_type, expected.data_type
                                 ),
-                                range,
+                                range: *site,
                                 code: Some(DiagnosticCode::TypeMismatch),
                                 data: Some(DiagnosticData::TypeMismatch {
                                     column_name: col_name.clone(),
@@ -628,7 +600,7 @@ mod tests {
         let ast = AstFile::cast(syntax).expect("should parse as AstFile");
         let select = ast.select_stmt().expect("should have select_stmt");
 
-        let diags = check_expression_types_for_select(&select, sql, 0);
+        let diags = check_expression_types_for_select(&select, rowan::TextSize::from(0));
         let matches: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::UnrecognizedFunction))
@@ -671,7 +643,7 @@ mod tests {
         let ast = AstFile::cast(syntax).expect("should parse as AstFile");
         let select = ast.select_stmt().expect("should have select_stmt");
 
-        let diags = check_expression_types_for_select(&select, sql, 0);
+        let diags = check_expression_types_for_select(&select, rowan::TextSize::from(0));
         let matches: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::UnknownCastType))
@@ -689,7 +661,7 @@ mod tests {
 
     /// When `range_offset = 0`, `check_expression_types_for_select` emits the
     /// diagnostic at the real AST node position (not the old zero-zero default).
-    /// For single-line SQL the diagnostic is on line 0.
+    /// For single-line SQL the diagnostic has a non-zero start byte offset.
     #[test]
     fn check_expression_types_for_select_range_offset_zero_noop() {
         use crate::queries::check_types::check_expression_types_for_select;
@@ -701,52 +673,43 @@ mod tests {
         let ast = AstFile::cast(syntax).expect("should parse as AstFile");
         let select = ast.select_stmt().expect("should have select_stmt");
 
-        let diags_0 = check_expression_types_for_select(&select, sql, 0);
-        // The CAST expression starts on line 0; with offset 0 the range is
-        // the real AST position, still on line 0.
+        let diags_0 = check_expression_types_for_select(&select, rowan::TextSize::from(0));
+        // The CAST expression starts after "SELECT " (7 bytes); with offset 0
+        // the range start should be at byte 7.
         assert!(
             !diags_0.is_empty(),
             "must produce at least one diagnostic; got: {:?}",
             diags_0
         );
         let first = &diags_0[0];
-        assert_eq!(
-            first.range.start.line, 0,
-            "CAST on single-line SQL must have start.line == 0; got: {:?}",
-            first.range
-        );
-        // Column must be > 0 (the CAST keyword is not at column 0 in
-        // "SELECT CAST(...)" — it starts at column 7).
+        // "SELECT " is 7 bytes; the CAST expression starts at byte offset 7.
         assert!(
-            first.range.start.column > 0,
-            "CAST expression is not at column 0 in 'SELECT CAST(...)'; got: {:?}",
-            first.range
+            u32::from(first.range.start()) > 0,
+            "CAST expression is not at byte 0 in 'SELECT CAST(...)'; start={:?}",
+            first.range.start()
         );
     }
 
     /// When `range_offset > 0`, `check_expression_types_for_select` shifts each
     /// diagnostic range so that byte offsets map into the enclosing file rather
-    /// than the fragment. Passing `range_offset = 100` (a 100-byte prefix) moves
-    /// the reported position forward by that many bytes worth of lines/columns.
+    /// than the fragment. Passing `range_offset = 100` bytes shifts each
+    /// reported start forward by 100.
     #[test]
     fn check_expression_types_for_select_range_offset_shifts_position() {
         use crate::queries::check_types::check_expression_types_for_select;
         use smelt_parser::{self, File as AstFile};
 
         // Fragment SQL — will be treated as starting at byte 100 in the
-        // enclosing file (100 bytes of newlines = 100 lines of offset).
+        // enclosing file.
         let fragment_sql = "SELECT CAST(x AS BogusType) FROM t";
         let parse = smelt_parser::parse(fragment_sql);
         let syntax = parse.syntax();
         let ast = AstFile::cast(syntax).expect("should parse as AstFile");
         let select = ast.select_stmt().expect("should have select_stmt");
 
-        // Build a 100-newline prefix so byte 100 is line 100 column 0.
-        let prefix = "\n".repeat(100);
-        let full_text = format!("{}{}", prefix, fragment_sql);
-
-        let diags_no_offset = check_expression_types_for_select(&select, fragment_sql, 0);
-        let diags_with_offset = check_expression_types_for_select(&select, &full_text, 100);
+        let diags_no_offset = check_expression_types_for_select(&select, rowan::TextSize::from(0));
+        let diags_with_offset =
+            check_expression_types_for_select(&select, rowan::TextSize::from(100));
 
         assert!(
             !diags_no_offset.is_empty(),
@@ -762,11 +725,11 @@ mod tests {
         let no_off = &diags_no_offset[0];
         let with_off = &diags_with_offset[0];
 
-        // With 100 newlines of prefix, line numbers shift by 100.
+        // With 100 bytes of offset, start byte advances by 100.
         assert_eq!(
-            with_off.range.start.line,
-            no_off.range.start.line + 100,
-            "range_offset = 100 (all newlines) must add 100 to start.line; \
+            u32::from(with_off.range.start()),
+            u32::from(no_off.range.start()) + 100,
+            "range_offset = 100 must add 100 to start byte; \
              no_offset: {:?}, with_offset: {:?}",
             no_off.range,
             with_off.range
@@ -782,7 +745,6 @@ mod tests {
         use crate::queries::check_types::cannot_infer_type_for_schema;
         use crate::{Column, ColumnSource, ModelSchema};
 
-        let text = "SELECT some_col FROM t";
         let col_range = rowan::TextRange::new(7.into(), 15.into()); // "some_col"
 
         let col_no_type = Column {
@@ -800,7 +762,7 @@ mod tests {
             input_constraints: vec![],
         };
 
-        let diags = cannot_infer_type_for_schema(&schema, text, 0);
+        let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
         let matches: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::CannotInferType))
@@ -822,7 +784,6 @@ mod tests {
         use crate::{Column, ColumnSource, ModelSchema};
         use smelt_types::{DataType, TypedColumn};
 
-        let text = "SELECT some_col FROM t";
         let col_range = rowan::TextRange::new(7.into(), 15.into());
 
         let col_unknown = Column {
@@ -843,7 +804,7 @@ mod tests {
             input_constraints: vec![],
         };
 
-        let diags = cannot_infer_type_for_schema(&schema, text, 0);
+        let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
         let matches: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::CannotInferType))
@@ -865,7 +826,6 @@ mod tests {
         use crate::{Column, ColumnSource, ModelSchema};
         use smelt_types::{DataType, TypedColumn};
 
-        let text = "SELECT some_col FROM t";
         let col_range = rowan::TextRange::new(7.into(), 15.into());
 
         let col_typed = Column {
@@ -886,7 +846,7 @@ mod tests {
             input_constraints: vec![],
         };
 
-        let diags = cannot_infer_type_for_schema(&schema, text, 0);
+        let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
         assert!(
             diags.is_empty(),
             "schema with typed column must produce 0 diagnostics; got: {:?}",

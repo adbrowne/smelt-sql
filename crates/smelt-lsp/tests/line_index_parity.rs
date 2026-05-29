@@ -102,27 +102,30 @@ fn ascii_broken_emission_body_undeclared_column_parity() {
     let line_index = LineIndex::new(&text);
 
     for diag in &diags {
-        // Shadow-mode parity check: round-trip the diagnostic's (line, col)
-        // through a byte-offset and back via LineIndex.
-        for (pos_label, pos) in [("start", diag.range.start), ("end", diag.range.end)] {
-            let Some(byte_offset) = codepoint_position_to_byte_offset(&text, pos.line, pos.column)
-            else {
-                // Position past end-of-file (can happen for end positions at EOF).
-                continue;
-            };
+        // Graduated from shadow-mode: verify that LineIndex can decode the
+        // byte-offset endpoints stored in the TextRange without panic, and
+        // that the line/col values are within the text's line bounds.
+        for (pos_label, ts) in [("start", diag.range.start()), ("end", diag.range.end())] {
+            let byte_offset = usize::from(ts);
+            // Byte offset must be within [0, len].
+            assert!(
+                byte_offset <= text.len(),
+                "diagnostic {pos_label} byte offset {byte_offset} exceeds text length {}; diag={:?}",
+                text.len(),
+                diag
+            );
             let lc = line_index.line_col(TextSize::from(byte_offset as u32));
-            assert_eq!(
-                lc.line, pos.line,
-                "LineIndex line mismatch at diagnostic {pos_label}: \
-                 expected line={}, got line={}; diag={:?}",
-                pos.line, lc.line, diag
-            );
-            assert_eq!(
-                lc.col, pos.column,
-                "LineIndex col mismatch at diagnostic {pos_label}: \
-                 expected col={}, got col={}; diag={:?}",
-                pos.column, lc.col, diag
-            );
+            // Round-trip: reconstruct the byte offset from the line/col via
+            // `codepoint_position_to_byte_offset` (valid for ASCII text where
+            // codepoint == byte offset) and verify they match.
+            if let Some(roundtrip_off) = codepoint_position_to_byte_offset(&text, lc.line, lc.col) {
+                assert_eq!(
+                    roundtrip_off, byte_offset,
+                    "LineIndex round-trip failed at diagnostic {pos_label}: \
+                     byte_offset={byte_offset} → line={}, col={} → byte_offset={roundtrip_off}; diag={:?}",
+                    lc.line, lc.col, diag
+                );
+            }
         }
     }
 }
@@ -260,22 +263,26 @@ fn synthetic_ascii_model_parity() {
     let line_index = LineIndex::new(&text);
 
     for diag in &diags {
-        for (label, pos) in [("start", diag.range.start), ("end", diag.range.end)] {
-            let Some(byte_off) = codepoint_position_to_byte_offset(&text, pos.line, pos.column)
-            else {
-                continue;
-            };
+        // Graduated from shadow-mode: for ASCII text, byte offsets == codepoint
+        // offsets, so we can verify the LineIndex round-trip directly.
+        for (label, ts) in [("start", diag.range.start()), ("end", diag.range.end())] {
+            let byte_off = usize::from(ts);
+            assert!(
+                byte_off <= text.len(),
+                "ASCII parity: {label} byte offset {byte_off} exceeds text length {}; diag={:?}",
+                text.len(),
+                diag
+            );
             let lc = line_index.line_col(TextSize::from(byte_off as u32));
-            assert_eq!(
-                lc.line, pos.line,
-                "ASCII parity: line mismatch at {label}; diag={:?}",
-                diag
-            );
-            assert_eq!(
-                lc.col, pos.column,
-                "ASCII parity: col mismatch at {label}; diag={:?}",
-                diag
-            );
+            // For ASCII: round-trip back to a byte offset and verify it matches.
+            if let Some(roundtrip_off) = codepoint_position_to_byte_offset(&text, lc.line, lc.col) {
+                assert_eq!(
+                    roundtrip_off, byte_off,
+                    "ASCII parity: round-trip mismatch at {label}: \
+                     byte_off={byte_off} → ({},{}) → byte_off={roundtrip_off}; diag={:?}",
+                    lc.line, lc.col, diag
+                );
+            }
         }
     }
 }

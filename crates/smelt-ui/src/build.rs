@@ -217,22 +217,27 @@ pub fn build_model_details(
         });
 
         // Build diagnostics
+        let file_text = file.map(|f| f.text(db).to_string()).unwrap_or_default();
         let diags = match (ws, file) {
             (Some(w), Some(f)) => smelt_db::file_diagnostics(db, w, f),
             _ => Vec::new(),
         };
         let diagnostics: Vec<DiagnosticInfo> = diags
             .iter()
-            .map(|d| DiagnosticInfo {
-                severity: match d.severity {
-                    DiagnosticSeverity::Error => "error".to_string(),
-                    DiagnosticSeverity::Warning => "warning".to_string(),
-                    DiagnosticSeverity::Info => "info".to_string(),
-                    DiagnosticSeverity::Hint => "hint".to_string(),
-                },
-                message: d.message.clone(),
-                line: Some(d.range.start.line),
-                column: Some(d.range.start.column),
+            .map(|d| {
+                let start =
+                    smelt_parser::ast::offset_to_position(&file_text, usize::from(d.range.start()));
+                DiagnosticInfo {
+                    severity: match d.severity {
+                        DiagnosticSeverity::Error => "error".to_string(),
+                        DiagnosticSeverity::Warning => "warning".to_string(),
+                        DiagnosticSeverity::Info => "info".to_string(),
+                        DiagnosticSeverity::Hint => "hint".to_string(),
+                    },
+                    message: d.message.clone(),
+                    line: Some(start.line),
+                    column: Some(start.column),
+                }
             })
             .collect();
 

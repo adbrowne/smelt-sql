@@ -135,17 +135,15 @@ fn collect_function_call_sites(
     db: &smelt_db::Database,
     files: &[smelt_db::SourceFile],
     name: &str,
-) -> Vec<(PathBuf, smelt_parser::ast::Range)> {
+) -> Vec<(PathBuf, rowan::TextRange)> {
     let mut out = Vec::new();
     for f in files {
         let parse = smelt_db::parse_file(db, *f);
         let Some(ast) = AstFile::cast(parse.syntax()) else {
             continue;
         };
-        let f_text = f.text(db);
         for trange in smelt_db::references::find_function_call_sites_in_file(&ast, name) {
-            let r = smelt_parser::ast::text_range_to_range(f_text, trange);
-            out.push((f.path(db).clone(), r));
+            out.push((f.path(db).clone(), trange));
         }
     }
     out
@@ -183,24 +181,24 @@ impl Backend {
         }
     }
 
-    /// Convert (PathBuf, Range) reference locations to LSP Location objects.
-    async fn ref_locations_to_lsp(
-        &self,
-        refs: &[(PathBuf, smelt_parser::ast::Range)],
-    ) -> Vec<Location> {
+    /// Convert (PathBuf, TextRange) reference locations to LSP Location objects.
+    async fn ref_locations_to_lsp(&self, refs: &[(PathBuf, rowan::TextRange)]) -> Vec<Location> {
         let py_sources = self.python_model_sources.lock().await;
         refs.iter()
-            .filter_map(|(path, range)| {
+            .filter_map(|(path, text_range)| {
                 let (actual_path, line_offset) = py_sources
                     .get(path)
                     .map(|(p, line)| (p.clone(), *line))
                     .unwrap_or((path.clone(), 0));
                 let uri = Url::from_file_path(&actual_path).ok()?;
+                // Convert TextRange (byte offset) to line/col via file text.
+                let file_text = std::fs::read_to_string(&actual_path).unwrap_or_default();
+                let pr = smelt_parser::ast::text_range_to_range(&file_text, *text_range);
                 Some(Location {
                     uri,
                     range: Range {
-                        start: Position::new(range.start.line + line_offset, range.start.column),
-                        end: Position::new(range.end.line + line_offset, range.end.column),
+                        start: Position::new(pr.start.line + line_offset, pr.start.column),
+                        end: Position::new(pr.end.line + line_offset, pr.end.column),
                     },
                 })
             })
@@ -208,7 +206,11 @@ impl Backend {
     }
 
     /// Convert our database diagnostic to LSP diagnostic
-    fn to_lsp_diagnostic(&self, diag: &DbDiagnostic) -> lsp_types::Diagnostic {
+    fn to_lsp_diagnostic(
+        &self,
+        diag: &DbDiagnostic,
+        converter: &crate::diagnostics_boundary::BoundaryConverter,
+    ) -> lsp_types::Diagnostic {
         let code = diag.code.map(|c| {
             let code_str = match c {
                 DbCode::ParseError => "parse-error",
@@ -427,16 +429,7 @@ impl Backend {
         let (message, related_information) = render_expansion_frames(diag);
 
         lsp_types::Diagnostic {
-            range: Range {
-                start: Position {
-                    line: diag.range.start.line,
-                    character: diag.range.start.column,
-                },
-                end: Position {
-                    line: diag.range.end.line,
-                    character: diag.range.end.column,
-                },
-            },
+            range: converter.convert(diag),
             severity: Some(match diag.severity {
                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
@@ -596,9 +589,7 @@ impl Backend {
                         crate::diagnostics_boundary::BoundaryConverter::new_utf16(&virtual_text);
                     let diagnostics = diagnostics_for(&db, &virtual_path);
                     for d in &diagnostics {
-                        // Shadow-mode: validate LineIndex parity (debug_assertions only).
-                        let _ = converter.convert(d, &virtual_text);
-                        let mut lsp_diag = self.to_lsp_diagnostic(d);
+                        let mut lsp_diag = self.to_lsp_diagnostic(d, &converter);
                         lsp_diag.range.start.line += start_line;
                         lsp_diag.range.end.line += start_line;
                         lsp_diagnostics.push(lsp_diag);
@@ -610,11 +601,7 @@ impl Backend {
                 let converter = crate::diagnostics_boundary::BoundaryConverter::new_utf16(&text);
                 diagnostics_for(&db, &path)
                     .iter()
-                    .map(|d| {
-                        // Shadow-mode: validate LineIndex parity (debug_assertions only).
-                        let _ = converter.convert(d, &text);
-                        self.to_lsp_diagnostic(d)
-                    })
+                    .map(|d| self.to_lsp_diagnostic(d, &converter))
                     .collect()
             };
 
@@ -836,19 +823,13 @@ impl Backend {
             for path in files.iter() {
                 if let Ok(uri) = Url::from_file_path(path) {
                     let diagnostics = diagnostics_for(&db_snapshot, path);
+                    let file_text = crate::db_helpers::file_text(&db_snapshot, path);
+                    let converter =
+                        crate::diagnostics_boundary::BoundaryConverter::new_utf16(&file_text);
                     let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
                         .iter()
                         .map(|d| lsp_types::Diagnostic {
-                            range: Range {
-                                start: Position {
-                                    line: d.range.start.line,
-                                    character: d.range.start.column,
-                                },
-                                end: Position {
-                                    line: d.range.end.line,
-                                    character: d.range.end.column,
-                                },
-                            },
+                            range: converter.convert(d),
                             severity: Some(match d.severity {
                                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
@@ -2009,7 +1990,7 @@ impl LanguageServer for Backend {
         // Collect reference data as plain types.
         // We use an enum to avoid holding AST nodes across await points.
         enum RefResult {
-            PathRanges(Vec<(PathBuf, smelt_parser::ast::Range)>),
+            PathRanges(Vec<(PathBuf, rowan::TextRange)>),
             CteRanges(PathBuf, Vec<(u32, u32, u32, u32)>),
             Empty,
         }
@@ -2046,7 +2027,7 @@ impl LanguageServer for Backend {
 
                     match symbol_at_cursor(&file, &text, cursor_offset) {
                         Some(SymbolAtCursor::PathRef { segments }) => {
-                            let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> = Vec::new();
+                            let mut all_refs: Vec<(PathBuf, rowan::TextRange)> = Vec::new();
                             for f in &project_files {
                                 let path_refs = smelt_db::model_path_refs(&db, *f);
                                 for loc in path_refs.iter() {
@@ -2152,6 +2133,7 @@ impl LanguageServer for Backend {
 
         let db = self.snapshot().await;
         let text = file_text(&db, &effective_path);
+        let converter = crate::diagnostics_boundary::BoundaryConverter::new_utf16(&text);
 
         // Collect diagnostics overlapping the request range
         let all_diags = diagnostics_for(&db, &effective_path);
@@ -2163,14 +2145,14 @@ impl LanguageServer for Backend {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
+                let r = converter.convert(d);
                 // Diagnostic overlaps the request range
                 !(r.end.line < adj_start_line
                     || (r.end.line == adj_start_line
-                        && r.end.column < request_range.start.character)
+                        && r.end.character < request_range.start.character)
                     || r.start.line > adj_end_line
                     || (r.start.line == adj_end_line
-                        && r.start.column > request_range.end.character))
+                        && r.start.character > request_range.end.character))
             })
             .collect();
 
@@ -2193,15 +2175,10 @@ impl LanguageServer for Backend {
             for kind in action_kinds {
                 match kind {
                     CAK::TextEdit(suggestion) => {
+                        let pr = smelt_parser::ast::text_range_to_range(&text, suggestion.range);
                         let range = Range {
-                            start: Position::new(
-                                suggestion.range.start.line + line_offset,
-                                suggestion.range.start.column,
-                            ),
-                            end: Position::new(
-                                suggestion.range.end.line + line_offset,
-                                suggestion.range.end.column,
-                            ),
+                            start: Position::new(pr.start.line + line_offset, pr.start.column),
+                            end: Position::new(pr.end.line + line_offset, pr.end.column),
                         };
                         let edit = TextEdit {
                             range,
@@ -2335,15 +2312,15 @@ impl LanguageServer for Backend {
             let edits: Vec<TextEdit> = result
                 .edits
                 .iter()
-                .map(|e| TextEdit {
-                    range: Range {
-                        start: Position::new(
-                            e.range.start.line + line_offset,
-                            e.range.start.column,
-                        ),
-                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
-                    },
-                    new_text: e.new_text.clone(),
+                .map(|e| {
+                    let pr = smelt_parser::ast::text_range_to_range(&text, e.range);
+                    TextEdit {
+                        range: Range {
+                            start: Position::new(pr.start.line + line_offset, pr.start.column),
+                            end: Position::new(pr.end.line + line_offset, pr.end.column),
+                        },
+                        new_text: e.new_text.clone(),
+                    }
                 })
                 .collect();
             let mut changes = std::collections::HashMap::new();
@@ -2367,15 +2344,15 @@ impl LanguageServer for Backend {
             let edits: Vec<TextEdit> = result
                 .edits
                 .iter()
-                .map(|e| TextEdit {
-                    range: Range {
-                        start: Position::new(
-                            e.range.start.line + line_offset,
-                            e.range.start.column,
-                        ),
-                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
-                    },
-                    new_text: e.new_text.clone(),
+                .map(|e| {
+                    let pr = smelt_parser::ast::text_range_to_range(&text, e.range);
+                    TextEdit {
+                        range: Range {
+                            start: Position::new(pr.start.line + line_offset, pr.start.column),
+                            end: Position::new(pr.end.line + line_offset, pr.end.column),
+                        },
+                        new_text: e.new_text.clone(),
+                    }
                 })
                 .collect();
             let mut changes = std::collections::HashMap::new();

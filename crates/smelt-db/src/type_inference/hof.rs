@@ -1336,25 +1336,19 @@ pub fn disambiguate_list_literal(
 /// sentinels produced by `infer_list_literal` and converts them into
 /// diagnostics anchored at `span` (the list literal's source span).
 ///
-/// `text` is the raw source text of the file — needed to convert
-/// `rowan::TextRange` byte offsets into `Position { line, column }` pairs via
-/// [`smelt_parser::ast::text_range_to_range`]. Pass an empty string `""` in
-/// unit tests where the exact range is not under test.
-///
 /// Pure function — no Salsa dependency. Returns the diagnostics so the
 /// caller can append them to whatever accumulator is in use.
 pub fn list_literal_sentinels_to_diagnostics(
     elements: &[smelt_parser::ast::Expr],
     ctx: &TypeContext,
     span: rowan::TextRange,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_types::signatures::format_smelt_type_hover;
 
     let result = infer_list_literal(elements, ctx, None);
     let mut diags = Vec::new();
 
-    let range = smelt_parser::ast::text_range_to_range(text, span);
+    let range = span;
 
     for sentinel in &result.sentinels {
         let (code, message) = match sentinel {
@@ -1452,15 +1446,10 @@ pub struct SelectListSpreadResult {
 /// Forbidden-position checking (WHERE, etc.) is handled separately by
 /// [`check_forbidden_position_spreads`].
 ///
-/// `text` is the raw source text — used to convert `rowan::TextRange` byte
-/// offsets into `Position { line, column }` for diagnostics. Pass `""` in unit
-/// tests where the exact range is not under test.
-///
 /// Pure function — no Salsa dependency.
 pub fn check_select_list_spreads(
     select_stmt: &smelt_parser::ast::SelectStmt,
     ctx: &TypeContext,
-    text: &str,
 ) -> SelectListSpreadResult {
     use smelt_parser::SyntaxKind::{LIST_SPREAD, SELECT_LIST};
     use smelt_types::signatures::format_smelt_type_hover;
@@ -1535,7 +1524,7 @@ pub fn check_select_list_spreads(
                         )
                     }
                 };
-                let span_range = smelt_parser::ast::text_range_to_range(text, spread_span);
+                let span_range = spread_span;
                 result.diagnostics.push(crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message,
@@ -1576,7 +1565,7 @@ pub fn check_select_list_spreads(
                             ),
                         );
                         let actual_str = format_smelt_type_hover(&actual);
-                        let span_range = smelt_parser::ast::text_range_to_range(text, spread_span);
+                        let span_range = spread_span;
                         result.diagnostics.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: crate::meta_list_diagnostic_message(
@@ -1620,15 +1609,10 @@ pub fn check_select_list_spreads(
 ///    `SelectStmt` has a `WHERE` clause — these represent spread-in-WHERE
 ///    parse errors.
 ///
-/// `text` is the raw source text — used to convert `rowan::TextRange` byte
-/// offsets into `Position { line, column }` for diagnostics. Pass `""` in unit
-/// tests where the exact range is not under test.
-///
 /// Pure function — no Salsa dependency.
 pub fn check_forbidden_position_spreads(
     select_stmt: &smelt_parser::ast::SelectStmt,
     _ctx: &TypeContext,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::SyntaxKind::{DOT_DOT_DOT, LIST_SPREAD, WHERE_CLAUSE};
 
@@ -1650,7 +1634,7 @@ pub fn check_forbidden_position_spreads(
         if let Some(wn) = where_node {
             for desc in wn.descendants() {
                 if desc.kind() == LIST_SPREAD {
-                    let range = smelt_parser::ast::text_range_to_range(text, desc.text_range());
+                    let range = desc.text_range();
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_list_diagnostic_message(
@@ -1696,7 +1680,7 @@ pub fn check_forbidden_position_spreads(
                 // Look for DOT_DOT_DOT tokens after the SELECT_STMT.
                 if let rowan::NodeOrToken::Token(tok) = &child {
                     if tok.kind() == DOT_DOT_DOT {
-                        let range = smelt_parser::ast::text_range_to_range(text, tok.text_range());
+                        let range = tok.text_range();
                         diags.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: crate::meta_list_diagnostic_message(
@@ -1714,7 +1698,7 @@ pub fn check_forbidden_position_spreads(
                 // Also check for LIST_SPREAD nodes at parent level.
                 if let rowan::NodeOrToken::Node(node) = &child {
                     if node.kind() == LIST_SPREAD {
-                        let range = smelt_parser::ast::text_range_to_range(text, node.text_range());
+                        let range = node.text_range();
                         diags.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: crate::meta_list_diagnostic_message(
@@ -1765,10 +1749,7 @@ pub fn expand_spread_into_position(
 ) -> (usize, Vec<OriginTag>, Vec<crate::Diagnostic>) {
     use smelt_types::signatures::format_smelt_type_hover;
 
-    let zero_range = crate::Range {
-        start: crate::Position { line: 0, column: 0 },
-        end: crate::Position { line: 0, column: 0 },
-    };
+    let zero_range = rowan::TextRange::empty(rowan::TextSize::from(0));
 
     // (a) Forbidden-position check.
     if !position.spread_allowed() {
@@ -1857,10 +1838,7 @@ pub fn expand_spread_into_position(
 /// Pure function — no Salsa dependency.
 pub fn check_define_name_shadowing(
     define: &smelt_parser::ast::SmeltDefine,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
-    use smelt_parser::ast::text_range_to_range;
-
     const HOF_NAMES: &[&str] = &["map", "filter", "reduce"];
     /// Reserved ternary keywords — must not be used as smelt.define, smelt.record,
     /// or lambda-parameter names.
@@ -1874,20 +1852,7 @@ pub fn check_define_name_shadowing(
 
     let range = define
         .name_range()
-        .map(|r| {
-            if text.is_empty() {
-                crate::Range {
-                    start: smelt_parser::ast::Position { line: 0, column: 0 },
-                    end: smelt_parser::ast::Position { line: 0, column: 0 },
-                }
-            } else {
-                text_range_to_range(text, r)
-            }
-        })
-        .unwrap_or(crate::Range {
-            start: smelt_parser::ast::Position { line: 0, column: 0 },
-            end: smelt_parser::ast::Position { line: 0, column: 0 },
-        });
+        .unwrap_or_else(|| rowan::TextRange::empty(rowan::TextSize::from(0)));
 
     if HOF_NAMES.contains(&name_lc.as_str()) {
         diags.push(crate::Diagnostic {
@@ -1997,24 +1962,13 @@ pub fn check_hof_position_diagnostics(
     let root = select_stmt.syntax();
 
     // Helper: range from a Rowan TextRange, text may be "" in tests.
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
-
     // Walk all descendants.
     for node in root.descendants() {
         match node.kind() {
             // ── LAMBDA node ────────────────────────────────────────────────
             LAMBDA => {
                 let lambda = smelt_parser::ast::Lambda::cast(node.clone()).unwrap();
-                let lambda_range = to_range(node.text_range());
+                let lambda_range = node.text_range();
 
                 // Arity check: does the LAMBDA have zero parameters?
                 let param_count = lambda.lambda_params().len();
@@ -2046,7 +2000,7 @@ pub fn check_hof_position_diagnostics(
                     for lp in lambda.lambda_params() {
                         if let Some(pname) = lp.name() {
                             if !seen.insert(pname.clone()) {
-                                let dup_range = to_range(lp.syntax().text_range());
+                                let dup_range = lp.syntax().text_range();
                                 diags.push(crate::Diagnostic {
                                     severity: crate::DiagnosticSeverity::Error,
                                     message: crate::meta_hof_diagnostic_message(
@@ -2183,7 +2137,7 @@ pub fn check_hof_position_diagnostics(
                         .unwrap_or(SmeltType::Unknown)
                 };
 
-                let call_range = to_range(node.text_range());
+                let call_range = node.text_range();
 
                 match hof {
                     HofKind::Map | HofKind::Filter => {
@@ -2229,7 +2183,7 @@ pub fn check_hof_position_diagnostics(
                                     None,
                                     None,
                                 ),
-                                range: to_range(second_arg.text_range()),
+                                range: second_arg.text_range(),
                                 code: Some(crate::DiagnosticCode::HofExpectsLambda),
                                 data: None,
                             });
@@ -2337,7 +2291,7 @@ pub fn check_hof_position_diagnostics(
                                 let reducer_name = reducer_call.name().unwrap_or_default();
                                 // Run parameterised reducer inference.
                                 let result = infer_parameterised_reducer_call(&reducer_call, ctx);
-                                let rc_range = to_range(reducer_node.text_range());
+                                let rc_range = reducer_node.text_range();
                                 if let Some(sentinel) = result.sentinel {
                                     match sentinel {
                                         ParameterisedReducerSentinel::ArityMismatch {
@@ -2465,7 +2419,7 @@ pub fn check_hof_position_diagnostics(
                                     None,
                                     None,
                                 ),
-                                range: to_range(second_arg.text_range()),
+                                range: second_arg.text_range(),
                                 code: Some(crate::DiagnosticCode::HofExpectsReducer),
                                 data: None,
                             });
@@ -2498,7 +2452,7 @@ pub fn check_hof_position_diagnostics(
                                             Some(expected_constraint),
                                             Some(&found_str),
                                         ),
-                                        range: to_range(second_arg.text_range()),
+                                        range: second_arg.text_range(),
                                         code: Some(crate::DiagnosticCode::ReducerInputTypeMismatch),
                                         data: None,
                                     });
@@ -2570,7 +2524,7 @@ pub fn check_hof_position_diagnostics(
                             None,
                             None,
                         ),
-                        range: to_range(node.text_range()),
+                        range: node.text_range(),
                         code: Some(crate::DiagnosticCode::PipeInDataPosition),
                         data: None,
                     });
@@ -2579,8 +2533,8 @@ pub fn check_hof_position_diagnostics(
                 if !pipe.rhs_is_call() {
                     let range = pipe
                         .rhs()
-                        .map(|r| to_range(r.text_range()))
-                        .unwrap_or_else(|| to_range(node.text_range()));
+                        .map(|r| r.text_range())
+                        .unwrap_or_else(|| node.text_range());
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_hof_diagnostic_message(

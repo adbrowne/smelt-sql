@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use rowan::TextRange;
-use smelt_parser::ast::{File as AstFile, Range, SmeltPathCall};
+use smelt_parser::ast::{File as AstFile, SmeltPathCall};
 use smelt_parser::SyntaxKind::{DOT, IDENT};
 
 use crate::{RefLocation, SourceLocation};
@@ -19,7 +19,7 @@ use crate::{RefLocation, SourceLocation};
 pub fn find_model_references(
     model_name: &str,
     file_refs: &[(PathBuf, Vec<RefLocation>)],
-) -> Vec<(PathBuf, Range)> {
+) -> Vec<(PathBuf, TextRange)> {
     let mut results = Vec::new();
     for (path, refs) in file_refs {
         for ref_loc in refs {
@@ -38,7 +38,7 @@ pub fn find_model_references(
 pub fn find_source_references(
     qualified_name: &str,
     file_sources: &[(PathBuf, Vec<SourceLocation>)],
-) -> Vec<(PathBuf, Range)> {
+) -> Vec<(PathBuf, TextRange)> {
     let mut results = Vec::new();
     for (path, sources) in file_sources {
         for source_loc in sources {

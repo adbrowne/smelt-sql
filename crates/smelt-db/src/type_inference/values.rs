@@ -15,7 +15,6 @@ use smelt_parser::SyntaxKind;
 use smelt_types::{DataType, TypedColumn};
 
 use crate::diagnostics_types::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
-use smelt_parser::ast::text_range_to_range;
 
 use super::dispatch::{infer_expression_type, promote_types};
 use super::type_context::TypeContext;
@@ -138,7 +137,7 @@ pub fn select_non_wildcard_item_count(select: &smelt_parser::ast::SelectStmt) ->
 /// diagnostics.
 ///
 /// Returns a `Vec<Diagnostic>` (empty when no issue is found).
-pub fn check_table_ref_values_arity(table_ref: &TableRef, text: &str) -> Vec<Diagnostic> {
+pub fn check_table_ref_values_arity(table_ref: &TableRef) -> Vec<Diagnostic> {
     use smelt_parser::SyntaxKind::ALIAS_COLUMN_LIST;
     let mut out = Vec::new();
 
@@ -157,8 +156,7 @@ pub fn check_table_ref_values_arity(table_ref: &TableRef, text: &str) -> Vec<Dia
         Some(n) => n,
         None => {
             // values_column_count returns None for zero rows.
-            let span = values_clause.syntax().text_range();
-            let range = text_range_to_range(text, span);
+            let range = values_clause.syntax().text_range();
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: "VALUES clause has no rows; cannot infer column types".to_string(),
@@ -186,10 +184,10 @@ pub fn check_table_ref_values_arity(table_ref: &TableRef, text: &str) -> Vec<Dia
         .children()
         .find(|n| n.kind() == ALIAS_COLUMN_LIST);
     let range = if let Some(acl) = acl_node {
-        text_range_to_range(text, acl.text_range())
+        acl.text_range()
     } else {
         // Fallback to the whole TABLE_REF span.
-        text_range_to_range(text, table_ref.syntax().text_range())
+        table_ref.syntax().text_range()
     };
 
     out.push(Diagnostic {
@@ -209,7 +207,7 @@ pub fn check_table_ref_values_arity(table_ref: &TableRef, text: &str) -> Vec<Dia
 /// Check a single `CTE` node for alias-column-list arity mismatches.
 ///
 /// Returns a `Vec<Diagnostic>` (empty when no issue is found).
-pub fn check_cte_alias_arity(cte: &Cte, text: &str) -> Vec<Diagnostic> {
+pub fn check_cte_alias_arity(cte: &Cte) -> Vec<Diagnostic> {
     use smelt_parser::SyntaxKind::ALIAS_COLUMN_LIST;
     let mut out = Vec::new();
 
@@ -240,13 +238,11 @@ pub fn check_cte_alias_arity(cte: &Cte, text: &str) -> Vec<Diagnostic> {
         .children()
         .find(|n| n.kind() == ALIAS_COLUMN_LIST);
     let range = if let Some(acl) = acl_node {
-        text_range_to_range(text, acl.text_range())
+        acl.text_range()
     } else {
         // Fallback to the CTE name range.
-        let fallback = cte
-            .name_range()
-            .unwrap_or_else(|| cte.syntax().text_range());
-        text_range_to_range(text, fallback)
+        cte.name_range()
+            .unwrap_or_else(|| cte.syntax().text_range())
     };
 
     out.push(Diagnostic {

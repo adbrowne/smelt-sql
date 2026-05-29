@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use line_index::{LineCol as LILineCol, LineIndex as LI};
 use salsa::{Accumulator, Setter};
 use smelt_core::metadata::{extract_file_metadata, FileMetadata, MetadataError, MixedKind};
 use smelt_parser::{self, File as AstFile};
@@ -396,7 +397,7 @@ pub struct Model {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefLocation {
     pub name: String,
-    pub range: Range,
+    pub range: rowan::TextRange,
 }
 
 /// Source location with position information
@@ -405,7 +406,7 @@ pub struct SourceLocation {
     pub source_name: String,
     pub table_name: String,
     pub qualified_name: String,
-    pub range: Range,
+    pub range: rowan::TextRange,
 }
 
 /// Position in a file (line, column)
@@ -762,10 +763,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 severity: DiagnosticSeverity::Warning,
                 message: "Seed schema is inferred and may drift if the CSV changes — pin it"
                     .to_string(),
-                range: Range {
-                    start: Position { line: 0, column: 0 },
-                    end: Position { line: 0, column: 0 },
-                },
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                 code: Some(DiagnosticCode::MissingSeedSidecar),
                 data: Some(DiagnosticData::MissingSeedSidecar {
                     csv_path: path.clone(),
@@ -787,19 +785,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // Anchor at the YAML value token (1-based line/col → 0-based).
             let diag_line = value_span.line.saturating_sub(1) as u32;
             let diag_col = value_span.column.saturating_sub(1) as u32;
+            let li = LI::new(text);
+            let start_ts = li
+                .offset(LILineCol {
+                    line: diag_line,
+                    col: diag_col,
+                })
+                .unwrap_or_default();
+            let end_ts = li
+                .offset(LILineCol {
+                    line: diag_line,
+                    col: diag_col + value.len() as u32,
+                })
+                .unwrap_or(start_ts);
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("generates must be `models`; found {}", value),
-                range: Range {
-                    start: Position {
-                        line: diag_line,
-                        column: diag_col,
-                    },
-                    end: Position {
-                        line: diag_line,
-                        column: diag_col + value.len() as u32,
-                    },
-                },
+                range: rowan::TextRange::new(start_ts, end_ts),
                 code: Some(DiagnosticCode::GeneratesUnknownValue),
                 data: None,
             })
@@ -815,19 +817,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 MixedKind::NameField => "name:".len() as u32,
                 MixedKind::SectionDelimiter => "--- name:".len() as u32,
             };
+            let li = LI::new(text);
+            let start_ts = li
+                .offset(LILineCol {
+                    line: diag_line,
+                    col: diag_col,
+                })
+                .unwrap_or_default();
+            let end_ts = li
+                .offset(LILineCol {
+                    line: diag_line,
+                    col: diag_col + key_len,
+                })
+                .unwrap_or(start_ts);
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: "generates: models cannot coexist with bare-model identity (name field or section delimiter)".to_string(),
-                range: Range {
-                    start: Position {
-                        line: diag_line,
-                        column: diag_col,
-                    },
-                    end: Position {
-                        line: diag_line,
-                        column: diag_col + key_len,
-                    },
-                },
+                range: rowan::TextRange::new(start_ts, end_ts),
                 code: Some(DiagnosticCode::GeneratesMixedWithBareModel),
                 data: None,
             })
@@ -858,11 +864,8 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     .find(|n| n.kind() == smelt_parser::SyntaxKind::SELECT_STMT);
                 let bare_range = select_node
                     .and_then(|n| n.first_token())
-                    .map(|t| smelt_parser::ast::text_range_to_range(text, t.text_range()))
-                    .unwrap_or(Range {
-                        start: Position { line: 0, column: 0 },
-                        end: Position { line: 0, column: 0 },
-                    });
+                    .map(|t| t.text_range())
+                    .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: "generator file body must produce List<ModelDef>; bare SELECT is the hand-authored model shape".to_string(),
@@ -954,10 +957,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message,
-                    range: Range {
-                        start: Position { line: 0, column: 0 },
-                        end: Position { line: 0, column: 0 },
-                    },
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                     code: Some(code),
                     data: None,
                 })
@@ -969,7 +969,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Parse errors
     let parse = parse_file(db, file);
     for error in parse.errors.iter() {
-        let range = smelt_parser::ast::text_range_to_range(text, error.range);
+        let range = error.range;
         DiagnosticAcc(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: error.message.clone(),
@@ -1094,7 +1094,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let vars_map = project
             .map(|p| smelt_yml_vars_query(db, p))
             .unwrap_or_default();
-        for diag in type_inference::check_config_var_call_diagnostics(&syntax, &vars_map, text) {
+        for diag in type_inference::check_config_var_call_diagnostics(&syntax, &vars_map) {
             DiagnosticAcc(diag).accumulate(db);
         }
     }
@@ -1122,7 +1122,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let syntax = parse.syntax();
         if let Some(ast) = AstFile::cast(syntax) {
             for define in ast.defines() {
-                for diag in type_inference::check_define_name_shadowing(&define, text) {
+                for diag in type_inference::check_define_name_shadowing(&define) {
                     DiagnosticAcc(diag).accumulate(db);
                 }
             }
@@ -1163,7 +1163,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 let result = type_inference::infer_model_def_literal(&lit, &ctx);
                 for sentinel in result.sentinels {
                     if sentinel.code == DiagnosticCode::ModelDefOutsideGeneratorFile {
-                        let range = smelt_parser::ast::text_range_to_range(text, sentinel.span);
+                        let range = sentinel.span;
                         DiagnosticAcc(Diagnostic {
                             severity: DiagnosticSeverity::Error,
                             message: sentinel.message,
@@ -1197,7 +1197,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // VALUES derived-table checks: scan all TABLE_REF nodes.
         for node in syntax.descendants().filter(|n| n.kind() == TABLE_REF) {
             if let Some(tr) = TableRef::cast(node) {
-                for diag in type_inference::check_table_ref_values_arity(&tr, text) {
+                for diag in type_inference::check_table_ref_values_arity(&tr) {
                     DiagnosticAcc(diag).accumulate(db);
                 }
             }
@@ -1206,7 +1206,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // CTE alias-list checks: scan all CTE nodes.
         for node in syntax.descendants().filter(|n| n.kind() == CTE) {
             if let Some(cte) = Cte::cast(node) {
-                for diag in type_inference::check_cte_alias_arity(&cte, text) {
+                for diag in type_inference::check_cte_alias_arity(&cte) {
                     DiagnosticAcc(diag).accumulate(db);
                 }
             }
@@ -1221,10 +1221,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: "File does not contain a valid SQL query".to_string(),
-                range: Range {
-                    start: Position { line: 0, column: 0 },
-                    end: Position { line: 0, column: 0 },
-                },
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                 code: Some(DiagnosticCode::InvalidModel),
                 data: None,
             })
@@ -1347,10 +1344,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: format!("sources.yml parse error: {}", yaml_error.message),
-                    range: Range {
-                        start: Position { line: 0, column: 0 },
-                        end: Position { line: 0, column: 0 },
-                    },
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                     code: Some(DiagnosticCode::YamlParseError),
                     data: None,
                 })
@@ -1367,10 +1361,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                             "Unknown type '{}' for column '{}' in source '{}'. Type information unavailable.",
                             error.invalid_type, error.column_name, source_qualified
                         ),
-                        range: Range {
-                            start: Position { line: 0, column: 0 },
-                            end: Position { line: 0, column: 0 },
-                        },
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                         code: Some(DiagnosticCode::SourceTypeError),
                         data: None,
                     })
@@ -1381,7 +1372,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     }
 
     // Unsupported constructs + malformed sources + CAST / unknown fn / ambiguous column
-    queries::check_types::check_unsupported_constructs(&parse.syntax(), text, db);
+    queries::check_types::check_unsupported_constructs(&parse.syntax(), db);
 
     let syntax = parse.syntax();
     if let Some(ast) = AstFile::cast(syntax) {
@@ -1393,7 +1384,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             if let Some(select_list) = select_stmt.select_list() {
                 for item in select_list.items() {
                     if let Some(expr) = item.expression() {
-                        queries::check_types::check_expression_types(&expr, text, db);
+                        queries::check_types::check_expression_types(&expr, db);
                     }
                 }
             }
@@ -1404,7 +1395,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // the check runs on a fresh empty `TypeContext`.
             let kind_ctx = type_inference::TypeContext::new();
             for info in type_inference::check_window_in_scalar_contexts(&select_stmt, &kind_ctx) {
-                let range = smelt_parser::ast::text_range_to_range(text, info.range);
+                let range = info.range;
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!(
@@ -1440,8 +1431,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // All three checks use an empty TypeContext (no column schema
             // available at this point) — consistent with the window-function
             // check above.
-            let spread_result =
-                type_inference::check_select_list_spreads(&select_stmt, &kind_ctx, text);
+            let spread_result = type_inference::check_select_list_spreads(&select_stmt, &kind_ctx);
             for diag in spread_result.diagnostics {
                 DiagnosticAcc(diag).accumulate(db);
             }
@@ -1454,7 +1444,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                             // Use the expression's span for the diagnostic anchor.
                             let span = expr.syntax().text_range();
                             for diag in type_inference::list_literal_sentinels_to_diagnostics(
-                                &elements, &kind_ctx, span, text,
+                                &elements, &kind_ctx, span,
                             ) {
                                 DiagnosticAcc(diag).accumulate(db);
                             }
@@ -1464,7 +1454,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
 
             let forbidden_diags =
-                type_inference::check_forbidden_position_spreads(&select_stmt, &kind_ctx, text);
+                type_inference::check_forbidden_position_spreads(&select_stmt, &kind_ctx);
             for diag in forbidden_diags {
                 DiagnosticAcc(diag).accumulate(db);
             }
@@ -1494,7 +1484,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // Uses an empty TypeContext (consistent with HOF checks above).
             {
                 let ternary_diags =
-                    type_inference::check_ternary_expr_diagnostics(&select_stmt, &kind_ctx, text);
+                    type_inference::check_ternary_expr_diagnostics(&select_stmt, &kind_ctx);
                 for diag in ternary_diags {
                     DiagnosticAcc(diag).accumulate(db);
                 }
@@ -1510,7 +1500,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // available at this stage in the orchestrator).
             {
                 let cols_of_diags =
-                    type_inference::check_columns_of_diagnostics(&select_stmt, &kind_ctx, text);
+                    type_inference::check_columns_of_diagnostics(&select_stmt, &kind_ctx);
                 for diag in cols_of_diags {
                     DiagnosticAcc(diag).accumulate(db);
                 }
@@ -1598,8 +1588,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                             })
                             .unwrap_or(false);
                         if !resolves {
-                            let call_range =
-                                smelt_parser::ast::text_range_to_range(text, node.text_range());
+                            let call_range = node.text_range();
                             DiagnosticAcc(Diagnostic {
                                 severity: DiagnosticSeverity::Error,
                                 message: meta_reflection_diagnostic_message_with_table_expr(
@@ -1631,7 +1620,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // `function_body_diagnostics_for_file`.
             {
                 for diag in
-                    function_body_check::check_hof_column_ref_field_diagnostics(&select_stmt, text)
+                    function_body_check::check_hof_column_ref_field_diagnostics(&select_stmt)
                 {
                     DiagnosticAcc(diag).accumulate(db);
                 }
@@ -1673,7 +1662,6 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             {
                 for diag in function_body_check::check_hof_model_ref_source_ref_field_diagnostics(
                     &select_stmt,
-                    text,
                 ) {
                     DiagnosticAcc(diag).accumulate(db);
                 }
@@ -1694,10 +1682,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                                                 "Column '{}' is ambiguous - multiple sources in FROM clause. Consider using a qualified name (e.g., table.{}).",
                                                 col_name, col_name
                                             ),
-                                            range: Range {
-                                                start: Position { line: 0, column: 0 },
-                                                end: Position { line: 0, column: 0 },
-                                            },
+                                            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                                             code: Some(DiagnosticCode::AmbiguousColumn),
                                             data: None,
                                         })
@@ -1723,7 +1708,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // Emits: TernaryDanglingThen.
         {
             let file_syntax = ast.syntax().clone();
-            for diag in type_inference::check_dangling_ternary_keywords(&file_syntax, text) {
+            for diag in type_inference::check_dangling_ternary_keywords(&file_syntax) {
                 DiagnosticAcc(diag).accumulate(db);
             }
         }
@@ -2164,10 +2149,7 @@ pub fn function_call_cycle_diagnostics_for_file(
             .iter()
             .find(|s| s.name == name)
             .map(|s| s.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         out.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!(

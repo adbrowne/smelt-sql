@@ -2720,12 +2720,18 @@ fn per_cohort_union_broken_emission_body_undeclared_column() {
         1,
         "expected exactly one UndeclaredColumn diagnostic"
     );
+    // Convert the TextRange byte-offset to a line number for the assertion.
+    let broken_model_path = path.join("models/broken.gen.sql");
+    let broken_text =
+        std::fs::read_to_string(&broken_model_path).expect("could not read broken.gen.sql");
+    let diag_start_lc =
+        smelt_parser::ast::text_range_to_range(&broken_text, undeclared_diags[0].range);
     assert!(
-        undeclared_diags[0].range.start.line >= 3,
+        diag_start_lc.start.line >= 3,
         "expected UndeclaredColumn diagnostic anchored inside the body (line >= 3, 0-indexed), \
          got line {} — diagnostic is likely pinned to the frontmatter delimiter (line 0) \
          rather than the body content",
-        undeclared_diags[0].range.start.line,
+        diag_start_lc.start.line,
     );
 }
 

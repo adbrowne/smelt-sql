@@ -183,9 +183,11 @@ fn test_undefined_ref_diagnostic_position() {
         diag.message
     );
 
-    // Check position - should be on line 0
-    assert_eq!(diag.range.start.line, 0);
-    assert_eq!(diag.range.end.line, 0);
+    // Check position - should be on line 0 (single-line source)
+    let content_single = "SELECT * FROM smelt.models.nonexistent_model";
+    let r = smelt_parser::ast::text_range_to_range(content_single, diag.range);
+    assert_eq!(r.start.line, 0);
+    assert_eq!(r.end.line, 0);
 }
 
 #[test]
@@ -220,11 +222,12 @@ fn test_undefined_ref_diagnostic_position_multiline() {
     // Check it starts on line 2 (0-indexed). The end may be line 2 or 3
     // depending on whether the path node's text range includes the trailing
     // newline — either is acceptable; the important thing is start line.
-    assert_eq!(diag.range.start.line, 2);
+    let r = smelt_parser::ast::text_range_to_range(content, diag.range);
+    assert_eq!(r.start.line, 2);
     assert!(
-        diag.range.end.line >= 2,
-        "end line should be >= 2, got: {:?}",
-        diag.range.end
+        r.end.line >= 2,
+        "end line should be >= 2, got: line {}",
+        r.end.line
     );
 }
 

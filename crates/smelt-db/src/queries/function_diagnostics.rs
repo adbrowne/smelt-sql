@@ -20,58 +20,13 @@ use crate::queries::schema::{
 };
 use crate::{
     backends, find_project, function_body_check, function_call_cycle_fn_ids, resolve_function,
-    resolve_ref_path, type_inference, Diagnostic, DiagnosticCode, DiagnosticSeverity, Position,
-    Range, RefKind, SourceFile, TypeContext, Workspace,
+    resolve_ref_path, type_inference, Diagnostic, DiagnosticCode, DiagnosticSeverity, RefKind,
+    SourceFile, TypeContext, Workspace,
 };
 
 // ============================================================================
 // Shared range-offset utility
 // ============================================================================
-
-/// Shift `Range` values in a list of diagnostics by scanning `full_text` for
-/// the byte positions that correspond to the existing line/column values, then
-/// adding `range_offset` to those byte positions before re-converting.
-///
-/// Called by `_for_select` pure helpers when `range_offset > 0` to remap
-/// diagnostic ranges from a body-fragment coordinate space back to the
-/// enclosing file's coordinate space. For Phase 1 (hand-authored callers),
-/// `range_offset` is always `0` so this function is never reached.
-fn shift_diagnostic_ranges(diags: &mut [Diagnostic], full_text: &str, range_offset: usize) {
-    for diag in diags.iter_mut() {
-        let sb = byte_offset_of_position(full_text, diag.range.start);
-        let eb = byte_offset_of_position(full_text, diag.range.end);
-        if let (Some(sb), Some(eb)) = (sb, eb) {
-            let shifted = rowan::TextRange::new(
-                rowan::TextSize::from((sb + range_offset) as u32),
-                rowan::TextSize::from((eb + range_offset) as u32),
-            );
-            diag.range = smelt_parser::ast::text_range_to_range(full_text, shifted);
-        }
-    }
-}
-
-/// Scan `text` to find the byte offset of the character at `pos`. Returns
-/// `None` if the position is out of range.
-fn byte_offset_of_position(text: &str, pos: Position) -> Option<usize> {
-    let mut line = 0u32;
-    let mut col = 0u32;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line && col == pos.column {
-            return Some(i);
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    // Handle position at the very end of text.
-    if line == pos.line && col == pos.column {
-        return Some(text.len());
-    }
-    None
-}
 
 /// Workspace-wide duplicate-function-name diagnostics. Each returned tuple is
 /// `(path, diagnostic)` where `path` is the offending file and `diagnostic`
@@ -452,7 +407,6 @@ pub fn function_body_diagnostics_for_file(
             // SELECT body emits `ColumnRefFieldUnknown` at definition time.
             out.extend(function_body_check::check_hof_column_ref_field_diagnostics(
                 &select_stmt,
-                &clean_text,
             ));
             // Phase D: run the HOF ModelRef/SourceRef field dispatcher and
             // the wide-reflection accessor checker so that
@@ -460,10 +414,7 @@ pub fn function_body_diagnostics_for_file(
             // `ModelRefFieldUnknown` and `smelt.models.with_tag(42)` emits
             // `WithTagRequiresText` inside a function SELECT body.
             out.extend(
-                function_body_check::check_hof_model_ref_source_ref_field_diagnostics(
-                    &select_stmt,
-                    &clean_text,
-                ),
+                function_body_check::check_hof_model_ref_source_ref_field_diagnostics(&select_stmt),
             );
             continue;
         }
@@ -486,9 +437,7 @@ pub fn function_body_diagnostics_for_file(
         // Phase 24: Tier 3 return type check.
         if sig.tier == smelt_types::signatures::Tier::Three {
             out.extend(function_body_check::check_tier3_return_type(
-                sig,
-                &body_expr,
-                &clean_text,
+                sig, &body_expr,
             ));
         }
     }
@@ -661,8 +610,6 @@ pub fn as_struct_backend_diagnostics_for_file(
     let Some(ast) = AstFile::cast(syntax) else {
         return Vec::new();
     };
-    let raw_text = file.text(db);
-    let text = smelt_parser::strip_frontmatter(raw_text);
 
     let mut out = Vec::new();
     for sig in sigs.iter() {
@@ -693,8 +640,7 @@ pub fn as_struct_backend_diagnostics_for_file(
                 // Check each backend in the resolved set.
                 for backend in &backends_to_check {
                     if !function_body_check::backend_supports_struct_literal(backend) {
-                        let range =
-                            smelt_parser::ast::text_range_to_range(&text, call.text_range());
+                        let range = call.text_range();
                         out.push(Diagnostic {
                             severity: DiagnosticSeverity::Error,
                             message: format!(
@@ -763,10 +709,7 @@ pub fn provenance_unstable_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         if matches!(props.provenance, Provenance::Declared(_)) {
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
@@ -793,10 +736,7 @@ pub fn provenance_unstable_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         if matches!(props.provenance, Provenance::Declared(_)) {
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
@@ -857,10 +797,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         for fm_diag in fm_diags {
             out.push(frontmatter_diag_to_diagnostic(fm_diag, range));
         }
@@ -880,10 +817,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         for fm_diag in fm_diags {
             out.push(frontmatter_diag_to_diagnostic(fm_diag, range));
         }
@@ -897,7 +831,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
 /// Phase 43.
 fn frontmatter_diag_to_diagnostic(
     fm: smelt_planner::logical::FrontmatterDiagnostic,
-    range: Range,
+    range: rowan::TextRange,
 ) -> Diagnostic {
     use smelt_planner::logical::FrontmatterSeverity;
     let severity = match fm.severity {
@@ -991,7 +925,6 @@ pub fn missing_provenance_advisory_for_file(
 ) -> Vec<Diagnostic> {
     use smelt_planner::logical::Provenance;
 
-    let raw_text = file.text(db);
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let Some(ast) = AstFile::cast(syntax) else {
@@ -1015,8 +948,7 @@ pub fn missing_provenance_advisory_for_file(
         let Some(where_clause) = select.where_clause() else {
             continue;
         };
-        let where_range =
-            smelt_parser::ast::text_range_to_range(raw_text, where_clause.text_range());
+        let where_range = where_clause.text_range();
 
         // Find smelt.functions.* calls in the FROM clause.
         let Some(from_clause) = select.from_clause() else {
@@ -1117,7 +1049,7 @@ pub fn smelt_fn_call_diagnostics_for_ast(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     ctx: &TypeContext,
     text: &str,
-    range_offset: usize,
+    range_offset: rowan::TextSize,
     deferred_define_names: &std::collections::HashSet<String>,
     sig_lookup: &dyn Fn(&str) -> Option<smelt_types::signatures::FunctionSig>,
     builtin_lookup: &dyn Fn(&str) -> Option<&'static smelt_types::signatures::Signature>,
@@ -1212,8 +1144,13 @@ pub fn smelt_fn_call_diagnostics_for_ast(
             path_prefix_validator,
         ));
     }
-    if range_offset > 0 {
-        shift_diagnostic_ranges(&mut out, text, range_offset);
+    if range_offset > rowan::TextSize::from(0) {
+        for diag in &mut out {
+            diag.range = rowan::TextRange::new(
+                diag.range.start() + range_offset,
+                diag.range.end() + range_offset,
+            );
+        }
     }
     out
 }
@@ -1676,7 +1613,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
         &syntax,
         &ctx,
         &clean_text,
-        0,
+        rowan::TextSize::from(0),
         &deferred_define_names,
         &sig_lookup,
         &builtin_lookup,
@@ -1968,13 +1905,18 @@ pub fn unknown_context_diagnostics_for_file(
 pub fn cte_cycle_diagnostics_for_select(
     select: &smelt_parser::ast::SelectStmt,
     text: &str,
-    range_offset: usize,
+    range_offset: rowan::TextSize,
 ) -> Vec<Diagnostic> {
     let empty_ctx = type_inference::TypeContext::new();
     let (_ctx, mut cycle_diags) =
         function_body_check::extract_function_body_cte_schemas(select, &empty_ctx, text, None);
-    if range_offset > 0 {
-        shift_diagnostic_ranges(&mut cycle_diags, text, range_offset);
+    if range_offset > rowan::TextSize::from(0) {
+        for diag in &mut cycle_diags {
+            diag.range = rowan::TextRange::new(
+                diag.range.start() + range_offset,
+                diag.range.end() + range_offset,
+            );
+        }
     }
     cycle_diags
 }
@@ -2001,7 +1943,11 @@ pub fn cte_cycle_diagnostics_for_file(
         let Some(select) = body.select_stmt() else {
             continue;
         };
-        out.extend(cte_cycle_diagnostics_for_select(&select, &clean_text, 0));
+        out.extend(cte_cycle_diagnostics_for_select(
+            &select,
+            &clean_text,
+            rowan::TextSize::from(0),
+        ));
     }
     out
 }
@@ -2048,6 +1994,7 @@ pub fn context_mismatch_diagnostics_for_file(
 mod tests {
     use crate::test_harness::TestDb;
     use crate::DiagnosticCode;
+    use rowan::TextSize;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -2079,7 +2026,7 @@ mod tests {
         let ast = AstFile::cast(syntax).expect("should parse as AstFile");
         let select = ast.select_stmt().expect("should have select_stmt");
 
-        let diags = cte_cycle_diagnostics_for_select(&select, body_sql, 0);
+        let diags = cte_cycle_diagnostics_for_select(&select, body_sql, TextSize::from(0));
         // The cycle detector should fire for this self-referencing CTE.
         let cycle_diags: Vec<_> = diags
             .iter()
@@ -2104,7 +2051,7 @@ mod tests {
         let ast = AstFile::cast(syntax).expect("should parse as AstFile");
         let select = ast.select_stmt().expect("should have select_stmt");
 
-        let diags = cte_cycle_diagnostics_for_select(&select, body_sql, 0);
+        let diags = cte_cycle_diagnostics_for_select(&select, body_sql, TextSize::from(0));
         let cycle_diags: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::CteCycle))
@@ -2165,7 +2112,7 @@ mod tests {
             &syntax,
             &ctx,
             sql,
-            0,
+            TextSize::from(0),
             &deferred,
             &sig_lookup,
             &builtin_lookup,

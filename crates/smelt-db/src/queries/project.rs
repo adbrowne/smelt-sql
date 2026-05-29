@@ -622,7 +622,6 @@ fn materialise_emitted_model_def(
 #[allow(clippy::too_many_arguments)]
 fn evaluate_body_emissions(
     generator_file: &Path,
-    file_text: &str,
     body_expr: &Expr,
     frontmatter_tags: &[String],
     frontmatter_incremental: Option<&IncrementalConfig>,
@@ -636,7 +635,7 @@ fn evaluate_body_emissions(
     // Run body type-check first.
     let body_result = infer_generator_file_body(body_expr, ctx);
     for sentinel in body_result.sentinels {
-        let range = smelt_parser::ast::text_range_to_range(file_text, sentinel.span);
+        let range = sentinel.span;
         diagnostics.push(crate::Diagnostic {
             severity: crate::DiagnosticSeverity::Error,
             message: sentinel.message,
@@ -677,8 +676,7 @@ fn evaluate_body_emissions(
                     let elem_result =
                         crate::type_inference::infer_model_def_literal(&record_lit, ctx);
                     for sentinel in elem_result.sentinels {
-                        let range =
-                            smelt_parser::ast::text_range_to_range(file_text, sentinel.span);
+                        let range = sentinel.span;
                         diagnostics.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: sentinel.message,
@@ -1232,7 +1230,6 @@ pub fn evaluate_generator(
     // Run the body evaluation.
     let (raw_emissions, mut diagnostics) = evaluate_body_emissions(
         file.path(db),
-        text,
         &body_expr,
         &frontmatter_tags,
         frontmatter_incremental.as_ref(),
@@ -1252,7 +1249,7 @@ pub fn evaluate_generator(
     // did not arise from an expansion, remain frameless per invariant 4.
     {
         use crate::function_body_check::{make_generator_frame, stamp_generator_frame_onto};
-        let gen_frame = make_generator_frame(&gen_file_path, body_range, text);
+        let gen_frame = make_generator_frame(&gen_file_path, body_range);
         for diag in &mut diagnostics {
             // Skip if already carrying a <generator> outermost frame.
             let already_stamped = match &diag.data {
@@ -1277,7 +1274,7 @@ pub fn evaluate_generator(
         diagnostics.retain(|d| d.code != Some(crate::DiagnosticCode::GenerateFileBodyTypeError));
     }
     for sentinel in forbid_sentinels {
-        let range = smelt_parser::ast::text_range_to_range(text, sentinel.span);
+        let range = sentinel.span;
         // Structural file check — did not arise from an expansion; no frame
         // stack per expansion.md invariant 4.
         diagnostics.push(crate::Diagnostic {
@@ -1296,7 +1293,7 @@ pub fn evaluate_generator(
         if seen_names.contains_key(&emitted.name) {
             // Duplicate — emit diagnostic at the name span, drop this emission.
             // Structural file check — no frame stack per expansion.md invariant 4.
-            let range = smelt_parser::ast::text_range_to_range(text, emitted.name_span);
+            let range = emitted.name_span;
             diagnostics.push(crate::Diagnostic {
                 severity: crate::DiagnosticSeverity::Error,
                 message: format!(
@@ -1429,10 +1426,7 @@ fn collect_loader_values(
                 &schema_arg.syntax().text().to_string(),
                 "",
             );
-            let call_range = crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            };
+            let call_range = rowan::TextRange::empty(rowan::TextSize::from(0));
             let parsed_clone = (**parsed_ref).clone();
             let val_result =
                 crate::loader::validate_against_schema(&parsed_clone, &schema_ty, call_range);
@@ -1533,7 +1527,6 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
             .map(|p| project_paths(db, *p))
             .map(|paths| paths.as_ref().clone())
             .unwrap_or_default();
-        let file_text = gen_file.text(db);
 
         for emitted in &evaluated.emissions {
             let smelt_path = emitted_model_smelt_path(
@@ -1561,7 +1554,7 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
                     })
                     .cloned()
                     .unwrap_or_default();
-                let range = smelt_parser::ast::text_range_to_range(file_text, emitted.name_span);
+                let range = emitted.name_span;
                 let diagnostic = crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message: format!(
@@ -1581,7 +1574,7 @@ pub fn emitted_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Emi
 
             // Check cross-generator collision.
             if let Some(prior_gen_path) = seen_smelt_paths.get(&smelt_path) {
-                let range = smelt_parser::ast::text_range_to_range(file_text, emitted.name_span);
+                let range = emitted.name_span;
                 let diagnostic = crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message: format!(
@@ -1800,69 +1793,6 @@ pub struct EmissionBodyAnalysis {
     pub diagnostics: Vec<crate::Diagnostic>,
 }
 
-/// Pure helper: convert a body-local `Range` (line/column positions relative to
-/// `body_sql`) to generator-file coordinates by converting to a body byte offset,
-/// adding `body_offset`, and re-converting via `generator_file_text`.
-///
-/// When `body_offset == 0` the positions are returned unchanged.
-fn remap_body_range(
-    body_sql: &str,
-    generator_file_text: &str,
-    body_offset: usize,
-    range: crate::Range,
-) -> crate::Range {
-    if body_offset == 0 {
-        return range;
-    }
-    // Convert body-local line/col to body-local byte offset.
-    let start_byte = body_position_to_byte(body_sql, range.start);
-    let end_byte = body_position_to_byte(body_sql, range.end);
-    let shifted = rowan::TextRange::new(
-        rowan::TextSize::from((start_byte + body_offset) as u32),
-        rowan::TextSize::from((end_byte + body_offset) as u32),
-    );
-    smelt_parser::ast::text_range_to_range(generator_file_text, shifted)
-}
-
-/// Scan `text` for the byte index of the character at `pos` (0-indexed line +
-/// column). Returns `text.len()` when the position is past the end of `text`.
-fn body_position_to_byte(text: &str, pos: smelt_parser::ast::Position) -> usize {
-    let mut line = 0u32;
-    let mut col = 0u32;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line && col == pos.column {
-            return i;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    text.len()
-}
-
-/// Shift a body-local `rowan::TextRange` (byte offsets relative to the start
-/// of `body_sql`) to generator-file coordinates and return the resulting
-/// `crate::Range` (line/col positions).
-///
-/// When `body_offset == 0` this degenerates to
-/// `smelt_parser::ast::text_range_to_range(body_sql, range)`.
-fn shifted_body_text_range(
-    body_sql: &str,
-    generator_file_text: &str,
-    body_offset: usize,
-    range: rowan::TextRange,
-) -> crate::Range {
-    if body_offset == 0 {
-        return smelt_parser::ast::text_range_to_range(body_sql, range);
-    }
-    let offset = rowan::TextSize::from(body_offset as u32);
-    let shifted = rowan::TextRange::new(range.start() + offset, range.end() + offset);
-    smelt_parser::ast::text_range_to_range(generator_file_text, shifted)
-}
-
 /// Pure helper: synthesise a typed `ModelSchema` AND collect body diagnostics
 /// for a single generator-emitted model body.
 ///
@@ -1904,8 +1834,8 @@ fn shifted_body_text_range(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn synthesise_emission_body_analysis(
     body_sql: &str,
-    generator_file_text: &str,
-    body_offset: usize,
+    _generator_file_text: &str,
+    body_offset: rowan::TextSize,
     refs: &dyn RefSchemaProvider,
     legacy_sources: &SourcesConfig,
     per_entity_sources: &[SourceInfo],
@@ -1921,15 +1851,6 @@ pub(crate) fn synthesise_emission_body_analysis(
     use crate::type_inference::loader_and_reflection::check_config_var_call_diagnostics;
     use crate::{DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
-    // Determine the effective text for final line/col conversion:
-    // when body_offset > 0 we use the generator file text so that positions
-    // land at generator-file coordinates; otherwise body_sql suffices.
-    let anchor_text = if body_offset > 0 {
-        generator_file_text
-    } else {
-        body_sql
-    };
-
     let mut diagnostics: Vec<crate::Diagnostic> = Vec::new();
 
     // Re-parse the body SQL as a standalone file.
@@ -1938,15 +1859,14 @@ pub(crate) fn synthesise_emission_body_analysis(
 
     // Build the anchor range for the body start (used by parse-error fallbacks
     // when there is no more specific position to report).
-    let body_start_range = {
-        let start_offset = rowan::TextSize::from(body_offset as u32);
-        let anchor = rowan::TextRange::new(start_offset, start_offset);
-        smelt_parser::ast::text_range_to_range(anchor_text, anchor)
-    };
+    let body_start_range = rowan::TextRange::empty(body_offset);
 
-    // Emit parse errors from the body, anchored at generator-file coordinates.
+    // Emit parse errors from the body, shifted to generator-file coordinates.
     for err in &parse.errors {
-        let err_range = shifted_body_text_range(body_sql, anchor_text, body_offset, err.range);
+        let err_range = rowan::TextRange::new(
+            err.range.start() + body_offset,
+            err.range.end() + body_offset,
+        );
         diagnostics.push(crate::Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: err.message.clone(),
@@ -2014,31 +1934,26 @@ pub(crate) fn synthesise_emission_body_analysis(
     // --- Diagnostic checks ---
     // All diagnostics are anchored at generator-file coordinates via body_offset.
 
-    // 1. CTE cycle detection — returns body-local ranges; remap to generator-file.
-    {
-        let cte_diags = cte_cycle_diagnostics_for_select(&select_stmt, body_sql, 0);
-        for mut diag in cte_diags {
-            diag.range = remap_body_range(body_sql, anchor_text, body_offset, diag.range);
-            diagnostics.push(diag);
-        }
-    }
-
-    // 2. Expression type diagnostics (CAST type names, function names).
-    //    `check_expression_types_for_select` uses `shifted_range(text, cst_range, offset)`:
-    //    pass `anchor_text` + `body_offset` so CST byte offsets are shifted into
-    //    generator-file space before the final line/col conversion.
-    diagnostics.extend(check_expression_types_for_select(
+    // 1. CTE cycle detection — returns body-local byte ranges; shift to generator-file.
+    diagnostics.extend(cte_cycle_diagnostics_for_select(
         &select_stmt,
-        anchor_text,
+        body_sql,
         body_offset,
     ));
 
-    // 3. config.var diagnostics — returns body-local ranges; remap to generator-file.
+    // 2. Expression type diagnostics (CAST type names, function names).
+    //    Pass body_offset so CST byte offsets are shifted into generator-file space.
+    diagnostics.extend(check_expression_types_for_select(&select_stmt, body_offset));
+
+    // 3. config.var diagnostics — body-local byte ranges; shift to generator-file.
     {
         let body_syntax = parse.syntax();
-        let var_diags = check_config_var_call_diagnostics(&body_syntax, config_vars, body_sql);
+        let var_diags = check_config_var_call_diagnostics(&body_syntax, config_vars);
         for mut diag in var_diags {
-            diag.range = remap_body_range(body_sql, anchor_text, body_offset, diag.range);
+            diag.range = rowan::TextRange::new(
+                diag.range.start() + body_offset,
+                diag.range.end() + body_offset,
+            );
             diagnostics.push(diag);
         }
     }
@@ -2048,7 +1963,10 @@ pub(crate) fn synthesise_emission_body_analysis(
     //    shift to generator-file coordinates.
     let undeclared = check_undeclared_columns(&select_stmt, &ctx);
     for info in undeclared {
-        let range = shifted_body_text_range(body_sql, anchor_text, body_offset, info.range);
+        let range = rowan::TextRange::new(
+            info.range.start() + body_offset,
+            info.range.end() + body_offset,
+        );
         diagnostics.push(crate::Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: info.message,
@@ -2071,13 +1989,8 @@ pub(crate) fn synthesise_emission_body_analysis(
     );
 
     // 5. CannotInferType warnings from the synthesised schema.
-    //    `cannot_infer_type_for_schema` uses `shifted_range(text, col.range, offset)`:
-    //    col.range is a CST TextRange (body-local bytes), so pass `anchor_text` + `body_offset`.
-    diagnostics.extend(cannot_infer_type_for_schema(
-        &schema,
-        anchor_text,
-        body_offset,
-    ));
+    //    col.range is a CST TextRange (body-local bytes); pass body_offset to shift.
+    diagnostics.extend(cannot_infer_type_for_schema(&schema, body_offset));
 
     EmissionBodyAnalysis {
         schema,
@@ -2127,7 +2040,7 @@ pub fn emitted_model_body_analysis(
     // body_offset: byte position of the body start within the generator file.
     // EmittedModelDef.body_span is a CST TextRange anchored in the generator file;
     // its start() is the byte offset we need to remap diagnostic ranges.
-    let body_offset: usize = u32::from(emission.body_span.start()) as usize;
+    let body_offset: rowan::TextSize = emission.body_span.start();
     let generator_file_text = generator_file.text(db);
 
     // Gather sources using the same two-path resolution as `type_context()`.
@@ -2577,18 +2490,19 @@ mod tests {
             .find(|d| d.code == Some(crate::DiagnosticCode::ModelDefInvalidName))
             .expect("expected ModelDefInvalidName diagnostic");
         // Range must point into the body (line >= 3 since the frontmatter
-        // occupies lines 1–3).  A zero range (start.line == 0 && end.line == 0)
+        // occupies lines 1–3).  A zero range (start == 0 && end == 0)
         // means the file-text plumbing into evaluate_body_emissions broke.
         let r = &invalid_name_diag.range;
+        let r_lc = smelt_parser::ast::text_range_to_range(generator, *r);
         assert!(
-            r.start.line > 0 || r.start.column > 0 || r.end.line > 0 || r.end.column > 0,
+            usize::from(r.start()) > 0 || usize::from(r.end()) > 0,
             "expected non-zero range for ModelDefInvalidName, got {:?}",
             r
         );
         assert!(
-            r.start.line >= 3,
+            r_lc.start.line >= 3,
             "expected range to point into post-frontmatter body (line >= 3), got line {}",
-            r.start.line
+            r_lc.start.line
         );
     }
 

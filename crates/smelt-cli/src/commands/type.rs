@@ -48,15 +48,6 @@ pub async fn show_type(args: TypeArgs) -> Result<()> {
         let file = db
             .source_file(&model.path)
             .expect("model file not registered");
-        // Shadow-mode: validate LineIndex parity for any diagnostics on this file.
-        {
-            let text = file.text(&db).clone();
-            let converter = smelt_cli::diagnostics_terminal::TerminalConverter::new(&text);
-            let diags = smelt_db::file_diagnostics(&db, ws, file);
-            for diag in &diags {
-                let _ = converter.start(diag, &text);
-            }
-        }
         let ft = smelt_db::model_function_type(&db, ws, file);
         println!("{}", ft);
     } else {
@@ -71,15 +62,6 @@ pub async fn show_type(args: TypeArgs) -> Result<()> {
             let file = db
                 .source_file(&model.path)
                 .expect("model file not registered");
-            // Shadow-mode: validate LineIndex parity for any diagnostics on this file.
-            {
-                let text = file.text(&db).clone();
-                let converter = smelt_cli::diagnostics_terminal::TerminalConverter::new(&text);
-                let diags = smelt_db::file_diagnostics(&db, ws, file);
-                for diag in &diags {
-                    let _ = converter.start(diag, &text);
-                }
-            }
             let ft = smelt_db::model_function_type(&db, ws, file);
             println!("{}", ft);
         }

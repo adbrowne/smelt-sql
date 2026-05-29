@@ -319,7 +319,7 @@ impl TestWorkspace {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
+                let r = smelt_parser::ast::text_range_to_range(&text, d.range);
                 (r.start.line < line || (r.start.line == line && r.start.column <= col))
                     && (r.end.line > line || (r.end.line == line && r.end.column >= col))
             })
@@ -388,7 +388,7 @@ impl TestWorkspace {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
+                let r = smelt_parser::ast::text_range_to_range(&text, d.range);
                 (r.start.line < line || (r.start.line == line && r.start.column <= col))
                     && (r.end.line > line || (r.end.line == line && r.end.column >= col))
             })
@@ -419,7 +419,7 @@ impl TestWorkspace {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
+                let r = smelt_parser::ast::text_range_to_range(&text, d.range);
                 (r.start.line < line || (r.start.line == line && r.start.column <= col))
                     && (r.end.line > line || (r.end.line == line && r.end.column >= col))
             })
@@ -478,6 +478,7 @@ impl TestWorkspace {
                         all_file_path_refs
                             .into_iter()
                             .flat_map(|(p, refs)| {
+                                let file_text = std::fs::read_to_string(&p).unwrap_or_default();
                                 refs.into_iter()
                                     .filter(|r| {
                                         r.path.first().map(|s| s.as_str()) == Some("models")
@@ -485,7 +486,10 @@ impl TestWorkspace {
                                                 == Some(model_name.as_str())
                                     })
                                     .map(move |r| {
-                                        (p.clone(), (r.range.start.line, r.range.start.column))
+                                        let lc = smelt_parser::ast::text_range_to_range(
+                                            &file_text, r.range,
+                                        );
+                                        (p.clone(), (lc.start.line, lc.start.column))
                                     })
                             })
                             .collect()
@@ -505,6 +509,7 @@ impl TestWorkspace {
                         all_file_path_refs
                             .into_iter()
                             .flat_map(|(p, refs)| {
+                                let file_text = std::fs::read_to_string(&p).unwrap_or_default();
                                 refs.into_iter()
                                     .filter(|r| {
                                         r.path.first().map(|s| s.as_str()) == Some("sources")
@@ -514,7 +519,10 @@ impl TestWorkspace {
                                                 == Some(table_name.as_str())
                                     })
                                     .map(move |r| {
-                                        (p.clone(), (r.range.start.line, r.range.start.column))
+                                        let lc = smelt_parser::ast::text_range_to_range(
+                                            &file_text, r.range,
+                                        );
+                                        (p.clone(), (lc.start.line, lc.start.column))
                                     })
                             })
                             .collect()
@@ -1256,8 +1264,10 @@ sources:
 
         assert_eq!(diags.len(), 1);
         // The ref is on line 2 (0-indexed)
-        assert_eq!(diags[0].range.start.line, 2);
-        assert_eq!(diags[0].range.end.line, 2);
+        let model_text = ws.file_text(&ws.model_path("broken"));
+        let r = smelt_parser::ast::text_range_to_range(&model_text, diags[0].range);
+        assert_eq!(r.start.line, 2);
+        assert_eq!(r.end.line, 2);
     }
 
     #[test]
@@ -4370,13 +4380,12 @@ fn test_extract_cte_creates_with_clause() {
 
 /// Apply text edits to a string, processing from end to start to maintain positions.
 fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggestion]) -> String {
-    // Convert to byte offsets and sort by position (end to start)
+    // TextEditSuggestion::range is now a TextRange (byte offsets); use directly.
     let mut edits_with_offsets: Vec<_> = edits
         .iter()
         .map(|edit| {
-            let start =
-                position_to_byte_offset(text, edit.range.start.line, edit.range.start.column);
-            let end = position_to_byte_offset(text, edit.range.end.line, edit.range.end.column);
+            let start = usize::from(edit.range.start());
+            let end = usize::from(edit.range.end());
             (start, end, &edit.new_text)
         })
         .collect();
@@ -4390,6 +4399,7 @@ fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggest
 }
 
 /// Convert (line, col) to byte offset in text.
+#[allow(dead_code)]
 fn position_to_byte_offset(text: &str, line: u32, col: u32) -> usize {
     let mut current_line = 0u32;
     let mut current_col = 0u32;
