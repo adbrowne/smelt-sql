@@ -54,7 +54,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | 13142fe2 | 2026-05-30 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
