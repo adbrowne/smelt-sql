@@ -57,7 +57,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 |-------|----------|--------|------|
 | 1     | done     | 8c0e859d | 2026-05-29 |
 | 2     | done     | d42a5fca | 2026-05-29 |
-| 3     | pending  |        |      |
+| 3     | done     | 5e99419d | 2026-05-29 |
 
 ---
 
@@ -220,6 +220,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 
 - Expansion-time-validated lifted-identifier diagnostics: tracked in `meta_language.md` §Known Divergences ("Lift-scope validation at body-check time is suppressed…"); not closed by this plan.
 - Restructuring of `_for_file` Salsa wrappers beyond what Phase 1 mechanically requires: if a helper is more entangled than expected, leave it as-is and document the gap.
+- `body_position_to_byte` (the helper inside `synthesise_emission_body_analysis` that backs `remap_body_range` for CTE-cycle and `smelt.config.var` diagnostics) advances by one codepoint per character rather than `ch.len_utf8()` bytes. For non-ASCII emission bodies this would miscount the byte offset and shift those diagnostics to slightly wrong line/columns. All current fixtures are ASCII so no test exercises the path; a one-line fix (replace `+= 1` with `+= ch.len_utf8()`) will land when a non-ASCII fixture surfaces.
 
 ## Verification
 
