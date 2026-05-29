@@ -95,15 +95,19 @@ pub use type_inference::{
     walk_select_columns_with_visitor, TypeContext, WindowInScalarContextInfo,
 };
 
-pub use queries::check_types::check_type_diagnostics;
+pub use queries::check_types::{
+    cannot_infer_type_for_schema, check_expression_types_for_select, check_type_diagnostics,
+};
 pub use queries::function_diagnostics::{
     as_struct_backend_diagnostics_for_file, backends_widening_diagnostics_for_file,
     context_mismatch_diagnostics_for_file, cte_cycle_diagnostics_for_file,
-    duplicate_function_diagnostics_for_file, extern_fragment_param_diagnostics_for_file,
-    frontmatter_parse_diagnostics_for_file, function_backends, function_body_diagnostics_for_file,
+    cte_cycle_diagnostics_for_select, duplicate_function_diagnostics_for_file,
+    extern_fragment_param_diagnostics_for_file, frontmatter_parse_diagnostics_for_file,
+    function_backends, function_body_diagnostics_for_file,
     invalid_function_type_ref_diagnostics_for_file, missing_provenance_advisory_for_file,
-    provenance_unstable_diagnostics_for_file, smelt_fn_call_diagnostics_for_file,
-    unknown_context_diagnostics_for_file, workspace_function_diagnostics,
+    provenance_unstable_diagnostics_for_file, smelt_fn_call_diagnostics_for_ast,
+    smelt_fn_call_diagnostics_for_file, unknown_context_diagnostics_for_file,
+    workspace_function_diagnostics,
 };
 pub use queries::functions::{
     file_signature_inputs, function_body, function_signature, functions_in_file, resolve_function,
@@ -111,9 +115,9 @@ pub use queries::functions::{
 };
 pub use queries::loader::{
     loader_call_diagnostics_for_file, loader_call_diagnostics_for_file_with_content,
-    loader_file_parsed, loader_resolved_value, loader_resolved_value_with_overlay,
-    parse_smelt_type_from_field_annotation, smelt_record_declarations, LoaderCallSiteId,
-    LoaderResolvedValue,
+    loader_call_diagnostics_for_syntax, loader_file_parsed, loader_resolved_value,
+    loader_resolved_value_with_overlay, parse_smelt_type_from_field_annotation,
+    smelt_record_declarations, LoaderCallSiteId, LoaderResolvedValue,
 };
 pub use queries::parse::{
     model_path_refs, model_refs, model_sources, parse_file, parse_model, PathRefLocation,
@@ -1371,7 +1375,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             if let Some(select_list) = select_stmt.select_list() {
                 for item in select_list.items() {
                     if let Some(expr) = item.expression() {
-                        queries::check_types::check_expression_types(&expr, db);
+                        queries::check_types::check_expression_types(&expr, text, db);
                     }
                 }
             }

@@ -641,25 +641,53 @@ pub fn loader_call_diagnostics_for_file_with_content(
     let decls = smelt_record_declarations(db, workspace);
     let (registry, _sentinels) = type_inference::record_registry_for_workspace(&decls);
 
-    // Build the file_exists callback from the get_loader_text closure.
-    // If the caller didn't provide loader text, fall back to a filesystem check.
+    let project_root = file.project_root(db).clone();
+
+    // Delegate to the pure helper.
+    loader_call_diagnostics_for_syntax(&syntax, text, 0, &registry, &project_root, get_loader_text)
+}
+
+/// Pure helper: run loader call diagnostics against a pre-parsed `SyntaxNode`.
+///
+/// This is the extraction of the core of [`loader_call_diagnostics_for_file_with_content`]
+/// into a function that takes plain data rather than Salsa handles.
+///
+/// **Parameters:**
+/// - `syntax` — root syntax node to scan.
+/// - `text` — source text for `text_range_to_range`. For hand-authored callers
+///   this is the file text; emission-body callers pass the full generator file
+///   text.
+/// - `range_offset` — byte offset of the scanned fragment within `text` (`0`
+///   for hand-authored callers). Shifts diagnostic ranges into the enclosing
+///   file's coordinate space before returning.
+/// - `registry` — pre-built record registry (from `record_registry_for_workspace`).
+/// - `project_root` — used for filesystem fallback when `get_loader_text`
+///   returns `None`.
+/// - `get_loader_text` — callback returning `(text, exists)` for a loader
+///   file path, or `None` to skip content-validation for that call site.
+pub fn loader_call_diagnostics_for_syntax(
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    text: &str,
+    range_offset: usize,
+    registry: &smelt_types::signatures::RecordRegistry,
+    project_root: &std::path::Path,
+    get_loader_text: LoaderTextFn<'_>,
+) -> Vec<Diagnostic> {
+    // Build the file_exists callback.
     let file_exists = |path: &str| -> bool {
         if let Some((_, exists)) = get_loader_text(path) {
             return exists;
         }
-        // Fallback: filesystem check (best-effort when no Salsa input registered).
-        let project_root = file.project_root(db);
+        // Fallback: filesystem check.
         let full_path = project_root.join(path);
         full_path.exists()
     };
 
     // Step 1: path/schema admissibility diagnostics (pure).
     let mut diags =
-        type_inference::check_loader_call_diagnostics(&syntax, &file_exists, &registry, text);
+        type_inference::check_loader_call_diagnostics(syntax, &file_exists, registry, text);
 
     // Step 2: content-validation for each valid call site.
-    // Walk the syntax tree again to find `load_yaml`/`load_json` calls that
-    // passed path + schema checks, then parse and validate the loaded file.
     {
         use smelt_parser::ast::SmeltPathCall;
         use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
@@ -685,13 +713,11 @@ pub fn loader_call_diagnostics_for_file_with_content(
                 continue;
             }
 
-            // Get positional args.
             let positional_args: Vec<_> = call
                 .arg_list()
                 .map(|args| args.positional_args().into_iter().collect())
                 .unwrap_or_default();
 
-            // Need both path and schema arguments.
             let path_arg = match positional_args.first() {
                 Some(a) => a,
                 None => continue,
@@ -701,7 +727,6 @@ pub fn loader_call_diagnostics_for_file_with_content(
                 None => continue,
             };
 
-            // Path must be a string literal.
             if !crate::config_vars::is_string_literal_expr(path_arg) {
                 continue;
             }
@@ -710,22 +735,19 @@ pub fn loader_call_diagnostics_for_file_with_content(
                 None => continue,
             };
 
-            // Schema must be admissible.
             let schema_text = schema_arg.syntax().text().to_string();
-            if !type_inference::schema_arg_text_is_admissible(&schema_text, &registry) {
+            if !type_inference::schema_arg_text_is_admissible(&schema_text, registry) {
                 continue;
             }
 
-            // Look up the loader file text.
             let (loader_text, loader_exists) = match get_loader_text(&path_value) {
                 Some(t) => t,
-                None => continue, // No text provided — skip content-validation.
+                None => continue,
             };
             if !loader_exists {
-                continue; // File doesn't exist — path check already emitted FileNotFound.
+                continue;
             }
 
-            // Parse the file.
             let format = if path_value.ends_with(".json") {
                 crate::loader::ConfigFormat::Json
             } else {
@@ -741,7 +763,6 @@ pub fn loader_call_diagnostics_for_file_with_content(
             };
             let parsed = match parsed_result {
                 Err(e) => {
-                    // Parse error — emit ConfigLoaderParseError.
                     diags.push(Diagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: crate::meta_loader_diagnostic_message(
@@ -769,20 +790,14 @@ pub fn loader_call_diagnostics_for_file_with_content(
                 Ok(p) => p,
             };
 
-            // Parse the schema type.
             let schema_ty = parse_smelt_type_from_field_annotation(&schema_text, "");
             if !crate::loader::is_admissible_loader_schema(&schema_ty) {
-                continue; // Already diagnosed above.
+                continue;
             }
 
-            // Validate the file against the schema.
             let call_range = to_range(node.text_range());
             let result = crate::loader::validate_against_schema(&parsed, &schema_ty, call_range);
             for loader_diag in result.diagnostics {
-                // Convert to a `Diagnostic`.
-                // Primary span is the loader file row; we anchor it at the call site
-                // range (secondary frame) since we don't have a source range for the
-                // loader file's rows in the LSP protocol.
                 let severity = match loader_diag.severity {
                     crate::loader::LoaderDiagnosticSeverity::Error => DiagnosticSeverity::Error,
                     crate::loader::LoaderDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
@@ -798,5 +813,158 @@ pub fn loader_call_diagnostics_for_file_with_content(
         }
     }
 
+    // Apply range offset if needed (Phase 2+ emission-body callers).
+    if range_offset > 0 {
+        let offset = rowan::TextSize::from(range_offset as u32);
+        for diag in &mut diags {
+            // Re-scan text to find byte offsets from line/column positions.
+            let sb = loader_byte_offset_of_position(text, diag.range.start);
+            let eb = loader_byte_offset_of_position(text, diag.range.end);
+            if let (Some(sb), Some(eb)) = (sb, eb) {
+                let shifted = rowan::TextRange::new(
+                    rowan::TextSize::from((sb + range_offset) as u32),
+                    rowan::TextSize::from((eb + range_offset) as u32),
+                );
+                let _ = offset; // used above indirectly
+                diag.range = smelt_parser::ast::text_range_to_range(text, shifted);
+            }
+        }
+    }
+
     diags
+}
+
+/// Scan `text` to find the byte offset of the character at line/column `pos`.
+fn loader_byte_offset_of_position(text: &str, pos: crate::Position) -> Option<usize> {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for (i, ch) in text.char_indices() {
+        if line == pos.line && col == pos.column {
+            return Some(i);
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    if line == pos.line && col == pos.column {
+        return Some(text.len());
+    }
+    None
+}
+
+// ============================================================================
+// Tests for loader_call_diagnostics_for_syntax pure helper
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::loader_call_diagnostics_for_syntax;
+    use crate::DiagnosticCode;
+    use smelt_types::signatures::RecordRegistry;
+
+    fn empty_registry() -> RecordRegistry {
+        RecordRegistry::default()
+    }
+
+    fn no_files(_path: &str) -> Option<(std::sync::Arc<str>, bool)> {
+        None
+    }
+
+    fn parse_syntax(sql: &str) -> (smelt_parser::syntax_kind::SyntaxNode, smelt_parser::Parse) {
+        let parse = smelt_parser::parse(sql);
+        let syntax = parse.syntax();
+        (syntax, parse)
+    }
+
+    /// `loader_call_diagnostics_for_syntax` must emit
+    /// `ConfigLoaderFileNotFound` for a literal path that doesn't exist,
+    /// consistent with the existing pure `check_loader_call_diagnostics`.
+    #[test]
+    fn loader_call_diagnostics_for_syntax_detects_missing_file() {
+        let sql = "SELECT smelt.config.load_yaml('missing.yaml', {}) FROM t";
+        let (syntax, _parse) = parse_syntax(sql);
+        let registry = empty_registry();
+
+        let diags = loader_call_diagnostics_for_syntax(
+            &syntax,
+            sql,
+            0,
+            &registry,
+            std::path::Path::new("/nonexistent"),
+            &no_files,
+        );
+
+        let not_found: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::ConfigLoaderFileNotFound))
+            .collect();
+        assert!(
+            !not_found.is_empty(),
+            "missing loader file must produce ConfigLoaderFileNotFound; got: {:?}",
+            diags
+        );
+    }
+
+    /// A well-formed loader call with a non-literal path must produce
+    /// `ConfigLoaderPathNotLiteral`.
+    #[test]
+    fn loader_call_diagnostics_for_syntax_detects_non_literal_path() {
+        let sql = "SELECT smelt.config.load_yaml(some_var, {}) FROM t";
+        let (syntax, _parse) = parse_syntax(sql);
+        let registry = empty_registry();
+
+        let diags = loader_call_diagnostics_for_syntax(
+            &syntax,
+            sql,
+            0,
+            &registry,
+            std::path::Path::new("/tmp"),
+            &no_files,
+        );
+
+        let path_not_literal: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::ConfigLoaderPathNotLiteral))
+            .collect();
+        assert!(
+            !path_not_literal.is_empty(),
+            "non-literal path must produce ConfigLoaderPathNotLiteral; got: {:?}",
+            diags
+        );
+    }
+
+    /// `loader_call_diagnostics_for_syntax` with `range_offset = 0` is a
+    /// no-op compared to calling it with a non-offset body — the diagnostic
+    /// count must match.
+    #[test]
+    fn loader_call_diagnostics_for_syntax_range_offset_zero_noop() {
+        let sql = "SELECT smelt.config.load_yaml('missing.yaml', {}) FROM t";
+        let (syntax, _parse) = parse_syntax(sql);
+        let registry = empty_registry();
+
+        let diags_no_offset = loader_call_diagnostics_for_syntax(
+            &syntax,
+            sql,
+            0,
+            &registry,
+            std::path::Path::new("/nonexistent"),
+            &no_files,
+        );
+
+        assert!(
+            !diags_no_offset.is_empty(),
+            "must produce diagnostics; got: {:?}",
+            diags_no_offset
+        );
+        // With range_offset = 0, the first diagnostic should have a valid range.
+        let first = &diags_no_offset[0];
+        assert!(
+            first.range.start.line == 0,
+            "range offset=0: first diag should be on line 0; got: {:?}",
+            first.range
+        );
+    }
 }
