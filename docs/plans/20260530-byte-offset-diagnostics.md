@@ -55,7 +55,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 13142fe2 | 2026-05-30 |
-| 2     | pending  |        |      |
+| 2     | done     | c44f21c6 | 2026-05-30 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 
@@ -240,6 +240,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 (Append-only.)
 
 - Runtime `RunReporter` and UI HTTP/WebSocket adapter encoding negotiation: Phase 3 ships LSP negotiation; other surfaces use the default (terminal: codepoints; runtime: bytes) until a concrete editor-in-browser use case surfaces.
+- `smelt-ui/src/build.rs::DiagnosticInfo` still uses `smelt_parser::ast::offset_to_position` (codepoint-based, legacy) at its JSON-serialization boundary. Not a Phase 2 violation — the spec's "DON'T" rules target analysis crates, not boundary converters — but Phase 4 deletes `offset_to_position`, so the UI boundary will need to switch to `LineIndex` before then.
 
 ## Verification
 
