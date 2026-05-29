@@ -123,12 +123,13 @@ pub use queries::parse::{
     model_path_refs, model_refs, model_sources, parse_file, parse_model, PathRefLocation,
 };
 pub use queries::project::{
-    all_models, emitted_model_smelt_path, emitted_model_typed_schema, emitted_models,
-    evaluate_generator, generator_files, models_all, models_all_with_generators, models_with_tag,
-    project_active_backends, project_paths, project_seeds, project_sources,
+    all_models, emitted_model_body_analysis, emitted_model_smelt_path, emitted_model_typed_schema,
+    emitted_models, evaluate_generator, generator_files, models_all, models_all_with_generators,
+    models_with_tag, project_active_backends, project_paths, project_seeds, project_sources,
     project_unstable_schema, resolve_seed_or_source_path, smelt_yml_vars_query, sources_all,
-    sources_config, sources_type_errors, sources_with_tag, sources_yaml_error, EmittedModelDef,
-    EmittedModelsResult, EvaluatedGenerator, SourceTypeError, YamlParseError,
+    sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
+    EmissionBodyAnalysis, EmittedModelDef, EmittedModelsResult, EvaluatedGenerator,
+    SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, available_columns, build_type_context,

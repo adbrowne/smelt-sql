@@ -660,6 +660,46 @@ impl TypeContext {
         self.lambda_params.insert(name.to_string(), col);
     }
 
+    /// Seed a record-typed lambda binding so that qualified field accesses
+    /// like `c.region` (where `c` is the lambda parameter and `region` is a
+    /// field on its record type) resolve correctly inside emission bodies.
+    ///
+    /// For each `(field_name, field_smelt_type)` pair in the record's fields,
+    /// this registers `"<name>.<field_name>"` as a model column so that
+    /// `lookup_column(Some(name), field_name)` returns `Some(typed_col)`.
+    ///
+    /// Non-Record types are not seeded — multi-arg lambda support over
+    /// non-record element types is not yet implemented. The method is a
+    /// graceful no-op for those types; callers may still emit diagnostics
+    /// through the normal `UndeclaredColumn` path.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn register_lambda_binding(&mut self, name: &str, ty: &smelt_types::signatures::SmeltType) {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypedColumn};
+
+        if let SmeltType::Record { fields, .. } = ty {
+            for (field_name, field_ty) in fields {
+                let data_type = match field_ty {
+                    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(dt)) => {
+                        dt.clone()
+                    }
+                    _ => DataType::Unknown,
+                };
+                self.add_model_column(
+                    name,
+                    field_name,
+                    TypedColumn {
+                        data_type,
+                        nullable: true,
+                    },
+                );
+            }
+        }
+        // Non-Record types: no-op. Multi-arg lambda support over non-record
+        // element types is not yet implemented.
+    }
+
     /// Unqualified-or-qualified identifier lookup that honours the
     /// function-parameter scope.
     ///

@@ -35,7 +35,7 @@ pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{IncrementalConfig, SeedInfo, SourceInfo, SourcesConfig};
-use smelt_types::signatures::FunctionSig;
+use smelt_types::signatures::{FunctionSig, SmeltType};
 
 /// YAML parse error with location information
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +356,21 @@ pub struct EmittedModelDef {
     /// when `materialization == "incremental"`.  `None` for non-incremental
     /// emissions or when the generator's frontmatter has no `timeseries:` block.
     pub timeseries_config: Option<TimeseriesConfig>,
+    /// Lambda parameter bindings captured at W2 evaluation time.
+    ///
+    /// When the generator body is a `pipeline_driver |> map(fn c => ModelDef { … })`
+    /// chain, this carries the lambda parameter name and its inferred type for each
+    /// emission.  The type is the *element* type of the loader's `List<T>` output —
+    /// typically a `SmeltType::Record { fields, … }`.
+    ///
+    /// Used by `synthesise_emission_body_analysis` to seed the `TypeContext` before
+    /// running body checks, so that `c.region`-style qualified accesses in the body
+    /// SQL resolve against the lambda parameter's record fields rather than
+    /// triggering spurious `UndeclaredColumn` diagnostics.
+    ///
+    /// Empty for array-literal generator bodies (no lambda in scope) and for
+    /// emissions where the lambda parameter type could not be determined.
+    pub lambda_bindings: Vec<(String, SmeltType)>,
 }
 
 /// The result of evaluating a single generator file.
@@ -587,6 +602,8 @@ fn materialise_emitted_model_def(
         description,
         incremental_config,
         timeseries_config,
+        // Array-literal generators have no enclosing lambda; no bindings.
+        lambda_bindings: Vec::new(),
     })
 }
 
@@ -709,6 +726,26 @@ fn evaluate_body_emissions(
                         empty_slice
                     };
 
+                    // Infer the element type of the loader call's List<T> schema.
+                    // This is used to populate `lambda_bindings` on each emission
+                    // so that body analysis can resolve `c.region`-style accesses.
+                    let loader_element_ty: Option<SmeltType> = {
+                        use smelt_parser::ast::SmeltPathCall;
+                        use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+                        loader_call
+                            .syntax()
+                            .descendants()
+                            .find(|n| n.kind() == SMELT_PATH_CALL)
+                            .and_then(SmeltPathCall::cast)
+                            .and_then(|call| {
+                                crate::type_inference::loader_and_reflection::infer_loader_call_smelt_type(&call, ctx)
+                            })
+                            .and_then(|ty| match ty {
+                                SmeltType::List(inner) => Some(*inner),
+                                _ => None,
+                            })
+                    };
+
                     // Get the lambda (second positional arg to map).
                     let args = func.arguments();
                     if let Some(lambda_arg) = args.first() {
@@ -722,6 +759,25 @@ fn evaluate_body_emissions(
                                 .descendants()
                                 .find_map(smelt_parser::ast::Lambda::cast)
                         }) {
+                            // Capture lambda parameter bindings for each param name.
+                            // Multi-arg lambdas carry one binding per parameter in
+                            // declaration order; single-arg lambdas carry one binding.
+                            let lambda_bindings: Vec<(String, SmeltType)> = lambda
+                                .params()
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(i, param_name)| {
+                                    // For the first (and typically only) param, use the
+                                    // loader's element type.  Additional params (multi-arg
+                                    // lambda, not currently used as a driver) get Unknown.
+                                    if i == 0 {
+                                        loader_element_ty.clone().map(|ty| (param_name, ty))
+                                    } else {
+                                        Some((param_name, SmeltType::Unknown))
+                                    }
+                                })
+                                .collect();
+
                             if let Some(body) = lambda.body() {
                                 // For each record in the loader, evaluate the lambda body.
                                 for record_val in records {
@@ -732,6 +788,7 @@ fn evaluate_body_emissions(
                                         frontmatter_tags,
                                         frontmatter_incremental,
                                         frontmatter_timeseries,
+                                        lambda_bindings.clone(),
                                     ) {
                                         emissions.push(emitted);
                                     }
@@ -798,6 +855,13 @@ fn extract_loader_path(expr: &Expr) -> Option<String> {
 
 /// Materialise a `ModelDef` from a lambda body expression by substituting
 /// the `c.field` accesses with values from a `MetaValue::Record`.
+///
+/// `lambda_bindings` carries the lambda parameter name and its inferred
+/// element type from the loader's `List<T>` schema.  These bindings are
+/// stored in the emitted `EmittedModelDef` so that
+/// `synthesise_emission_body_analysis` can seed the `TypeContext` and prevent
+/// spurious `UndeclaredColumn` diagnostics for `c.region`-style accesses in
+/// the body SQL.
 fn materialise_modeldef_from_lambda_body(
     generator_file: &Path,
     body: &Expr,
@@ -805,6 +869,7 @@ fn materialise_modeldef_from_lambda_body(
     frontmatter_tags: &[String],
     frontmatter_incremental: Option<&IncrementalConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
+    lambda_bindings: Vec<(String, SmeltType)>,
 ) -> Option<EmittedModelDef> {
     let record_fields = match record_val {
         crate::loader::MetaValue::Record(fields) => fields,
@@ -880,6 +945,7 @@ fn materialise_modeldef_from_lambda_body(
         description,
         incremental_config,
         timeseries_config,
+        lambda_bindings,
     })
 }
 
@@ -1714,16 +1780,257 @@ pub fn emitted_model_typed_schema(
     generator_file: SourceFile,
     name: String,
 ) -> Arc<ModelSchema> {
+    // Thin adapter: delegate to the body analysis query and extract the schema.
+    // This preserves identical `ModelSchema` behaviour for all existing consumers
+    // while lambda-binding seeding now applies through the shared analysis path.
+    let analysis = emitted_model_body_analysis(db, workspace, generator_file, name);
+    Arc::new(analysis.schema.clone())
+}
+
+/// The result of body-analysis for a single generator-emitted model.
+///
+/// Produced by `synthesise_emission_body_analysis` (pure) and wrapped by the
+/// `emitted_model_body_analysis` Salsa query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmissionBodyAnalysis {
+    /// The synthesised column schema derived from the emission body's SELECT list.
+    pub schema: ModelSchema,
+    /// Diagnostics arising from type-checking the emission body — undeclared
+    /// columns, type mismatches, CTE cycles, parse errors, and so on.
+    pub diagnostics: Vec<crate::Diagnostic>,
+}
+
+/// Pure helper: synthesise a typed `ModelSchema` AND collect body diagnostics
+/// for a single generator-emitted model body.
+///
+/// All Salsa calls are made by the caller (`emitted_model_body_analysis`); this
+/// function is Salsa-free and satisfies the pure-function rule (CLAUDE.md
+/// §"Pure Function Rule (smelt-db)").
+///
+/// # Lambda-binding seeding
+///
+/// When `lambda_bindings` is non-empty, each `(param_name, param_type)` pair
+/// is registered in the `TypeContext` via `register_lambda_binding` before any
+/// diagnostic checks run.  This lets `c.region`-style qualified accesses in
+/// the body SQL resolve against the lambda parameter's record fields rather
+/// than triggering spurious `UndeclaredColumn` diagnostics.
+///
+/// # Parse-error handling
+///
+/// Diagnostic ranges are in body-local coordinates (relative to the start of
+/// `body_sql`). If the body SQL cannot be parsed as a `SelectStmt`, a single
+/// `ParseError` diagnostic anchored at `(0, 0)` is returned and the schema
+/// is `ModelSchema::empty()`.
+///
+/// # Parameters
+///
+/// - `body_sql` — raw SQL text of the `ModelDef.body` field value.
+/// - `refs` — `RefSchemaProvider` scoped to the generator file's project.
+/// - `legacy_sources` — `SourcesConfig` from `sources.yml`.
+/// - `per_entity_sources` — per-entity source infos from `sources/*.yml`.
+/// - `all_function_sigs` — workspace function signatures.
+/// - `lambda_bindings` — lambda parameter bindings captured at W2 evaluation time.
+/// - `config_vars` — workspace config vars map for `smelt.config.var` resolution.
+pub(crate) fn synthesise_emission_body_analysis(
+    body_sql: &str,
+    refs: &dyn RefSchemaProvider,
+    legacy_sources: &SourcesConfig,
+    per_entity_sources: &[SourceInfo],
+    all_function_sigs: &[Arc<Vec<FunctionSig>>],
+    lambda_bindings: &[(String, SmeltType)],
+    config_vars: &std::collections::BTreeMap<String, serde_yaml::Value>,
+) -> EmissionBodyAnalysis {
+    use crate::queries::check_types::{
+        cannot_infer_type_for_schema, check_expression_types_for_select,
+    };
+    use crate::queries::function_diagnostics::cte_cycle_diagnostics_for_select;
+    use crate::type_inference::check_undeclared_columns;
+    use crate::type_inference::loader_and_reflection::check_config_var_call_diagnostics;
+    use crate::{DiagnosticCode, DiagnosticData, DiagnosticSeverity};
+
+    let mut diagnostics: Vec<crate::Diagnostic> = Vec::new();
+
+    // Re-parse the body SQL as a standalone file.
+    let parse = smelt_parser::parse(body_sql);
+    let syntax = parse.syntax();
+
+    // Diagnostic ranges are in body-local coordinates throughout this function.
+    // Callers are responsible for offset translation if they need generator-file coordinates.
+
+    // Emit parse errors from the body (body-local ranges).
+    for err in &parse.errors {
+        let err_range = if body_sql.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(body_sql, err.range)
+        };
+        diagnostics.push(crate::Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.message.clone(),
+            range: err_range,
+            code: Some(DiagnosticCode::ParseError),
+            data: None,
+        });
+    }
+
+    let ast = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => {
+            if diagnostics.is_empty() {
+                let zero_range = crate::Range {
+                    start: smelt_parser::ast::Position { line: 0, column: 0 },
+                    end: smelt_parser::ast::Position { line: 0, column: 0 },
+                };
+                diagnostics.push(crate::Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "Could not parse body as a SQL expression".to_string(),
+                    range: zero_range,
+                    code: Some(DiagnosticCode::ParseError),
+                    data: None,
+                });
+            }
+            return EmissionBodyAnalysis {
+                schema: ModelSchema::empty(),
+                diagnostics,
+            };
+        }
+    };
+
+    let select_stmt = match ast.select_stmt() {
+        Some(s) => s,
+        None => {
+            // Body parses but has no SELECT statement — report parse error if not already present.
+            if diagnostics.is_empty() {
+                let zero_range = crate::Range {
+                    start: smelt_parser::ast::Position { line: 0, column: 0 },
+                    end: smelt_parser::ast::Position { line: 0, column: 0 },
+                };
+                diagnostics.push(crate::Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "Body does not contain a SELECT statement".to_string(),
+                    range: zero_range,
+                    code: Some(DiagnosticCode::ParseError),
+                    data: None,
+                });
+            }
+            return EmissionBodyAnalysis {
+                schema: ModelSchema::empty(),
+                diagnostics,
+            };
+        }
+    };
+
+    // Build TypeContext with the same two-path source resolution as `type_context()`.
+    let mut ctx = build_type_context(&ast, legacy_sources, refs);
+    add_source_info_to_type_context(per_entity_sources, &mut ctx);
+
+    // Seed workspace function signatures.
+    for sigs in all_function_sigs {
+        for sig in sigs.iter() {
+            ctx.add_function_signature(&sig.name, sig.clone());
+        }
+    }
+
+    // Seed lambda bindings so `c.region`-style qualified accesses resolve.
+    for (param_name, param_ty) in lambda_bindings {
+        ctx.register_lambda_binding(param_name, param_ty);
+    }
+
+    // --- Diagnostic checks ---
+    // All diagnostics are produced in body-local coordinates (offset = 0).
+
+    // 1. CTE cycle detection.
+    diagnostics.extend(cte_cycle_diagnostics_for_select(&select_stmt, body_sql, 0));
+
+    // 2. Expression type diagnostics (CAST type names, function names).
+    diagnostics.extend(check_expression_types_for_select(&select_stmt, body_sql, 0));
+
+    // 3. config.var diagnostics.
+    let body_syntax = parse.syntax();
+    diagnostics.extend(check_config_var_call_diagnostics(
+        &body_syntax,
+        config_vars,
+        body_sql,
+    ));
+
+    // 4. Undeclared column diagnostics.
+    let undeclared = check_undeclared_columns(&select_stmt, &ctx);
+    for info in undeclared {
+        let range = smelt_parser::ast::text_range_to_range(body_sql, info.range);
+        diagnostics.push(crate::Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: info.message,
+            range,
+            code: Some(DiagnosticCode::UndeclaredColumn),
+            data: Some(DiagnosticData::UndeclaredColumn {
+                qualifier: info.qualifier,
+                column_name: info.column_name,
+            }),
+        });
+    }
+
+    // --- Schema synthesis (reuse the existing pure helper) ---
+    let schema = synthesise_emission_schema(
+        body_sql,
+        refs,
+        legacy_sources,
+        per_entity_sources,
+        all_function_sigs,
+    );
+
+    // 5. CannotInferType warnings from the synthesised schema.
+    diagnostics.extend(cannot_infer_type_for_schema(&schema, body_sql, 0));
+
+    EmissionBodyAnalysis {
+        schema,
+        diagnostics,
+    }
+}
+
+/// Synthesise body diagnostics AND a typed `ModelSchema` for a single
+/// generator-emitted model.
+///
+/// Given the `generator_file` that produced the emission and the emission's
+/// `name`, this query:
+///
+/// 1. Finds the `EmittedModelDef` (and its `lambda_bindings`) from the W2
+///    evaluation of this generator file.
+/// 2. Gathers the project's source config and function signatures.
+/// 3. Delegates all parsing / inference / diagnostic collection to the pure
+///    `synthesise_emission_body_analysis` helper — this query is a thin wrapper.
+/// 4. Returns the assembled `EmissionBodyAnalysis` (schema + diagnostics).
+///
+/// Returns an `EmissionBodyAnalysis` with an empty schema and a single
+/// `ParseError` when the emission is not found (e.g. discarded by W3
+/// collision detection) or when the body cannot be parsed.
+///
+/// Salsa-cached. Invalidated when `generator_file`'s text changes or when any
+/// upstream model whose schema the body references changes.
+#[salsa::tracked]
+pub fn emitted_model_body_analysis(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    generator_file: SourceFile,
+    name: String,
+) -> Arc<EmissionBodyAnalysis> {
     // Find the emission by name from the W2 evaluation of this generator file.
     let evaluated = evaluate_generator(db, workspace, generator_file);
     let emission = match evaluated.emissions.iter().find(|e| e.name == name) {
         Some(e) => e,
-        None => return Arc::new(ModelSchema::empty()),
+        None => {
+            return Arc::new(EmissionBodyAnalysis {
+                schema: ModelSchema::empty(),
+                diagnostics: Vec::new(),
+            });
+        }
     };
     let body_sql = emission.body_text.clone();
+    let lambda_bindings = emission.lambda_bindings.clone();
 
-    // Gather sources using the same two-path resolution as `type_context()`:
-    // per-entity sources/*.yml take precedence; fall back to legacy sources.yml.
+    // Gather sources using the same two-path resolution as `type_context()`.
     let project_root = generator_file.project_root(db).clone();
     let project = find_project(db, workspace, &project_root);
 
@@ -1740,7 +2047,6 @@ pub fn emitted_model_typed_schema(
     };
 
     // Build the SalsaRefSchemaProvider scoped to this generator file's project.
-    // This ensures `FROM smelt.orders` resolves against the correct project's models.
     let provider = SalsaRefSchemaProvider::new_for_file(db, workspace, generator_file);
 
     // Gather all workspace function signatures (path-sorted for determinism).
@@ -1751,15 +2057,22 @@ pub fn emitted_model_typed_schema(
         .map(|f| file_signature_inputs(db, *f))
         .collect();
 
-    // Delegate all parse / inference work to the pure helper.
-    let schema = synthesise_emission_schema(
+    // Gather config vars for `smelt.config.var` resolution.
+    let config_vars = project
+        .map(|p| smelt_yml_vars_query(db, p))
+        .unwrap_or_else(|| Arc::new(std::collections::BTreeMap::new()));
+
+    let analysis = synthesise_emission_body_analysis(
         &body_sql,
         &provider,
         &legacy_sources,
         &per_entity_sources,
         &all_function_sigs,
+        &lambda_bindings,
+        &config_vars,
     );
-    Arc::new(schema)
+
+    Arc::new(analysis)
 }
 
 /// Pure helper: materialise a `ModelRefValue` from an `EmittedModelDef`.
