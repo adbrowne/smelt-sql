@@ -56,7 +56,7 @@ You are executing this plan from the start of a new session. Drive it to complet
 |-------|----------|--------|------|
 | 1     | done     | 13142fe2 | 2026-05-30 |
 | 2     | done     | c44f21c6 | 2026-05-30 |
-| 3     | pending  |        |      |
+| 3     | done     | 78968c50 | 2026-05-30 |
 | 4     | pending  |        |      |
 
 ---
