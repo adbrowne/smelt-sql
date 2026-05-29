@@ -1800,6 +1800,69 @@ pub struct EmissionBodyAnalysis {
     pub diagnostics: Vec<crate::Diagnostic>,
 }
 
+/// Pure helper: convert a body-local `Range` (line/column positions relative to
+/// `body_sql`) to generator-file coordinates by converting to a body byte offset,
+/// adding `body_offset`, and re-converting via `generator_file_text`.
+///
+/// When `body_offset == 0` the positions are returned unchanged.
+fn remap_body_range(
+    body_sql: &str,
+    generator_file_text: &str,
+    body_offset: usize,
+    range: crate::Range,
+) -> crate::Range {
+    if body_offset == 0 {
+        return range;
+    }
+    // Convert body-local line/col to body-local byte offset.
+    let start_byte = body_position_to_byte(body_sql, range.start);
+    let end_byte = body_position_to_byte(body_sql, range.end);
+    let shifted = rowan::TextRange::new(
+        rowan::TextSize::from((start_byte + body_offset) as u32),
+        rowan::TextSize::from((end_byte + body_offset) as u32),
+    );
+    smelt_parser::ast::text_range_to_range(generator_file_text, shifted)
+}
+
+/// Scan `text` for the byte index of the character at `pos` (0-indexed line +
+/// column). Returns `text.len()` when the position is past the end of `text`.
+fn body_position_to_byte(text: &str, pos: smelt_parser::ast::Position) -> usize {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for (i, ch) in text.char_indices() {
+        if line == pos.line && col == pos.column {
+            return i;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    text.len()
+}
+
+/// Shift a body-local `rowan::TextRange` (byte offsets relative to the start
+/// of `body_sql`) to generator-file coordinates and return the resulting
+/// `crate::Range` (line/col positions).
+///
+/// When `body_offset == 0` this degenerates to
+/// `smelt_parser::ast::text_range_to_range(body_sql, range)`.
+fn shifted_body_text_range(
+    body_sql: &str,
+    generator_file_text: &str,
+    body_offset: usize,
+    range: rowan::TextRange,
+) -> crate::Range {
+    if body_offset == 0 {
+        return smelt_parser::ast::text_range_to_range(body_sql, range);
+    }
+    let offset = rowan::TextSize::from(body_offset as u32);
+    let shifted = rowan::TextRange::new(range.start() + offset, range.end() + offset);
+    smelt_parser::ast::text_range_to_range(generator_file_text, shifted)
+}
+
 /// Pure helper: synthesise a typed `ModelSchema` AND collect body diagnostics
 /// for a single generator-emitted model body.
 ///
@@ -1817,22 +1880,32 @@ pub struct EmissionBodyAnalysis {
 ///
 /// # Parse-error handling
 ///
-/// Diagnostic ranges are in body-local coordinates (relative to the start of
-/// `body_sql`). If the body SQL cannot be parsed as a `SelectStmt`, a single
-/// `ParseError` diagnostic anchored at `(0, 0)` is returned and the schema
-/// is `ModelSchema::empty()`.
+/// All diagnostic ranges are anchored in **generator-file coordinates** using
+/// `body_offset` (byte offset of the body within the generator file) and
+/// `generator_file_text`.  When `body_offset == 0` the ranges equal body-local
+/// coordinates (no-op shift).  If the body SQL cannot be parsed as a
+/// `SelectStmt`, a single `ParseError` diagnostic is anchored at the body start
+/// position in the generator file.
 ///
 /// # Parameters
 ///
 /// - `body_sql` — raw SQL text of the `ModelDef.body` field value.
+/// - `generator_file_text` — full text of the generator file (used for
+///   byte-offset → line/column conversion so that all diagnostics land at
+///   generator-file coordinates rather than body-local coordinates).
+/// - `body_offset` — byte offset of `body_sql` within `generator_file_text`.
+///   Pass `0` when body-local coordinates are acceptable (e.g. tests).
 /// - `refs` — `RefSchemaProvider` scoped to the generator file's project.
 /// - `legacy_sources` — `SourcesConfig` from `sources.yml`.
 /// - `per_entity_sources` — per-entity source infos from `sources/*.yml`.
 /// - `all_function_sigs` — workspace function signatures.
 /// - `lambda_bindings` — lambda parameter bindings captured at W2 evaluation time.
 /// - `config_vars` — workspace config vars map for `smelt.config.var` resolution.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn synthesise_emission_body_analysis(
     body_sql: &str,
+    generator_file_text: &str,
+    body_offset: usize,
     refs: &dyn RefSchemaProvider,
     legacy_sources: &SourcesConfig,
     per_entity_sources: &[SourceInfo],
@@ -1848,25 +1921,32 @@ pub(crate) fn synthesise_emission_body_analysis(
     use crate::type_inference::loader_and_reflection::check_config_var_call_diagnostics;
     use crate::{DiagnosticCode, DiagnosticData, DiagnosticSeverity};
 
+    // Determine the effective text for final line/col conversion:
+    // when body_offset > 0 we use the generator file text so that positions
+    // land at generator-file coordinates; otherwise body_sql suffices.
+    let anchor_text = if body_offset > 0 {
+        generator_file_text
+    } else {
+        body_sql
+    };
+
     let mut diagnostics: Vec<crate::Diagnostic> = Vec::new();
 
     // Re-parse the body SQL as a standalone file.
     let parse = smelt_parser::parse(body_sql);
     let syntax = parse.syntax();
 
-    // Diagnostic ranges are in body-local coordinates throughout this function.
-    // Callers are responsible for offset translation if they need generator-file coordinates.
+    // Build the anchor range for the body start (used by parse-error fallbacks
+    // when there is no more specific position to report).
+    let body_start_range = {
+        let start_offset = rowan::TextSize::from(body_offset as u32);
+        let anchor = rowan::TextRange::new(start_offset, start_offset);
+        smelt_parser::ast::text_range_to_range(anchor_text, anchor)
+    };
 
-    // Emit parse errors from the body (body-local ranges).
+    // Emit parse errors from the body, anchored at generator-file coordinates.
     for err in &parse.errors {
-        let err_range = if body_sql.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(body_sql, err.range)
-        };
+        let err_range = shifted_body_text_range(body_sql, anchor_text, body_offset, err.range);
         diagnostics.push(crate::Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: err.message.clone(),
@@ -1880,14 +1960,10 @@ pub(crate) fn synthesise_emission_body_analysis(
         Some(f) => f,
         None => {
             if diagnostics.is_empty() {
-                let zero_range = crate::Range {
-                    start: smelt_parser::ast::Position { line: 0, column: 0 },
-                    end: smelt_parser::ast::Position { line: 0, column: 0 },
-                };
                 diagnostics.push(crate::Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: "Could not parse body as a SQL expression".to_string(),
-                    range: zero_range,
+                    range: body_start_range,
                     code: Some(DiagnosticCode::ParseError),
                     data: None,
                 });
@@ -1904,14 +1980,10 @@ pub(crate) fn synthesise_emission_body_analysis(
         None => {
             // Body parses but has no SELECT statement — report parse error if not already present.
             if diagnostics.is_empty() {
-                let zero_range = crate::Range {
-                    start: smelt_parser::ast::Position { line: 0, column: 0 },
-                    end: smelt_parser::ast::Position { line: 0, column: 0 },
-                };
                 diagnostics.push(crate::Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: "Body does not contain a SELECT statement".to_string(),
-                    range: zero_range,
+                    range: body_start_range,
                     code: Some(DiagnosticCode::ParseError),
                     data: None,
                 });
@@ -1940,26 +2012,43 @@ pub(crate) fn synthesise_emission_body_analysis(
     }
 
     // --- Diagnostic checks ---
-    // All diagnostics are produced in body-local coordinates (offset = 0).
+    // All diagnostics are anchored at generator-file coordinates via body_offset.
 
-    // 1. CTE cycle detection.
-    diagnostics.extend(cte_cycle_diagnostics_for_select(&select_stmt, body_sql, 0));
+    // 1. CTE cycle detection — returns body-local ranges; remap to generator-file.
+    {
+        let cte_diags = cte_cycle_diagnostics_for_select(&select_stmt, body_sql, 0);
+        for mut diag in cte_diags {
+            diag.range = remap_body_range(body_sql, anchor_text, body_offset, diag.range);
+            diagnostics.push(diag);
+        }
+    }
 
     // 2. Expression type diagnostics (CAST type names, function names).
-    diagnostics.extend(check_expression_types_for_select(&select_stmt, body_sql, 0));
-
-    // 3. config.var diagnostics.
-    let body_syntax = parse.syntax();
-    diagnostics.extend(check_config_var_call_diagnostics(
-        &body_syntax,
-        config_vars,
-        body_sql,
+    //    `check_expression_types_for_select` uses `shifted_range(text, cst_range, offset)`:
+    //    pass `anchor_text` + `body_offset` so CST byte offsets are shifted into
+    //    generator-file space before the final line/col conversion.
+    diagnostics.extend(check_expression_types_for_select(
+        &select_stmt,
+        anchor_text,
+        body_offset,
     ));
 
+    // 3. config.var diagnostics — returns body-local ranges; remap to generator-file.
+    {
+        let body_syntax = parse.syntax();
+        let var_diags = check_config_var_call_diagnostics(&body_syntax, config_vars, body_sql);
+        for mut diag in var_diags {
+            diag.range = remap_body_range(body_sql, anchor_text, body_offset, diag.range);
+            diagnostics.push(diag);
+        }
+    }
+
     // 4. Undeclared column diagnostics.
+    //    `check_undeclared_columns` returns CST TextRanges (body-local byte offsets);
+    //    shift to generator-file coordinates.
     let undeclared = check_undeclared_columns(&select_stmt, &ctx);
     for info in undeclared {
-        let range = smelt_parser::ast::text_range_to_range(body_sql, info.range);
+        let range = shifted_body_text_range(body_sql, anchor_text, body_offset, info.range);
         diagnostics.push(crate::Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: info.message,
@@ -1982,7 +2071,13 @@ pub(crate) fn synthesise_emission_body_analysis(
     );
 
     // 5. CannotInferType warnings from the synthesised schema.
-    diagnostics.extend(cannot_infer_type_for_schema(&schema, body_sql, 0));
+    //    `cannot_infer_type_for_schema` uses `shifted_range(text, col.range, offset)`:
+    //    col.range is a CST TextRange (body-local bytes), so pass `anchor_text` + `body_offset`.
+    diagnostics.extend(cannot_infer_type_for_schema(
+        &schema,
+        anchor_text,
+        body_offset,
+    ));
 
     EmissionBodyAnalysis {
         schema,
@@ -2029,6 +2124,11 @@ pub fn emitted_model_body_analysis(
     };
     let body_sql = emission.body_text.clone();
     let lambda_bindings = emission.lambda_bindings.clone();
+    // body_offset: byte position of the body start within the generator file.
+    // EmittedModelDef.body_span is a CST TextRange anchored in the generator file;
+    // its start() is the byte offset we need to remap diagnostic ranges.
+    let body_offset: usize = u32::from(emission.body_span.start()) as usize;
+    let generator_file_text = generator_file.text(db);
 
     // Gather sources using the same two-path resolution as `type_context()`.
     let project_root = generator_file.project_root(db).clone();
@@ -2064,6 +2164,8 @@ pub fn emitted_model_body_analysis(
 
     let analysis = synthesise_emission_body_analysis(
         &body_sql,
+        generator_file_text,
+        body_offset,
         &provider,
         &legacy_sources,
         &per_entity_sources,

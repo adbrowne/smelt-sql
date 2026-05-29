@@ -900,6 +900,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // W4 body diagnostics: for each surviving emission from this
+            // generator file, run `emitted_model_body_analysis` and surface
+            // any SQL-level diagnostics (UndeclaredColumn, ParseError,
+            // CteCycle, etc.) anchored inside the generator file body.
+            // Discarded emissions are naturally skipped because they are not
+            // in `survivors` — their bodies are never analysed.
+            for survivor in emitted_result.survivors.iter() {
+                if survivor.generator_file != gen_file_path {
+                    continue;
+                }
+                let analysis =
+                    emitted_model_body_analysis(db, workspace, file, survivor.name.clone());
+                for diag in analysis.diagnostics.iter() {
+                    DiagnosticAcc(diag.clone()).accumulate(db);
+                }
+            }
+
             // Generator files are not SQL models; skip the model-validity check
             // and all SQL-only diagnostics.
             return;
