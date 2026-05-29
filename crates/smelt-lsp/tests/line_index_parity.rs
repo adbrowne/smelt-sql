@@ -1,9 +1,10 @@
-//! Unit tests for `LineIndex` semantics and parity with `smelt_parser::offset_to_position`.
+//! Unit tests for `LineIndex` semantics.
 //!
 //! These tests verify that `line_index::LineIndex::new(text).line_col(offset)`
-//! round-trips to the same `(line, column)` as `smelt_parser::offset_to_position`
-//! for ASCII text, and that the non-ASCII behaviour of `LineIndex` is
-//! byte-column (not codepoint-column).
+//! round-trips correctly for ASCII text, and that the non-ASCII behaviour of
+//! `LineIndex` is byte-column (not codepoint-column). The codepoint-based
+//! helper now lives in `smelt_lsp::diagnostics_boundary::offset_to_codepoint_position`
+//! (boundary-converter module) instead of `smelt_parser::ast`.
 //!
 //! No LSP server or Salsa DB is needed — all assertions are pure computations
 //! over text and `TextSize` values.
@@ -16,10 +17,9 @@ use std::path::PathBuf;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Reconstruct a byte-offset for `(line, col_codepoints)` the same way
-/// `smelt_parser::ast::offset_to_position` produces its output. For ASCII
-/// text the codepoint offset equals the byte offset, so this round-trips
-/// correctly in the shadow assert.
+/// Reconstruct a byte-offset for `(line, col_codepoints)` using codepoint
+/// counting. For ASCII text the codepoint offset equals the byte offset, so
+/// this round-trips correctly against `LineIndex`.
 fn codepoint_position_to_byte_offset(text: &str, line: u32, col: u32) -> Option<usize> {
     let mut cur_line = 0u32;
     let mut cur_col = 0u32;
@@ -205,23 +205,21 @@ fn non_ascii_line_index_byte_col_semantics() {
     assert_eq!(lc2.col, 2, "byte 2 is byte-col 2 (the newline character)");
 }
 
-/// Non-ASCII: contrast with `smelt_parser::offset_to_position` which counts
-/// **Unicode codepoints**, not bytes. For `"α\nβ\nγ\n"`:
-/// - `α` is one codepoint but two bytes.
-/// - `smelt_parser::offset_to_position(text, 2)` walks past two codepoints
+/// Non-ASCII: contrast between codepoint-based and byte-based offset mapping.
+/// For `"α\nβ\nγ\n"`:
+/// - `α` is one codepoint but two bytes (UTF-8: 0xCE 0xB1).
+/// - `offset_to_codepoint_position(text, 2)` walks past two codepoints
 ///   (0: α, 1: \n) so it lands at the start of β — `(line=1, col=0)`.
+/// - `LineIndex` at byte offset 2 is the second byte of α — still `(line=0, col=2)`.
 ///
-/// This test pins the divergence between codepoint-offsets (what
-/// `Diagnostic::range.start.column` stores today) and byte-offsets (what
-/// `LineIndex` natively uses): for non-ASCII text they are different numbers.
-/// For ASCII they coincide — that's why the shadow assert in the emission
-/// points is safe for ASCII workspaces today.
+/// This test pins the divergence between codepoint-offsets and byte-offsets:
+/// for non-ASCII text they are different numbers. For ASCII they coincide.
 #[test]
 fn non_ascii_divergence_between_codepoint_and_byte_offset() {
     let text = "α\nβ\nγ\n";
-    // smelt_parser::offset_to_position counts codepoints.
+    // offset_to_codepoint_position (now in diagnostics_boundary) counts codepoints.
     // Codepoint 0 = α, codepoint 1 = \n, codepoint 2 = β.
-    let codepoint_pos = smelt_parser::offset_to_position(text, 2);
+    let codepoint_pos = smelt_lsp::diagnostics_boundary::offset_to_codepoint_position(text, 2);
     assert_eq!(codepoint_pos.line, 1, "codepoint offset 2 should be line 1");
     assert_eq!(
         codepoint_pos.column, 0,
@@ -246,9 +244,8 @@ fn non_ascii_divergence_between_codepoint_and_byte_offset() {
 // ---------------------------------------------------------------------------
 
 /// Build a small in-memory workspace with an intentional parse-level error and
-/// verify that every diagnostic's `(line, col)` — as produced by
-/// `offset_to_position` — round-trips cleanly through `LineIndex` when the
-/// text is pure ASCII.
+/// verify that every diagnostic's `TextRange` round-trips cleanly through
+/// `LineIndex` when the text is pure ASCII.
 #[test]
 fn synthetic_ascii_model_parity() {
     // A model referencing a non-existent smelt.ref — produces a diagnostic.

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{Duration, NaiveDate};
+use line_index::LineIndex;
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
@@ -222,11 +223,12 @@ pub fn build_model_details(
             (Some(w), Some(f)) => smelt_db::file_diagnostics(db, w, f),
             _ => Vec::new(),
         };
+        // Construct the LineIndex once for the file; each diagnostic lookup is O(log N).
+        let line_index = LineIndex::new(&file_text);
         let diagnostics: Vec<DiagnosticInfo> = diags
             .iter()
             .map(|d| {
-                let start =
-                    smelt_parser::ast::offset_to_position(&file_text, usize::from(d.range.start()));
+                let lc = line_index.line_col(d.range.start());
                 DiagnosticInfo {
                     severity: match d.severity {
                         DiagnosticSeverity::Error => "error".to_string(),
@@ -235,8 +237,8 @@ pub fn build_model_details(
                         DiagnosticSeverity::Hint => "hint".to_string(),
                     },
                     message: d.message.clone(),
-                    line: Some(start.line),
-                    column: Some(start.column),
+                    line: Some(lc.line),
+                    column: Some(lc.col),
                 }
             })
             .collect();

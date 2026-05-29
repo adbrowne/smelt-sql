@@ -20,7 +20,9 @@
 //!   inside the lambda body.
 
 use smelt_parser::ast::File as AstFile;
-use smelt_parser::{ast::text_range_to_range, SyntaxKind};
+use smelt_parser::SyntaxKind;
+
+use crate::diagnostics_boundary::text_range_to_lsp_codepoint;
 
 // ─────────────────────────── public types ──────────────────────────────────
 
@@ -373,8 +375,8 @@ pub fn byte_edits_to_lsp_ranges(text: &str, edits: Vec<ByteEdit>) -> Vec<(u32, u
         .into_iter()
         .map(|(start, end, _new_text)| {
             let range = TextRange::new((start as u32).into(), (end as u32).into());
-            let r = text_range_to_range(text, range);
-            (r.start.line, r.start.column, r.end.line, r.end.column)
+            let r = text_range_to_lsp_codepoint(text, range);
+            (r.start.line, r.start.character, r.end.line, r.end.character)
         })
         .collect()
 }

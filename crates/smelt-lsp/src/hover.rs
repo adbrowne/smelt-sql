@@ -86,10 +86,11 @@ pub fn render_expansion_frames(
                 // Convert TextRange (byte offset) to lsp_types::Range (line/col).
                 // Read file text from disk — decl_path is always a real file.
                 let lsp_range = if let Ok(text) = std::fs::read_to_string(path) {
-                    let pr = smelt_parser::ast::text_range_to_range(&text, *range);
+                    let pr =
+                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, *range);
                     Range {
-                        start: Position::new(pr.start.line, pr.start.column),
-                        end: Position::new(pr.end.line, pr.end.column),
+                        start: Position::new(pr.start.line, pr.start.character),
+                        end: Position::new(pr.end.line, pr.end.character),
                     }
                 } else {
                     Range::default()

@@ -1030,9 +1030,9 @@ pub fn missing_provenance_advisory_for_file(
 ///   body subtree for Phase 2 emission-body callers).
 /// - `ctx` — pre-built [`TypeContext`] seeded with workspace signatures and
 ///   the source/CTE column scope of the surrounding model (if any).
-/// - `text` — source text used for `text_range_to_range` inside
-///   `check_smelt_path_call`. For hand-authored callers this is the stripped
-///   file text; emission-body callers pass the full generator file text.
+/// - `text` — source text used to anchor diagnostic byte offsets. For
+///   hand-authored callers this is the stripped file text; emission-body
+///   callers pass the full generator file text.
 /// - `range_offset` — byte offset of the body within `text` (`0` for
 ///   hand-authored callers). Shifts diagnostic ranges into the enclosing file's
 ///   coordinate space before returning.

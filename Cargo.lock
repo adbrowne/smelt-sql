@@ -4332,6 +4332,7 @@ dependencies = [
  "axum",
  "chrono",
  "http-body-util",
+ "line-index",
  "mime_guess",
  "notify-debouncer-mini",
  "rowan",

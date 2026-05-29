@@ -280,13 +280,16 @@ fn find_column_in_ctes(
                 if explicit_name == column_name {
                     // Point to the i-th select item
                     if let Some(item) = cte_select_list.items().nth(i) {
-                        let pr = smelt_parser::ast::text_range_to_range(&text, item.range());
+                        let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text,
+                            item.range(),
+                        );
                         locations.push(ColumnDefLocation {
                             path: current_path.to_path_buf(),
                             line: pr.start.line,
-                            col: pr.start.column,
+                            col: pr.start.character,
                             end_line: pr.end.line,
-                            end_col: pr.end.column,
+                            end_col: pr.end.character,
                         });
                     }
                     break;
@@ -303,13 +306,16 @@ fn find_column_in_ctes(
                 }
                 if let Some(name) = item.column_name() {
                     if name == column_name {
-                        let pr = smelt_parser::ast::text_range_to_range(&text, item.range());
+                        let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text,
+                            item.range(),
+                        );
                         locations.push(ColumnDefLocation {
                             path: current_path.to_path_buf(),
                             line: pr.start.line,
-                            col: pr.start.column,
+                            col: pr.start.character,
                             end_line: pr.end.line,
-                            end_col: pr.end.column,
+                            end_col: pr.end.character,
                         });
                         found_explicit = true;
                         break;
@@ -411,13 +417,13 @@ fn find_column_in_model_chain(
     // First check explicit columns
     for col in &schema.columns {
         if col.name == column_name {
-            let pr = smelt_parser::ast::text_range_to_range(&text, col.range);
+            let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, col.range);
             locations.push(ColumnDefLocation {
                 path: model_path.to_path_buf(),
                 line: pr.start.line,
-                col: pr.start.column,
+                col: pr.start.character,
                 end_line: pr.end.line,
-                end_col: pr.end.column,
+                end_col: pr.end.character,
             });
             return true;
         }
@@ -605,13 +611,13 @@ fn trace_upstream_column_chain(
         if let Some(def_range) =
             smelt_db::references::find_column_definition_in_select(&up_file, column_name)
         {
-            let r = smelt_parser::ast::text_range_to_range(&up_text, def_range);
+            let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(&up_text, def_range);
             edits.push((
                 model_path.to_path_buf(),
                 r.start.line,
-                r.start.column,
+                r.start.character,
                 r.end.line,
-                r.end.column,
+                r.end.character,
             ));
             return true;
         }

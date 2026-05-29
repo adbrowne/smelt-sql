@@ -46,6 +46,9 @@ anyhow.workspace = true
 # CST types (for TextRange in tests)
 rowan.workspace = true
 
+# Byte-offset → line/column at the UI JSON boundary
+line-index.workspace = true
+
 # Logging
 tracing = "0.1"
 

@@ -5,6 +5,7 @@
 //! Regressions introduced by parser, type-inference, or example changes are
 //! caught here.
 
+use line_index::LineIndex;
 use smelt_cli::{init_db, Config, ModelDiscovery};
 use smelt_db::{DiagnosticAcc, Workspace};
 use std::path::Path;
@@ -2731,14 +2732,14 @@ fn per_cohort_union_broken_emission_body_undeclared_column() {
     let broken_model_path = path.join("models/broken.gen.sql");
     let broken_text =
         std::fs::read_to_string(&broken_model_path).expect("could not read broken.gen.sql");
-    let diag_start_lc =
-        smelt_parser::ast::text_range_to_range(&broken_text, undeclared_diags[0].range);
+    let li = LineIndex::new(&broken_text);
+    let diag_start_line = li.line_col(undeclared_diags[0].range.start()).line;
     assert!(
-        diag_start_lc.start.line >= 3,
+        diag_start_line >= 3,
         "expected UndeclaredColumn diagnostic anchored inside the body (line >= 3, 0-indexed), \
          got line {} — diagnostic is likely pinned to the frontmatter delimiter (line 0) \
          rather than the body content",
-        diag_start_lc.start.line,
+        diag_start_line,
     );
 }
 

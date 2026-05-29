@@ -149,14 +149,41 @@ pub fn model_sources(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<Sour
 
 #[cfg(test)]
 mod tests {
+    use line_index::LineIndex;
     use smelt_parser::SyntaxKind;
 
     use crate::{Database, DiagnosticCode, SourceFile};
 
-    /// Convert a `TextRange` (byte offsets) to a `smelt_parser::ast::Range`
-    /// (line/column) for assertion readability.
-    fn lc(source: &str, range: &rowan::TextRange) -> smelt_parser::ast::Range {
-        smelt_parser::ast::text_range_to_range(source, *range)
+    /// Lightweight position for test assertions.
+    #[derive(Debug, Clone, Copy)]
+    struct LcPos {
+        pub line: u32,
+        pub column: u32,
+    }
+
+    /// Lightweight range for test assertions.
+    #[derive(Debug, Clone, Copy)]
+    struct Lc {
+        pub start: LcPos,
+        pub end: LcPos,
+    }
+
+    /// Convert a `TextRange` (byte offsets) to `(line, col)` for assertion
+    /// readability. Uses `LineIndex` (byte-based columns; ASCII-safe).
+    fn lc(source: &str, range: &rowan::TextRange) -> Lc {
+        let li = LineIndex::new(source);
+        let s = li.line_col(range.start());
+        let e = li.line_col(range.end());
+        Lc {
+            start: LcPos {
+                line: s.line,
+                column: s.col,
+            },
+            end: LcPos {
+                line: e.line,
+                column: e.col,
+            },
+        }
     }
 
     /// Build a minimal Salsa database with one source file and return the

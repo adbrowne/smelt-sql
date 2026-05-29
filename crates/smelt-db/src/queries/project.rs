@@ -2349,6 +2349,7 @@ pub fn sources_all(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<S
 mod tests {
     use super::*;
     use crate::Database;
+    use line_index::LineIndex;
     use salsa::Setter;
     use std::path::PathBuf;
 
@@ -2493,16 +2494,17 @@ mod tests {
         // occupies lines 1–3).  A zero range (start == 0 && end == 0)
         // means the file-text plumbing into evaluate_body_emissions broke.
         let r = &invalid_name_diag.range;
-        let r_lc = smelt_parser::ast::text_range_to_range(generator, *r);
         assert!(
             usize::from(r.start()) > 0 || usize::from(r.end()) > 0,
             "expected non-zero range for ModelDefInvalidName, got {:?}",
             r
         );
+        let li = LineIndex::new(generator);
+        let start_line = li.line_col(r.start()).line;
         assert!(
-            r_lc.start.line >= 3,
+            start_line >= 3,
             "expected range to point into post-frontmatter body (line >= 3), got line {}",
-            r_lc.start.line
+            start_line
         );
     }
 

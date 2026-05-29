@@ -655,9 +655,9 @@ pub fn loader_call_diagnostics_for_file_with_content(
 ///
 /// **Parameters:**
 /// - `syntax` — root syntax node to scan.
-/// - `text` — source text for `text_range_to_range`. For hand-authored callers
-///   this is the file text; emission-body callers pass the full generator file
-///   text.
+/// - `text` — source text used to anchor diagnostic ranges via `LineIndex` at
+///   the boundary. For hand-authored callers this is the file text;
+///   emission-body callers pass the full generator file text.
 /// - `range_offset` — byte offset of the scanned fragment within `text` (`0`
 ///   for hand-authored callers). Shifts diagnostic ranges into the enclosing
 ///   file's coordinate space before returning.

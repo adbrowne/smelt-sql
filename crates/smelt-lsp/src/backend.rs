@@ -198,12 +198,15 @@ impl Backend {
                 let uri = Url::from_file_path(&actual_path).ok()?;
                 // Convert TextRange (byte offset) to line/col via file text.
                 let file_text = std::fs::read_to_string(&actual_path).unwrap_or_default();
-                let pr = smelt_parser::ast::text_range_to_range(&file_text, *text_range);
+                let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                    &file_text,
+                    *text_range,
+                );
                 Some(Location {
                     uri,
                     range: Range {
-                        start: Position::new(pr.start.line + line_offset, pr.start.column),
-                        end: Position::new(pr.end.line + line_offset, pr.end.column),
+                        start: Position::new(pr.start.line + line_offset, pr.start.character),
+                        end: Position::new(pr.end.line + line_offset, pr.end.character),
                     },
                 })
             })
@@ -1481,16 +1484,16 @@ impl LanguageServer for Backend {
                                 if let Some(with_clause) = select_stmt.with_clause() {
                                     for cte in with_clause.ctes() {
                                         if cte.name().as_deref() == Some(name.as_str()) {
-                                            let pr = smelt_parser::ast::text_range_to_range(
+                                            let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                 &text,
                                                 cte.syntax().text_range(),
                                             );
                                             result = Some(GotoTarget::SameFile(Range {
                                                 start: Position::new(
                                                     pr.start.line,
-                                                    pr.start.column,
+                                                    pr.start.character,
                                                 ),
-                                                end: Position::new(pr.end.line, pr.end.column),
+                                                end: Position::new(pr.end.line, pr.end.character),
                                             }));
                                             break;
                                         }
@@ -1555,16 +1558,16 @@ impl LanguageServer for Backend {
                                     if let Some(with_clause) = select_stmt.with_clause() {
                                         for cte in with_clause.ctes() {
                                             if cte.name().as_deref() == Some(qualifier_str) {
-                                                let pr = smelt_parser::ast::text_range_to_range(
+                                                let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &text,
                                                     cte.syntax().text_range(),
                                                 );
                                                 result = Some(GotoTarget::SameFile(Range {
                                                     start: Position::new(
                                                         pr.start.line,
-                                                        pr.start.column,
+                                                        pr.start.character,
                                                     ),
-                                                    end: Position::new(pr.end.line, pr.end.column),
+                                                    end: Position::new(pr.end.line, pr.end.character),
                                                 }));
                                                 break;
                                             }
@@ -1591,18 +1594,18 @@ impl LanguageServer for Backend {
                                                     || table_ref.identifier().as_deref()
                                                         == Some(qualifier_str);
                                                 if matches {
-                                                    let pr = smelt_parser::ast::text_range_to_range(
+                                                    let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                         &text,
                                                         table_ref.syntax().text_range(),
                                                     );
                                                     result = Some(GotoTarget::SameFile(Range {
                                                         start: Position::new(
                                                             pr.start.line,
-                                                            pr.start.column,
+                                                            pr.start.character,
                                                         ),
                                                         end: Position::new(
                                                             pr.end.line,
-                                                            pr.end.column,
+                                                            pr.end.character,
                                                         ),
                                                     }));
                                                     break;
@@ -1735,14 +1738,14 @@ impl LanguageServer for Backend {
                                             continue;
                                         }
                                         // Convert the binder range to an LSP Range.
-                                        let pr = smelt_parser::ast::text_range_to_range(
+                                        let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                             &text,
                                             binder_range,
                                         );
                                         return Some(GotoTarget::LambdaParam {
                                             binder_start: pr.start.line,
-                                            binder_col: pr.start.column,
-                                            binder_end_col: pr.end.column,
+                                            binder_col: pr.start.character,
+                                            binder_end_col: pr.end.character,
                                         });
                                     }
                                 }
@@ -1840,18 +1843,18 @@ impl LanguageServer for Backend {
                                         // Convert the name_span (TextRange) to an LSP Range.
                                         let gen_text = std::fs::read_to_string(&em.generator_file)
                                             .unwrap_or_default();
-                                        let pr_range = smelt_parser::ast::text_range_to_range(
+                                        let pr_range = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                             &gen_text,
                                             em.name_span,
                                         );
                                         let name_range = Range {
                                             start: Position::new(
                                                 pr_range.start.line,
-                                                pr_range.start.column,
+                                                pr_range.start.character,
                                             ),
                                             end: Position::new(
                                                 pr_range.end.line,
-                                                pr_range.end.column,
+                                                pr_range.end.character,
                                             ),
                                         };
                                         return Some(GotoTarget::EmittedModelRef {
@@ -1997,8 +2000,14 @@ impl LanguageServer for Backend {
                 // frontmatter-stripped source (parse_file strips before
                 // parsing). Strip here too so byte→line/col mapping aligns.
                 let stripped = smelt_parser::strip_frontmatter(&target_text);
-                let start = smelt_parser::ast::offset_to_position(&stripped, name_start as usize);
-                let end = smelt_parser::ast::offset_to_position(&stripped, name_end as usize);
+                let start = crate::diagnostics_boundary::offset_to_codepoint_position(
+                    &stripped,
+                    name_start as usize,
+                );
+                let end = crate::diagnostics_boundary::offset_to_codepoint_position(
+                    &stripped,
+                    name_end as usize,
+                );
                 Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: target_uri,
                     range: Range {
@@ -2118,8 +2127,11 @@ impl LanguageServer for Backend {
                                 .iter()
                                 .map(|text_range| {
                                     let r =
-                                        smelt_parser::ast::text_range_to_range(&text, *text_range);
-                                    (r.start.line, r.start.column, r.end.line, r.end.column)
+                                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &text,
+                                            *text_range,
+                                        );
+                                    (r.start.line, r.start.character, r.end.line, r.end.character)
                                 })
                                 .collect();
                             RefResult::CteRanges(effective_path.clone(), ranges)
@@ -2223,10 +2235,13 @@ impl LanguageServer for Backend {
             for kind in action_kinds {
                 match kind {
                     CAK::TextEdit(suggestion) => {
-                        let pr = smelt_parser::ast::text_range_to_range(&text, suggestion.range);
+                        let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text,
+                            suggestion.range,
+                        );
                         let range = Range {
-                            start: Position::new(pr.start.line + line_offset, pr.start.column),
-                            end: Position::new(pr.end.line + line_offset, pr.end.column),
+                            start: Position::new(pr.start.line + line_offset, pr.start.character),
+                            end: Position::new(pr.end.line + line_offset, pr.end.character),
                         };
                         let edit = TextEdit {
                             range,
@@ -2361,11 +2376,12 @@ impl LanguageServer for Backend {
                 .edits
                 .iter()
                 .map(|e| {
-                    let pr = smelt_parser::ast::text_range_to_range(&text, e.range);
+                    let pr =
+                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, e.range);
                     TextEdit {
                         range: Range {
-                            start: Position::new(pr.start.line + line_offset, pr.start.column),
-                            end: Position::new(pr.end.line + line_offset, pr.end.column),
+                            start: Position::new(pr.start.line + line_offset, pr.start.character),
+                            end: Position::new(pr.end.line + line_offset, pr.end.character),
                         },
                         new_text: e.new_text.clone(),
                     }
@@ -2393,11 +2409,12 @@ impl LanguageServer for Backend {
                 .edits
                 .iter()
                 .map(|e| {
-                    let pr = smelt_parser::ast::text_range_to_range(&text, e.range);
+                    let pr =
+                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, e.range);
                     TextEdit {
                         range: Range {
-                            start: Position::new(pr.start.line + line_offset, pr.start.column),
-                            end: Position::new(pr.end.line + line_offset, pr.end.column),
+                            start: Position::new(pr.start.line + line_offset, pr.start.character),
+                            end: Position::new(pr.end.line + line_offset, pr.end.character),
                         },
                         new_text: e.new_text.clone(),
                     }
@@ -2472,14 +2489,14 @@ impl LanguageServer for Backend {
                                 for cte in with_clause.ctes() {
                                     if cte.name().as_deref() == Some(&name) {
                                         if let Some(name_range) = cte.name_range() {
-                                            let r = smelt_parser::ast::text_range_to_range(
+                                            let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                 &text, name_range,
                                             );
                                             found_range = Some((
                                                 r.start.line,
-                                                r.start.column,
+                                                r.start.character,
                                                 r.end.line,
-                                                r.end.column,
+                                                r.end.character,
                                             ));
                                         }
                                         break;
@@ -2521,15 +2538,15 @@ impl LanguageServer for Backend {
                                                 None
                                             };
                                             if let Some(tok) = name_token {
-                                                let r = smelt_parser::ast::text_range_to_range(
+                                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &text,
                                                     tok.text_range(),
                                                 );
                                                 best_range = Some((
                                                     r.start.line,
-                                                    r.start.column,
+                                                    r.start.character,
                                                     r.end.line,
-                                                    r.end.column,
+                                                    r.end.character,
                                                 ));
                                                 best_len = len;
                                             }
@@ -2548,15 +2565,15 @@ impl LanguageServer for Backend {
                             .filter_map(smelt_parser::ast::SmeltPathRef::cast)
                         {
                             if path_ref.segments() == segments {
-                                let r = smelt_parser::ast::text_range_to_range(
+                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                     &text,
                                     path_ref.text_range(),
                                 );
                                 let placeholder = segments.last().cloned().unwrap_or_default();
                                 return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
                                     range: Range {
-                                        start: Position::new(r.start.line, r.start.column),
-                                        end: Position::new(r.end.line, r.end.column),
+                                        start: Position::new(r.start.line, r.start.character),
+                                        end: Position::new(r.end.line, r.end.character),
                                     },
                                     placeholder,
                                 }));
@@ -2574,11 +2591,13 @@ impl LanguageServer for Backend {
                                 (start_byte as u32).into(),
                                 (end_byte as u32).into(),
                             );
-                            let r = smelt_parser::ast::text_range_to_range(&text, range);
+                            let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                &text, range,
+                            );
                             return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
                                 range: Range {
-                                    start: Position::new(r.start.line, r.start.column),
-                                    end: Position::new(r.end.line, r.end.column),
+                                    start: Position::new(r.start.line, r.start.character),
+                                    end: Position::new(r.end.line, r.end.character),
                                 },
                                 placeholder,
                             }));
@@ -2693,8 +2712,11 @@ impl LanguageServer for Backend {
                                 .iter()
                                 .map(|text_range| {
                                     let r =
-                                        smelt_parser::ast::text_range_to_range(&text, *text_range);
-                                    (r.start.line, r.start.column, r.end.line, r.end.column)
+                                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &text,
+                                            *text_range,
+                                        );
+                                    (r.start.line, r.start.character, r.end.line, r.end.character)
                                 })
                                 .collect();
                             Some(RenameKind::Cte { edits })
@@ -2713,12 +2735,15 @@ impl LanguageServer for Backend {
                                 .iter()
                                 .map(|r| {
                                     let range =
-                                        smelt_parser::ast::text_range_to_range(&text, r.name_range);
+                                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &text,
+                                            r.name_range,
+                                        );
                                     (
                                         range.start.line,
-                                        range.start.column,
+                                        range.start.character,
                                         range.end.line,
-                                        range.end.column,
+                                        range.end.character,
                                     )
                                 })
                                 .collect();
@@ -2731,12 +2756,14 @@ impl LanguageServer for Backend {
                                 )
                             {
                                 let range =
-                                    smelt_parser::ast::text_range_to_range(&text, def_range);
+                                    crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                        &text, def_range,
+                                    );
                                 let edit = (
                                     range.start.line,
-                                    range.start.column,
+                                    range.start.character,
                                     range.end.line,
-                                    range.end.column,
+                                    range.end.character,
                                 );
                                 if !local_edits.contains(&edit) {
                                     local_edits.push(edit);
@@ -2859,16 +2886,16 @@ impl LanguageServer for Backend {
                                             None,
                                         );
                                             for col_ref in &col_refs {
-                                                let r = smelt_parser::ast::text_range_to_range(
+                                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &down_text,
                                                     col_ref.name_range,
                                                 );
                                                 cross_file_edits.push((
                                                     down_path.clone(),
                                                     r.start.line,
-                                                    r.start.column,
+                                                    r.start.character,
                                                     r.end.line,
-                                                    r.end.column,
+                                                    r.end.character,
                                                 ));
                                             }
                                             // Check for SELECT * passthrough
@@ -2933,16 +2960,16 @@ impl LanguageServer for Backend {
                                                 && segs.get(1).map(|s| s.as_str())
                                                     == Some(model_name.as_str())
                                             {
-                                                let r = smelt_parser::ast::text_range_to_range(
+                                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &f_text,
                                                     path_ref.text_range(),
                                                 );
                                                 edits.push((
                                                     path.clone(),
                                                     r.start.line,
-                                                    r.start.column,
+                                                    r.start.character,
                                                     r.end.line,
-                                                    r.end.column,
+                                                    r.end.character,
                                                 ));
                                             }
                                         }

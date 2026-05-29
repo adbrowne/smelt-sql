@@ -2351,41 +2351,23 @@ impl NamedParam {
     }
 }
 
-/// Helper to convert TextRange offset to line/column position
-pub fn offset_to_position(text: &str, offset: usize) -> Position {
-    let mut line = 0u32;
-    let mut column = 0u32;
-
-    for (i, ch) in text.chars().enumerate() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-
-    Position { line, column }
-}
-
-/// Helper to convert TextRange to LSP Range
-pub fn text_range_to_range(text: &str, range: TextRange) -> Range {
-    let start = offset_to_position(text, usize::from(range.start()));
-    let end = offset_to_position(text, usize::from(range.end()));
-    Range { start, end }
-}
-
-/// Position (line, column)
+/// Position (line, column) — codepoint-based.
+///
+/// Used only by the LSP boundary-converter helpers in
+/// `smelt-lsp::diagnostics_boundary`. The `column` field counts Unicode
+/// codepoints, **not** bytes or UTF-16 code units.
+///
+/// Diagnostic positions must be carried as `rowan::TextRange` (byte offsets)
+/// and converted at the boundary via `line_index::LineIndex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
 }
 
-/// Range (start, end positions)
+/// Range (start, end positions) — codepoint-based.
+///
+/// See `Position` for encoding notes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
     pub start: Position,
