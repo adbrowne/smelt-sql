@@ -1894,6 +1894,13 @@ fn staging_from_sources_example_has_zero_diagnostics() {
     check_workspace_no_diagnostics("examples/staging_from_sources");
 }
 
+/// Non-ASCII fixture: `examples/non_ascii_columns/` has Greek-letter column
+/// aliases and must produce zero diagnostics.
+#[test]
+fn non_ascii_columns_example_has_zero_diagnostics() {
+    check_workspace_no_diagnostics("examples/non_ascii_columns");
+}
+
 /// Phase E2 TDD: `GeneratesUnknownValue` — `generates: views` fires.
 #[test]
 fn per_cohort_union_broken_generates_unknown_value() {
@@ -2917,4 +2924,25 @@ fn per_cohort_union_emitted_cohorts_have_typed_schemas() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Non-ASCII broken fixture: E2E non-ASCII diagnostic anchoring gate
+// ---------------------------------------------------------------------------
+
+/// CLI gate: `examples/non_ascii_broken/` produces exactly one `UndeclaredColumn`
+/// diagnostic anchored in `models/broken.gen.sql`.
+///
+/// The generator body `SELECT 1 AS α, nonexistent_column FROM smelt.upstream`
+/// uses a 2-byte Greek letter (α, U+03B1) before the undeclared column, so the
+/// byte-column position of the diagnostic differs from the UTF-16 position.
+/// This fixture is used by the E2E position-encoding test to verify that
+/// `publishDiagnostics` emits the correct `character` field under both encodings.
+#[test]
+fn non_ascii_broken_undeclared_column() {
+    check_workspace_emits_exactly_one_emission_body_diagnostic(
+        "examples/non_ascii_broken",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::UndeclaredColumn,
+    );
 }

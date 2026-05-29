@@ -126,6 +126,9 @@ pub struct Backend {
     /// the `file.sql::model_name` convention and start_line_offset is the
     /// 0-based line in the original file where the section's SQL begins.
     multi_model_files: Arc<Mutex<HashMap<PathBuf, MultiModelEntry>>>,
+    /// The position encoding negotiated with the client during `initialize`.
+    /// Defaults to UTF-16 (LSP default when the client advertises no preference).
+    negotiated_encoding: Arc<Mutex<PositionEncodingKind>>,
 }
 
 /// Collect every `smelt.functions.<name>(...)` call-site path range across
@@ -161,6 +164,8 @@ impl Backend {
             python_diagnostics: Arc::new(Mutex::new(HashMap::new())),
             project_roots: Arc::new(Mutex::new(Vec::new())),
             multi_model_files: Arc::new(Mutex::new(HashMap::new())),
+            // Default: UTF-16, as required by LSP spec §3.17 general capabilities.
+            negotiated_encoding: Arc::new(Mutex::new(PositionEncodingKind::UTF16)),
         }
     }
 
@@ -554,6 +559,17 @@ impl Backend {
         self.db.lock().await.clone()
     }
 
+    /// Build a `BoundaryConverter` for `text` using the encoding negotiated
+    /// with the client during `initialize`. Falls back to UTF-16 before
+    /// negotiation completes (i.e. during the `initialize` request itself).
+    async fn boundary_converter(
+        &self,
+        text: &str,
+    ) -> crate::diagnostics_boundary::BoundaryConverter {
+        let kind = self.negotiated_encoding.lock().await.clone();
+        crate::diagnostics_boundary::BoundaryConverter::new_from_kind(text, &kind)
+    }
+
     /// Rebuild the `Workspace` singleton from every currently-registered
     /// `SourceFile` + `ProjectInput`. Call after any input-set change so
     /// `all_models` / `resolve_ref` / diagnostics see the new set.
@@ -585,8 +601,7 @@ impl Backend {
                 let mut lsp_diagnostics = Vec::new();
                 for (virtual_path, start_line) in virtual_entries {
                     let virtual_text = file_text(&db, &virtual_path);
-                    let converter =
-                        crate::diagnostics_boundary::BoundaryConverter::new_utf16(&virtual_text);
+                    let converter = self.boundary_converter(&virtual_text).await;
                     let diagnostics = diagnostics_for(&db, &virtual_path);
                     for d in &diagnostics {
                         let mut lsp_diag = self.to_lsp_diagnostic(d, &converter);
@@ -598,7 +613,7 @@ impl Backend {
                 lsp_diagnostics
             } else {
                 let text = file_text(&db, &path);
-                let converter = crate::diagnostics_boundary::BoundaryConverter::new_utf16(&text);
+                let converter = self.boundary_converter(&text).await;
                 diagnostics_for(&db, &path)
                     .iter()
                     .map(|d| self.to_lsp_diagnostic(d, &converter))
@@ -671,6 +686,7 @@ impl Backend {
         let py_diags = self.python_diagnostics.clone();
         let cache = self.python_cache.clone();
         let client = self.client.clone();
+        let negotiated_encoding = self.negotiated_encoding.clone();
 
         // Build context from current model list
         let context_json = {
@@ -819,13 +835,15 @@ impl Backend {
             // Republish all diagnostics since ref resolution may have changed
             let files = tracked_files.lock().await.clone();
             let db_snapshot = db.lock().await.clone();
+            let enc_kind = negotiated_encoding.lock().await.clone();
 
             for path in files.iter() {
                 if let Ok(uri) = Url::from_file_path(path) {
                     let diagnostics = diagnostics_for(&db_snapshot, path);
                     let file_text = crate::db_helpers::file_text(&db_snapshot, path);
-                    let converter =
-                        crate::diagnostics_boundary::BoundaryConverter::new_utf16(&file_text);
+                    let converter = crate::diagnostics_boundary::BoundaryConverter::new_from_kind(
+                        &file_text, &enc_kind,
+                    );
                     let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
                         .iter()
                         .map(|d| lsp_types::Diagnostic {
@@ -1052,8 +1070,38 @@ impl LanguageServer for Backend {
         // Store errors for reporting after initialized notification
         *self.init_errors.lock().await = Some(init_errors);
 
+        // Negotiate position encoding with the client.
+        //
+        // The server supports UTF-16 and UTF-8. Preference order: UTF-16 first
+        // (LSP default), then UTF-8. If the client advertises a list, pick the
+        // first mutually-supported encoding. Unknown/unsupported encodings are
+        // skipped; if none match, fall back to UTF-16.
+        let client_encodings: Vec<PositionEncodingKind> = params
+            .capabilities
+            .general
+            .as_ref()
+            .and_then(|g| g.position_encodings.clone())
+            .unwrap_or_default();
+
+        let negotiated = if client_encodings.is_empty() {
+            // Client advertised no preference → LSP default is UTF-16.
+            PositionEncodingKind::UTF16
+        } else {
+            // Pick the first encoding the client listed that we support.
+            // Supported: UTF-8 and UTF-16.
+            client_encodings
+                .iter()
+                .find(|e| **e == PositionEncodingKind::UTF8 || **e == PositionEncodingKind::UTF16)
+                .cloned()
+                .unwrap_or(PositionEncodingKind::UTF16)
+        };
+
+        *self.negotiated_encoding.lock().await = negotiated.clone();
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
+                // Advertise the negotiated encoding back to the client.
+                position_encoding: Some(negotiated),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
@@ -2133,7 +2181,7 @@ impl LanguageServer for Backend {
 
         let db = self.snapshot().await;
         let text = file_text(&db, &effective_path);
-        let converter = crate::diagnostics_boundary::BoundaryConverter::new_utf16(&text);
+        let converter = self.boundary_converter(&text).await;
 
         // Collect diagnostics overlapping the request range
         let all_diags = diagnostics_for(&db, &effective_path);
