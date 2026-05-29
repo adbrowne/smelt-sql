@@ -12,6 +12,7 @@ mod backend;
 mod column_resolution;
 mod completion;
 mod db_helpers;
+pub mod diagnostics_boundary;
 pub mod hover;
 mod python_scan;
 pub mod rename_lambda;

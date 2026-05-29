@@ -591,8 +591,13 @@ impl Backend {
             if let Some(virtual_entries) = multi_entries {
                 let mut lsp_diagnostics = Vec::new();
                 for (virtual_path, start_line) in virtual_entries {
+                    let virtual_text = file_text(&db, &virtual_path);
+                    let converter =
+                        crate::diagnostics_boundary::BoundaryConverter::new_utf16(&virtual_text);
                     let diagnostics = diagnostics_for(&db, &virtual_path);
                     for d in &diagnostics {
+                        // Shadow-mode: validate LineIndex parity (debug_assertions only).
+                        let _ = converter.convert(d, &virtual_text);
                         let mut lsp_diag = self.to_lsp_diagnostic(d);
                         lsp_diag.range.start.line += start_line;
                         lsp_diag.range.end.line += start_line;
@@ -601,9 +606,15 @@ impl Backend {
                 }
                 lsp_diagnostics
             } else {
+                let text = file_text(&db, &path);
+                let converter = crate::diagnostics_boundary::BoundaryConverter::new_utf16(&text);
                 diagnostics_for(&db, &path)
                     .iter()
-                    .map(|d| self.to_lsp_diagnostic(d))
+                    .map(|d| {
+                        // Shadow-mode: validate LineIndex parity (debug_assertions only).
+                        let _ = converter.convert(d, &text);
+                        self.to_lsp_diagnostic(d)
+                    })
                     .collect()
             };
 
