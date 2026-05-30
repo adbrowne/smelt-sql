@@ -34,8 +34,9 @@ fn test_explain_json_exposes_bounds() {
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
     let output = build_explain_output(&graph).expect("build explain output");
 
-    // sessions is the canonical incremental model with a timeseries upstream
-    let sessions = output.models.get("sessions").unwrap_or_else(|| {
+    // sessions is the canonical incremental model with a timeseries upstream.
+    // After LogicalGraph canonical-path rekey (Phase 3), the key is "silver.sessions".
+    let sessions = output.models.get("silver.sessions").unwrap_or_else(|| {
         panic!(
             "sessions model not found in explain output; keys: {:?}",
             output.models.keys().collect::<Vec<_>>()
@@ -45,22 +46,25 @@ fn test_explain_json_exposes_bounds() {
     let inc = sessions
         .incremental
         .as_ref()
-        .expect("sessions must have incremental metadata");
+        .expect("silver.sessions must have incremental metadata");
 
     // source_bounds must be present
     assert!(
         !inc.source_bounds.is_empty(),
-        "sessions incremental metadata must have source_bounds; got: {:?}",
+        "silver.sessions incremental metadata must have source_bounds; got: {:?}",
         inc.source_bounds
     );
 
-    // events_parsed is the upstream timeseries source
-    let bound = inc.source_bounds.get("events_parsed").unwrap_or_else(|| {
-        panic!(
-            "sessions source_bounds must have 'events_parsed' entry; keys: {:?}",
-            inc.source_bounds.keys().collect::<Vec<_>>()
-        )
-    });
+    // events_parsed is the upstream timeseries source; its canonical key is "silver.events_parsed".
+    let bound = inc
+        .source_bounds
+        .get("silver.events_parsed")
+        .unwrap_or_else(|| {
+            panic!(
+                "sessions source_bounds must have 'silver.events_parsed' entry; keys: {:?}",
+                inc.source_bounds.keys().collect::<Vec<_>>()
+            )
+        });
 
     // Verify the JSON shape
     let json_str = serde_json::to_string_pretty(&inc.source_bounds).expect("serialize");
@@ -106,12 +110,16 @@ fn test_explain_json_lookup_sources_absent() {
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
     let output = build_explain_output(&graph).expect("build explain output");
 
-    let events_parsed = output.models.get("events_parsed").unwrap_or_else(|| {
-        panic!(
-            "events_parsed model not found; keys: {:?}",
-            output.models.keys().collect::<Vec<_>>()
-        )
-    });
+    // After LogicalGraph canonical-path rekey (Phase 3), the key is "silver.events_parsed".
+    let events_parsed = output
+        .models
+        .get("silver.events_parsed")
+        .unwrap_or_else(|| {
+            panic!(
+                "events_parsed model not found; keys: {:?}",
+                output.models.keys().collect::<Vec<_>>()
+            )
+        });
 
     let inc = events_parsed
         .incremental

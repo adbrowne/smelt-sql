@@ -192,10 +192,15 @@ fn apply_ref_redirects(model_file: &ModelFile, redirects: &HashMap<String, Strin
             &format!("smelt.ref(\"{}\")", to),
         );
 
-        // Update refs list
+        // Update refs list: redirect the smelt_ref path when the leaf matches.
         for r in &mut refs {
-            if r.model_name == *from {
-                r.model_name = to.clone();
+            let smelt_core::refs::SmeltRef::Path(segs) = &r.smelt_ref;
+            if segs.last().map(|s| s.as_str()) == Some(from.as_str()) {
+                let mut new_segs = segs.clone();
+                if let Some(last) = new_segs.last_mut() {
+                    *last = to.clone();
+                }
+                r.smelt_ref = smelt_core::refs::SmeltRef::Path(new_segs);
             }
         }
     }
@@ -439,7 +444,6 @@ impl<'a> PhysicalGraphBuilder<'a> {
                 refs: dependencies
                     .iter()
                     .map(|dep| RefInfo {
-                        model_name: dep.clone(),
                         has_named_params: false,
                         range: rowan::TextRange::default(),
                         smelt_ref: smelt_core::SmeltRef::Path(vec![
@@ -657,7 +661,6 @@ mod tests {
         let refs = deps
             .into_iter()
             .map(|dep| RefInfo {
-                model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
                 smelt_ref: smelt_core::refs::SmeltRef::Path(vec![

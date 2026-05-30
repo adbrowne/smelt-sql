@@ -37,23 +37,24 @@ fn test_60_day_backfill_one_call() {
     let output = build_explain_output(&graph).expect("build explain output");
 
     // events_parsed is the simplest FullyBatchSafe incremental model.
+    // It lives in models/silver/ so its canonical path is "silver.events_parsed".
     let model_info = output
         .models
-        .get("events_parsed")
-        .expect("events_parsed must be in explain output");
+        .get("silver.events_parsed")
+        .expect("silver.events_parsed must be in explain output");
     let inc = model_info
         .incremental
         .as_ref()
-        .expect("events_parsed must have incremental metadata");
+        .expect("silver.events_parsed must have incremental metadata");
 
     // Must classify as batch-safe for the one-query assertion to hold.
     assert_eq!(
         inc.batch_safety, "fully_batch_safe",
-        "events_parsed must be fully_batch_safe"
+        "silver.events_parsed must be fully_batch_safe"
     );
 
     // Now compute batches for a 60-day window.
-    let node = graph.get_node("events_parsed").expect("node exists");
+    let node = graph.get_node("silver.events_parsed").expect("node exists");
 
     let sixty_day_range = TimeRange {
         start: "2024-01-01".to_string(),

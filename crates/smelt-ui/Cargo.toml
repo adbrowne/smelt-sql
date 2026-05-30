@@ -60,3 +60,5 @@ bundled-duckdb = ["smelt-backend-duckdb/bundled"]
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tempfile = "3"
+urlencoding = "2"

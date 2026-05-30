@@ -45,7 +45,7 @@ export function ModelNode({ data, selected }: NodeProps<ModelNodeType>) {
       <Handle type="target" position={Position.Top} className="!bg-gray-400 !w-2 !h-2" />
 
       <div className="flex items-center justify-between gap-2">
-        <span className={`text-sm font-medium ${textColor} truncate`}>{data.label}</span>
+        <span className={`text-sm font-medium ${textColor} truncate`} title={data.label}>{data.label}</span>
         {matLabel && (
           <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${matBadgeColor} shrink-0`}>
             {matLabel}

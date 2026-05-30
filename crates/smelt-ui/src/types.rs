@@ -10,7 +10,9 @@ pub struct GraphResponse {
 
 #[derive(Clone, Serialize)]
 pub struct GraphNode {
+    /// Canonical dot-path identifier, e.g. `silver.events_parsed`.
     pub id: String,
+    /// Human-readable label — identical to `id` (the canonical dot-path).
     pub label: String,
     pub materialization: Option<String>,
     pub tags: Vec<String>,
@@ -29,12 +31,15 @@ pub enum NodeType {
 
 #[derive(Clone, Serialize)]
 pub struct GraphEdge {
+    /// Canonical dot-path of the upstream (dependency) node.
     pub source: String,
+    /// Canonical dot-path of the downstream (dependent) node.
     pub target: String,
 }
 
 #[derive(Clone, Serialize)]
 pub struct ModelDetailResponse {
+    /// Canonical dot-path identifier, e.g. `silver.events_parsed`.
     pub name: String,
     pub path: String,
     pub sql: String,
@@ -42,6 +47,7 @@ pub struct ModelDetailResponse {
     pub tags: Vec<String>,
     pub owner: Option<String>,
     pub description: Option<String>,
+    /// Canonical dot-path identifiers of upstream models this model depends on.
     pub refs: Vec<String>,
     pub columns: Vec<ColumnInfo>,
     /// Incremental configuration (if model is incremental).
@@ -156,6 +162,7 @@ pub struct RunPlanResponse {
 
 #[derive(Clone, Serialize)]
 pub struct PlanModel {
+    /// Canonical dot-path identifier for this model in the execution plan.
     pub name: String,
     pub is_incremental: bool,
     pub batch_safety: Option<BatchSafetyInfo>,

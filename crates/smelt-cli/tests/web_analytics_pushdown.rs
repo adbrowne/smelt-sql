@@ -93,17 +93,19 @@ fn iso8601_duration_to_secs(s: &str) -> u64 {
 /// The map is keyed by the full smelt path as it appears in the sessions SQL
 /// (e.g., "smelt.silver.events_parsed").
 fn sessions_bound_map(output: &smelt_cli::explain::ExplainOutput) -> HashMap<String, SourceBound> {
-    let sessions = output.models.get("sessions").expect("sessions model");
+    let sessions = output
+        .models
+        .get("silver.sessions")
+        .expect("sessions model");
     let inc = sessions.incremental.as_ref().expect("sessions incremental");
 
     let mut map = HashMap::new();
     for (source_name, bound_json) in &inc.source_bounds {
         if let Some(bound) = bound_json_to_source_bound(bound_json) {
-            // The source name in source_bounds is the leaf name (e.g., "events_parsed").
-            // The smelt ref in the SQL is the full path (e.g., "smelt.silver.events_parsed").
-            // Construct the full smelt path by looking at the sessions model deps.
-            // For integration testing we assume it's "smelt.silver.<source_name>".
-            let smelt_path = format!("smelt.silver.{}", source_name);
+            // After LogicalGraph canonical-path rekey (Phase 3), source_name is a canonical
+            // dot-path like "silver.events_parsed". The smelt ref in the SQL uses the
+            // full smelt.* prefix, so we prepend "smelt." to get "smelt.silver.events_parsed".
+            let smelt_path = format!("smelt.{}", source_name);
             map.insert(smelt_path, bound);
         }
     }

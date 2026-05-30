@@ -218,7 +218,8 @@ mod tests {
             metadata: None,
             model_id: smelt_core::ModelId::from_path("models/test_model.sql".into()),
             kind: smelt_core::ModelKind::Sql,
-            address_segments: Vec::new(),
+            // Single-segment address: canonical_path() == "test_model".
+            address_segments: vec!["test_model".to_string()],
         }];
 
         let graph = DependencyGraph::build(models.clone(), None).unwrap();

@@ -56,6 +56,12 @@ pub struct ModelFile {
 }
 
 impl ModelFile {
+    /// Canonical dot-joined `smelt.<path>` address of this model.
+    /// Equals `self.address_segments.join(".")`.
+    pub fn canonical_path(&self) -> String {
+        self.address_segments.join(".")
+    }
+
     /// Whether this model is a test.
     pub fn is_test(&self) -> bool {
         self.metadata
@@ -223,23 +229,34 @@ impl ModelDiscovery {
     }
 
     fn parse_model_file(&self, path: &Path) -> Result<Vec<ModelFile>> {
-        parse_sql_file(path)
+        // `discover_models` fills in `address_segments` after this call, so
+        // pass `None` for scan_root here (the parent loop handles it).
+        parse_sql_file(path, None)
     }
 }
 
 /// Parse a `.sql` file into one or more `ModelFile`s.
 ///
 /// Pure function — reads the file, expands multi-model frontmatter, parses
-/// each section for refs, and returns the resulting `ModelFile` entries with
-/// `address_segments = Vec::new()`. The caller is responsible for computing
-/// address segments (which require a `scan_root` context this function
-/// doesn't have).
+/// each section for refs, and returns the resulting `ModelFile` entries.
+///
+/// When `scan_root` is `Some`, `address_segments` is populated using
+/// [`ModelDiscovery::compute_address_segments`]: the path relative to
+/// `scan_root`, with directory components as prefix and the model name (or
+/// file stem for single-model files) as the leaf segment. The caller should
+/// pass `project_root` as the scan root for files discovered outside
+/// `config.paths` (e.g. `functions/`) so they keep their full
+/// workspace-relative path.
+///
+/// When `scan_root` is `None`, `address_segments` is left empty and the
+/// caller is responsible for computing it (e.g. `ModelDiscovery::discover_models`
+/// does this in a post-pass).
 ///
 /// Shared by `ModelDiscovery::discover_models` and by
 /// `smelt_core::workspace::load_workspace` so multi-model handling is in one
 /// place; the LSP's `register_sql_content` is the third (LSP-specific) copy
 /// that should eventually delegate here too.
-pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
+pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<ModelFile>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read model file: {:?}", path))?;
 
@@ -255,6 +272,10 @@ pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
     match file_metadata {
         Some(FileMetadata::Multi { models }) => {
             // Multi-model file: create one ModelFile per section
+            let base_segments = scan_root
+                .map(|root| ModelDiscovery::compute_address_segments(path, root))
+                .unwrap_or_default();
+
             let mut result = Vec::with_capacity(models.len());
             for section in models {
                 let model_name = section
@@ -274,6 +295,12 @@ pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
 
                 let model_id = ModelId::multi_model(path.to_path_buf(), model_name.clone());
 
+                // Replace the leaf segment with the declared model name.
+                let mut address_segments = base_segments.clone();
+                if let Some(last) = address_segments.last_mut() {
+                    *last = model_name.clone();
+                }
+
                 result.push(ModelFile {
                     name: model_name,
                     path: model_id.salsa_key(),
@@ -283,7 +310,7 @@ pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
                     metadata: Some(Box::new(section.metadata)),
                     kind: ModelKind::Sql,
                     model_id,
-                    address_segments: Vec::new(),
+                    address_segments,
                 });
             }
             Ok(result)
@@ -317,6 +344,20 @@ pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
 
             let model_id = ModelId::from_path(path.to_path_buf());
 
+            // Compute address_segments if scan_root was provided.
+            // For single-model files, the leaf segment is the model name
+            // (which may differ from the file stem if frontmatter declares
+            // a `name:` override). Replace the file-stem leaf with the name.
+            let address_segments = if let Some(root) = scan_root {
+                let mut segs = ModelDiscovery::compute_address_segments(path, root);
+                if let Some(last) = segs.last_mut() {
+                    *last = name.clone();
+                }
+                segs
+            } else {
+                Vec::new()
+            };
+
             Ok(vec![ModelFile {
                 name,
                 path: path.to_path_buf(),
@@ -326,7 +367,7 @@ pub fn parse_sql_file(path: &Path) -> Result<Vec<ModelFile>> {
                 metadata: model_metadata,
                 kind: ModelKind::Sql,
                 model_id,
-                address_segments: Vec::new(),
+                address_segments,
             }])
         }
     }
@@ -351,7 +392,7 @@ GROUP BY user_id
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "raw_events");
+        assert_eq!(refs[0].smelt_ref.to_path().join("."), "models.raw_events");
         assert!(!refs[0].has_named_params);
     }
 
@@ -368,7 +409,7 @@ FROM raw_events
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "format_date");
+        assert_eq!(refs[0].smelt_ref.leaf_name(), "format_date");
         assert!(refs[0].has_named_params);
     }
 
@@ -412,7 +453,10 @@ SELECT * FROM smelt.models.staging_events
         assert!(cleaned.model_id.is_multi_model);
         assert!(cleaned.content.contains("smelt.models.staging_events"));
         assert_eq!(cleaned.refs.len(), 1);
-        assert_eq!(cleaned.refs[0].model_name, "staging_events");
+        assert_eq!(
+            cleaned.refs[0].smelt_ref.to_path().join("."),
+            "models.staging_events"
+        );
 
         // Virtual paths should be different
         assert_ne!(staging.path, cleaned.path);
@@ -476,7 +520,132 @@ INNER JOIN smelt.models.model_b b ON a.id = b.id
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].model_name, "model_a");
-        assert_eq!(refs[1].model_name, "model_b");
+        assert_eq!(refs[0].smelt_ref.to_path().join("."), "models.model_a");
+        assert_eq!(refs[1].smelt_ref.to_path().join("."), "models.model_b");
+    }
+
+    // ----- canonical_path() tests (Phase 1) --------------------------------
+
+    /// A model at `models/silver/events_parsed.sql` under `paths: ["models"]`
+    /// must yield canonical_path() == "silver.events_parsed".
+    #[test]
+    fn canonical_path_single_model_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let silver_dir = dir.path().join("models").join("silver");
+        std::fs::create_dir_all(&silver_dir).unwrap();
+
+        let file_path = silver_dir.join("events_parsed.sql");
+        std::fs::File::create(&file_path)
+            .unwrap()
+            .write_all(b"SELECT 1 AS x")
+            .unwrap();
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].canonical_path(), "silver.events_parsed");
+    }
+
+    /// A multi-model file at `models/staging/pairs.sql` declaring two models
+    /// must yield canonical paths "staging.orders" and "staging.customers".
+    #[test]
+    fn canonical_path_multi_model_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let staging_dir = dir.path().join("models").join("staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        let content = r#"--- name: orders ---
+materialization: view
+---
+SELECT 1 AS id
+
+--- name: customers ---
+materialization: view
+---
+SELECT 2 AS id
+"#;
+        std::fs::File::create(staging_dir.join("pairs.sql"))
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+        assert_eq!(models.len(), 2);
+
+        let orders = models.iter().find(|m| m.name == "orders").unwrap();
+        assert_eq!(orders.canonical_path(), "staging.orders");
+
+        let customers = models.iter().find(|m| m.name == "customers").unwrap();
+        assert_eq!(customers.canonical_path(), "staging.customers");
+    }
+
+    /// A model file discovered outside the project's `paths:` (e.g. under
+    /// `functions/`) keeps the full workspace-relative path joined by `.`.
+    /// For `functions/patterns/sessionize.sql` with `project_root` as scan
+    /// root, canonical_path() == "functions.patterns.sessionize".
+    #[test]
+    fn canonical_path_no_scan_root_match() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let patterns_dir = dir.path().join("functions").join("patterns");
+        std::fs::create_dir_all(&patterns_dir).unwrap();
+
+        std::fs::File::create(patterns_dir.join("sessionize.sql"))
+            .unwrap()
+            .write_all(b"smelt.define sessionize() AS (SELECT 1)")
+            .unwrap();
+
+        // Simulate the segments that load_workspace computes for function
+        // files: scan_root = project_root, so we get the full path.
+        let scan_root = dir.path();
+        let file_path = patterns_dir.join("sessionize.sql");
+        let segs = ModelDiscovery::compute_address_segments(&file_path, scan_root);
+        assert_eq!(segs, vec!["functions", "patterns", "sessionize"]);
+
+        let mut model = ModelFile {
+            name: "sessionize".to_string(),
+            path: file_path.clone(),
+            content: String::new(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+            model_id: crate::model_id::ModelId::from_path(file_path),
+            address_segments: segs,
+        };
+        // For a single-function file the leaf segment is the file stem which
+        // matches the model name, so no replacement is needed. But for a
+        // multi-model function file the caller would replace the leaf.
+        // canonical_path() always just joins whatever segments are present.
+        assert_eq!(model.canonical_path(), "functions.patterns.sessionize");
+
+        // After leaf-replacement with model name (multi-function case):
+        if let Some(last) = model.address_segments.last_mut() {
+            *last = "sessionize".to_string();
+        }
+        assert_eq!(model.canonical_path(), "functions.patterns.sessionize");
+    }
+
+    /// A model directly under the scan root (`models/users.sql` with
+    /// `paths: ["models"]`) yields canonical_path() == "users".
+    #[test]
+    fn canonical_path_at_scan_root() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        std::fs::File::create(models_dir.join("users.sql"))
+            .unwrap()
+            .write_all(b"SELECT 1 AS id")
+            .unwrap();
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].canonical_path(), "users");
     }
 }

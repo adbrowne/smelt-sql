@@ -185,7 +185,11 @@ pub fn build_model_details(
                 let model_info = ModelInfo {
                     name: name.to_string(),
                     sql: model.content.clone(),
-                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    refs: model
+                        .refs
+                        .iter()
+                        .map(|r| r.smelt_ref.to_path().join("."))
+                        .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
                 };
@@ -255,7 +259,11 @@ pub fn build_model_details(
                 tags,
                 owner: metadata.and_then(|m| m.owner.clone()),
                 description: metadata.and_then(|m| m.description.clone()),
-                refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                refs: model
+                    .refs
+                    .iter()
+                    .map(|r| r.smelt_ref.to_path().join("."))
+                    .collect(),
                 columns,
                 incremental,
                 batch_safety,
@@ -374,7 +382,11 @@ pub fn build_run_plan(
                 let model_info = ModelInfo {
                     name: model_name.clone(),
                     sql: model.content.clone(),
-                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    refs: model
+                        .refs
+                        .iter()
+                        .map(|r| r.smelt_ref.to_path().join("."))
+                        .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
                 };
@@ -532,18 +544,18 @@ mod tests {
     fn make_model(name: &str, deps: Vec<&str>) -> ModelFile {
         let refs = deps
             .into_iter()
-            .map(|dep| RefInfo {
-                model_name: dep.to_string(),
-                has_named_params: false,
-                range: TextRange::default(),
-                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
-                    "models".to_string(),
-                    dep.to_string(),
-                ]),
+            .map(|dep| {
+                // Split dep canonical path into segments so segs.join(".") == dep.
+                let segs: Vec<String> = dep.split('.').map(|s| s.to_string()).collect();
+                RefInfo {
+                    has_named_params: false,
+                    range: TextRange::default(),
+                    smelt_ref: smelt_core::refs::SmeltRef::Path(segs),
+                }
             })
             .collect();
 
-        let path: std::path::PathBuf = format!("{}.sql", name).into();
+        let path: std::path::PathBuf = format!("models/{}.sql", name).into();
         ModelFile {
             name: name.to_string(),
             model_id: smelt_core::ModelId::from_path(path.clone()),
@@ -553,7 +565,8 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
-            address_segments: Vec::new(),
+            // Single-segment address: canonical_path() == name.
+            address_segments: vec![name.to_string()],
         }
     }
 

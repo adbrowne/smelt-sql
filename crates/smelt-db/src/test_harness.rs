@@ -143,37 +143,9 @@ impl TestDb {
         parse_model(&self.db, file)
     }
 
-    pub fn model_refs(&mut self, path: PathBuf) -> Arc<Vec<RefLocation>> {
-        let file = self.file(&path);
-        model_refs(&self.db, file)
-    }
-
     pub fn model_sources(&mut self, path: PathBuf) -> Arc<Vec<SourceLocation>> {
         let file = self.file(&path);
         model_sources(&self.db, file)
-    }
-
-    pub fn resolve_ref(&mut self, model_name: String) -> Option<PathBuf> {
-        let ws = self.sync_workspace();
-        // Test harness convenience: try the first registered project. Tests
-        // typically register one project, so this preserves prior behaviour
-        // for single-project tests. Multi-project tests should call
-        // `resolve_ref_in_project` instead.
-        let project = self
-            .project_paths
-            .first()
-            .and_then(|p| self.db.project_input(p))?;
-        resolve_ref(&self.db, ws, project, model_name).map(|f| f.path(&self.db).clone())
-    }
-
-    pub fn resolve_ref_in_project(
-        &mut self,
-        project_root: PathBuf,
-        model_name: String,
-    ) -> Option<PathBuf> {
-        let ws = self.sync_workspace();
-        let project = self.db.project_input(&project_root)?;
-        resolve_ref(&self.db, ws, project, model_name).map(|f| f.path(&self.db).clone())
     }
 
     pub fn resolve_source(

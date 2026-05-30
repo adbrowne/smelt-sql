@@ -11,7 +11,7 @@ use std::sync::Arc;
 use smelt_core::metadata::{extract_file_metadata, FileMetadata};
 use smelt_parser::{self, ast::SmeltPathRef, File as AstFile};
 
-use crate::{Model, RefLocation, SourceFile, SourceLocation};
+use crate::{Model, SourceFile, SourceLocation};
 
 // ============================================================================
 // Syntax queries
@@ -63,18 +63,6 @@ pub fn parse_model(db: &dyn salsa::Database, file: SourceFile) -> Option<Arc<Mod
     }))
 }
 
-/// Legacy `smelt.models.name` locations.
-///
-/// Phase 4: `smelt.ref()` is now a parse error; this query always returns an
-/// empty vec. Kept so callers compile without changes during the migration.
-/// Will be removed in a follow-up cleanup.
-#[salsa::tracked]
-pub fn model_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<RefLocation>> {
-    // smelt.ref() is a parse error — no legacy RefCall nodes can appear.
-    let _ = (db, file);
-    Arc::new(Vec::new())
-}
-
 /// Path-form refs (`smelt.<path>` in value position) extracted with
 /// their resolution metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,12 +77,10 @@ pub struct PathRefLocation {
 
 /// Extract every unified `smelt.<path>` value-form ref from a file.
 ///
-/// Phase 2a — Salsa-tracked sister of [`model_refs`] for the new path
-/// surface. The legacy `model_refs` query still surfaces
-/// `smelt.models.name` callsites; this query surfaces the unified
-/// path-form value refs (no `(`) so the diagnostic pass can validate
-/// them through [`resolve_ref_path`]. Call-form path refs are not
-/// included here — they're consumed by the function-call pipeline.
+/// Surfaces the unified path-form value refs (no `(`) so the diagnostic
+/// pass can validate them through [`resolve_ref_path`]. Call-form path
+/// refs are not included here — they're consumed by the function-call
+/// pipeline.
 #[salsa::tracked]
 pub fn model_path_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<PathRefLocation>> {
     let parse = parse_file(db, file);

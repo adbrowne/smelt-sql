@@ -3,12 +3,14 @@ use arrow::util::pretty;
 use chrono::{NaiveDate, Utc};
 use smelt_backend::PartitionRange;
 use smelt_cli::{
-    build_source_bound_map, compiler::UpstreamSchemas, compute_batches_for_model,
-    compute_incremental_windows, discover_emitted_model_files, discover_python_models, executor,
-    find_project_root, init_db, inject_source_filters, inject_time_filter, migration,
-    parse_selector, BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph,
-    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
-    TimeRange,
+    argument_resolution::{compute_scope, resolve_selector_args},
+    build_source_bound_map,
+    compiler::UpstreamSchemas,
+    compute_batches_for_model, compute_incremental_windows, discover_emitted_model_files,
+    discover_python_models, executor, find_project_root, init_db, inject_source_filters,
+    inject_time_filter, migration, parse_selector, BackendRegistry, BackfillOptions,
+    CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
+    PhysicalStrategy, SourcesConfig, TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
 use smelt_planner::{derive_model_source_bounds, Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -25,7 +27,7 @@ use crate::helpers::{
 };
 use crate::RunArgs;
 
-pub async fn run(args: RunArgs) -> Result<()> {
+pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let run_start = Utc::now();
 
     // 1. Find project root
@@ -197,6 +199,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
         }
     }
 
+    // Get workspace and project from the Salsa DB for scope resolution.
+    let gen_salsa_ws =
+        smelt_db::Workspace::try_get(&gen_salsa_db).expect("workspace not initialized");
+    let gen_salsa_project = gen_salsa_db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+
     // 4. Build logical graph (eagerly resolves config per model)
     let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
@@ -208,16 +217,35 @@ pub async fn run(args: RunArgs) -> Result<()> {
     graph.warn_unused_ephemerals();
 
     // 5. Determine execution order (with optional selector filtering)
-    let execution_order = if args.select.is_empty() && args.exclude.is_empty() {
+    // Resolve --select / --exclude args through scope before parsing selectors.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let resolved_select = resolve_selector_args(
+        &gen_salsa_db,
+        gen_salsa_ws,
+        gen_salsa_project,
+        active_scope.as_ref(),
+        &args.select,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let resolved_exclude = resolve_selector_args(
+        &gen_salsa_db,
+        gen_salsa_ws,
+        gen_salsa_project,
+        active_scope.as_ref(),
+        &args.exclude,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let execution_order = if resolved_select.is_empty() && resolved_exclude.is_empty() {
         graph
             .execution_order()
             .with_context(|| "Failed to determine execution order")?
     } else {
-        let mut selected = if args.select.is_empty() {
+        let mut selected = if resolved_select.is_empty() {
             graph.all_model_names()
         } else {
-            let selectors: Vec<_> = args
-                .select
+            let selectors: Vec<_> = resolved_select
                 .iter()
                 .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
                 .collect::<Result<_, _>>()?;
@@ -243,9 +271,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 .with_context(|| "Failed to select models")?
         };
 
-        if !args.exclude.is_empty() {
-            let excludes: Vec<_> = args
-                .exclude
+        if !resolved_exclude.is_empty() {
+            let excludes: Vec<_> = resolved_exclude
                 .iter()
                 .map(|s| {
                     parse_selector(s).with_context(|| format!("Invalid exclude selector '{}'", s))
@@ -366,7 +393,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // may not reference all sources, and some sources may live on backends that
     // aren't running (e.g., Spark sources when only DuckDB models are selected).
     if let Some(ref source_config) = sources {
-        if args.select.is_empty() && args.exclude.is_empty() {
+        if resolved_select.is_empty() && resolved_exclude.is_empty() {
             executor::validate_sources(registry.get(&args.target), source_config)
                 .await
                 .with_context(|| "Source validation failed")?;
@@ -460,7 +487,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
         opt_graph.add_model(ModelInfo {
             name: model.name.clone(),
             sql: model.content.clone(),
-            refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            refs: model
+                .refs
+                .iter()
+                .map(|r| r.smelt_ref.to_path().join("."))
+                .collect(),
             timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
             incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
         });
@@ -1336,12 +1367,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         // Update interval tracking for incremental models.
         //
-        // `result.model_name` is the db-form (e.g. "silver_events_parsed"), but
-        // LogicalGraph::get_model keys by the leaf bare name. For nested models
-        // those forms differ, so a direct get_model lookup fails. Resolve by
-        // matching db_name across the graph as a fallback. (Flat-layout models
-        // hit the fast path because leaf == db_name.)
+        // `result.model_name` is the db-form (e.g. "silver_events_parsed") from
+        // CompiledModel.name (which uses db_name_owned()). LogicalGraph keys by
+        // canonical path (e.g. "silver.events_parsed"), so we must resolve via
+        // db_name_owned() scan. Flat-layout models hit the fast path because
+        // their canonical path == db_name.
         if let Some(ref range) = tr {
+            // Try canonical path as key first (flat models: "events" == db_name).
             let model = graph.get_model(&result.model_name).or_else(|_| {
                 graph
                     .iter_models()

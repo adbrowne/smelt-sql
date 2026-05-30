@@ -2976,17 +2976,13 @@ impl LanguageServer for Backend {
                                     }
                                 }
 
-                                // Compute old model file path (project-scoped — only
-                                // consider models in the same project as the file
-                                // being renamed).
-                                let rename_project_root = file_project_root(&db, &effective_path);
-                                let rename_project = lookup_project(&db, &rename_project_root);
-                                let old_model_path = ws
-                                    .zip(rename_project)
-                                    .and_then(|(w, p)| {
-                                        smelt_db::resolve_ref(&db, w, p, model_name.clone())
-                                    })
-                                    .map(|sf| sf.path(&db).clone());
+                                // Compute old model file path using the full path
+                                // tuple from the parsed ref (project-isolation-safe).
+                                let old_model_path = ws.and_then(|w| {
+                                    smelt_db::resolve_ref_path(&db, w, segments.clone())
+                                        .and_then(|r| r.source_file)
+                                        .map(|sf| sf.path(&db).clone())
+                                });
 
                                 Some(RenameKind::Model {
                                     model_name,
@@ -3305,13 +3301,12 @@ impl LanguageServer for Backend {
                     if cursor_offset >= start && cursor_offset <= end {
                         if let Some(model_name) = segments.get(1).cloned() {
                             // Resolve upstream model and show its resolved schema
-                            // (project-scoped — only consider models in the same
-                            // project as the file being hovered).
+                            // Resolve using the full path tuple so multi-layer
+                            // models (e.g. smelt.silver.events) resolve correctly.
                             let ws = Workspace::try_get(&db);
-                            let hover_project_root = file_project_root(&db, &effective_path);
-                            let hover_project = lookup_project(&db, &hover_project_root);
-                            let upstream_file = ws.zip(hover_project).and_then(|(w, p)| {
-                                smelt_db::resolve_ref(&db, w, p, model_name.clone())
+                            let upstream_file = ws.and_then(|w| {
+                                smelt_db::resolve_ref_path(&db, w, segments.clone())
+                                    .and_then(|r| r.source_file)
                             });
                             if let (Some(upstream), Some(w)) = (upstream_file, ws) {
                                 // Use resolved_model_schema to get type information through wildcards

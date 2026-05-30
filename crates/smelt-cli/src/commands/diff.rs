@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
+    argument_resolution::{compute_scope, resolve_selector_args},
     discover_python_models, find_project_root, init_db, migration, parse_selector, Config,
     LogicalGraph, ModelDiscovery, SourcesConfig,
 };
@@ -25,7 +26,7 @@ struct ModelDiffEntry {
     status: ModelDiffStatus,
 }
 
-pub async fn diff(args: DiffArgs) -> Result<()> {
+pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -61,6 +62,14 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
         models.extend(python_models);
     }
 
+    // Initialise the Salsa DB early so scope resolution can call
+    // smelt_db::resolve_ref_path / leaf_did_you_mean.
+    let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+
     let default_target = config
         .targets
         .keys()
@@ -80,12 +89,21 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
+    // Resolve --select / --exclude args through scope before parsing selectors.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let resolved_select =
+        resolve_selector_args(&db, ws, project, active_scope.as_ref(), &args.select)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let resolved_exclude =
+        resolve_selector_args(&db, ws, project, active_scope.as_ref(), &args.exclude)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
     // Apply --select / --exclude filters
-    let has_selectors = !args.select.is_empty() || !args.exclude.is_empty();
+    let has_selectors = !resolved_select.is_empty() || !resolved_exclude.is_empty();
     let selected_names: HashSet<String> = if has_selectors {
-        let mut selected = if !args.select.is_empty() {
-            let selectors: Vec<_> = args
-                .select
+        let mut selected = if !resolved_select.is_empty() {
+            let selectors: Vec<_> = resolved_select
                 .iter()
                 .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
                 .collect::<Result<_, _>>()?;
@@ -94,9 +112,8 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
             graph.execution_order()?.into_iter().collect::<HashSet<_>>()
         };
 
-        if !args.exclude.is_empty() {
-            let excludes: Vec<_> = args
-                .exclude
+        if !resolved_exclude.is_empty() {
+            let excludes: Vec<_> = resolved_exclude
                 .iter()
                 .map(|s| {
                     parse_selector(s).with_context(|| format!("Invalid exclude selector '{}'", s))
@@ -117,13 +134,11 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
         .filter(|name| selected_names.contains(name.as_str()))
         .collect();
 
-    // Initialize Salsa DB for type inference
-    let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();
-    let db = init_db(&project_dir, &all_models);
-
     let file_store = FileStore::new(&project_dir);
 
-    // Build model name → ModelFile lookup
+    // Build model name → ModelFile lookup (from the already-initialised DB's
+    // model list; graph.iter_models() returns ModelFile refs).
+    let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();
     let model_lookup: std::collections::HashMap<&str, &smelt_cli::ModelFile> =
         all_models.iter().map(|m| (m.name.as_str(), m)).collect();
 

@@ -802,8 +802,6 @@ impl SqlCompiler {
                 let path_key = r.smelt_ref.to_path().join("_");
                 if resolver.ephemeral_names.contains(&path_key) {
                     Some(path_key)
-                } else if resolver.ephemeral_names.contains(&r.model_name) {
-                    Some(r.model_name.clone())
                 } else {
                     None
                 }
@@ -1329,8 +1327,6 @@ impl SqlCompiler {
                 let path_key = r.smelt_ref.to_path().join("_");
                 if resolver.ephemeral_names.contains(&path_key) {
                     Some(path_key)
-                } else if resolver.ephemeral_names.contains(&r.model_name) {
-                    Some(r.model_name.clone())
                 } else {
                     None
                 }
@@ -1492,6 +1488,7 @@ GROUP BY user_id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1521,6 +1518,7 @@ JOIN smelt.model_b b ON a.id = b.id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1546,7 +1544,6 @@ JOIN smelt.model_b b ON a.id = b.id
         let sql = "SELECT user_id FROM smelt.raw_events";
 
         let named_ref = RefInfo {
-            model_name: "raw_events".to_string(),
             has_named_params: true,
             range: rowan::TextRange::new(0.into(), 1.into()),
             smelt_ref: SmeltRef::Path(vec!["functions".to_string(), "my_fn".to_string()]),
@@ -1560,6 +1557,7 @@ JOIN smelt.model_b b ON a.id = b.id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1586,6 +1584,7 @@ JOIN smelt.model_b b ON a.id = b.id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1621,6 +1620,7 @@ JOIN smelt.model_b b ON a.id = b.id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1648,6 +1648,7 @@ JOIN smelt.model_b b ON a.id = b.id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1677,6 +1678,7 @@ JOIN smelt.model_a b ON a.parent_id = b.id
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1709,6 +1711,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1742,6 +1745,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1782,6 +1786,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1827,6 +1832,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1865,6 +1871,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1958,6 +1965,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1999,6 +2007,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -2040,6 +2049,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -2076,6 +2086,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -2122,6 +2133,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             metadata: None,
             kind: smelt_core::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("final_users.sql".into()),
+            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 

@@ -5,11 +5,22 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Validate a --scope value at parse time.
+fn parse_scope(s: &str) -> Result<String, String> {
+    smelt_cli::argument_resolution::validate_scope_value(s)?;
+    Ok(s.to_string())
+}
+
 #[derive(Parser)]
 #[command(name = "smelt")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Modern data transformation framework", long_about = None)]
 struct Cli {
+    /// Scope prefix for argument resolution (dot-separated path, e.g. "silver").
+    /// Overrides cwd-derived scope. Pass "" to disable auto-scope.
+    #[arg(long, global = true, value_parser = parse_scope)]
+    scope: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -431,18 +442,20 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let scope = cli.scope.as_deref();
+
     match cli.command {
-        Commands::Run(args) => commands::run::run(args).await,
-        Commands::Backbuild(args) => commands::backbuild::backbuild(args).await,
-        Commands::Table(args) => commands::table::table(args).await,
+        Commands::Run(args) => commands::run::run(args, scope).await,
+        Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
+        Commands::Table(args) => commands::table::table(args, scope).await,
         Commands::Ui(args) => commands::ui::ui(args).await,
-        Commands::Seed(args) => commands::seed::run_seed(args).await,
-        Commands::Build(args) => commands::build::build(args).await,
-        Commands::Type(args) => commands::r#type::show_type(args).await,
-        Commands::Status(args) => commands::status::status(args).await,
-        Commands::History(args) => commands::history::history(args).await,
-        Commands::Explain(args) => commands::explain::explain(args).await,
-        Commands::Diff(args) => commands::diff::diff(args).await,
+        Commands::Seed(args) => commands::seed::run_seed(args, scope).await,
+        Commands::Build(args) => commands::build::build(args, scope).await,
+        Commands::Type(args) => commands::r#type::show_type(args, scope).await,
+        Commands::Status(args) => commands::status::status(args, scope).await,
+        Commands::History(args) => commands::history::history(args, scope).await,
+        Commands::Explain(args) => commands::explain::explain(args, scope).await,
+        Commands::Diff(args) => commands::diff::diff(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,

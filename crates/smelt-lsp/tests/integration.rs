@@ -218,7 +218,6 @@ impl TestWorkspace {
         smelt_db::parse_file(&self.db, fi).clone()
     }
 
-    /// Wrapper: model_refs
     /// Wrapper: model_sources
     #[allow(dead_code)]
     fn model_sources(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::SourceLocation>> {
@@ -245,11 +244,13 @@ impl TestWorkspace {
         smelt_db::typed_model_schema(&self.db, ws, fi)
     }
 
-    /// Wrapper: resolve_ref (scoped to the test workspace's single project)
-    fn resolve_ref(&self, model_name: &str) -> Option<PathBuf> {
+    /// Wrapper: resolve_ref_leaf (scoped to this test workspace's project).
+    /// Models added via `add_model("foo", ...)` are resolved by leaf name,
+    /// matching the schema-inference subsystem's `RowExtension.ref_name` semantics.
+    fn find_model_by_name(&self, model_name: &str) -> Option<PathBuf> {
         let ws = self.workspace()?;
         let project = self.db.project_input(&self.project_root())?;
-        smelt_db::resolve_ref(&self.db, ws, project, model_name.to_string())
+        smelt_db::resolve_ref_leaf(&self.db, ws, project, model_name.to_string())
             .map(|f| f.path(&self.db).clone())
     }
 
@@ -1038,15 +1039,11 @@ impl TestWorkspace {
                         Some(f) => f,
                         None => continue,
                     };
-                    // Phase 4: check both legacy model_refs and new model_path_refs
-                    let down_refs = smelt_db::model_refs(&self.db, down_fi);
                     let down_path_refs = smelt_db::model_path_refs(&self.db, down_fi);
-                    let refs_exposing = down_refs.iter().any(|r| r.name == *exposing_model)
-                        || down_path_refs.iter().any(|r| {
-                            r.path.first().map(|s| s.as_str()) == Some("models")
-                                && r.path.get(1).map(|s| s.as_str())
-                                    == Some(exposing_model.as_str())
-                        });
+                    let refs_exposing = down_path_refs.iter().any(|r| {
+                        r.path.first().map(|s| s.as_str()) == Some("models")
+                            && r.path.get(1).map(|s| s.as_str()) == Some(exposing_model.as_str())
+                    });
                     if !refs_exposing {
                         continue;
                     }
@@ -1174,10 +1171,10 @@ impl TestWorkspace {
             let schema = smelt_db::model_schema(&self.db, up_fi);
             for ext in &schema.row_extensions {
                 let ws = self.workspace();
-                let project = self.db.project_input(&self.project_root());
-                let upstream_file = ws
-                    .zip(project)
-                    .and_then(|(w, p)| smelt_db::resolve_ref(&self.db, w, p, ext.ref_name.clone()));
+                let upstream_file = ws.and_then(|w| {
+                    smelt_db::resolve_ref_path(&self.db, w, vec![ext.ref_name.clone()])
+                        .and_then(|r| r.source_file)
+                });
                 if let Some(upstream) = upstream_file {
                     let upstream_path = upstream.path(&self.db).clone();
                     if self.trace_upstream_column_chain(
@@ -1421,7 +1418,7 @@ mod goto_definition {
         ws.add_model("users", "SELECT 1 as id");
         ws.add_model("orders", "SELECT * FROM smelt.models.users");
 
-        let resolved = ws.resolve_ref("users");
+        let resolved = ws.find_model_by_name("users");
 
         assert!(resolved.is_some());
         assert_eq!(resolved.unwrap(), ws.model_path("users"));
@@ -1432,7 +1429,7 @@ mod goto_definition {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 as id");
 
-        let resolved = ws.resolve_ref("nonexistent");
+        let resolved = ws.find_model_by_name("nonexistent");
 
         assert!(resolved.is_none());
     }
@@ -1740,7 +1737,7 @@ mod incremental {
         // Create a downstream model first (with broken ref)
         ws.add_model("downstream", "SELECT * FROM smelt.models.upstream");
         assert!(
-            ws.resolve_ref("upstream").is_none(),
+            ws.find_model_by_name("upstream").is_none(),
             "Upstream should not exist yet"
         );
 
@@ -1749,7 +1746,7 @@ mod incremental {
 
         // Verify ref now resolves
         assert!(
-            ws.resolve_ref("upstream").is_some(),
+            ws.find_model_by_name("upstream").is_some(),
             "Upstream should now resolve"
         );
     }

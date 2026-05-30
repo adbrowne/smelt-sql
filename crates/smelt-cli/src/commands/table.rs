@@ -1,9 +1,12 @@
 use crate::helpers::{print_json, print_table};
 use crate::TableArgs;
 use anyhow::{Context, Result};
-use smelt_cli::{discover_python_models, find_project_root, init_db, Config, ModelDiscovery};
+use smelt_cli::{
+    argument_resolution::{compute_scope, resolve_argument},
+    discover_python_models, find_project_root, init_db, Config, ModelDiscovery,
+};
 
-pub async fn table(args: TableArgs) -> Result<()> {
+pub async fn table(args: TableArgs, scope: Option<&str>) -> Result<()> {
     // 1. Find project root
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
@@ -36,24 +39,33 @@ pub async fn table(args: TableArgs) -> Result<()> {
 
     // 3. Initialize Salsa database
     let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
 
-    // 4. Find the model path
+    // 4. Compute active scope and resolve the model argument
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), &args.model_name)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // 5. Find the model by canonical path
     let model = models
         .iter()
-        .find(|m| m.name == args.model_name)
-        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", args.model_name))?;
+        .find(|m| m.canonical_path() == canonical)
+        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", canonical))?;
 
-    // 5. Get typed schema
-    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    // 6. Get typed schema
     let file = db
         .source_file(&model.path)
         .expect("model file not registered");
     let schema = smelt_db::typed_model_schema(&db, ws, file);
 
-    // 6. Output
+    // 7. Output using canonical path as the model name
     match args.format.as_str() {
-        "json" => print_json(&schema, &args.model_name),
-        _ => print_table(&schema, &args.model_name),
+        "json" => print_json(&schema, &canonical),
+        _ => print_table(&schema, &canonical),
     }
 
     Ok(())
