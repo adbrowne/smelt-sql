@@ -136,11 +136,13 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
     let file_store = FileStore::new(&project_dir);
 
-    // Build model name → ModelFile lookup (from the already-initialised DB's
-    // model list; graph.iter_models() returns ModelFile refs).
+    // Build model name → ModelFile lookup keyed by the canonical dot-path
+    // (`graph.execution_order()` / `ordered_models` use canonical keys). Keying
+    // by the leaf `m.name` would miss sub-directory models (canonical
+    // `staging.stg_orders` ≠ leaf `stg_orders`), silently skipping them.
     let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();
-    let model_lookup: std::collections::HashMap<&str, &smelt_cli::ModelFile> =
-        all_models.iter().map(|m| (m.name.as_str(), m)).collect();
+    let model_lookup: std::collections::HashMap<String, &smelt_cli::ModelFile> =
+        all_models.iter().map(|m| (m.canonical_path(), m)).collect();
 
     // Diff each selected model
     let mut entries: Vec<ModelDiffEntry> = Vec::new();
@@ -152,8 +154,12 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
         let inferred = infer_deployed_columns(&db, model);
 
+        // Stored schemas are keyed by the db-name (`db_name_owned()`), matching
+        // the run-pipeline save path. Loading by the canonical `name` would
+        // never find a sub-directory model's schema (always reporting it NEW).
+        let db_name = model.db_name_owned();
         let deployed = file_store
-            .load_schema(name)
+            .load_schema(&db_name)
             .with_context(|| format!("Failed to load deployed schema for {}", name))?;
 
         let status = match deployed {
@@ -175,7 +181,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
                     let action = plan_migration(
                         schema_name,
-                        name,
+                        &db_name,
                         &schema_diff,
                         true, // show full plan, don't block on column removal
                         &column_defaults,
@@ -197,7 +203,10 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
     // Detect removed models (only when no selectors active)
     if !has_selectors {
-        let discovered_names: HashSet<&str> = all_models.iter().map(|m| m.name.as_str()).collect();
+        // Deployed schema files are keyed by db-name; compare against db-names
+        // so a live sub-directory model is not falsely reported REMOVED.
+        let discovered_names: HashSet<String> =
+            all_models.iter().map(|m| m.db_name_owned()).collect();
         let deployed_names = file_store.list_deployed_model_names();
         for deployed_name in &deployed_names {
             if !discovered_names.contains(deployed_name.as_str()) {

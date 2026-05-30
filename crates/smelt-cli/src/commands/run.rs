@@ -1415,7 +1415,14 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     // (not just selected ones) so a deleted model's schema is cleaned up even if
     // the run was selective (spec: schema_evolution.md §"Stale schema cleanup").
     if !args.dry_run {
-        let current_names: HashSet<String> = graph.all_model_names().into_iter().collect();
+        // Stored schemas are keyed by the db-name (`db_name_owned()`, e.g.
+        // `staging_stg_orders`), matching the save + migration paths. Compare
+        // against db-names — not canonical paths (`all_model_names()`) — or a
+        // sub-directory model's just-saved schema would be deleted every run.
+        let current_names: HashSet<String> = graph
+            .iter_models()
+            .map(|(_, m)| m.db_name_owned())
+            .collect();
         for orphan in file_store
             .list_deployed_model_names()
             .into_iter()

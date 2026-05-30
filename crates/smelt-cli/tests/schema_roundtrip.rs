@@ -144,6 +144,108 @@ fn stale_schema_cleaned_after_model_deleted() {
     );
 }
 
+/// Sub-directory models must participate in schema evolution exactly like flat
+/// models. Schemas are keyed by the db-name (`address_segments.join("_")`, e.g.
+/// `staging_stg_orders`) in the save + migration paths; `smelt diff` and the
+/// stale-schema cleanup must agree on that key.
+///
+/// Regression for the canonical-vs-db_name asymmetry (BUG-034/035):
+///   1. The just-saved `staging_stg_orders.json` was deleted by the stale-schema
+///      cleanup on the same run (cleanup compared db-name file stems against the
+///      canonical `all_model_names()` set), so a sub-dir model's schema never
+///      persisted and schema evolution silently never triggered.
+///   2. `smelt diff` skipped sub-dir models entirely (model_lookup keyed by the
+///      leaf `m.name`, but the iteration used canonical paths → lookup miss →
+///      `continue`), so a sub-dir model was never reported (`0 models checked`).
+#[test]
+fn subdir_model_schema_persists_and_diffs() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("models/staging")).unwrap();
+    std::fs::create_dir_all(dir.join("seeds")).unwrap();
+
+    std::fs::write(
+        dir.join("smelt.yml"),
+        r#"
+name: subdir-test
+version: 1
+paths:
+  - models
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("seeds/raw_orders.csv"),
+        "order_id,customer_id,amount\n1,100,29.99\n2,101,49.99\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("models/staging/stg_orders.sql"),
+        "---\nmaterialization: table\n---\n\
+         SELECT order_id, customer_id, amount FROM smelt.raw_orders\n",
+    )
+    .unwrap();
+
+    let build = run_smelt(&["build"], dir);
+    assert!(
+        build.status.success(),
+        "smelt build failed:\nstderr: {}",
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    // The schema for the sub-dir model must survive the stale-schema cleanup.
+    assert!(
+        dir.join(".smelt/schemas/staging_stg_orders.json").exists(),
+        "sub-dir model schema was deleted by stale-schema cleanup; \
+         .smelt/schemas/ = {:?}",
+        std::fs::read_dir(dir.join(".smelt/schemas"))
+            .map(|rd| rd
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+
+    // `smelt diff` must include the sub-dir model (not silently skip it) and
+    // report no changes after a clean build.
+    let diff = run_smelt(&["diff"], dir);
+    let stdout = String::from_utf8_lossy(&diff.stdout);
+    assert!(
+        diff.status.success(),
+        "smelt diff reported changes for a clean sub-dir model:\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&diff.stderr),
+    );
+    assert!(
+        stdout.contains("1 model checked"),
+        "smelt diff did not check the sub-dir model (expected '1 model checked'), got:\n{stdout}",
+    );
+
+    // Drop a column and confirm the generated ALTER statement targets the real
+    // db-name table (`main.staging_stg_orders`), not the invalid 3-part canonical
+    // form (`main.staging.stg_orders`).
+    std::fs::write(
+        dir.join("models/staging/stg_orders.sql"),
+        "---\nmaterialization: table\n---\n\
+         SELECT order_id, customer_id FROM smelt.raw_orders\n",
+    )
+    .unwrap();
+    let diff2 = run_smelt(&["diff"], dir);
+    let stdout2 = String::from_utf8_lossy(&diff2.stdout);
+    assert!(
+        stdout2.contains("main.staging_stg_orders"),
+        "expected ALTER on the db-name table 'main.staging_stg_orders', got:\n{stdout2}",
+    );
+    assert!(
+        !stdout2.contains("main.staging.stg_orders"),
+        "diff emitted an invalid 3-part table name 'main.staging.stg_orders':\n{stdout2}",
+    );
+}
+
 /// Phase 3: `smelt build --select` with a non-existent model name must fail
 /// with a non-zero exit code and a diagnostic message.
 ///
