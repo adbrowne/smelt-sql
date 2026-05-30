@@ -14,6 +14,16 @@ A next-generation data pipeline tool designed to improve upon dbt by:
 
 **Project Status**: This is still an experiment - Andrew is testing it out to see how far he can push this idea. Consider this early-stage development - no backward compatibility constraints. The codebase is evolving rapidly and breaking changes are expected. We are trying to push towards production ready from a feature perspecitve - we want to ensure we aren't backing ourselves into a corner.
 
+## Architectural invariants
+
+These rules constrain how the codebase evolves; the spec is the authoritative source. Read the linked spec section before changing behaviour in the named area.
+
+- **Salsa purity (`smelt-db`)** — Analysis logic is pure functions; Salsa queries are thin wrappers that build inputs and call them. Authoritative spec: [`docs/specs/architecture.md` §"Salsa purity rule (analysis)"](docs/specs/architecture.md#salsa-purity-rule-analysis).
+- **Workspace loading parity (CLI ↔ LSP)** — Eager workspace discovery lives in exactly one place (`smelt_core::workspace::load_workspace`); CLI and LSP both consume it. Authoritative spec: [`docs/specs/architecture.md` §"Workspace loading parity rule (CLI ↔ LSP)"](docs/specs/architecture.md#workspace-loading-parity-rule-cli--lsp).
+- **Project isolation** — A workspace folder may contain multiple smelt projects; each is a closed resolution scope. Every workspace-scoped resolver must be project-scoped. Authoritative spec: [`docs/specs/architecture.md` §"Project isolation rule"](docs/specs/architecture.md#project-isolation-rule).
+- **Run pipeline parity (CLI ↔ UI)** — The compile + execute pipeline lives in exactly one place (`smelt-runtime`); CLI and UI both consume it via `execute_project(request, reporter)`. Authoritative spec: [`docs/specs/architecture.md` §"Run pipeline parity rule (CLI ↔ UI)"](docs/specs/architecture.md#run-pipeline-parity-rule-cli--ui).
+- **Diagnostic range encoding** — Diagnostics carry `rowan::TextRange` internally; conversion to `(line, column)` happens exactly once at the boundary, backed by `line_index::LineIndex`. Authoritative spec: [`docs/specs/architecture.md` §"Diagnostic range encoding rule"](docs/specs/architecture.md#diagnostic-range-encoding-rule).
+
 ## Key Documentation
 
 - **docs/specs/**: Per-feature normative specs — the canonical answer to "how does this feature work?"
@@ -186,92 +196,6 @@ smelt-parser (pure parser)  →  smelt-db (Salsa queries)  →  smelt-lsp (LSP s
   - Automatic invalidation when files change
 
 This separation allows the LSP to get incremental parsing via Salsa, while the planner and CLI can use fast one-shot parsing directly from smelt-parser.
-
-### Pure Function Rule (smelt-db)
-
-**All analysis logic in smelt-db must be implemented as pure functions. Salsa queries must be thin wrappers that call these functions.**
-
-This is an architectural invariant. The core type inference, schema extraction, and diagnostic checks are deliberately written as pure functions that take AST nodes and plain data structures — not Salsa database references. Salsa queries exist only to provide incrementality (caching, dependency tracking, change detection).
-
-**Why this matters:** We plan to extract a `smelt-check` crate for batch compilation (planner, CLI) that doesn't need Salsa. Keeping logic pure makes that extraction a mechanical refactoring rather than a rewrite.
-
-**The rule in practice:**
-- **DO**: Write analysis as `fn check_something(ast: &Expr, ctx: &TypeContext) -> Result`
-- **DO**: Have Salsa queries build the inputs, call the pure function, and return the result
-- **DON'T**: Use `db.some_query()` calls inside analysis logic — pass the data in as parameters instead
-- **DON'T**: Make `TypeContext`, `ModelSchema`, or diagnostic functions depend on Salsa traits
-
-**Current examples of this pattern:**
-- `type_inference.rs` — 1800 lines of pure functions, zero Salsa imports
-- `schema.rs` — pure data structures
-- `check_expression_types()` in `lib.rs` — pure diagnostic check
-
-**Current exceptions (acceptable for now):**
-- `file_diagnostics()` orchestrates multiple Salsa queries to gather inputs before running checks
-- `type_context()` calls Salsa to resolve upstream model schemas
-
-### Workspace Loading Parity Rule (CLI ↔ LSP)
-
-**Eager init-time workspace discovery lives in exactly one place: `smelt_core::workspace::load_workspace`. Both the CLI's `init_db` and the LSP's `Backend::initialize` consume it.**
-
-This covers: SQL models under `config.paths`, function definitions under the hardcoded `functions/` directory, multi-model frontmatter expansion, and YAML/JSON/TOML loader files for `smelt.config.load_yaml`. The Salsa-ingest sequence (`set_project_input` → `set_source_file` → `register_loader_files_from_disk`) is centralised in `smelt_db::workspace_ingest::ingest_loaded_workspace`. *Lazy* discovery (seeds via `project_seeds`, per-entity sources via `project_sources`) lives inside Salsa queries keyed on `ProjectInput` — already shared by construction, doesn't need the loader.
-
-**Why this matters:** The asymmetric-discovery bug class is the load-bearing failure mode of having two parallel reimplementations of "load a smelt project from disk". Two real instances: the LSP shipping without `functions/` discovery (VSCode showed `unknown-smelt-fn` while the CLI test suite was green), and the LSP not calling `set_loader_file` (so `smelt.config.load_yaml` failed silently in the editor only). Routing every consumer through the same loader makes this class structurally impossible. See `docs/specs/architecture.md` → "Workspace loading parity rule (CLI ↔ LSP)" for the normative spec.
-
-**The rule in practice:**
-- **DO** add new eager-discovery steps to `smelt_core::workspace::load_workspace`.
-- **DO** route new lazy-discovery steps through Salsa queries keyed on `ProjectInput`.
-- **DON'T** walk the filesystem from inside `Backend::initialize` or from CLI commands directly — call `load_workspace` instead.
-- **DON'T** add a sibling discovery helper that only one side calls.
-
-The standing CI gate is `cargo test -p smelt-lsp --test example_workspaces`, which drives the real `Backend` against every non-broken example workspace and asserts zero diagnostics. Always run this when touching LSP startup, CLI discovery, or `smelt-core::workspace`.
-
-### Project Isolation Rule
-
-**A workspace folder may contain multiple smelt projects. Each project is a closed resolution scope: a `smelt.<path>` reference inside project A resolves only against entities declared inside project A.**
-
-This is an architectural invariant. `find_smelt_projects` discovers projects recursively from any workspace folder root (the LSP loads a monorepo with `examples/web_analytics/`, `examples/functions_demo/`, etc. all in one VSCode window). Same-name collisions across projects are independent, not errors — `smelt.functions.sessionize` in `web_analytics` and `smelt.functions.sessionize` in `functions_demo` are different functions with different signatures, and each call site sees only its own project's definition.
-
-**Why this matters:** Resolvers that walk `workspace.files(db)` flat (no project filter) leak signatures between projects. The bug class first surfaced as a spurious `Missing required argument` on `examples/web_analytics/models/silver/sessions.sql` when VSCode opened the entire worktree — `resolve_function("sessionize")` returned `functions_demo`'s signature (alphabetically first), which has different parameter names. CLI test suites missed it because each `--test example_diagnostics` case ingests one project at a time. See `docs/specs/architecture.md` → "Project isolation rule" for the normative spec.
-
-**The rule in practice:**
-- **DO** thread `ProjectInput` through any Salsa query that takes `workspace: Workspace` and walks `workspace.files(db)` to resolve a name.
-- **DO** derive the project from the file under analysis: `source_file.project_root(db)` → `find_project(workspace, root)` → `ProjectInput`.
-- **DON'T** add a workspace-flat resolver helper; if you need cross-project information later, make it opt-in (future `dependencies:` declaration in `smelt.yml`).
-- **DON'T** assume a workspace folder is one project — `find_smelt_projects` may return 0..N projects.
-
-The standing CI gate is a multi-project case in `cargo test -p smelt-lsp --test example_workspaces` that opens the entire `examples/` directory as one workspace folder.
-
-### Run Pipeline Parity Rule (CLI ↔ UI)
-
-**The compile + execute pipeline lives in exactly one place: `smelt-runtime`. Both `smelt-cli`'s `commands/run.rs` and `smelt-ui`'s `run_manager.rs` consume it through a single `execute_project(request, reporter)` entry point.**
-
-This covers: the selection/filter pass (resolve selectors, drop tests, drop `.gen` generators, expand emitted models), the compile pipeline (`SqlCompiler` with all four emitters, ephemeral inlining, `apply_type_casts`, `inject_time_filter`, `build_fn_body_map`), the pre-execution diagnostic gate (`UnknownSmeltFn` etc.), and the per-model execute loop (batch dispatch, `RunManifest`, intervals). Consumer crates contribute only surface concerns — argument parsing, stdout/HTTP serialization, and `RunReporter` implementations.
-
-**Why this matters:** Incidents trace to two failure modes at different layers. **Mode A** (a consumer reimplements *analysis* logic instead of calling the shared analysis layer) is what the two rules above address — LSP `functions/`-discovery miss, `set_loader_file` miss, flat-resolver project leak. **Mode B** (a consumer reimplements *compile or execute* logic because there is no shared layer to call) is what this rule addresses — UI executing `materialization: test` models (today's `unreachable!` panic), UI silently passing `smelt.fn.*` calls through unexpanded because its `PrintContext` had `smelt_fn: None`, UI skipping `apply_type_casts` and ephemeral inlining, UI not expanding `*.gen.sql` generators. Layered single-ownership closes both modes. See `docs/specs/architecture.md` → "Run pipeline parity rule (CLI ↔ UI)" for the normative spec.
-
-**The rule in practice:**
-- **DO** place new lifecycle logic at the *lowest* layer that needs it. LSP-shared (parsing, analysis, type inference, diagnostics, workspace discovery, planning) → `smelt-parser` / `smelt-db` / `smelt-core` / `smelt-planner`. CLI+UI-only (compile, execute, manifests, selection/filter) → `smelt-runtime`. Surface concerns → consumer crate.
-- **DO** make `smelt-runtime`'s internal helpers (`SqlCompiler`, emitter factories, `PrintContext` constructors, `inject_time_filter`) `pub(crate)` so consumers cannot construct a `CompiledModel` half-way.
-- **DON'T** add a parallel compile or execute helper inside `smelt-cli` or `smelt-ui`. If `smelt-runtime` doesn't expose the shape you need, change `smelt-runtime`.
-- **DON'T** move analysis logic *up* into `smelt-runtime`. Diagnostic checks, type inference, schema extraction, and workspace ingest stay in `smelt-db` / `smelt-core` so the LSP continues to consume them and a future `smelt-language-service` extraction (for UI in-browser editing) remains mechanical.
-
-The standing CI gate is `cargo test -p smelt-runtime --test execute_parity`, which runs the same fixture project through both `smelt-cli` and `smelt-ui` entry points and asserts identical model outputs, manifest contents, and selection sets. Always run this when touching the compile pipeline, the execute loop, or either consumer's run path.
-
-### Diagnostic Range Encoding Rule
-
-**Diagnostics carry `rowan::TextRange` (byte-offset) values internally. Conversion to `(line, column)` form happens exactly once, at the boundary between smelt's analysis layer and an external consumer, backed by a per-file `line_index::LineIndex`.**
-
-This covers every `Diagnostic` in `smelt-db`, every Salsa accumulator that emits a `Diagnostic`, and every body-offset helper that shifts diagnostic ranges across frontmatter boundaries. The LSP boundary converter lives in `smelt-lsp::diagnostics_boundary::BoundaryConverter` (encoding-aware: UTF-16 or UTF-8 per negotiated `positionEncodingKind`). The CLI boundary converter lives in `smelt-cli::diagnostics_terminal::TerminalConverter`. The UI JSON boundary uses `line_index::LineIndex` directly in `smelt-ui::build`. The helpers `offset_to_position` and `text_range_to_range` no longer exist in `smelt-parser` — they live only inside `smelt-lsp::diagnostics_boundary` for non-diagnostic LSP protocol surface (goto-definition, completions, rename). See `docs/specs/architecture.md` → "Diagnostic range encoding rule" for the normative spec.
-
-**The rule in practice:**
-- **DO** carry `rowan::TextRange` through every `Diagnostic`, every analysis function, and every Salsa query that returns positions.
-- **DO** construct `LineIndex` once per file at the boundary and reuse it across all diagnostics for that file.
-- **DO** consult the negotiated `positionEncodingKind` in the LSP boundary converter (defaults to UTF-16).
-- **DON'T** convert `TextRange` to `(line, column)` inside `smelt-db`, `smelt-parser`, or any other analysis crate.
-- **DON'T** store `Position` / `Range` fields on `Diagnostic` or any analysis-layer intermediate. `lsp_types::Range` is produced only at the LSP boundary.
-
-The standing CI gate is `cargo test -p smelt-lsp --test position_encoding`, which verifies correct diagnostic positions for both UTF-8 and UTF-16 encoding negotiation, including non-ASCII text. Run `rg 'offset_to_position|text_range_to_range' crates/smelt-db/src/ crates/smelt-parser/src/` to confirm no analysis-crate violations were reintroduced.
 
 ### Key Dependencies
 

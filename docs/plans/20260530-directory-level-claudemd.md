@@ -64,7 +64,7 @@ Crate-specific *non-rule* content (build invocations, test idioms, file-layout g
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | ee2e57f4 | 2026-05-30 |
-| 2     | pending  |        |      |
+| 2     | done     | 3a8f8885 | 2026-05-30 |
 | 3     | pending  |        |      |
 
 ---
