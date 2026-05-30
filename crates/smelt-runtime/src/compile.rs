@@ -242,6 +242,61 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
 
+/// Inline `smelt.define` function-call bodies into `sql` using `fn_bodies`,
+/// leaving `smelt.<path>` source references intact (`smelt_path_ref: None`).
+///
+/// Standalone counterpart to `SqlCompiler::expand_function_calls` for callers
+/// that have a `FnBodyMap` but no compiler — notably the explain /
+/// batch-safety classification path, which must derive lookback bounds from the
+/// expanded SQL so a `RANGE BETWEEN INTERVAL` declared inside a function body is
+/// seen. The dialect is irrelevant here: the output feeds the text-based bound
+/// deriver, and a `RANGE BETWEEN INTERVAL` round-trips identically across
+/// dialects. Returns `sql` unchanged when `fn_bodies` is empty.
+pub fn expand_function_calls(sql: &str, fn_bodies: &FnBodyMap) -> String {
+    if fn_bodies.is_empty() {
+        return sql.to_string();
+    }
+    let bodies = Arc::new(fn_bodies.clone());
+    let fn_bodies_for_fn = Arc::clone(&bodies);
+    let fn_expander: SmeltFnExpander<'static> = Box::new(
+        move |fn_name: &str, positional: Vec<String>, named: Vec<(String, String)>| {
+            let (params, body_sql) = fn_bodies_for_fn.get(fn_name)?;
+            Some(substitute_params_with_named(
+                body_sql,
+                params,
+                &positional,
+                &named,
+            ))
+        },
+    );
+    let fn_bodies_for_call = Arc::clone(&bodies);
+    let path_call_expander: SmeltPathCallExpander<'static> = Box::new(
+        move |segs: &[String], positional: Vec<String>, named: Vec<(String, String)>| {
+            let fn_name = segs.last()?;
+            let (params, body_sql) = fn_bodies_for_call.get(fn_name)?;
+            Some(substitute_params_with_named(
+                body_sql,
+                params,
+                &positional,
+                &named,
+            ))
+        },
+    );
+    let parse = smelt_parser::parse(sql);
+    let ctx = PrintContext {
+        dialect: &SqlDialect::DuckDB,
+        capabilities: &BackendCapabilities::duckdb(),
+        schema: "",
+        ephemeral_models: std::collections::HashSet::new(),
+        cross_engine_refs: std::collections::HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: Some(fn_expander),
+        smelt_path_ref: None,
+        smelt_path_call: Some(path_call_expander),
+    };
+    smelt_dialect::print(&parse.syntax(), &ctx)
+}
+
 pub struct SqlCompiler {
     config: Config,
     dialect: SqlDialect,
@@ -839,26 +894,10 @@ impl SqlCompiler {
     /// when no function bodies are registered (the common case for models that
     /// call no `smelt.define` functions).
     pub fn expand_function_calls(&self, sql: &str) -> String {
-        if self.fn_bodies.is_none() {
-            return sql.to_string();
+        match self.fn_bodies.as_ref() {
+            Some(bodies) => expand_function_calls(sql, bodies),
+            None => sql.to_string(),
         }
-        let parse = smelt_parser::parse(sql);
-        let (as_struct_emitter, fn_expander, path_call_expander) =
-            self.build_emitters(&parse.syntax());
-        let ctx = PrintContext {
-            dialect: &self.dialect,
-            capabilities: &self.capabilities,
-            schema: "",
-            ephemeral_models: HashSet::new(),
-            cross_engine_refs: HashMap::new(),
-            smelt_as_struct: as_struct_emitter,
-            smelt_fn: fn_expander,
-            // None ⇒ the printer leaves `smelt.<path>` refs as written, so the
-            // deriver can still match them against the dependency map.
-            smelt_path_ref: None,
-            smelt_path_call: path_call_expander,
-        };
-        smelt_dialect::print(&parse.syntax(), &ctx)
     }
 }
 
