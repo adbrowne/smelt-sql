@@ -34,6 +34,6 @@ Update `docs/specs/incremental_models.md` Known Divergence to reflect the explai
 - **Commit:** folded into Phase 2.
 
 ## Progress
-- Phase 1: pending
-- Phase 2: pending
-- Phase 3: pending
+- Phase 1: done — free `expand_function_calls(sql, &FnBodyMap)`; `SqlCompiler` method delegates.
+- Phase 2: done — `build_explain_output` takes `&FnBodyMap` and expands per model before classification + bound derivation; callers updated. Surfaced a second gap: the batch-safety temporal analyzer only inspected the outer SELECT, so an inlined function body (a derived table) was invisible; added a text scan for `RANGE BETWEEN INTERVAL` frames over the whole statement (only adds *bounded* lookback, never unbounded). Red-green test `test_batch_safety_uses_expanded_function_body`.
+- Phase 3: done — spec Known Divergence narrowed to the run/backfill chunk-sizing call sites.

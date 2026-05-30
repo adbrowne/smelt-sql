@@ -84,9 +84,13 @@ fn assert_incremental_and_fully_batch_safe(
 fn web_analytics_incremental_models_classify_as_safe() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, _db) =
+    let (graph, db) =
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
-    let output = build_explain_output(&graph).expect("build explain output");
+    let fn_bodies = smelt_runtime::build_fn_body_map(
+        &db,
+        smelt_db::Workspace::try_get(&db).expect("workspace"),
+    );
+    let output = build_explain_output(&graph, &fn_bodies).expect("build explain output");
 
     // Models without a Form B date filter: must stay fully_batch_safe.
     // Listed explicitly so adding a new incremental model without a

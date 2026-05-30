@@ -131,7 +131,10 @@ fn emitted_model_carries_origin_in_real_explain_pipeline() {
         .expect("build logical graph");
 
     // Build explain output and assert on the JSON.
-    let output = smelt_cli::build_explain_output(&graph).expect("build explain output");
+    // This test asserts on emitted-model provenance, not batch-safety, so it
+    // needs no function registry.
+    let output = smelt_cli::build_explain_output(&graph, &smelt_runtime::FnBodyMap::new())
+        .expect("build explain output");
     let json = serde_json::to_string_pretty(&output).expect("serialize ExplainOutput");
 
     // --- Assert emitted models have origin ---
