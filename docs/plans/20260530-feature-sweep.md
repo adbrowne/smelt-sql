@@ -47,7 +47,7 @@ A lot of functionality has landed across 26 specs in `docs/specs/`. This plan dr
 | C4 | timeseries | pending | | | |
 | C5 | seeds | pending | | | |
 | C6 | sources | pending | | | |
-| C7 | datagen | pending | | | |
+| C7 | datagen | done | 0 findings (mature; all config-validation rules enforced) | (drift report) | 2026-05-30 |
 | C8 | schema_evolution | pending | | | |
 | C9 | python_models | pending | | | |
 | C10 | testing | pending | | | |
