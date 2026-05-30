@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780120938433,
+  "lastUpdate": 1780120940818,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23465,6 +23465,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.742210766449663,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e16b7dac38d4fe96c532a2a9a5074bee587bcf50",
+          "message": "fix(ui): drive watcher refresh on captured Tokio runtime handle\n\nThe file-watcher event loop runs in a plain std thread (notify uses std\nchannels), which has no Tokio runtime context. It called\n`Handle::current()` there, panicking with \"there is no reactor running\"\non every file change in `smelt ui`. `block_in_place` was also misused —\nit must run on a runtime worker thread.\n\nCapture the runtime `Handle` in `start_watcher` (called from the async\nserver startup) and `block_on` it directly inside the thread.\n\nAdds a regression test that exercises the real watcher + file change.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-05-30T15:58:48+10:00",
+          "tree_id": "38847e41baec0bb8fd8f0c1055eeb8f64a2bb2f0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e16b7dac38d4fe96c532a2a9a5074bee587bcf50"
+        },
+        "date": 1780120940009,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.98831751778843,
             "unit": "MB/s"
           }
         ]
