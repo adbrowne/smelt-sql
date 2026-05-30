@@ -57,6 +57,14 @@ pub fn start_watcher(
 
     let paths_config = state.config.paths.clone();
 
+    // Capture a handle to the current Tokio runtime *now*, while we are still
+    // running inside it (`start_watcher` is called from the async server
+    // startup). The background thread below is a plain std thread with no
+    // runtime context of its own, so `Handle::current()` there would panic
+    // ("there is no reactor running"). The captured handle lets that thread
+    // drive async work via `handle.block_on(...)`.
+    let runtime = tokio::runtime::Handle::current();
+
     // Spawn a background thread to process file events
     // (notify uses std channels, not tokio)
     std::thread::spawn(move || {
@@ -76,13 +84,14 @@ pub fn start_watcher(
                         let project_dir = project_dir.clone();
                         let paths = paths_config.clone();
 
-                        // Use a tokio runtime handle to do async work
-                        tokio::task::block_in_place(move || {
-                            tokio::runtime::Handle::current().block_on(async {
-                                if let Err(e) = refresh_state(&state, &project_dir, &paths).await {
-                                    tracing::error!("Failed to refresh state: {}", e);
-                                }
-                            });
+                        // Drive the async refresh on the captured runtime. This
+                        // thread is not a runtime worker, so we call `block_on`
+                        // on the handle directly (not `block_in_place`, which
+                        // must run from within a runtime worker thread).
+                        runtime.block_on(async {
+                            if let Err(e) = refresh_state(&state, &project_dir, &paths).await {
+                                tracing::error!("Failed to refresh state: {}", e);
+                            }
                         });
                     }
                 }
@@ -150,4 +159,79 @@ async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -
 
     tracing::info!("State refreshed: {} models", models.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::AppState;
+    use smelt_core::config::Config;
+    use smelt_core::graph::DependencyGraph;
+    use std::collections::HashMap;
+    use tokio::sync::broadcast;
+
+    fn minimal_state(project_dir: &Path) -> Arc<AppState> {
+        let config = Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: HashMap::new(),
+            default_materialization: smelt_core::config::Materialization::View,
+            models: HashMap::new(),
+            python: None,
+        };
+
+        let (change_tx, _) = broadcast::channel(16);
+        let (run_event_tx, _) = broadcast::channel(16);
+        let run_manager = Arc::new(crate::run_manager::RunManager::new(
+            run_event_tx,
+            project_dir.to_path_buf(),
+        ));
+
+        Arc::new(AppState {
+            db: Arc::new(tokio::sync::Mutex::new(smelt_db::Database::default())),
+            config: Arc::new(config),
+            sources: Arc::new(None),
+            graph: Arc::new(tokio::sync::Mutex::new(
+                DependencyGraph::build(vec![], None).unwrap(),
+            )),
+            project_dir: project_dir.to_path_buf(),
+            change_tx,
+            run_manager,
+            run_event_tx: broadcast::channel(16).0,
+        })
+    }
+
+    /// A file change in a watched directory must drive `refresh_state` to
+    /// completion and broadcast a `ModelsUpdated` event. Regression test for
+    /// the watcher thread panicking with "there is no reactor running" because
+    /// it called `tokio::runtime::Handle::current()` from a plain std thread
+    /// that is not inside the Tokio runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_change_broadcasts_models_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        let model_file = models_dir.join("foo.sql");
+        std::fs::write(&model_file, "SELECT 1 AS id").unwrap();
+
+        let state = minimal_state(&project_dir);
+        let mut change_rx = state.change_tx.subscribe();
+
+        start_watcher(state, vec![models_dir.clone()], project_dir).unwrap();
+
+        // Give the watcher a moment to register, then modify the file.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::fs::write(&model_file, "SELECT 2 AS id").unwrap();
+
+        // The watcher thread must process the event without panicking and
+        // broadcast ModelsUpdated. Before the fix it panicked, so this times out.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), change_rx.recv())
+            .await
+            .expect("timed out waiting for ModelsUpdated — watcher thread likely panicked")
+            .expect("change channel closed");
+
+        assert!(matches!(event, ChangeEvent::ModelsUpdated));
+    }
 }

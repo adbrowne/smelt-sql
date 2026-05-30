@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{Duration, NaiveDate};
+use line_index::LineIndex;
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
@@ -221,22 +222,28 @@ pub fn build_model_details(
         });
 
         // Build diagnostics
+        let file_text = file.map(|f| f.text(db).to_string()).unwrap_or_default();
         let diags = match (ws, file) {
             (Some(w), Some(f)) => smelt_db::file_diagnostics(db, w, f),
             _ => Vec::new(),
         };
+        // Construct the LineIndex once for the file; each diagnostic lookup is O(log N).
+        let line_index = LineIndex::new(&file_text);
         let diagnostics: Vec<DiagnosticInfo> = diags
             .iter()
-            .map(|d| DiagnosticInfo {
-                severity: match d.severity {
-                    DiagnosticSeverity::Error => "error".to_string(),
-                    DiagnosticSeverity::Warning => "warning".to_string(),
-                    DiagnosticSeverity::Info => "info".to_string(),
-                    DiagnosticSeverity::Hint => "hint".to_string(),
-                },
-                message: d.message.clone(),
-                line: Some(d.range.start.line),
-                column: Some(d.range.start.column),
+            .map(|d| {
+                let lc = line_index.line_col(d.range.start());
+                DiagnosticInfo {
+                    severity: match d.severity {
+                        DiagnosticSeverity::Error => "error".to_string(),
+                        DiagnosticSeverity::Warning => "warning".to_string(),
+                        DiagnosticSeverity::Info => "info".to_string(),
+                        DiagnosticSeverity::Hint => "hint".to_string(),
+                    },
+                    message: d.message.clone(),
+                    line: Some(lc.line),
+                    column: Some(lc.col),
+                }
             })
             .collect();
 

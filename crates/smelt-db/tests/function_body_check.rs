@@ -126,25 +126,17 @@ fn body_type_error_reported() {
     let inner_start = text.find("numerator + 'text'").unwrap();
     let inner_end = inner_start + "numerator + 'text'".len();
 
-    // Convert expected byte offsets to column positions (line 0 throughout).
+    // Pin the exact span using byte offsets.
     assert_eq!(
-        diag.range.start.line, 0,
-        "expected inner-subexpression span on line 0, got {:?}",
+        usize::from(diag.range.start()),
+        inner_start,
+        "expected diagnostic start at byte offset of inner subexpression, got {:?}",
         diag.range
     );
     assert_eq!(
-        diag.range.end.line, 0,
-        "expected inner-subexpression span on line 0, got {:?}",
-        diag.range
-    );
-    assert_eq!(
-        diag.range.start.column as usize, inner_start,
-        "expected diagnostic start column at byte offset of inner subexpression, got {:?}",
-        diag.range
-    );
-    assert_eq!(
-        diag.range.end.column as usize, inner_end,
-        "expected diagnostic end column at end of inner subexpression, got {:?}",
+        usize::from(diag.range.end()),
+        inner_end,
+        "expected diagnostic end at end of inner subexpression, got {:?}",
         diag.range
     );
 }
@@ -177,17 +169,14 @@ fn body_references_unknown_param() {
     let z_start = src.find(" z)").unwrap() + 1;
     let z_end = z_start + 1;
     assert_eq!(
-        diag.range.start.line, 0,
-        "expected identifier span on line 0, got {:?}",
-        diag.range
-    );
-    assert_eq!(
-        diag.range.start.column as usize, z_start,
+        usize::from(diag.range.start()),
+        z_start,
         "expected span start at the `z` identifier, got {:?}",
         diag.range
     );
     assert_eq!(
-        diag.range.end.column as usize, z_end,
+        usize::from(diag.range.end()),
+        z_end,
         "expected span end just after `z`, got {:?}",
         diag.range
     );
@@ -225,17 +214,13 @@ fn duplicate_param_name_is_error() {
     let second_x = src.rfind("x: Expr<Integer>)").unwrap();
     assert_ne!(first_x, second_x, "test sanity: the two positions differ");
     assert_eq!(
-        diag.range.start.line, 0,
-        "expected diagnostic on line 0, got {:?}",
-        diag.range
-    );
-    assert_eq!(
-        diag.range.start.column as usize, second_x,
+        usize::from(diag.range.start()),
+        second_x,
         "diagnostic should be anchored at the second `x`, got {:?}",
         diag.range
     );
     assert_eq!(
-        diag.range.end.column as usize,
+        usize::from(diag.range.end()),
         second_x + 1,
         "diagnostic span should be exactly one char wide, got {:?}",
         diag.range

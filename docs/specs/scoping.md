@@ -139,6 +139,7 @@ CTEs declared inside a `smelt.define` body participate in scoping as follows:
 - CTE schemas are computed using the same schema inference applied to models and function calls; a CTE that selects from a `smelt.<path>(...)` call whose output schema cannot be determined at body-check time is marked **opaque**, and bare-column lookups against it return an `Unknown`-typed result rather than `UnknownIdentifier`.
 - A cyclic CTE graph (`A` references `B` references `A`, directly or via `*`-expansion) emits `CteCycle` anchored at every CTE declaration participating in the cycle.
 - A CTE name is also a valid `ctx` identifier in fragment annotations — the parameter's columns are scoped to that CTE's output.
+- **Column-list rebinding.** A CTE declared with an explicit column list, `WITH cte(c₁, c₂, …) AS (SELECT …)`, rebinds the inner SELECT's inferred column types to the declared names positionally. The types are preserved; only the names change. When the column list is absent, the inner SELECT's own aliases are used unchanged. When the declared column count does not match the inner SELECT's actual column count, the compiler emits `AliasColumnArityMismatch` anchored at the column-list span and applies alias names positionally up to whichever list is shorter; any remaining columns retain their inferred names. Wildcard `SELECT *` CTEs are exempt from static arity checking (the column count depends on the upstream schema).
 
 ### Interactions with adjacent specs
 

@@ -178,7 +178,7 @@ pub struct LoaderDiagnostic {
     /// Optional secondary span — the loader call site in the smelt model file.
     /// Callers should fill this in from the call-site span before emitting the
     /// diagnostic to the LSP accumulator.
-    pub secondary_call_span: Option<crate::Range>,
+    pub secondary_call_span: Option<rowan::TextRange>,
 }
 
 /// The result of a validation run.
@@ -460,7 +460,7 @@ pub fn is_admissible_loader_schema(schema: &SmeltType) -> bool {
 pub fn validate_against_schema(
     parsed: &ParsedConfigFile,
     schema: &SmeltType,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
 ) -> ValidationResult {
     let mut diags: Vec<LoaderDiagnostic> = Vec::new();
     let value = validate_node(
@@ -488,7 +488,7 @@ pub fn validate_against_schema(
 pub fn validate_against_schema_partial(
     parsed: &ParsedConfigFile,
     schema: &SmeltType,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
 ) -> ValidationResult {
     let mut diags: Vec<LoaderDiagnostic> = Vec::new();
     let value = validate_node_partial(
@@ -511,7 +511,7 @@ fn validate_node_partial(
     schema: &SmeltType,
     field_name: Option<&str>,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     match schema {
@@ -543,7 +543,7 @@ fn validate_record_node_partial(
     fields: &BTreeMap<String, SmeltType>,
     schema: &SmeltType,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     let schema_name = schema_display_name(schema);
@@ -635,7 +635,7 @@ fn validate_node(
     schema: &SmeltType,
     field_name: Option<&str>,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     match schema {
@@ -665,7 +665,7 @@ fn validate_record_node(
     fields: &BTreeMap<String, SmeltType>,
     schema: &SmeltType,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     let schema_name = schema_display_name(schema);
@@ -786,7 +786,7 @@ fn validate_list_node(
     elem_ty: &SmeltType,
     schema: &SmeltType,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     let schema_name = schema_display_name(schema);
@@ -832,7 +832,7 @@ fn validate_map_node(
     val_ty: &SmeltType,
     schema: &SmeltType,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     let schema_name = schema_display_name(schema);
@@ -908,7 +908,7 @@ fn validate_scalar_field(
     node: &ParsedNode,
     dt: &DataType,
     file: &ParsedConfigFile,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
     diags: &mut Vec<LoaderDiagnostic>,
 ) -> MetaValue {
     let _is_json = file.format == ConfigFormat::Json;
@@ -1071,7 +1071,7 @@ fn content_diag(
     severity: LoaderDiagnosticSeverity,
     message: String,
     primary_span: FileSpan,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
 ) -> LoaderDiagnostic {
     LoaderDiagnostic {
         code,
@@ -1087,7 +1087,7 @@ fn type_mismatch_diag(
     expected: &str,
     actual: &str,
     span: FileSpan,
-    call_site_range: crate::Range,
+    call_site_range: rowan::TextRange,
 ) -> LoaderDiagnostic {
     content_diag(
         crate::DiagnosticCode::ConfigLoaderTypeMismatch,
@@ -1212,12 +1212,9 @@ mod tests {
     use smelt_types::DataType;
     use smelt_types::TypeConstraint;
 
-    /// Build a `crate::Range` at line 0 column 0 (placeholder call-site).
-    fn zero_range() -> crate::Range {
-        crate::Range {
-            start: smelt_parser::ast::Position { line: 0, column: 0 },
-            end: smelt_parser::ast::Position { line: 0, column: 0 },
-        }
+    /// Build a zero `TextRange` (placeholder call-site).
+    fn zero_range() -> rowan::TextRange {
+        rowan::TextRange::empty(rowan::TextSize::from(0))
     }
 
     /// Build a simple `Cohort = {name: Text, threshold: Integer}` schema.

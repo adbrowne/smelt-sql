@@ -24,6 +24,7 @@ pub mod record;
 pub mod subquery;
 pub mod ternary;
 pub mod type_context;
+pub mod values;
 
 #[cfg(test)]
 mod tests;
@@ -105,4 +106,8 @@ pub use multi_model::{
 pub use ternary::{
     check_dangling_ternary_keywords, check_ternary_expr_diagnostics, infer_ternary_type,
     ShortCircuitHint, TernaryResult, TernarySentinel,
+};
+
+pub use values::{
+    check_cte_alias_arity, check_table_ref_values_arity, infer_values_columns, ValuesError,
 };

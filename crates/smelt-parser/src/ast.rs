@@ -1488,6 +1488,19 @@ impl TableRef {
     pub fn subquery(&self) -> Option<Subquery> {
         self.0.children().find_map(Subquery::cast)
     }
+
+    /// Get the column names from the optional alias column list, e.g. `AS t(c1, c2, …)`.
+    /// Returns `Some(names)` when an `ALIAS_COLUMN_LIST` node is present, `None` otherwise.
+    pub fn alias_column_names(&self) -> Option<Vec<String>> {
+        let acl = self.0.children().find(|n| n.kind() == ALIAS_COLUMN_LIST)?;
+        let names = acl
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .collect();
+        Some(names)
+    }
 }
 
 /// WHERE clause
@@ -2338,41 +2351,23 @@ impl NamedParam {
     }
 }
 
-/// Helper to convert TextRange offset to line/column position
-pub fn offset_to_position(text: &str, offset: usize) -> Position {
-    let mut line = 0u32;
-    let mut column = 0u32;
-
-    for (i, ch) in text.chars().enumerate() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-
-    Position { line, column }
-}
-
-/// Helper to convert TextRange to LSP Range
-pub fn text_range_to_range(text: &str, range: TextRange) -> Range {
-    let start = offset_to_position(text, usize::from(range.start()));
-    let end = offset_to_position(text, usize::from(range.end()));
-    Range { start, end }
-}
-
-/// Position (line, column)
+/// Position (line, column) — codepoint-based.
+///
+/// Used only by the LSP boundary-converter helpers in
+/// `smelt-lsp::diagnostics_boundary`. The `column` field counts Unicode
+/// codepoints, **not** bytes or UTF-16 code units.
+///
+/// Diagnostic positions must be carried as `rowan::TextRange` (byte offsets)
+/// and converted at the boundary via `line_index::LineIndex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
 }
 
-/// Range (start, end positions)
+/// Range (start, end positions) — codepoint-based.
+///
+/// See `Position` for encoding notes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
     pub start: Position,
@@ -2563,6 +2558,24 @@ impl TypeSpec {
     }
 }
 
+/// VALUES clause: `VALUES (expr, …), …`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValuesClause(SyntaxNode);
+
+impl ValuesClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == VALUES_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
 /// Subquery (SELECT statement in parentheses)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Subquery(SyntaxNode);
@@ -2576,9 +2589,14 @@ impl Subquery {
         }
     }
 
-    /// Get the SELECT statement
+    /// Get the SELECT statement (returns `None` for VALUES subqueries).
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// Get the VALUES clause if this is a `(VALUES …)` subquery.
+    pub fn values_clause(&self) -> Option<ValuesClause> {
+        self.0.children().find_map(ValuesClause::cast)
     }
 }
 
@@ -3047,31 +3065,19 @@ impl Cte {
         self.0.children().find_map(Subquery::cast)
     }
 
-    /// Get the column names from the optional column list
+    /// Get the column names from the optional column list, e.g. `cte(a, b, c) AS (…)`.
+    /// Returns an empty `Vec` when no column list is declared.
+    /// Reads from the `ALIAS_COLUMN_LIST` child node produced by the parser.
     pub fn column_names(&self) -> Vec<String> {
-        // Extract column names between first LPAREN and RPAREN (before AS)
-        let mut in_column_list = false;
-        let mut found_as = false;
-        let mut columns = Vec::new();
-
-        for child in self.0.children_with_tokens() {
-            if let Some(token) = child.as_token() {
-                match token.kind() {
-                    LPAREN if !found_as => in_column_list = true,
-                    RPAREN if in_column_list && !found_as => in_column_list = false,
-                    AS_KW => {
-                        found_as = true;
-                        in_column_list = false;
-                    }
-                    IDENT if in_column_list => {
-                        columns.push(token.text().to_string());
-                    }
-                    _ => {}
-                }
-            }
+        match self.0.children().find(|n| n.kind() == ALIAS_COLUMN_LIST) {
+            None => Vec::new(),
+            Some(acl) => acl
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == IDENT)
+                .map(|t| t.text().to_string())
+                .collect(),
         }
-
-        columns
     }
 }
 

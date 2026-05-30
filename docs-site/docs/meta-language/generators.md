@@ -46,11 +46,22 @@ smelt.<dir>.<base>.<n>
 
 For example, `models/cohorts.gen.sql` emitting `name: 'us_west'` → `smelt.cohorts.us_west`.
 
-Generator-emitted models are referenced the same way as hand-authored models:
+Generator-emitted models are referenced the same way as hand-authored models through the standard `smelt.<path>` resolution. Their column types are derived from the `ModelDef.body` query and propagated to consumers, so downstream projections type-check against the emission's actual schema:
 
 ```sql
 -- Downstream model consuming an emitted model:
-SELECT * FROM smelt.cohorts.us_west
+-- Columns id, user_id, region, revenue, created_at resolve to their concrete types.
+SELECT id, user_id, region FROM smelt.cohorts.us_west
+```
+
+A UNION ALL across multiple emissions works identically — each branch's column types are resolved independently from the corresponding emission's schema:
+
+```sql
+SELECT id, region FROM smelt.cohorts.us_west
+UNION ALL
+SELECT id, region FROM smelt.cohorts.us_east
+UNION ALL
+SELECT id, region FROM smelt.cohorts.eu
 ```
 
 ## Frontmatter inheritance

@@ -30,6 +30,8 @@ serde_json = "1.0"
 sha2 = "0.10"
 walkdir = "2.4"
 pyo3 = { workspace = true, optional = true }
+line-index.workspace = true
+rowan.workspace = true
 
 [features]
 default = ["python"]

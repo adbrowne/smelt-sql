@@ -204,6 +204,7 @@ pub enum SyntaxKind {
     ARRAY_LITERAL,       // ARRAY[1, 2, 3]
     VALUES_CLAUSE,       // VALUES (1, 2), (3, 4)
     VALUES_ROW,          // Single row in VALUES: (1, 2)
+    ALIAS_COLUMN_LIST,   // Column list after table alias: AS t(c1, c2, …) or CTE name(c1, c2, …)
     STRUCT_LITERAL,      // STRUCT(a, b, c)
     ROW_CONSTRUCTOR,     // ROW(1, 2, 3)
     EXTRACT_EXPR,        // EXTRACT(field FROM expr)

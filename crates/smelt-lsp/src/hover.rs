@@ -83,19 +83,22 @@ pub fn render_expansion_frames(
                         frame.function, frame.param, frame.bound_type,
                     )
                 };
+                // Convert TextRange (byte offset) to lsp_types::Range (line/col).
+                // Read file text from disk — decl_path is always a real file.
+                let lsp_range = if let Ok(text) = std::fs::read_to_string(path) {
+                    let pr =
+                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, *range);
+                    Range {
+                        start: Position::new(pr.start.line, pr.start.character),
+                        end: Position::new(pr.end.line, pr.end.character),
+                    }
+                } else {
+                    Range::default()
+                };
                 related.push(DiagnosticRelatedInformation {
                     location: Location {
                         uri,
-                        range: Range {
-                            start: Position {
-                                line: range.start.line,
-                                character: range.start.column,
-                            },
-                            end: Position {
-                                line: range.end.line,
-                                character: range.end.column,
-                            },
-                        },
+                        range: lsp_range,
                     },
                     message: related_msg,
                 });

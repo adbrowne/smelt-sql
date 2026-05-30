@@ -153,6 +153,26 @@ WITH
 SELECT * FROM cte2
 ```
 
+An optional **column list** after the CTE name rebinds the inner SELECT's column types to the declared names, positionally:
+
+```sql
+-- Inner SELECT columns are renamed to (a, b) while keeping their types
+WITH cte(a, b) AS (SELECT CAST(1 AS INTEGER), CAST(2.0 AS DOUBLE))
+SELECT a, b FROM cte
+-- a: Integer, b: Double
+```
+
+When the column list is omitted, the inner SELECT's own aliases are used unchanged.
+
+When the declared column count does not match the inner SELECT's actual column count, smelt emits `AliasColumnArityMismatch` anchored at the column-list span. Alias names are applied positionally up to whichever list is shorter; any remaining columns retain their inferred names:
+
+```sql
+-- Error: alias list has 1 name but SELECT produces 2 columns
+WITH cte(a) AS (SELECT CAST(1 AS INTEGER), CAST(2 AS INTEGER))
+SELECT a FROM cte
+-- AliasColumnArityMismatch at (a)
+```
+
 ## Set operations
 
 ```sql
@@ -208,6 +228,36 @@ WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
 
 -- IN subquery
 WHERE user_id IN (SELECT user_id FROM active_users)
+```
+
+### VALUES-derived tables
+
+A `VALUES` clause in a derived-table position produces a typed schema. smelt infers each column's type as the least upper bound (LUB) of the corresponding elements across all rows, following the numeric promotion chain (`SmallInt < Integer < BigInt < Decimal < Double`):
+
+```sql
+-- Alias column list provides names; types are inferred from the rows
+SELECT id, region, created_at
+FROM (
+    VALUES
+        (1, 'us-west-2', CAST('2024-01-01' AS TIMESTAMP)),
+        (2, 'eu-west-1', CAST('2024-01-02' AS TIMESTAMP))
+) AS t(id, region, created_at)
+-- id: SMALLINT, region: TEXT, created_at: TIMESTAMP
+
+-- Multi-row promotion: Integer + Double → Double
+SELECT x FROM (VALUES (CAST(1 AS INTEGER)), (CAST(2.0 AS DOUBLE))) AS t(x)
+-- x: Double
+
+-- Without an alias column list, columns are named col1, col2, …
+SELECT col1, col2 FROM (VALUES (1, 2)) AS t
+```
+
+When the alias column list has a different length from the number of VALUES columns, smelt emits `AliasColumnArityMismatch` anchored at the column-list span:
+
+```sql
+-- Error: alias list has 1 name but VALUES produces 2 columns per row
+SELECT a FROM (VALUES (CAST(1 AS INTEGER), CAST(2 AS INTEGER))) AS t(a)
+-- AliasColumnArityMismatch at (a)
 ```
 
 ## Type casting

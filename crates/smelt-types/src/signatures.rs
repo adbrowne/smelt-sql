@@ -19,10 +19,8 @@
 //! deferred to later phases of the smelt-functions plan.
 
 use crate::{parse_type, DataType};
-use smelt_parser::ast::{
-    File as AstFile, Param as AstParam, Range, SmeltDefine, SmeltExtern, TypeRef,
-};
-use smelt_parser::offset_to_position;
+use smelt_parser::ast::{File as AstFile, Param as AstParam, SmeltDefine, SmeltExtern, TypeRef};
+use smelt_parser::TextRange;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
@@ -1572,7 +1570,7 @@ pub struct ParamSpec {
     /// diagnostics (notably `DuplicateParameterName` in Phase 5). `None` only
     /// if the declaration was so malformed that no IDENT token was present in
     /// the PARAM node.
-    pub name_range: Option<Range>,
+    pub name_range: Option<TextRange>,
     /// Raw text of the declared type, or `None` if unannotated.
     pub type_ref_text: Option<String>,
     /// Structured parse of `type_ref_text`, or `None` if unannotated.
@@ -1582,7 +1580,7 @@ pub struct ParamSpec {
     /// Source range of the `TypeRef` node for this parameter, suitable for
     /// anchoring diagnostic spans. `None` when the parameter has no
     /// annotation at all.
-    pub type_ref_range: Option<Range>,
+    pub type_ref_range: Option<TextRange>,
     /// `true` when the parameter has a default value.
     pub has_default: bool,
     /// Pre-resolution context binding from `Expr<T, ctx>` / `AggExpr<T, ctx>`
@@ -1635,11 +1633,11 @@ pub struct FrameInfo {
     /// Range of the `DEFINE_NAME` / `EXTERN_NAME` identifier in
     /// `decl_path`. Used by LSP clients to open the declaration site
     /// when a user clicks the frame's related-information link.
-    pub decl_range: Option<Range>,
+    pub decl_range: Option<TextRange>,
     /// Range of the call-path span at this frame's call site (in the
     /// file that *contains* the call — distinct from `decl_path`, which
     /// points at where the callee is defined).
-    pub call_site_range: Option<Range>,
+    pub call_site_range: Option<TextRange>,
     /// Identifier of the declaring function in the function registry.
     /// `None` for anonymous frames (e.g. HOF inline-expansion frames produced
     /// by `map`, `filter`, `reduce`). Named `smelt.define` frames carry `Some`.
@@ -2031,11 +2029,11 @@ pub struct FunctionSig {
     pub return_type: Option<Result<SmeltType, SmeltTypeParseError>>,
     /// Source range of the return `TypeRef`, suitable for anchoring
     /// diagnostics. `None` when no return type is declared.
-    pub return_type_range: Option<Range>,
+    pub return_type_range: Option<TextRange>,
     /// Tier, derived from annotation completeness at parse time.
     pub tier: Tier,
-    /// Line/column range of the function-name identifier, for diagnostics.
-    pub name_range: Range,
+    /// Byte-offset range of the function-name identifier, for diagnostics.
+    pub name_range: TextRange,
     /// Whether this signature comes from a `smelt.define` (has a body) or
     /// a `smelt.extern` (signature-only).
     pub origin: SigOrigin,
@@ -2063,12 +2061,8 @@ pub struct FunctionSig {
     pub frontmatter_parse_error: Option<String>,
 }
 
-fn type_ref_range(type_ref: &TypeRef, text: &str) -> Range {
-    let tr = type_ref.syntax().text_range();
-    Range {
-        start: offset_to_position(text, usize::from(tr.start())),
-        end: offset_to_position(text, usize::from(tr.end())),
-    }
+fn type_ref_range(type_ref: &TypeRef, _text: &str) -> TextRange {
+    type_ref.syntax().text_range()
 }
 
 /// Extract a `ParamSpec` from an AST `Param`.
@@ -2101,10 +2095,7 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
     }
 
     let type_ref_range = type_ref_node.as_ref().map(|t| type_ref_range(t, text));
-    let name_range = param.name_range().map(|r| Range {
-        start: offset_to_position(text, usize::from(r.start())),
-        end: offset_to_position(text, usize::from(r.end())),
-    });
+    let name_range = param.name_range();
     // Phase 19: extract the optional context binding from `EXPR_CTX`.
     let context = type_ref_node
         .as_ref()
@@ -2257,11 +2248,7 @@ pub fn extract_signature_with_raw(
     raw_text: &str,
 ) -> Option<FunctionSig> {
     let name = define.name()?;
-    let name_text_range = define.name_range()?;
-    let name_range = Range {
-        start: offset_to_position(stripped_text, usize::from(name_text_range.start())),
-        end: offset_to_position(stripped_text, usize::from(name_text_range.end())),
-    };
+    let name_range = define.name_range()?;
 
     let params: Vec<ParamSpec> = define
         .param_list()
@@ -2338,11 +2325,7 @@ pub fn extract_extern_signature_with_raw(
     raw_text: &str,
 ) -> Option<FunctionSig> {
     let name = ext.name()?;
-    let name_text_range = ext.name_range()?;
-    let name_range = Range {
-        start: offset_to_position(stripped_text, usize::from(name_text_range.start())),
-        end: offset_to_position(stripped_text, usize::from(name_text_range.end())),
-    };
+    let name_range = ext.name_range()?;
 
     let params: Vec<ParamSpec> = ext
         .param_list()

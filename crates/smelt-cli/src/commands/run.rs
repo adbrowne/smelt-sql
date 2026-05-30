@@ -681,7 +681,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                 continue;
             };
             let diags = smelt_db::file_diagnostics(&type_db, workspace, src_file);
-            for diag in diags {
+            for diag in &diags {
                 if diag.code == Some(smelt_db::DiagnosticCode::UnknownSmeltFn) {
                     fn_path_errors.push(format!("model '{}': {}", model.name, diag.message));
                 }

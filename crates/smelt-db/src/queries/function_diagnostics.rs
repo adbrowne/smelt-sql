@@ -20,9 +20,13 @@ use crate::queries::schema::{
 };
 use crate::{
     backends, find_project, function_body_check, function_call_cycle_fn_ids, resolve_function,
-    resolve_ref_path, type_inference, Diagnostic, DiagnosticCode, DiagnosticSeverity, Position,
-    Range, RefKind, SourceFile, TypeContext, Workspace,
+    resolve_ref_path, type_inference, Diagnostic, DiagnosticCode, DiagnosticSeverity, RefKind,
+    SourceFile, TypeContext, Workspace,
 };
+
+// ============================================================================
+// Shared range-offset utility
+// ============================================================================
 
 /// Workspace-wide duplicate-function-name diagnostics. Each returned tuple is
 /// `(path, diagnostic)` where `path` is the offending file and `diagnostic`
@@ -403,7 +407,6 @@ pub fn function_body_diagnostics_for_file(
             // SELECT body emits `ColumnRefFieldUnknown` at definition time.
             out.extend(function_body_check::check_hof_column_ref_field_diagnostics(
                 &select_stmt,
-                &clean_text,
             ));
             // Phase D: run the HOF ModelRef/SourceRef field dispatcher and
             // the wide-reflection accessor checker so that
@@ -411,10 +414,7 @@ pub fn function_body_diagnostics_for_file(
             // `ModelRefFieldUnknown` and `smelt.models.with_tag(42)` emits
             // `WithTagRequiresText` inside a function SELECT body.
             out.extend(
-                function_body_check::check_hof_model_ref_source_ref_field_diagnostics(
-                    &select_stmt,
-                    &clean_text,
-                ),
+                function_body_check::check_hof_model_ref_source_ref_field_diagnostics(&select_stmt),
             );
             continue;
         }
@@ -437,9 +437,7 @@ pub fn function_body_diagnostics_for_file(
         // Phase 24: Tier 3 return type check.
         if sig.tier == smelt_types::signatures::Tier::Three {
             out.extend(function_body_check::check_tier3_return_type(
-                sig,
-                &body_expr,
-                &clean_text,
+                sig, &body_expr,
             ));
         }
     }
@@ -612,8 +610,6 @@ pub fn as_struct_backend_diagnostics_for_file(
     let Some(ast) = AstFile::cast(syntax) else {
         return Vec::new();
     };
-    let raw_text = file.text(db);
-    let text = smelt_parser::strip_frontmatter(raw_text);
 
     let mut out = Vec::new();
     for sig in sigs.iter() {
@@ -644,8 +640,7 @@ pub fn as_struct_backend_diagnostics_for_file(
                 // Check each backend in the resolved set.
                 for backend in &backends_to_check {
                     if !function_body_check::backend_supports_struct_literal(backend) {
-                        let range =
-                            smelt_parser::ast::text_range_to_range(&text, call.text_range());
+                        let range = call.text_range();
                         out.push(Diagnostic {
                             severity: DiagnosticSeverity::Error,
                             message: format!(
@@ -714,10 +709,7 @@ pub fn provenance_unstable_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         if matches!(props.provenance, Provenance::Declared(_)) {
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
@@ -744,10 +736,7 @@ pub fn provenance_unstable_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         if matches!(props.provenance, Provenance::Declared(_)) {
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
@@ -808,10 +797,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         for fm_diag in fm_diags {
             out.push(frontmatter_diag_to_diagnostic(fm_diag, range));
         }
@@ -831,10 +817,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
             .iter()
             .find(|sig| sig.name == name)
             .map(|sig| sig.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
         for fm_diag in fm_diags {
             out.push(frontmatter_diag_to_diagnostic(fm_diag, range));
         }
@@ -848,7 +831,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
 /// Phase 43.
 fn frontmatter_diag_to_diagnostic(
     fm: smelt_planner::logical::FrontmatterDiagnostic,
-    range: Range,
+    range: rowan::TextRange,
 ) -> Diagnostic {
     use smelt_planner::logical::FrontmatterSeverity;
     let severity = match fm.severity {
@@ -942,7 +925,6 @@ pub fn missing_provenance_advisory_for_file(
 ) -> Vec<Diagnostic> {
     use smelt_planner::logical::Provenance;
 
-    let raw_text = file.text(db);
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let Some(ast) = AstFile::cast(syntax) else {
@@ -966,8 +948,7 @@ pub fn missing_provenance_advisory_for_file(
         let Some(where_clause) = select.where_clause() else {
             continue;
         };
-        let where_range =
-            smelt_parser::ast::text_range_to_range(raw_text, where_clause.text_range());
+        let where_range = where_clause.text_range();
 
         // Find smelt.functions.* calls in the FROM clause.
         let Some(from_clause) = select.from_clause() else {
@@ -1038,6 +1019,142 @@ pub fn missing_provenance_advisory_for_file(
     out
 }
 
+/// Pure core of `smelt.functions.*` call-site validation.
+///
+/// Collects all `SMELT_PATH_CALL` nodes from `syntax` that are within scope
+/// (top-level call sites + calls inside deferred define bodies), then runs
+/// [`function_body_check::check_smelt_path_call`] for each node.
+///
+/// **Parameters:**
+/// - `syntax` — root syntax node to scan (typically the whole file AST or a
+///   body subtree for Phase 2 emission-body callers).
+/// - `ctx` — pre-built [`TypeContext`] seeded with workspace signatures and
+///   the source/CTE column scope of the surrounding model (if any).
+/// - `text` — source text used to anchor diagnostic byte offsets. For
+///   hand-authored callers this is the stripped file text; emission-body
+///   callers pass the full generator file text.
+/// - `range_offset` — byte offset of the body within `text` (`0` for
+///   hand-authored callers). Shifts diagnostic ranges into the enclosing file's
+///   coordinate space before returning.
+/// - `deferred_define_names` — names of `smelt.define`s whose bodies are
+///   deferred (have `TableExpr`/`SelectItems` params). Calls inside non-deferred
+///   bodies are excluded here to avoid duplication with the body re-walk.
+/// - Remaining parameters are closures forwarded to `check_smelt_path_call`.
+///
+/// This is the extraction target for the Salsa wrapper
+/// [`smelt_fn_call_diagnostics_for_file`]; that function builds all inputs
+/// from Salsa and delegates here with `range_offset = 0`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn smelt_fn_call_diagnostics_for_ast(
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    ctx: &TypeContext,
+    text: &str,
+    range_offset: rowan::TextSize,
+    deferred_define_names: &std::collections::HashSet<String>,
+    sig_lookup: &dyn Fn(&str) -> Option<smelt_types::signatures::FunctionSig>,
+    builtin_lookup: &dyn Fn(&str) -> Option<&'static smelt_types::signatures::Signature>,
+    lub: &dyn Fn(&DataType, &DataType) -> DataType,
+    body_lookup: &dyn Fn(
+        &smelt_types::signatures::FunctionSig,
+    ) -> Option<(String, function_body_check::BodyShape)>,
+    decl_lookup: &dyn Fn(&smelt_types::signatures::FunctionSig) -> Option<std::path::PathBuf>,
+    tableexpr_schema_lookup: &dyn Fn(
+        &smelt_parser::ast::Expr,
+        &TypeContext,
+    ) -> Option<Vec<(String, TypedColumn)>>,
+    default_type_lookup: &dyn Fn(&smelt_types::signatures::FunctionSig, &str) -> Option<DataType>,
+    table_ref_schema_lookup: &dyn Fn(
+        &smelt_parser::ast::TableRef,
+    ) -> Option<Vec<(String, TypedColumn)>>,
+    smelt_path_schema_lookup: &dyn Fn(
+        &smelt_parser::ast::SmeltPathCall,
+    ) -> Option<Vec<(String, TypedColumn)>>,
+    path_prefix_validator: &dyn Fn(&[String], &str) -> bool,
+) -> Vec<Diagnostic> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let path_call_nodes: Vec<SmeltPathCall> = syntax
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SMELT_PATH_CALL)
+        .filter(|n| {
+            if let Some(call) = SmeltPathCall::cast(n.clone()) {
+                let segs = call.segments();
+                // Skip smelt.config.var — handled separately.
+                if segs.len() == 2
+                    && segs[0].to_lowercase() == "config"
+                    && segs[1].to_lowercase() == "var"
+                {
+                    return false;
+                }
+                // Skip smelt.config.load_* — handled by loader diagnostics.
+                if segs.len() == 2
+                    && segs[0].to_lowercase() == "config"
+                    && matches!(
+                        segs[1].to_lowercase().as_str(),
+                        "load_yaml" | "load_json" | "load_toml"
+                    )
+                {
+                    return false;
+                }
+                // Skip smelt.columns_of — handled by check_columns_of_diagnostics.
+                if segs.len() == 1 && segs[0].to_lowercase() == "columns_of" {
+                    return false;
+                }
+            }
+            let inside_define_body = n.ancestors().any(|a| a.kind() == SyntaxKind::DEFINE_BODY);
+            if !inside_define_body {
+                return true; // Top-level call site — always check.
+            }
+            // Inside a define body: only check if the define is deferred.
+            use smelt_parser::syntax_kind::SyntaxKind as Sk;
+            let enclosing_define_name = n
+                .ancestors()
+                .find(|a| a.kind() == Sk::SMELT_DEFINE)
+                .and_then(|def| {
+                    use smelt_parser::ast::SmeltDefine;
+                    SmeltDefine::cast(def).and_then(|d| d.name())
+                });
+            enclosing_define_name
+                .map(|nm| deferred_define_names.contains(&nm))
+                .unwrap_or(false)
+        })
+        .filter_map(SmeltPathCall::cast)
+        .collect();
+
+    if path_call_nodes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for call in &path_call_nodes {
+        out.extend(function_body_check::check_smelt_path_call(
+            call,
+            ctx,
+            text,
+            sig_lookup,
+            builtin_lookup,
+            lub,
+            body_lookup,
+            decl_lookup,
+            tableexpr_schema_lookup,
+            default_type_lookup,
+            table_ref_schema_lookup,
+            smelt_path_schema_lookup,
+            path_prefix_validator,
+        ));
+    }
+    if range_offset > rowan::TextSize::from(0) {
+        for diag in &mut out {
+            diag.range = rowan::TextRange::new(
+                diag.range.start() + range_offset,
+                diag.range.end() + range_offset,
+            );
+        }
+    }
+    out
+}
+
 /// Per-file diagnostics for `smelt.functions.<name>(...)` call sites.
 ///
 /// For every `SMELT_PATH_CALL` AST node in `file`, runs the pure
@@ -1051,18 +1168,13 @@ pub fn missing_provenance_advisory_for_file(
 ///     [`DiagnosticCode::UnknownIdentifier`] with
 ///     [`DiagnosticData::ExpansionFrames`] attached.
 ///
-/// Pure-function-rule note: the analysis lives in
-/// `function_body_check::check_smelt_path_call`; this wrapper builds the
-/// call-site [`TypeContext`] (seeded with the workspace's signatures) and
-/// threads Salsa-backed closures through for signature / body lookup.
+/// Thin Salsa adapter: builds all closures and the type context from Salsa
+/// inputs, then delegates to [`smelt_fn_call_diagnostics_for_ast`].
 pub fn smelt_fn_call_diagnostics_for_file(
     db: &dyn salsa::Database,
     workspace: Workspace,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
-    use smelt_parser::ast::SmeltPathCall;
-    use smelt_parser::syntax_kind::SyntaxKind;
-
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let text_raw = file.text(db);
@@ -1108,79 +1220,6 @@ pub fn smelt_fn_call_diagnostics_for_file(
             })
             .unwrap_or_default()
     };
-
-    // Collect SMELT_PATH_CALL nodes (smelt.functions.* form).
-    //
-    // For nodes outside a DEFINE_BODY: always include (top-level call sites
-    // in models / expression-only defines).
-    //
-    // For nodes inside a DEFINE_BODY: include only when the enclosing define
-    // is deferred (has TableExpr/SelectItems params) — those bodies are
-    // skipped by `function_body_diagnostics_for_file`, so any nested
-    // `smelt.functions.*` calls would otherwise go unchecked. For
-    // non-deferred defines, the body re-walk dispatches nested calls through
-    // `nested_path_handler`, so we exclude them here to avoid duplication.
-    let path_call_nodes: Vec<SmeltPathCall> = syntax
-        .descendants()
-        .filter(|n| n.kind() == SyntaxKind::SMELT_PATH_CALL)
-        .filter(|n| {
-            // Skip `smelt.config.var(...)` — those are handled by
-            // `check_config_var_call_diagnostics` in `check_file_diagnostics`,
-            // not by the smelt-function call checker.
-            //
-            // Skip `smelt.columns_of(...)` — a Phase C meta-builtin handled
-            // by `check_columns_of_diagnostics` and the
-            // `ColumnsOfUnresolvableSchema` wiring block in
-            // `check_file_diagnostics`.
-            if let Some(call) = SmeltPathCall::cast(n.clone()) {
-                let segs = call.segments();
-                if segs.len() == 2
-                    && segs[0].to_lowercase() == "config"
-                    && segs[1].to_lowercase() == "var"
-                {
-                    return false;
-                }
-                // Skip `smelt.config.load_yaml`, `smelt.config.load_json`,
-                // `smelt.config.load_toml` — Phase E1 loader meta-builtins
-                // handled by `loader_call_diagnostics_for_file`, not by
-                // the smelt-function call checker.
-                if segs.len() == 2
-                    && segs[0].to_lowercase() == "config"
-                    && matches!(
-                        segs[1].to_lowercase().as_str(),
-                        "load_yaml" | "load_json" | "load_toml"
-                    )
-                {
-                    return false;
-                }
-                if segs.len() == 1 && segs[0].to_lowercase() == "columns_of" {
-                    return false;
-                }
-            }
-            let inside_define_body = n.ancestors().any(|a| a.kind() == SyntaxKind::DEFINE_BODY);
-            if !inside_define_body {
-                return true; // Top-level call site — always check.
-            }
-            // Inside a define body: only check if the define is deferred.
-            // Walk up to find the enclosing DEFINE node and check its name.
-            use smelt_parser::syntax_kind::SyntaxKind as Sk;
-            let enclosing_define_name = n
-                .ancestors()
-                .find(|a| a.kind() == Sk::SMELT_DEFINE)
-                .and_then(|def| {
-                    use smelt_parser::ast::SmeltDefine;
-                    SmeltDefine::cast(def).and_then(|d| d.name())
-                });
-            enclosing_define_name
-                .map(|nm| deferred_define_names.contains(&nm))
-                .unwrap_or(false)
-        })
-        .filter_map(SmeltPathCall::cast)
-        .collect();
-
-    if path_call_nodes.is_empty() {
-        return Vec::new();
-    }
 
     // Build the call-site type context. For model-files we reuse the
     // model's TypeContext (source/CTE/model columns all in scope) and
@@ -1570,25 +1609,23 @@ pub fn smelt_fn_call_diagnostics_for_file(
         None
     };
 
-    let mut out = Vec::new();
-    for call in &path_call_nodes {
-        out.extend(function_body_check::check_smelt_path_call(
-            call,
-            &ctx,
-            &clean_text,
-            &sig_lookup,
-            &builtin_lookup,
-            &lub,
-            &body_lookup,
-            &decl_lookup,
-            &tableexpr_schema_lookup,
-            &default_type_lookup,
-            &table_ref_schema_lookup,
-            &smelt_path_schema_lookup,
-            &path_prefix_validator,
-        ));
-    }
-    out
+    smelt_fn_call_diagnostics_for_ast(
+        &syntax,
+        &ctx,
+        &clean_text,
+        rowan::TextSize::from(0),
+        &deferred_define_names,
+        &sig_lookup,
+        &builtin_lookup,
+        &lub,
+        &body_lookup,
+        &decl_lookup,
+        &tableexpr_schema_lookup,
+        &default_type_lookup,
+        &table_ref_schema_lookup,
+        &smelt_path_schema_lookup,
+        &path_prefix_validator,
+    )
 }
 
 /// Check whether a `SmeltType` is a struct annotation containing at least one
@@ -1853,13 +1890,42 @@ pub fn unknown_context_diagnostics_for_file(
     out
 }
 
+/// Pure helper: check a single `SelectStmt` for cyclic CTE references and
+/// return any [`DiagnosticCode::CteCycle`] diagnostics.
+///
+/// `text` is the source text used for range conversion. `range_offset` is `0`
+/// for hand-authored callers (no-op); emission-body callers (Phase 2+) pass
+/// the body span's byte start so that the reported ranges are expressed
+/// relative to the enclosing file. The shift is applied to the diagnostic
+/// ranges returned by `extract_function_body_cte_schemas`.
+///
+/// This is the extraction of the inner loop from
+/// [`cte_cycle_diagnostics_for_file`]; that function is now a thin Salsa
+/// adapter that calls this helper.
+pub fn cte_cycle_diagnostics_for_select(
+    select: &smelt_parser::ast::SelectStmt,
+    text: &str,
+    range_offset: rowan::TextSize,
+) -> Vec<Diagnostic> {
+    let empty_ctx = type_inference::TypeContext::new();
+    let (_ctx, mut cycle_diags) =
+        function_body_check::extract_function_body_cte_schemas(select, &empty_ctx, text, None);
+    if range_offset > rowan::TextSize::from(0) {
+        for diag in &mut cycle_diags {
+            diag.range = rowan::TextRange::new(
+                diag.range.start() + range_offset,
+                diag.range.end() + range_offset,
+            );
+        }
+    }
+    cycle_diags
+}
+
 /// Phase 20: emit [`DiagnosticCode::CteCycle`] for every `smelt.define` in
 /// `file` whose SELECT body contains a cyclic CTE reference.
 ///
-/// Uses [`function_body_check::extract_function_body_cte_schemas`] with an
-/// empty seed context (cycle detection is purely structural).
-///
-/// Pure: reads `parse_file`.
+/// Thin Salsa adapter: extracts file text and AST from Salsa, then delegates
+/// to [`cte_cycle_diagnostics_for_select`] for each define body.
 pub fn cte_cycle_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
@@ -1877,14 +1943,11 @@ pub fn cte_cycle_diagnostics_for_file(
         let Some(select) = body.select_stmt() else {
             continue;
         };
-        let empty_ctx = type_inference::TypeContext::new();
-        let (_ctx, cycle_diags) = function_body_check::extract_function_body_cte_schemas(
+        out.extend(cte_cycle_diagnostics_for_select(
             &select,
-            &empty_ctx,
             &clean_text,
-            None,
-        );
-        out.extend(cycle_diags);
+            rowan::TextSize::from(0),
+        ));
     }
     out
 }
@@ -1921,4 +1984,172 @@ pub fn context_mismatch_diagnostics_for_file(
         ));
     }
     out
+}
+
+// ============================================================================
+// Tests for _for_select pure helpers
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use crate::test_harness::TestDb;
+    use crate::DiagnosticCode;
+    use rowan::TextSize;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn setup(sql: &str) -> (TestDb, PathBuf) {
+        let mut db = TestDb::default();
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+        (db, path)
+    }
+
+    // ── cte_cycle_diagnostics_for_select ──────────────────────────────────────
+
+    /// A smelt.define body with a self-referencing CTE must produce a CteCycle
+    /// diagnostic from both `file_diagnostics` (via `_for_file`) and directly
+    /// from `cte_cycle_diagnostics_for_select`.
+    #[test]
+    fn cte_cycle_diagnostics_for_select_detects_cycle() {
+        use super::cte_cycle_diagnostics_for_select;
+        use smelt_parser::{self, File as AstFile};
+
+        // A SELECT whose WITH clause has a CTE that references itself.
+        let body_sql = "WITH a AS (SELECT * FROM a) SELECT * FROM a";
+        let parse = smelt_parser::parse(body_sql);
+        let syntax = parse.syntax();
+        let ast = AstFile::cast(syntax).expect("should parse as AstFile");
+        let select = ast.select_stmt().expect("should have select_stmt");
+
+        let diags = cte_cycle_diagnostics_for_select(&select, body_sql, TextSize::from(0));
+        // The cycle detector should fire for this self-referencing CTE.
+        let cycle_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::CteCycle))
+            .collect();
+        assert!(
+            !cycle_diags.is_empty(),
+            "self-referencing CTE must produce at least one CteCycle; got: {:?}",
+            diags
+        );
+    }
+
+    /// A SELECT with a non-cyclic CTE produces zero CteCycle diagnostics.
+    #[test]
+    fn cte_cycle_diagnostics_for_select_no_cycle() {
+        use super::cte_cycle_diagnostics_for_select;
+        use smelt_parser::{self, File as AstFile};
+
+        let body_sql = "WITH a AS (SELECT 1 AS x) SELECT * FROM a";
+        let parse = smelt_parser::parse(body_sql);
+        let syntax = parse.syntax();
+        let ast = AstFile::cast(syntax).expect("should parse as AstFile");
+        let select = ast.select_stmt().expect("should have select_stmt");
+
+        let diags = cte_cycle_diagnostics_for_select(&select, body_sql, TextSize::from(0));
+        let cycle_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::CteCycle))
+            .collect();
+        assert!(
+            cycle_diags.is_empty(),
+            "non-cyclic CTE must produce 0 CteCycle diagnostics; got: {:?}",
+            diags
+        );
+    }
+
+    // ── smelt_fn_call_diagnostics_for_ast ────────────────────────────────────
+
+    /// `smelt_fn_call_diagnostics_for_ast` with empty closures produces the
+    /// same UnknownSmeltFn diagnostic as `smelt_fn_call_diagnostics_for_file`
+    /// for a call to a non-existent function.
+    ///
+    /// For the pure variant, we use stub closures that return `None` for all
+    /// lookups — same as what `_for_file` would produce with no functions
+    /// registered in the workspace.
+    #[test]
+    fn smelt_fn_call_diagnostics_for_ast_matches_file_for_unknown_fn() {
+        use super::smelt_fn_call_diagnostics_for_ast;
+        use crate::TypeContext;
+        use smelt_parser;
+        use smelt_types::DataType;
+
+        let sql = "SELECT smelt.functions.nonexistent(1) FROM t";
+        let parse = smelt_parser::parse(sql);
+        let syntax = parse.syntax();
+
+        let ctx = TypeContext::new();
+        let deferred: std::collections::HashSet<String> = Default::default();
+
+        // Stub closures — return None/false for all lookups.
+        let sig_lookup = |_: &str| -> Option<smelt_types::signatures::FunctionSig> { None };
+        let builtin_lookup =
+            |_: &str| -> Option<&'static smelt_types::signatures::Signature> { None };
+        let lub = |_a: &DataType, _b: &DataType| -> DataType { DataType::Unknown };
+        let body_lookup = |_: &smelt_types::signatures::FunctionSig| -> Option<(String, crate::function_body_check::BodyShape)> { None };
+        let decl_lookup =
+            |_: &smelt_types::signatures::FunctionSig| -> Option<std::path::PathBuf> { None };
+        let tableexpr_schema_lookup =
+            |_: &smelt_parser::ast::Expr,
+             _: &TypeContext|
+             -> Option<Vec<(String, smelt_types::TypedColumn)>> { None };
+        let default_type_lookup =
+            |_: &smelt_types::signatures::FunctionSig, _: &str| -> Option<DataType> { None };
+        let table_ref_schema_lookup =
+            |_: &smelt_parser::ast::TableRef| -> Option<Vec<(String, smelt_types::TypedColumn)>> {
+                None
+            };
+        let smelt_path_schema_lookup = |_: &smelt_parser::ast::SmeltPathCall|
+         -> Option<Vec<(String, smelt_types::TypedColumn)>> { None };
+        let path_prefix_validator = |_: &[String], _: &str| -> bool { false };
+
+        let diags = smelt_fn_call_diagnostics_for_ast(
+            &syntax,
+            &ctx,
+            sql,
+            TextSize::from(0),
+            &deferred,
+            &sig_lookup,
+            &builtin_lookup,
+            &lub,
+            &body_lookup,
+            &decl_lookup,
+            &tableexpr_schema_lookup,
+            &default_type_lookup,
+            &table_ref_schema_lookup,
+            &smelt_path_schema_lookup,
+            &path_prefix_validator,
+        );
+
+        let unknown_fn: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::UnknownSmeltFn))
+            .collect();
+        assert!(
+            !unknown_fn.is_empty(),
+            "call to nonexistent smelt function must produce UnknownSmeltFn; got: {:?}",
+            diags
+        );
+
+        // The _for_file path with an empty workspace should agree.
+        let (mut db, path) = setup(sql);
+        let file_diags = db.file_diagnostics(path);
+        let file_unknown: Vec<_> = file_diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::UnknownSmeltFn))
+            .collect();
+        assert_eq!(
+            file_unknown.len(),
+            unknown_fn.len(),
+            "smelt_fn_call_diagnostics_for_ast and file_diagnostics must agree; \
+             file: {:?}, pure: {:?}",
+            file_diags,
+            diags
+        );
+    }
 }

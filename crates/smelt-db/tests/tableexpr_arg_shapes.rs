@@ -168,15 +168,11 @@ fn tableexpr_arg_unrecognised_shape_errors_clearly() {
     // in the model source. We accept the diagnostic anchoring at the
     // literal (start position) rather than buried inside the body.
     let arg_text_start = model_src.find("42").expect("`42` literal in source");
-    // Convert to line/character. Single-line source so line=0.
     assert_eq!(
-        m.range.start.line, 0,
-        "diagnostic should anchor on line 0 of the caller; got {:?}",
+        usize::from(m.range.start()),
+        arg_text_start,
+        "diagnostic should anchor at the `42` literal byte offset; got {:?}",
         m.range
-    );
-    assert_eq!(
-        m.range.start.column as usize, arg_text_start,
-        "diagnostic should anchor at the `42` literal column"
     );
 }
 

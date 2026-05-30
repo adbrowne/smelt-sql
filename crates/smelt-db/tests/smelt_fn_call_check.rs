@@ -131,17 +131,14 @@ fn wrong_arg_type_error_at_call_site() {
     let arg_start = model_src.find(arg_text).unwrap();
     let arg_end = arg_start + arg_text.len();
     assert_eq!(
-        diag.range.start.line, 0,
-        "expected arg span on line 0, got {:?}",
-        diag.range
-    );
-    assert_eq!(
-        diag.range.start.column as usize, arg_start,
+        usize::from(diag.range.start()),
+        arg_start,
         "expected arg-range start at `'not a number'`, got {:?}",
         diag.range
     );
     assert_eq!(
-        diag.range.end.column as usize, arg_end,
+        usize::from(diag.range.end()),
+        arg_end,
         "expected arg-range end after `'not a number'`, got {:?}",
         diag.range
     );
@@ -648,12 +645,8 @@ fn passing_clause_name_mismatch_errors() {
     let name_text = "wrong_name";
     let name_start = model_src.find(name_text).unwrap();
     assert_eq!(
-        unknown_passing[0].range.start.line, 0,
-        "expected name span on line 0, got {:?}",
-        unknown_passing[0].range
-    );
-    assert_eq!(
-        unknown_passing[0].range.start.column as usize, name_start,
+        usize::from(unknown_passing[0].range.start()),
+        name_start,
         "expected range start at `wrong_name` (col {name_start}), got {:?}",
         unknown_passing[0].range
     );
