@@ -1,6 +1,6 @@
 # Expansion level as a planner-pipeline contract
 
-**Status:** research / design clarity — not a committed scope.
+**Status:** research / design clarity — not a committed scope. Tracked in issue #130.
 **Prompted by:** `docs/plans/20260530-thread-fn-registry-classification.md` (threading the `smelt.define` registry into bound derivation / batch-safety classification) and the recurring "expand the function bodies first, then analyze" pattern that came up across L1, L8, and the classification work.
 **Related:** `docs/specs/expansion.md` (function expansion), `docs/specs/incremental_models.md` (bound derivation, batch-safety, source-filter pushdown), `docs/research/20260521-incremental-as-planner-rule.md`.
 
