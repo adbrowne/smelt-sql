@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780124374359,
+  "lastUpdate": 1780124376647,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23588,6 +23588,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.98831751778843,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ff1c9ab32798d508731e903de061aa51da340bd8",
+          "message": "Merge pull request #128 from adbrowne/worktree-unknown_types\n\ndocs: directory-level CLAUDE.md restructure (rules at root, gotchas per crate)",
+          "timestamp": "2026-05-30T16:56:18+10:00",
+          "tree_id": "37f38a985ba3b67d28fc3189cdb7154cea8a481e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ff1c9ab32798d508731e903de061aa51da340bd8"
+        },
+        "date": 1780124376161,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.126135481275668,
             "unit": "MB/s"
           }
         ]
