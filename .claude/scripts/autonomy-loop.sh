@@ -66,6 +66,15 @@ PERMISSION_MODE="${PERMISSION_MODE:-bypassPermissions}"
 MODEL="${MODEL:-opus}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-10}"
 
+# Cap cargo build parallelism. The host has 32 cores, so an unbounded
+# `cargo test` fans out to 32 concurrent rustc + multiple rust-lld link jobs,
+# each linking a statically-linked-DuckDB test binary. Those link-time RSS
+# spikes drove the cgroup's memory *pressure* (PSI) over systemd-oomd's limit
+# and got the whole tmux scope killed on 2026-05-31 (137 procs, oom-kill) even
+# though absolute free RAM was ~50 GB. Capping parallel jobs flattens the
+# spikes. Exported so every cargo invocation in the iteration inherits it.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
+
 SENTINEL_PHASE="<<PHASE_COMPLETE>>"
 SENTINEL_DONE="<<ALL_DONE>>"
 SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
