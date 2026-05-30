@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780119701356,
+  "lastUpdate": 1780120938433,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17859,6 +17859,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.041848,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e16b7dac38d4fe96c532a2a9a5074bee587bcf50",
+          "message": "fix(ui): drive watcher refresh on captured Tokio runtime handle\n\nThe file-watcher event loop runs in a plain std thread (notify uses std\nchannels), which has no Tokio runtime context. It called\n`Handle::current()` there, panicking with \"there is no reactor running\"\non every file change in `smelt ui`. `block_in_place` was also misused —\nit must run on a runtime worker thread.\n\nCapture the runtime `Handle` in `start_watcher` (called from the async\nserver startup) and `block_on` it directly inside the thread.\n\nAdds a regression test that exercises the real watcher + file change.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-05-30T15:58:48+10:00",
+          "tree_id": "38847e41baec0bb8fd8f0c1055eeb8f64a2bb2f0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e16b7dac38d4fe96c532a2a9a5074bee587bcf50"
+        },
+        "date": 1780120936978,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 31.2864,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 29.510762999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.837739,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.46551,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.225959,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1877.337441,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.32662,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.830963,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.865785,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.588064,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2026.025478,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.0613,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 24.36249,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 10.177118,
             "unit": "ms"
           }
         ]
