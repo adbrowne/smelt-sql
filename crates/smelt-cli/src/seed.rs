@@ -52,13 +52,20 @@ impl SeedFile {
     }
 
     /// Read and return the sidecar for this seed's CSV path, if one exists.
-    /// Silently returns None on parse failure.
-    fn read_sidecar_from_path(csv_path: &Path) -> Option<SeedSidecar> {
+    ///
+    /// A sidecar that exists but fails to parse (forbidden `name:` key, malformed
+    /// YAML, unknown column type) is a hard error — `seeds.md` Invariant 8 and the
+    /// "type-coercion failures are hard" doctrine. The error is propagated rather
+    /// than swallowed so the seed is never silently loaded with full inference as
+    /// if no sidecar were present.
+    fn read_sidecar_from_path(csv_path: &Path) -> Result<Option<SeedSidecar>> {
         let yml = csv_path.with_extension("yml");
         if yml.exists() {
-            parse_sidecar(&yml).ok()
+            let sidecar = parse_sidecar(&yml)
+                .with_context(|| format!("Invalid seed sidecar {}", yml.display()))?;
+            Ok(Some(sidecar))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -117,8 +124,9 @@ pub fn discover_seeds(
                     .collect();
                 address_segments.push(name.clone());
 
-                // Read sidecar YAML if present.
-                let sidecar = SeedFile::read_sidecar_from_path(&path);
+                // Read sidecar YAML if present. A malformed sidecar is a hard
+                // error (propagated), never silently dropped.
+                let sidecar = SeedFile::read_sidecar_from_path(&path)?;
 
                 seeds.push(SeedFile {
                     name,
@@ -359,6 +367,31 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
         assert!(result.is_empty());
+    }
+
+    /// A seed sidecar that fails to parse (here: the forbidden `name:` key,
+    /// `seeds.md` Invariant 8) must surface as a hard error from discovery —
+    /// not be silently swallowed and the seed loaded with full inference.
+    /// Regression for the `parse_sidecar(...).ok()` swallow in
+    /// `read_sidecar_from_path`.
+    #[test]
+    fn test_sidecar_parse_error_is_hard_not_swallowed() {
+        let tmp = TempDir::new().unwrap();
+        let seeds_dir = tmp.path().join("seeds");
+        fs::create_dir_all(&seeds_dir).unwrap();
+        fs::write(seeds_dir.join("my_table.csv"), "id,name\n1,a\n").unwrap();
+        // `name:` is forbidden on a seed sidecar.
+        fs::write(seeds_dir.join("my_table.yml"), "name: custom\n").unwrap();
+
+        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main");
+        let err = result.expect_err(
+            "a sidecar with a forbidden `name:` key must abort discovery, not be swallowed",
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("name:"),
+            "error should explain the forbidden `name:` key, got: {msg}"
+        );
     }
 
     #[test]
