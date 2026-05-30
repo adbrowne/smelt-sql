@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780119541702,
+  "lastUpdate": 1780119544766,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23219,6 +23219,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.553967024158542,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "977c7f05769b62374635288fbf2d16b29592e0ca",
+          "message": "Merge pull request #127 from adbrowne/worktree-unknown_types\n\nClose UNKNOWN gaps in VALUES, sources, and generator emission paths",
+          "timestamp": "2026-05-30T15:34:48+10:00",
+          "tree_id": "186ac528fa93c81b77c06b9c238344d85095bc30",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/977c7f05769b62374635288fbf2d16b29592e0ca"
+        },
+        "date": 1780119543926,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.429724902286445,
             "unit": "MB/s"
           }
         ]
