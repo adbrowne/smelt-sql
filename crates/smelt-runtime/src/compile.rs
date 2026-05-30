@@ -828,6 +828,38 @@ impl SqlCompiler {
             materialization,
         })
     }
+
+    /// Inline `smelt.define` function-call bodies into `sql` while leaving
+    /// `smelt.<path>` source references intact (NOT rewritten to physical
+    /// names). The lookback-bound deriver matches sources by their
+    /// `smelt.<path>` name and scans for `RANGE BETWEEN INTERVAL` / window
+    /// patterns; feeding it this expanded form makes a bound (or a bare,
+    /// non-derivable window) declared *inside* a function body visible, instead
+    /// of silently defaulting to a zero-lookback read. Returns `sql` unchanged
+    /// when no function bodies are registered (the common case for models that
+    /// call no `smelt.define` functions).
+    pub fn expand_function_calls(&self, sql: &str) -> String {
+        if self.fn_bodies.is_none() {
+            return sql.to_string();
+        }
+        let parse = smelt_parser::parse(sql);
+        let (as_struct_emitter, fn_expander, path_call_expander) =
+            self.build_emitters(&parse.syntax());
+        let ctx = PrintContext {
+            dialect: &self.dialect,
+            capabilities: &self.capabilities,
+            schema: "",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: as_struct_emitter,
+            smelt_fn: fn_expander,
+            // None ⇒ the printer leaves `smelt.<path>` refs as written, so the
+            // deriver can still match them against the dependency map.
+            smelt_path_ref: None,
+            smelt_path_call: path_call_expander,
+        };
+        smelt_dialect::print(&parse.syntax(), &ctx)
+    }
 }
 
 /// Resolved ephemeral models ready for CTE inlining.

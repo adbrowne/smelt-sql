@@ -1191,7 +1191,14 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                                 }
                             }
                         }
-                        let bound_map = build_source_bound_map(&clean_sql, &dep_timeseries);
+                        // Derive bounds from the *expanded* SQL so a `RANGE
+                        // BETWEEN INTERVAL` (or a bare window) declared inside a
+                        // `smelt.define` body is visible — see
+                        // `SqlCompiler::expand_function_calls`. The filters are
+                        // injected into the unexpanded `clean_sql` so the
+                        // function call survives to `compile_with_sql_and_ephemerals`.
+                        let expanded_sql = compiler.expand_function_calls(&clean_sql);
+                        let bound_map = build_source_bound_map(&expanded_sql, &dep_timeseries);
                         inject_source_filters(&clean_sql, &bound_map, &batch.filter_range)
                     };
 

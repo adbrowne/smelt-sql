@@ -369,21 +369,27 @@ cases rather than aggregate statistics.
 
 ## Known divergences
 
-### Function-encapsulated window lookback is not yet derived
+### Why the sessionization is inlined rather than a reusable function
 
 `silver/sessions` inlines its window functions in the model body rather than
-calling a `smelt.define` sessionize function. This is deliberate: the planner's
-Form A bound derivation runs on the outer SQL only, so a `RANGE BETWEEN INTERVAL`
-frame hidden inside a function body is invisible and the model would silently
-default to a zero-lookback read (splitting cross-midnight sessions). Inlining
-keeps the `RANGE` frames visible, so the 1-day lookback is derived directly. The
-window functions partition by `device_id` — which does *not* include the model's
-`partition_column` (`session_start_date`) — yet are admitted because each carries
-a bounded `RANGE BETWEEN INTERVAL '1 day' PRECEDING` frame; the bounded frame
-proves the window is partition-local up to the lookback (see
-`docs/specs/incremental_models.md` § "Batch safety classification"). Restoring a
-reusable sessionize function awaits expanded-CST bound derivation (tracked in
-`docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`).
+calling a `smelt.define` sessionize function. The window functions partition by
+`device_id` — which does *not* include the model's `partition_column`
+(`session_start_date`) — yet are admitted because each carries a bounded
+`RANGE BETWEEN INTERVAL '1 day' PRECEDING` frame; the bounded frame proves the
+window is partition-local up to the lookback (see
+`docs/specs/incremental_models.md` § "Batch safety classification").
+
+A reusable `sessionize` function would be cleaner, and at *execution* time its
+internal `RANGE` lookback would now be honored (the run pipeline derives bounds
+from the expanded SQL — see `SqlCompiler::expand_function_calls`). The blocker is
+elsewhere: this model needs a Form B filter
+(`WHERE event_date BETWEEN session_start_date - INTERVAL '1 day' AND …`) to widen
+the *write* window for cross-midnight sessions, and that filter references
+`session_start_date` — a column produced by the function. Type inference does not
+yet flow through `TableExpr`-returning functions, so referencing a function-output
+column in that filter raises a spurious "Column not found". Inlining sidesteps it
+by keeping every column resolvable. Restoring the function awaits column-type
+inference through `TableExpr` functions.
 
 ## How this example was built
 
