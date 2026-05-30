@@ -83,5 +83,5 @@ an explicit input to each planner entry point (or stage), so a rule declares the
 level it consumes and the pipeline provides the CST at that level once, rather
 than each call site re-deriving it. The two remaining outer-SQL spots above are
 not really "bugs to patch one by one" — they are the same missing abstraction
-showing through. Worth a dedicated design pass (research doc) before adding more
-per-call-site expansion; see `docs/research/` for where that would live.
+showing through. Worth a dedicated design pass before adding more per-call-site
+expansion. Explored in `docs/research/20260531-planner-expansion-levels.md`.
