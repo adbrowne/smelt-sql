@@ -34,7 +34,7 @@ A lot of functionality has landed across 26 specs in `docs/specs/`. This plan dr
 | A2 | incremental_models | done | 0 fixed, 1 needs-review (mature; +e2e idempotency/equivalence coverage; smelt_shop_min 3 bugs confirmed fixed) | (below) | 2026-05-30 |
 | A3 | cli | done | 1 fixed (BUG-005: sub-dir seeds unresolvable in CLI run/explain path — asymmetric discovery; red-green + e2e) | (below) | 2026-05-30 |
 | A4 | functions | done | 0 fixed, 1 needs-review (mature; gates+1000-case proptests green) | (below) | 2026-05-30 |
-| A5 | meta_language | pending | | | |
+| A5 | meta_language | done | 0 fixed, 1 needs-review (BUG-006: in-model meta (spread/HOF/columns_of/config.var/with_tag) is LSP-clean but unbuildable via CLI run pipeline — BUG-005 class, systemic; 65/65 diag codes present; per_cohort_union builds e2e) | (below) | 2026-05-30 |
 | B1 | expansion | pending | | | |
 | B2 | function_schema_inference | pending | | | |
 | B3 | cumulative_aggregate | pending | | | |
