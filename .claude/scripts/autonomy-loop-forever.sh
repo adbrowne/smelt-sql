@@ -7,6 +7,6 @@ TARGET="$SCRIPT_DIR/autonomy-loop.sh"
 while true; do
     "$TARGET"
     status=$?
-    echo "[autonomy-loop-forever] autonomy-loop.sh exited with status $status; sleeping 1h before restart" >&2
-    sleep 3600
+    echo "[autonomy-loop-forever] autonomy-loop.sh exited with status $status; sleeping 10m before restart" >&2
+    sleep 600
 done
