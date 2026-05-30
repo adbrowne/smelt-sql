@@ -53,8 +53,11 @@ struct IncrementalPlan {
 }
 
 struct BatchPlan {
-    partition_start: NaiveDate,
-    partition_end: NaiveDate,
+    // The DELETE+INSERT both operate on [filter_start, filter_end): the output
+    // is clamped to this range by inject_time_filter and the DELETE must cover
+    // exactly what the INSERT writes. For a model with no lookback this equals
+    // the run window; for a lookback/rebasing model it is widened so the
+    // contract stays idempotent (see the partition construction below).
     filter_start: NaiveDate,
     filter_end: NaiveDate,
 }
@@ -231,8 +234,6 @@ pub async fn execute_project(
                     let batch_end = (batch_start + Duration::days(batch_days as i64)).min(end_date);
                     let filter_start = batch_start - Duration::days(context_days as i64);
                     batches.push(BatchPlan {
-                        partition_start: batch_start,
-                        partition_end: batch_end,
                         filter_start,
                         filter_end: batch_end,
                     });
@@ -526,10 +527,22 @@ pub async fn execute_project(
                         resolver,
                     )?;
 
+                    // The DELETE range must cover the full set of partitions the
+                    // INSERT actually writes. `inject_time_filter` clamps the output
+                    // on `event_time_column` to [filter_start, filter_end) — i.e. the
+                    // run window widened backward by `context_days` (the derived
+                    // lookback). For models whose write window spans more than the run
+                    // window (a Form B output rebasing, e.g. a session that started on
+                    // D-1 and is updated by events on D), using the un-widened
+                    // partition_start here would DELETE only the run-window partition
+                    // while the INSERT writes the lookback partition too, accumulating
+                    // duplicates across consecutive day-by-day runs. Deleting the same
+                    // [filter_start, filter_end) the output is clamped to keeps the
+                    // DELETE+INSERT contract idempotent regardless of write-window width.
                     let partition = PartitionRange {
                         column: inc_plan.timeseries.partition_column.clone(),
-                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
-                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                        start: batch.filter_start.format("%Y-%m-%d").to_string(),
+                        end: batch.filter_end.format("%Y-%m-%d").to_string(),
                     };
 
                     let strategy = MaterializationStrategy::Incremental {

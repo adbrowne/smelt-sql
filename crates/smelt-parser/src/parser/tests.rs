@@ -685,6 +685,28 @@ fn test_window_frame_groups() {
 }
 
 #[test]
+fn test_window_frame_range_interval_preceding() {
+    // RANGE BETWEEN INTERVAL '...' PRECEDING is the spec's Form A lookback
+    // declaration (incremental_models.md). DuckDB supports it; the parser must too.
+    let input = "SELECT LAG(ts) OVER (PARTITION BY device_id ORDER BY ts RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) FROM events";
+    let parse = parse(input);
+    if !parse.errors.is_empty() {
+        eprintln!("Errors: {:?}", parse.errors);
+    }
+    assert_eq!(parse.errors.len(), 0);
+}
+
+#[test]
+fn test_window_frame_range_interval_both_bounds() {
+    let input = "SELECT SUM(x) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '2 hours' PRECEDING AND INTERVAL '1 hour' FOLLOWING) FROM events";
+    let parse = parse(input);
+    if !parse.errors.is_empty() {
+        eprintln!("Errors: {:?}", parse.errors);
+    }
+    assert_eq!(parse.errors.len(), 0);
+}
+
+#[test]
 fn test_multiple_window_functions() {
     let input = "SELECT
                    ROW_NUMBER() OVER (ORDER BY date),

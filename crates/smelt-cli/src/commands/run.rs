@@ -1022,10 +1022,15 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     debug!("Temporal window: {}", windows.effective_window.explanation);
                 }
 
+                // DELETE must cover the same partitions the INSERT writes, which
+                // execute_plan_incremental clamps to `filter_range` (run window +
+                // derived lookback/lookahead). Using `partition_range` would miss
+                // lookback partitions for write-rebasing models and accumulate
+                // duplicates across runs. See the batched path below for detail.
                 let partition = PartitionRange {
                     column: inc_ts.partition_column.clone(),
-                    start: windows.partition_range.start.clone(),
-                    end: windows.partition_range.end.clone(),
+                    start: windows.filter_range.start.clone(),
+                    end: windows.filter_range.end.clone(),
                 };
 
                 executor::execute_plan_incremental(
@@ -1213,10 +1218,20 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                         println!("{}", compiled.sql);
                     }
 
+                    // The DELETE must cover the same partitions the INSERT writes.
+                    // `inject_time_filter` (above) clamps the output on
+                    // event_time_column to `filter_range` — the run window widened
+                    // by the derived lookback/lookahead. A model whose write window
+                    // spans more than the run window (Form B output rebasing, e.g. a
+                    // session that started on D-1 updated by events on D) writes the
+                    // lookback partition too; deleting only `partition_range` would
+                    // leave that partition's prior rows in place and accumulate
+                    // duplicates across consecutive runs. Delete `filter_range` so the
+                    // DELETE+INSERT contract stays idempotent for any write width.
                     let partition = PartitionRange {
                         column: inc_ts.partition_column.clone(),
-                        start: batch.partition_range.start.clone(),
-                        end: batch.partition_range.end.clone(),
+                        start: batch.filter_range.start.clone(),
+                        end: batch.filter_range.end.clone(),
                     };
 
                     if effective_batches.len() == 1 {

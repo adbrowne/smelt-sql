@@ -1655,8 +1655,23 @@ impl<'a> super::Parser<'a> {
             } else {
                 self.error("Expected PRECEDING or FOLLOWING after number".to_string());
             }
+        } else if self.at(IDENT) && self.is_typed_literal() {
+            // INTERVAL '…' PRECEDING / FOLLOWING — time-based RANGE frame bound
+            // (the spec's Form A lookback declaration; DuckDB executes it natively).
+            self.advance(); // INTERVAL keyword (IDENT)
+            self.skip_trivia();
+            self.advance(); // string literal
+            self.skip_trivia();
+            if self.at(PRECEDING_KW) || self.at(FOLLOWING_KW) {
+                self.advance();
+            } else {
+                self.error("Expected PRECEDING or FOLLOWING after INTERVAL literal".to_string());
+            }
         } else {
-            self.error("Expected frame bound (UNBOUNDED, CURRENT ROW, or number)".to_string());
+            self.error(
+                "Expected frame bound (UNBOUNDED, CURRENT ROW, number, or INTERVAL literal)"
+                    .to_string(),
+            );
         }
 
         self.finish_node();
