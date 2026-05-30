@@ -72,10 +72,25 @@ impl LogicalGraph {
             }
         }
 
-        // Build seed name set so `smelt.<seed>` validates without a
-        // sources.yml workaround. Mirrors `smelt-db::resolve_ref` (Phase 6),
-        // which the CLI dependency validator was previously missing.
-        let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
+        // Build the seed address set so `smelt.<path>` validates without a
+        // sources.yml workaround. Mirrors `smelt-db::resolve_ref`, which the
+        // CLI dependency validator was previously missing. Seeds are keyed by
+        // their canonical dot-path (`address_segments.join(".")`), the same key
+        // model nodes and dep strings use — a seed at `models/lookup/regions.csv`
+        // is addressable as `smelt.lookup.regions`, not just by its leaf name.
+        // Keying by leaf `name` alone made sub-directory seeds unresolvable in
+        // the CLI run/explain path while the LSP resolver accepted them.
+        let seed_set: HashSet<String> = seeds
+            .iter()
+            .map(|s| {
+                let cp = s.address_segments.join(".");
+                if cp.is_empty() {
+                    s.name.clone()
+                } else {
+                    cp
+                }
+            })
+            .collect();
 
         // Collect unresolved (raw-path) deps alongside each model in a single pass.
         // Deps are resolved to canonical node-name keys in a second pass once all
@@ -817,6 +832,21 @@ mod tests {
         }
     }
 
+    /// A seed nested under a sub-directory of a scan root. Its leaf `name` is
+    /// the file stem, but its canonical address is the full dot-path
+    /// (`address_segments.join(".")`). E.g. `models/lookup/regions.csv` →
+    /// `smelt.lookup.regions` with `name = "regions"`.
+    fn make_subdir_seed(segments: &[&str]) -> smelt_core::SeedInfo {
+        let segs: Vec<String> = segments.iter().map(|s| s.to_string()).collect();
+        smelt_core::SeedInfo {
+            name: segs.last().expect("at least one segment").clone(),
+            path: format!("models/{}.csv", segs.join("/")).into(),
+            columns: Vec::new(),
+            address_segments: segs,
+            sidecar: None,
+        }
+    }
+
     /// Bug #2 regression: top-level seeds referenced via `smelt.ref()` must
     /// validate without a sources.yml workaround. Mirrors the e2e idempotency
     /// test (`smelt_shop_idempotency.rs`) but at unit-test speed so the
@@ -850,6 +880,35 @@ mod tests {
             upstream.is_empty(),
             "seed ref should not appear as an upstream model node: saw {:?}",
             upstream
+        );
+    }
+
+    /// Regression: a seed nested under a sub-directory of a scan root must
+    /// validate as a `smelt.<full.path>` ref target, mirroring the canonical
+    /// addressing the Salsa/LSP resolver uses (architecture.md §Resolution,
+    /// cli.md Constraint #11). `models/lookup/regions.csv` is addressable as
+    /// `smelt.lookup.regions` — keying the seed set by leaf `name` only
+    /// (the prior bug) made the CLI run/explain path reject it while the LSP
+    /// example gates passed, the asymmetric-discovery bug class.
+    #[test]
+    fn test_subdirectory_seed_as_ref_target_validates() {
+        let models = vec![make_model("region_report", vec!["lookup.regions"])];
+        let seeds = vec![make_subdir_seed(&["lookup", "regions"])];
+        let config = make_test_config();
+
+        let graph = LogicalGraph::build(models, None, &seeds, &config, "dev").expect("build graph");
+
+        graph
+            .validate()
+            .expect("subdirectory seed ref `smelt.lookup.regions` should validate");
+
+        // The seed is surfaced under its canonical dot-path, not its leaf name
+        // (cli.md Constraint #10: all CLI output is canonical `smelt.<path>`).
+        let seed_names: HashSet<&str> = graph.iter_seeds().collect();
+        assert!(
+            seed_names.contains("lookup.regions"),
+            "subdir seed should be visible via iter_seeds() by canonical path: saw {:?}",
+            seed_names
         );
     }
 
