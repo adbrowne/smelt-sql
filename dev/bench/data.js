@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780185269698,
+  "lastUpdate": 1780185272209,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23711,6 +23711,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.126135481275668,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "da8dd2a81bb8dae70fd1d8cf2d2b99ab89d4e592",
+          "message": "Merge pull request #129 from adbrowne/feat/cross-midnight-sessions\n\nBounded cross-midnight sessionization + incremental framework fixes",
+          "timestamp": "2026-05-31T09:52:05+10:00",
+          "tree_id": "3446a492d4f4cd6a90689841758f7dd69399ea5b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/da8dd2a81bb8dae70fd1d8cf2d2b99ab89d4e592"
+        },
+        "date": 1780185271391,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.954183593861494,
             "unit": "MB/s"
           }
         ]
