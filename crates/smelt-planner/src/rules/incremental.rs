@@ -368,6 +368,15 @@ fn find_inadmissible_over(sql: &str, partition_col: &str) -> Option<String> {
         };
         search_from = paren_start + over_content.len() + 2; // skip '(' content ')'
 
+        // A window carrying a bounded RANGE INTERVAL frame (Form A) is admitted
+        // regardless of PARTITION BY alignment: the bounded lookback widens the
+        // source read to cover the frame, so the window is partition-local up to
+        // that bound and the DELETE+INSERT contract still holds. An UNBOUNDED
+        // frame is cumulative-across-history and is NOT made safe this way.
+        if has_bounded_range_interval_frame(&over_content) {
+            continue;
+        }
+
         // Check for PARTITION BY inside the window spec.
         if let Some(pb_pos) = find_partition_by_in_over(&over_content) {
             let after_pb = &over_content[pb_pos..];
@@ -397,6 +406,18 @@ fn find_inadmissible_over(sql: &str, partition_col: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True if a window spec's frame is a bounded `RANGE BETWEEN INTERVAL '…'
+/// PRECEDING [AND …]` (Form A) with no `UNBOUNDED` bound. Such a frame has a
+/// finite lookback/lookforward that the source-bound deriver picks up and the
+/// planner widens the source read to cover, so the window is partition-local up
+/// to that bound — safe for incremental even when PARTITION BY is not aligned to
+/// the partition_column. An `UNBOUNDED` bound reads across all history and is
+/// deliberately excluded.
+fn has_bounded_range_interval_frame(over_content: &str) -> bool {
+    let upper = over_content.to_uppercase();
+    upper.contains("RANGE BETWEEN") && upper.contains("INTERVAL") && !upper.contains("UNBOUNDED")
 }
 
 /// Find the next position of the OVER keyword (word boundary) at or after `from`.
@@ -777,6 +798,35 @@ mod tests {
         let result = detect(&m);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_over_with_bounded_range_interval_frame_is_admissible() {
+        // A window whose PARTITION BY does NOT include the partition_column is
+        // still partition-local when it carries a bounded RANGE INTERVAL frame:
+        // the Form A lookback widens the source read to cover the frame, so the
+        // DELETE+INSERT contract holds. It must be admitted without an override.
+        let sql = "SELECT MAX(boundary_ts) OVER (PARTITION BY device_id ORDER BY event_ts \
+                   RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS s FROM events";
+        assert_eq!(find_inadmissible_over(sql, "session_start_date"), None);
+    }
+
+    #[test]
+    fn test_over_without_frame_still_inadmissible() {
+        // No frame, non-aligned PARTITION BY → still inadmissible (bare window
+        // function reads unbounded prior rows within the partition).
+        let sql =
+            "SELECT ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY event_ts) AS rn FROM events";
+        assert!(find_inadmissible_over(sql, "session_start_date").is_some());
+    }
+
+    #[test]
+    fn test_over_with_unbounded_range_still_inadmissible() {
+        // An UNBOUNDED PRECEDING frame is genuinely cumulative-across-history and
+        // is not made safe by the lookback widening — still inadmissible.
+        let sql = "SELECT SUM(x) OVER (PARTITION BY device_id ORDER BY event_ts \
+                   RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM events";
+        assert!(find_inadmissible_over(sql, "session_start_date").is_some());
     }
 
     #[test]

@@ -30,9 +30,13 @@ fn examples_dir() -> &'static Path {
 fn test_explain_json_exposes_bounds() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, _db) =
+    let (graph, db) =
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
-    let output = build_explain_output(&graph).expect("build explain output");
+    let fn_bodies = smelt_runtime::build_fn_body_map(
+        &db,
+        smelt_db::Workspace::try_get(&db).expect("workspace"),
+    );
+    let output = build_explain_output(&graph, &fn_bodies).expect("build explain output");
 
     // sessions is the canonical incremental model with a timeseries upstream.
     // After LogicalGraph canonical-path rekey (Phase 3), the key is "silver.sessions".
@@ -106,9 +110,13 @@ fn test_explain_json_exposes_bounds() {
 fn test_explain_json_lookup_sources_absent() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, _db) =
+    let (graph, db) =
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
-    let output = build_explain_output(&graph).expect("build explain output");
+    let fn_bodies = smelt_runtime::build_fn_body_map(
+        &db,
+        smelt_db::Workspace::try_get(&db).expect("workspace"),
+    );
+    let output = build_explain_output(&graph, &fn_bodies).expect("build explain output");
 
     // After LogicalGraph canonical-path rekey (Phase 3), the key is "silver.events_parsed".
     let events_parsed = output

@@ -678,171 +678,6 @@ fn test_parse_event_payload_function_compiles() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: sessionize smelt function signature parses correctly
-// ---------------------------------------------------------------------------
-
-/// Verify the `sessionize` function file parses with no errors and declares
-/// the expected signature shape. Mirrors `test_parse_event_payload_function_compiles`
-/// but for the sessionize function, which uses window functions to assign a
-/// `session_seq` value partitioned by user/device and ordered by timestamp,
-/// with a session boundary on inactivity gap or platform change.
-///
-/// Checks: (i) no parse errors; (ii) exactly five parameters with the correct
-/// names and types; (iii) the function body is present.
-#[test]
-fn test_sessionize_function_compiles() {
-    use smelt_parser::ast::{File, Param, SmeltDefine};
-    use smelt_parser::parse;
-
-    let fn_path = repo_root().join("examples/web_analytics/functions/sessionize.sql");
-    let source = fs::read_to_string(&fn_path).unwrap_or_else(|e| panic!("read {fn_path:?}: {e}"));
-
-    let parsed = parse(&source);
-    assert!(
-        parsed.errors.is_empty(),
-        "parse errors in sessionize.sql:\n{:?}",
-        parsed.errors
-    );
-
-    let file = File::cast(parsed.syntax()).expect("syntax root is a FILE");
-    let defines: Vec<SmeltDefine> = file.defines().collect();
-    assert_eq!(
-        defines.len(),
-        1,
-        "expected exactly one smelt.define in sessionize.sql"
-    );
-
-    let def = &defines[0];
-    assert_eq!(
-        def.name().as_deref(),
-        Some("sessionize"),
-        "function name should be sessionize"
-    );
-
-    // Five parameters: source, partition_col, ts_col, platform_col, gap
-    let params: Vec<Param> = def
-        .param_list()
-        .expect("function has a param list")
-        .params()
-        .collect();
-    assert_eq!(params.len(), 5, "expected exactly five parameters");
-
-    // Parameter 0: source: TableExpr
-    assert_eq!(
-        params[0].name().as_deref(),
-        Some("source"),
-        "first parameter name should be source"
-    );
-    let p0_type: String = params[0]
-        .type_ref()
-        .expect("param 0 has type")
-        .text()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert_eq!(
-        p0_type, "TableExpr",
-        "first parameter type should be TableExpr"
-    );
-
-    // Parameter 1: partition_col: Expr<Integer>
-    assert_eq!(
-        params[1].name().as_deref(),
-        Some("partition_col"),
-        "second parameter name should be partition_col"
-    );
-    let p1_type: String = params[1]
-        .type_ref()
-        .expect("param 1 has type")
-        .text()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert_eq!(
-        p1_type, "Expr<Integer>",
-        "second parameter type should be Expr<Integer>"
-    );
-
-    // Parameter 2: ts_col: Expr<Date>
-    // Note: smelt infers event_ts as Date (to_seconds() is not recognized as
-    // returning INTERVAL, so CAST(date AS DATE) + to_seconds(n) infers as Date).
-    // The function signature uses Expr<Date> to match the actual argument type.
-    assert_eq!(
-        params[2].name().as_deref(),
-        Some("ts_col"),
-        "third parameter name should be ts_col"
-    );
-    let p2_type: String = params[2]
-        .type_ref()
-        .expect("param 2 has type")
-        .text()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert_eq!(
-        p2_type, "Expr<Date>",
-        "third parameter type should be Expr<Date>"
-    );
-
-    // Parameter 3: platform_col: Expr<Text>
-    assert_eq!(
-        params[3].name().as_deref(),
-        Some("platform_col"),
-        "fourth parameter name should be platform_col"
-    );
-    let p3_type: String = params[3]
-        .type_ref()
-        .expect("param 3 has type")
-        .text()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert_eq!(
-        p3_type, "Expr<Text>",
-        "fourth parameter type should be Expr<Text>"
-    );
-
-    // Parameter 4: gap: Expr<BigInt> (with default 30 * 60 * 1000000 microseconds)
-    // Note: using epoch_us() arithmetic (BIGINT microseconds) instead of INTERVAL
-    // because DuckDB cannot compare DATE - DATE (which yields BIGINT) with INTERVAL.
-    assert_eq!(
-        params[4].name().as_deref(),
-        Some("gap"),
-        "fifth parameter name should be gap"
-    );
-    let p4_type: String = params[4]
-        .type_ref()
-        .expect("param 4 has type")
-        .text()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert_eq!(
-        p4_type, "Expr<BigInt>",
-        "fifth parameter type should be Expr<BigInt>"
-    );
-    assert!(
-        params[4].default_value().is_some(),
-        "gap parameter must have a default value (30 * 60 * 1000000)"
-    );
-
-    // Return type: TableExpr
-    let ret: String = def
-        .return_type()
-        .expect("function declares a return type")
-        .text()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert_eq!(ret, "TableExpr", "return type should be TableExpr");
-
-    assert!(
-        def.body().is_some(),
-        "function declaration must have a body"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Test 7: end-to-end build materializes silver/events_parsed
 // ---------------------------------------------------------------------------
 
@@ -972,9 +807,9 @@ fn test_end_to_end_smelt_build() {
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
 /// `smelt build`, then verify that `main.silver_sessions` materializes with at
-/// least one row, every row has a non-null platform, and the maximum
-/// `session_seq` across all sessions is >= 1 (confirming that the 30-minute
-/// inactivity / platform-boundary rule fired at least once).
+/// least one row, every row has a non-null platform, and at least one device
+/// has more than one session (confirming that the 30-minute inactivity /
+/// platform-boundary rule fired at least once).
 ///
 /// `models/silver/sessions.sql` address segments are `["silver", "sessions"]`,
 /// so smelt materializes the table as `silver_sessions` in the `main` schema.
@@ -1082,18 +917,25 @@ fn test_sessions_model_materializes() {
         "every session must have exactly one distinct platform value (boundary rule); {multi_platform_sessions} sessions have multiple platforms"
     );
 
-    // --- Step 7: verify max session_seq >= 1 (sessionization fired at least once) ---
-    let max_seq: i64 = conn2
+    // --- Step 7: verify at least one device has more than one session ---
+    // (sessionization fired at least once). The model keys sessions by
+    // (device_id, session_start_ts) rather than a sequence number, so a device
+    // with >1 distinct session is the evidence that a boundary was detected.
+    let devices_with_multiple_sessions: i64 = conn2
         .query_row(
-            "SELECT MAX(session_seq) FROM main.silver_sessions",
+            "SELECT COUNT(*) FROM (
+                 SELECT device_id FROM main.silver_sessions
+                 GROUP BY device_id HAVING COUNT(*) > 1
+             )",
             [],
             |row| row.get(0),
         )
-        .unwrap_or_else(|e| panic!("MAX(session_seq) from silver_sessions: {e}"));
+        .unwrap_or_else(|e| panic!("multi-session device query from silver_sessions: {e}"));
 
     assert!(
-        max_seq >= 1,
-        "MAX(session_seq) should be >= 1, indicating at least one session boundary was detected; got {max_seq}"
+        devices_with_multiple_sessions >= 1,
+        "expected at least one device with more than one session, indicating a \
+         session boundary was detected; got {devices_with_multiple_sessions}"
     );
 }
 

@@ -7,56 +7,50 @@ timeseries:
   partition_column: session_start_date
   granularity: day
 ---
--- One row per session under the 30-minute inactivity + platform-boundary rule.
+-- One row per session under the 30-minute inactivity + platform-boundary rule,
+-- reconstructed across midnight from a bounded 1-day lookback.
 --
--- session_start_date — the partition_column — is computed via GROUP BY in the
--- session_starts CTE (one row per session with the earliest event's date) and
--- joined back into the outer SELECT.  This expresses the safety property
--- structurally: session_start_date is a function of (device_id, session_seq),
--- and the outer body groups by all three so the time-filter injection works.
--- No window function appears in the outer body; the LAG inside sessionize is
--- hidden by function expansion.
+-- The sessionization lives in the reusable `smelt.functions.sessionize`
+-- transparent function: it assigns each event a stable `session_start_ts`
+-- identity and declares its 1-day lookback via `RANGE BETWEEN INTERVAL` frames
+-- in its body. The planner derives that bound from the expanded SQL and widens
+-- the events_parsed read to the previous day, so a session whose events straddle
+-- midnight is reconstructed as one row instead of being split at the partition
+-- boundary.
 --
--- An earlier shape used FIRST_VALUE OVER inside a transparent function to
--- compute session_start_date; both forms produce identical output.  The
--- GROUP BY form is preferred because the safety property is visible in the
--- outer SQL.
+-- session_id is (device_id, session_start_ts) — stable across run windows.
 WITH sessionized AS (
-    -- Columns projected explicitly so the type checker resolves them on
-    -- references from outer CTEs / SELECTs; SELECT * through a TableExpr-
-    -- returning function is currently opaque to the type checker.
+    -- Columns projected explicitly: a TableExpr-returning function's output is
+    -- opaque to the type checker, so the outer body names the columns it uses.
     SELECT
         device_id,
         event_ts,
         event_date,
         platform,
-        session_seq
+        session_start_ts,
+        CAST(session_start_ts AS DATE) AS session_start_date
     FROM smelt.functions.sessionize(
         source => smelt.silver.events_parsed,
         partition_col => device_id,
         ts_col => event_ts,
         platform_col => platform
     )
-),
-session_starts AS (
-    SELECT
-        device_id,
-        session_seq,
-        CAST(MIN(event_ts) AS DATE) AS session_start_date
-    FROM sessionized
-    GROUP BY device_id, session_seq
 )
+-- Form B: the partition_column (session_start_date) is derived and skews earlier
+-- than the events that update it. This filter declares event_date stays within
+-- 1 day of session_start_date, so the planner rebases the WRITE window to
+-- [D-1, D+1) and a cross-midnight session updates its prior-day partition.
 SELECT
-    CONCAT(CAST(s.device_id AS VARCHAR), '-', CAST(s.session_seq AS VARCHAR), '-', CAST(MIN(s.event_ts) AS VARCHAR)) AS session_id,
-    s.device_id,
-    s.session_seq,
-    MIN(s.event_ts) AS session_start,
-    MAX(s.event_ts) AS session_end,
-    ss.session_start_date,
+    CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
+    device_id,
+    session_start_ts,
+    session_start_date,
+    MIN(event_ts) AS session_start,
+    MAX(event_ts) AS session_end,
     COUNT(*) AS event_count,
-    ANY_VALUE(s.platform) AS platform
-FROM sessionized s
-JOIN session_starts ss
-    ON s.device_id = ss.device_id
-   AND s.session_seq = ss.session_seq
-GROUP BY s.device_id, s.session_seq, ss.session_start_date
+    ANY_VALUE(platform) AS platform
+FROM sessionized
+WHERE event_date
+    BETWEEN session_start_date - INTERVAL '1 day'
+        AND session_start_date + INTERVAL '1 day'
+GROUP BY device_id, session_start_ts, session_start_date

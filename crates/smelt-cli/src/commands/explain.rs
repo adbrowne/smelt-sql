@@ -109,7 +109,10 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
             .with_context(|| "Failed to determine execution order")?
     };
 
-    let mut output = build_explain_output(&graph)?;
+    // Function bodies so batch-safety classification sees lookback declared
+    // inside `smelt.define` bodies (parity with the execution path).
+    let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
+    let mut output = build_explain_output(&graph, &fn_bodies)?;
     // Narrow the output's execution_order to the filtered set so the
     // human-readable and JSON output reflects --select.
     output.execution_order = execution_order.clone();

@@ -16,7 +16,8 @@
 
 use smelt_core::config::{Config, Materialization, Target};
 use smelt_runtime::{
-    inject_time_filter, EphemeralResolver, FnBodyMap, SqlCompiler, TimeRange, UpstreamSchemas,
+    build_source_bound_map, inject_time_filter, EphemeralResolver, FnBodyMap, SqlCompiler,
+    TimeRange, UpstreamSchemas,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::collections::HashMap;
@@ -102,6 +103,72 @@ fn test_compile_with_function_call() {
         !compiled.sql.contains("smelt.functions.safe_div"),
         "expected smelt.functions.safe_div call site to be expanded, got: {}",
         compiled.sql
+    );
+}
+
+#[test]
+fn test_expand_function_calls_reveals_inner_range_bound() {
+    // L1: a `RANGE BETWEEN INTERVAL` lookback declared INSIDE a `smelt.define`
+    // body must become visible to the bound deriver after expand_function_calls,
+    // so a function-encapsulated window does not silently default to a
+    // zero-lookback read.
+    let sql = "SELECT * FROM smelt.functions.windowed(src => smelt.silver.events_parsed)";
+    let model = make_model("uses_window_fn", sql);
+
+    let mut compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let mut fn_bodies: FnBodyMap = HashMap::new();
+    fn_bodies.insert(
+        "windowed".to_string(),
+        (
+            vec![("src".to_string(), None)],
+            "(SELECT ts, LAG(ts) OVER (PARTITION BY device_id ORDER BY ts \
+             RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS prev FROM src)"
+                .to_string(),
+        ),
+    );
+    compiler.set_function_bodies(fn_bodies);
+    let _ = &model;
+
+    let expanded = compiler.expand_function_calls(sql);
+    // The inner RANGE bound is now visible…
+    assert!(
+        expanded.contains("RANGE BETWEEN INTERVAL '1 day' PRECEDING"),
+        "expected inner RANGE frame to surface after expansion, got: {expanded}"
+    );
+    // …and the source ref is intact (not rewritten to a physical name).
+    assert!(
+        expanded.contains("smelt.silver.events_parsed"),
+        "expected the smelt.<path> source ref to survive expansion, got: {expanded}"
+    );
+
+    let mut dep_ts: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    dep_ts.insert(
+        "smelt.silver.events_parsed".to_string(),
+        (
+            vec!["silver".to_string(), "events_parsed".to_string()],
+            "event_date".to_string(),
+        ),
+    );
+
+    // The deriver picks up the 1-day lookback from the expanded SQL.
+    let bounds = build_source_bound_map(&expanded, &dep_ts);
+    let b = bounds
+        .get("smelt.silver.events_parsed")
+        .expect("bound entry for events_parsed");
+    assert_eq!(
+        b.before_secs, 86400,
+        "expected a 1-day lookback derived from inside the function body"
+    );
+
+    // Control: WITHOUT expansion the inner bound is invisible (outer SQL only).
+    let bounds_outer = build_source_bound_map(sql, &dep_ts);
+    let before_outer = bounds_outer
+        .get("smelt.silver.events_parsed")
+        .map(|b| b.before_secs)
+        .unwrap_or(0);
+    assert_eq!(
+        before_outer, 0,
+        "outer SQL alone must NOT see the function-internal bound (this is L1)"
     );
 }
 
