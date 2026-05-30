@@ -29,7 +29,7 @@ A lot of functionality has landed across 26 specs in `docs/specs/`. This plan dr
 
 | Phase | Feature / seam | Status | Findings | Commit | Date |
 |-------|----------------|--------|----------|--------|------|
-| S0 | Setup: artifacts + loop wiring | pending | | | |
+| S0 | Setup: artifacts + loop wiring | done | scaffold | 16e7a49a | 2026-05-30 |
 | A1 | architecture | pending | | | |
 | A2 | incremental_models | pending | | | |
 | A3 | cli | pending | | | |
