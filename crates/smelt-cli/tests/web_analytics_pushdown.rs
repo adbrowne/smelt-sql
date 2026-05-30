@@ -190,9 +190,9 @@ fn test_full_run_equivalent_with_pushdown() {
         "Pushdown result must contain SELECT: {result_with_pushdown}"
     );
 
-    // The top-level CTEs (WITH marked AS ...) must still be present.
+    // The top-level CTE (WITH sessionized AS ...) must still be present.
     assert!(
-        result_with_pushdown.contains("WITH marked AS"),
+        result_with_pushdown.contains("WITH sessionized AS"),
         "CTE structure must be preserved after pushdown: {result_with_pushdown}"
     );
 
@@ -202,12 +202,11 @@ fn test_full_run_equivalent_with_pushdown() {
         "Outer GROUP BY must survive pushdown: {result_with_pushdown}"
     );
 
-    // The events_parsed source reference must survive (wrapped in the pushdown
-    // subquery). The sessionization is inlined in the model body — there is no
-    // function call to preserve.
+    // The sessionize function call must survive pushdown (it is expanded later,
+    // at compile time, not by source-filter pushdown).
     assert!(
-        result_with_pushdown.contains("smelt.silver.events_parsed"),
-        "Source reference must survive pushdown: {result_with_pushdown}"
+        result_with_pushdown.contains("smelt.functions.sessionize"),
+        "Function call must survive pushdown: {result_with_pushdown}"
     );
 
     // Pushdown must not have introduced any extra outer WHERE on the sessions model's own

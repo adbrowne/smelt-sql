@@ -80,7 +80,8 @@ Source files:
 - [`models/bronze/raw_events.sql`](models/bronze/raw_events.sql)
 - [`models/silver/events_parsed.sql`](models/silver/events_parsed.sql) +
   [`functions/parse_event_payload.sql`](functions/parse_event_payload.sql)
-- [`models/silver/sessions.sql`](models/silver/sessions.sql) (bounded cross-midnight sessionization — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
+- [`models/silver/sessions.sql`](models/silver/sessions.sql) +
+  [`functions/sessionize.sql`](functions/sessionize.sql) (bounded cross-midnight sessionization — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
 - [`models/silver/device_user_edges.sql`](models/silver/device_user_edges.sql)
 - [`models/gold/identity_forward_only.sql`](models/gold/identity_forward_only.sql)
 - [`models/gold/identity_backward_fill.sql`](models/gold/identity_backward_fill.sql)
@@ -180,15 +181,16 @@ a sanity check.
 writing only a bounded window — the property that keeps per-day cost flat as
 history grows.
 
-The sessionization is inlined in the model body so the planner can *see* its
-window functions (Form A bound derivation runs on the outer SQL, not inside
-`smelt.define` bodies). Each `LAG`/`MAX OVER` carries a
+The sessionization lives in the reusable `smelt.functions.sessionize` function.
+Each `LAG`/`MAX OVER` in its body carries a
 `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW` frame: the planner
-derives a 1-day lookback and widens the `silver/events_parsed` read to the
-previous day, so a session whose events straddle midnight is reconstructed as
-**one** row instead of being split at the partition boundary. The 1-day frame
-is also the cap — a session whose sub-30-minute activity chain runs longer than
-the lookback is clipped at the frame edge rather than reading unbounded history.
+derives a 1-day lookback from those frames — bound derivation runs on the
+*expanded* SQL, so a frame declared inside the function body is honored — and
+widens the `silver/events_parsed` read to the previous day, so a session whose
+events straddle midnight is reconstructed as **one** row instead of being split
+at the partition boundary. The 1-day frame is also the cap — a session whose
+sub-30-minute activity chain runs longer than the lookback is clipped at the
+frame edge rather than reading unbounded history.
 
 Because the partition column `session_start_date` is *derived* and can skew
 earlier than the events that update it (a session that started yesterday gains
@@ -369,27 +371,26 @@ cases rather than aggregate statistics.
 
 ## Known divergences
 
-### Why the sessionization is inlined rather than a reusable function
+### What makes the `sessionize` function work as an incremental dependency
 
-`silver/sessions` inlines its window functions in the model body rather than
-calling a `smelt.define` sessionize function. The window functions partition by
-`device_id` — which does *not* include the model's `partition_column`
-(`session_start_date`) — yet are admitted because each carries a bounded
-`RANGE BETWEEN INTERVAL '1 day' PRECEDING` frame; the bounded frame proves the
-window is partition-local up to the lookback (see
-`docs/specs/incremental_models.md` § "Batch safety classification").
+`silver/sessions` calls the reusable `smelt.functions.sessionize` function, which
+encapsulates the windowing. Three framework behaviors make that safe inside an
+incremental model:
 
-A reusable `sessionize` function would be cleaner, and at *execution* time its
-internal `RANGE` lookback would now be honored (the run pipeline derives bounds
-from the expanded SQL — see `SqlCompiler::expand_function_calls`). The blocker is
-elsewhere: this model needs a Form B filter
-(`WHERE event_date BETWEEN session_start_date - INTERVAL '1 day' AND …`) to widen
-the *write* window for cross-midnight sessions, and that filter references
-`session_start_date` — a column produced by the function. Type inference does not
-yet flow through `TableExpr`-returning functions, so referencing a function-output
-column in that filter raises a spurious "Column not found". Inlining sidesteps it
-by keeping every column resolvable. Restoring the function awaits column-type
-inference through `TableExpr` functions.
+- **Bound derivation reads the expanded SQL.** The `RANGE BETWEEN INTERVAL`
+  frames live in the function body; the run pipeline expands the function before
+  deriving source bounds (`SqlCompiler::expand_function_calls`), so the 1-day
+  lookback is honored rather than silently defaulting to zero.
+- **Bounded-frame windows are admitted regardless of `PARTITION BY`.** The window
+  partitions by `device_id`, which does not include the model's
+  `partition_column` (`session_start_date`); it is admitted because each frame is
+  a bounded `RANGE BETWEEN INTERVAL` (see
+  `docs/specs/incremental_models.md` § "Batch safety classification").
+- **The write window covers the lookback partition.** The outer Form B filter
+  (`WHERE event_date BETWEEN session_start_date - INTERVAL '1 day' AND …`)
+  references `session_start_date`, a column produced by the function — resolvable
+  because column references through a `TableExpr` function are inferred, and a
+  typed literal like `INTERVAL '1 day'` is no longer mistaken for a column.
 
 ## How this example was built
 

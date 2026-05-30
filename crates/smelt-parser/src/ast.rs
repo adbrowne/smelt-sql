@@ -1814,8 +1814,23 @@ impl ColumnRef {
             return None;
         }
 
-        // Simple identifier
+        // Simple identifier — but NOT a typed literal such as `INTERVAL '1 day'`,
+        // `DATE '2026-01-01'`, etc. The lexer emits those as a type-keyword
+        // `IDENT` followed by a `STRING` inside one EXPRESSION node; the IDENT
+        // alone would otherwise be mistaken for a column named "INTERVAL".
         if tokens.len() == 1 && tokens[0].kind() == IDENT {
+            let is_type_keyword = matches!(
+                tokens[0].text().to_uppercase().as_str(),
+                "DATE" | "TIME" | "TIMESTAMP" | "INTERVAL"
+            );
+            let has_string_literal = expr
+                .0
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .any(|t| t.kind() == STRING);
+            if is_type_keyword && has_string_literal {
+                return None;
+            }
             return Some(ColumnRef {
                 qualifier: None,
                 name: tokens[0].text().to_string(),
