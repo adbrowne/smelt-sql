@@ -15,8 +15,13 @@
 # `.claude/active-plan`.
 #
 # Currently active:
-#   in-repo plan: docs/plans/20260517-web-analytics-example.md
-#   meta-plan:    ~/.claude/plans/i-would-like-to-stitch-eventstream.md
+#   in-repo plan: docs/plans/20260530-feature-sweep.md
+#   meta-plan:    ~/.claude/plans/we-now-have-a-idempotent-torvalds.md
+#
+# NOTE: this drives a bug-hunting sweep, not a feature plan. The default
+# PROMPT below assumes /smelt:plan+/smelt:implement; for the sweep, run with
+# the bug-hunt iteration prompt instead:
+#   PROMPT="$(cat .claude/bug-hunt-prompt.txt)" bash .claude/scripts/autonomy-loop.sh
 #
 # When swapping plans, update .claude/active-plan, the two comment
 # lines above, and the LOG_DIR below.
@@ -39,8 +44,8 @@
 # Stop the loop manually: Ctrl-C. The current Claude iteration will
 # finish naturally; the next iteration will not start.
 #
-# Logs: ${HOME}/.claude/logs/web-analytics-loop/iter-<ts>-<n>.log
-#       ${HOME}/.claude/logs/web-analytics-loop/iter-<ts>-<n>.memory.log
+# Logs: ${HOME}/.claude/logs/feature-sweep/iter-<ts>-<n>.log
+#       ${HOME}/.claude/logs/feature-sweep/iter-<ts>-<n>.memory.log
 # Each iteration's full stdout+stderr is captured for post-hoc review,
 # alongside a periodic memory snapshot (free, top RSS processes, parent
 # cgroup memory.current / memory.peak) so the next systemd-oomd kill has
@@ -52,7 +57,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-LOG_DIR="${HOME}/.claude/logs/web-analytics-loop"
+LOG_DIR="${HOME}/.claude/logs/feature-sweep"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
