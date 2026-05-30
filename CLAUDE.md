@@ -258,6 +258,21 @@ This covers: the selection/filter pass (resolve selectors, drop tests, drop `.ge
 
 The standing CI gate is `cargo test -p smelt-runtime --test execute_parity`, which runs the same fixture project through both `smelt-cli` and `smelt-ui` entry points and asserts identical model outputs, manifest contents, and selection sets. Always run this when touching the compile pipeline, the execute loop, or either consumer's run path.
 
+### Diagnostic Range Encoding Rule
+
+**Diagnostics carry `rowan::TextRange` (byte-offset) values internally. Conversion to `(line, column)` form happens exactly once, at the boundary between smelt's analysis layer and an external consumer, backed by a per-file `line_index::LineIndex`.**
+
+This covers every `Diagnostic` in `smelt-db`, every Salsa accumulator that emits a `Diagnostic`, and every body-offset helper that shifts diagnostic ranges across frontmatter boundaries. The LSP boundary converter lives in `smelt-lsp::diagnostics_boundary::BoundaryConverter` (encoding-aware: UTF-16 or UTF-8 per negotiated `positionEncodingKind`). The CLI boundary converter lives in `smelt-cli::diagnostics_terminal::TerminalConverter`. The UI JSON boundary uses `line_index::LineIndex` directly in `smelt-ui::build`. The helpers `offset_to_position` and `text_range_to_range` no longer exist in `smelt-parser` — they live only inside `smelt-lsp::diagnostics_boundary` for non-diagnostic LSP protocol surface (goto-definition, completions, rename). See `docs/specs/architecture.md` → "Diagnostic range encoding rule" for the normative spec.
+
+**The rule in practice:**
+- **DO** carry `rowan::TextRange` through every `Diagnostic`, every analysis function, and every Salsa query that returns positions.
+- **DO** construct `LineIndex` once per file at the boundary and reuse it across all diagnostics for that file.
+- **DO** consult the negotiated `positionEncodingKind` in the LSP boundary converter (defaults to UTF-16).
+- **DON'T** convert `TextRange` to `(line, column)` inside `smelt-db`, `smelt-parser`, or any other analysis crate.
+- **DON'T** store `Position` / `Range` fields on `Diagnostic` or any analysis-layer intermediate. `lsp_types::Range` is produced only at the LSP boundary.
+
+The standing CI gate is `cargo test -p smelt-lsp --test position_encoding`, which verifies correct diagnostic positions for both UTF-8 and UTF-16 encoding negotiation, including non-ASCII text. Run `rg 'offset_to_position|text_range_to_range' crates/smelt-db/src/ crates/smelt-parser/src/` to confirm no analysis-crate violations were reintroduced.
+
 ### Key Dependencies
 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)

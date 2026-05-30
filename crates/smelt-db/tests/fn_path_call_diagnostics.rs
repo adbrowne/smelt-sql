@@ -62,12 +62,14 @@ fn path_form_arg_type_mismatch() {
     let arg_start = model_src.find("'text'").unwrap();
     let arg_end = arg_start + "'text'".len();
     assert_eq!(
-        diags[0].range.start.column as usize, arg_start,
+        usize::from(diags[0].range.start()),
+        arg_start,
         "expected arg-range start at `'text'`, got {:?}",
         diags[0].range
     );
     assert_eq!(
-        diags[0].range.end.column as usize, arg_end,
+        usize::from(diags[0].range.end()),
+        arg_end,
         "expected arg-range end after `'text'`, got {:?}",
         diags[0].range
     );

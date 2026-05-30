@@ -5,8 +5,8 @@ use crate::ast::{
     File, FilterClause, FrameUnit, FunctionCall, GroupByClause, HavingClause, InExpr, JoinType,
     Lambda, LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering, OrderByClause,
     OrderByItem, PartitionByClause, PipeExpr, PivotClause, QualifyClause, SelectItem, SelectList,
-    SelectStmt, SortDirection, Subquery, UnpivotClause, WhenClause, WindowFrame, WindowSpec,
-    WithClause,
+    SelectStmt, SortDirection, Subquery, TableRef, UnpivotClause, ValuesClause, WhenClause,
+    WindowFrame, WindowSpec, WithClause,
 };
 
 /// Helper: parse SQL, assert no errors, return the SelectStmt
@@ -5546,5 +5546,375 @@ fn parses_smelt_path_call_dot_star_with_space() {
             .descendants()
             .any(|n| n.kind() == SMELT_PATH_CALL_STAR),
         "expected SMELT_PATH_CALL_STAR node in CST (space-before-dot form)"
+    );
+}
+
+// ===== Phase 1: ALIAS_COLUMN_LIST — derived-table and CTE alias column lists =====
+
+#[test]
+fn alias_column_list_single_col_on_values_subquery() {
+    // `SELECT * FROM (VALUES (1)) AS t(c)` — should produce an ALIAS_COLUMN_LIST
+    // node with exactly one IDENT `c` and no parse errors.
+    let parse = crate::parse("SELECT * FROM (VALUES (1)) AS t(c)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let alias_col_list = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == ALIAS_COLUMN_LIST)
+        .expect("must have an ALIAS_COLUMN_LIST node");
+    let idents: Vec<_> = alias_col_list
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(
+        idents,
+        vec!["c"],
+        "expected single IDENT 'c' in ALIAS_COLUMN_LIST"
+    );
+}
+
+#[test]
+fn alias_column_list_absent_when_no_parens_after_alias() {
+    // `SELECT * FROM (VALUES (1)) AS t` — no alias column list, no parse errors.
+    let parse = crate::parse("SELECT * FROM (VALUES (1)) AS t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    assert!(
+        !parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == ALIAS_COLUMN_LIST),
+        "must NOT have an ALIAS_COLUMN_LIST node when alias has no column list"
+    );
+}
+
+#[test]
+fn alias_column_list_three_cols_on_values_subquery() {
+    // `SELECT * FROM (VALUES (1, 2, 3)) AS t(a, b, c)` — three IDENTs.
+    let parse = crate::parse("SELECT * FROM (VALUES (1, 2, 3)) AS t(a, b, c)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let alias_col_list = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == ALIAS_COLUMN_LIST)
+        .expect("must have an ALIAS_COLUMN_LIST node");
+    let idents: Vec<_> = alias_col_list
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(
+        idents,
+        vec!["a", "b", "c"],
+        "expected IDENTs a, b, c in ALIAS_COLUMN_LIST"
+    );
+}
+
+#[test]
+fn alias_column_list_on_cte_with_columns() {
+    // `WITH cte(a, b) AS (SELECT 1, 2) SELECT * FROM cte` — ALIAS_COLUMN_LIST
+    // with `a` and `b` under the CTE node, not inside the inner SELECT's table refs.
+    let parse = crate::parse("WITH cte(a, b) AS (SELECT 1, 2) SELECT * FROM cte");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    // There must be exactly one ALIAS_COLUMN_LIST in the whole tree.
+    let acl_nodes: Vec<_> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == ALIAS_COLUMN_LIST)
+        .collect();
+    assert_eq!(acl_nodes.len(), 1, "expected exactly one ALIAS_COLUMN_LIST");
+    // It must live under a CTE node.
+    let cte_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == CTE)
+        .expect("must have a CTE node");
+    assert!(
+        cte_node
+            .descendants()
+            .any(|n| n.kind() == ALIAS_COLUMN_LIST),
+        "ALIAS_COLUMN_LIST must be a descendant of the CTE node"
+    );
+    // Must NOT appear inside the inner SELECT's FROM clause.
+    let inner_select = cte_node
+        .descendants()
+        .find(|n| n.kind() == SELECT_STMT)
+        .expect("CTE must have an inner SELECT_STMT");
+    assert!(
+        !inner_select
+            .descendants()
+            .any(|n| n.kind() == ALIAS_COLUMN_LIST),
+        "ALIAS_COLUMN_LIST must NOT appear inside the inner SELECT's subtree"
+    );
+    // Confirm the two column names.
+    let idents: Vec<_> = acl_nodes[0]
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(idents, vec!["a", "b"]);
+}
+
+#[test]
+fn alias_column_list_absent_on_cte_without_column_list() {
+    // `WITH cte AS (SELECT 1) SELECT * FROM cte` — no ALIAS_COLUMN_LIST.
+    let parse = crate::parse("WITH cte AS (SELECT 1) SELECT * FROM cte");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    assert!(
+        !parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == ALIAS_COLUMN_LIST),
+        "must NOT have an ALIAS_COLUMN_LIST node when CTE has no column list"
+    );
+}
+
+#[test]
+fn subquery_values_clause_returns_some_for_values_subquery() {
+    // `(VALUES (1, 2))` inside a FROM clause — Subquery::values_clause() returns Some.
+    let parse = crate::parse("SELECT * FROM (VALUES (1, 2)) AS t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let subquery_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == SUBQUERY)
+        .expect("must have a SUBQUERY node");
+    let subquery = Subquery::cast(subquery_node).expect("must cast to Subquery");
+    assert!(
+        subquery.values_clause().is_some(),
+        "Subquery::values_clause() must return Some for a VALUES subquery"
+    );
+    assert!(
+        subquery.select_stmt().is_none(),
+        "Subquery::select_stmt() must return None for a VALUES subquery"
+    );
+}
+
+#[test]
+fn subquery_values_clause_returns_none_for_select_subquery() {
+    // `(SELECT 1)` inside a FROM clause — Subquery::values_clause() returns None.
+    let parse = crate::parse("SELECT * FROM (SELECT 1) AS t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let subquery_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == SUBQUERY)
+        .expect("must have a SUBQUERY node");
+    let subquery = Subquery::cast(subquery_node).expect("must cast to Subquery");
+    assert!(
+        subquery.values_clause().is_none(),
+        "Subquery::values_clause() must return None for a SELECT subquery"
+    );
+}
+
+#[test]
+fn table_ref_alias_column_names_on_per_cohort_orders() {
+    // The `examples/per_cohort_union/models/orders.sql` body uses:
+    //   FROM (VALUES (...)) AS t(id, user_id, region, revenue, created_at)
+    // TableRef::alias_column_names() must return those five names.
+    let sql = "\
+SELECT id, user_id, region, revenue, created_at
+FROM (VALUES
+    (1, 10, 'us-west-2', 150, CAST('2024-01-01' AS TIMESTAMP)),
+    (2, 11, 'us-west-2', 80,  CAST('2024-01-02' AS TIMESTAMP))
+) AS t(id, user_id, region, revenue, created_at)";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    // Find the TABLE_REF that wraps the subquery
+    let table_ref_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TABLE_REF)
+        .expect("must have a TABLE_REF node");
+    let table_ref = TableRef::cast(table_ref_node).expect("must cast to TableRef");
+    let cols = table_ref.alias_column_names();
+    assert_eq!(
+        cols,
+        Some(vec![
+            "id".to_string(),
+            "user_id".to_string(),
+            "region".to_string(),
+            "revenue".to_string(),
+            "created_at".to_string(),
+        ]),
+        "alias_column_names() must return the five column names from AS t(...)"
+    );
+}
+
+#[test]
+fn table_ref_alias_column_names_returns_none_when_no_list() {
+    // `SELECT * FROM (VALUES (1)) AS t` — no column list; returns None.
+    let parse = crate::parse("SELECT * FROM (VALUES (1)) AS t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let table_ref_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == TABLE_REF)
+        .expect("must have a TABLE_REF node");
+    let table_ref = TableRef::cast(table_ref_node).expect("must cast to TableRef");
+    assert_eq!(
+        table_ref.alias_column_names(),
+        None,
+        "alias_column_names() must return None when no column list is present"
+    );
+}
+
+#[test]
+fn cte_column_names_reads_from_alias_column_list_node() {
+    // `WITH cte(x, y, z) AS (SELECT 1, 2, 3) SELECT * FROM cte`
+    // Cte::column_names() must return ["x", "y", "z"] via the ALIAS_COLUMN_LIST node.
+    let parse = crate::parse("WITH cte(x, y, z) AS (SELECT 1, 2, 3) SELECT * FROM cte");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).unwrap();
+    let select = file.select_stmt().unwrap();
+    let with_clause = select.with_clause().expect("must have WITH clause");
+    let cte = with_clause
+        .ctes()
+        .next()
+        .expect("must have at least one CTE");
+    assert_eq!(
+        cte.column_names(),
+        vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        "Cte::column_names() must return [x, y, z]"
+    );
+}
+
+#[test]
+fn cte_column_names_empty_when_no_list() {
+    // `WITH cte AS (SELECT 1) SELECT * FROM cte` — column_names() returns [].
+    let parse = crate::parse("WITH cte AS (SELECT 1) SELECT * FROM cte");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).unwrap();
+    let select = file.select_stmt().unwrap();
+    let with_clause = select.with_clause().expect("must have WITH clause");
+    let cte = with_clause
+        .ctes()
+        .next()
+        .expect("must have at least one CTE");
+    assert_eq!(
+        cte.column_names(),
+        Vec::<String>::new(),
+        "Cte::column_names() must return [] when no column list declared"
+    );
+}
+
+/// The existing spread-in-values-row test must continue to pass.
+/// (Re-stated here to make Phase 1 self-contained; the original is still present above.)
+#[test]
+fn parse_spread_in_values_row_still_passes_after_alias_col_list_change() {
+    let parse = crate::parse("SELECT * FROM (VALUES (...vals)) AS t(c)");
+    assert!(
+        parse.errors.is_empty(),
+        "VALUES (...vals) must parse without errors; got: {:?}",
+        parse.errors
+    );
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == LIST_SPREAD),
+        "must still have a LIST_SPREAD node"
+    );
+}
+
+// ===== Phase 1 error-recovery: malformed alias column lists =====
+
+#[test]
+fn alias_column_list_trailing_comma_derived_table_no_panic() {
+    // Trailing comma in a derived-table alias column list must not panic.
+    // The parser tolerates trailing commas by policy (same as test_trailing_comma_select
+    // and friends), so no parse errors are expected here either.
+    let parse = crate::parse("SELECT * FROM (VALUES (1, 2)) AS t(a,)");
+    // Must not panic — reaching this assertion is the primary goal.
+    // No errors: trailing commas are silently accepted by parser policy.
+    assert!(
+        parse.errors.is_empty(),
+        "trailing comma in AS t(a,) should be tolerated (no errors); got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn alias_column_list_leading_comma_derived_table_no_panic() {
+    // A leading comma `AS t(,a)` is unambiguously malformed.
+    // The parser must not panic; it must emit at least one parse error.
+    let parse = crate::parse("SELECT * FROM (VALUES (1, 2)) AS t(,a)");
+    // Must not panic — reaching this assertion is the primary goal.
+    assert!(
+        !parse.errors.is_empty(),
+        "leading comma in AS t(,a) must produce at least one parse error"
+    );
+}
+
+#[test]
+fn alias_column_list_trailing_comma_cte_no_panic() {
+    // Trailing comma in a CTE column list must not panic.
+    // Consistent with the derived-table trailing-comma policy above: tolerated, no errors.
+    let parse = crate::parse("WITH cte(a,) AS (SELECT 1) SELECT * FROM cte");
+    // Must not panic — reaching this assertion is the primary goal.
+    // No errors: trailing commas are silently accepted by parser policy.
+    assert!(
+        parse.errors.is_empty(),
+        "trailing comma in cte(a,) should be tolerated (no errors); got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn alias_column_list_leading_comma_cte_no_panic() {
+    // A leading comma `cte(,a)` in a CTE column list is unambiguously malformed.
+    // The parser must not panic; it must emit at least one parse error.
+    let parse = crate::parse("WITH cte(,a) AS (SELECT 1) SELECT * FROM cte");
+    // Must not panic — reaching this assertion is the primary goal.
+    assert!(
+        !parse.errors.is_empty(),
+        "leading comma in cte(,a) must produce at least one parse error"
     );
 }

@@ -2279,6 +2279,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "line-index"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e27e0ed5a392a7f5ba0b3808a2afccff16c64933312c84b57618b49d1209bd2"
+dependencies = [
+ "nohash-hasher",
+ "text-size",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2439,6 +2449,12 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nom"
@@ -4099,6 +4115,7 @@ dependencies = [
  "clap",
  "duckdb",
  "include_dir",
+ "line-index",
  "pyo3",
  "rand 0.8.6",
  "rowan",
@@ -4174,6 +4191,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "duckdb",
+ "line-index",
  "marked-yaml",
  "proptest",
  "rowan",
@@ -4204,8 +4222,10 @@ name = "smelt-lsp"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "line-index",
  "lsp-types",
  "pyo3",
+ "rowan",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4312,6 +4332,7 @@ dependencies = [
  "axum",
  "chrono",
  "http-body-util",
+ "line-index",
  "mime_guess",
  "notify-debouncer-mini",
  "rowan",

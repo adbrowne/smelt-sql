@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticData, Range};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticData};
 
 /// A suggested code action with title and replacement text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,8 +14,8 @@ pub struct CodeActionSuggestion {
     pub title: String,
     /// The replacement text for the diagnostic range
     pub new_text: String,
-    /// The range to replace (line/col start and end)
-    pub range: crate::Range,
+    /// The range to replace (byte-offset TextRange)
+    pub range: rowan::TextRange,
 }
 
 /// A code action that creates a new model file.
@@ -82,36 +82,13 @@ const COMMON_TYPES: &[&str] = &[
 ];
 
 /// Extract the text covered by a diagnostic range from the file text.
-fn extract_range_text(file_text: &str, range: &crate::Range) -> Option<String> {
-    let mut current_line = 0u32;
-    let mut current_col = 0u32;
-    let mut start_byte = None;
-    let mut end_byte = None;
-
-    for (i, ch) in file_text.char_indices() {
-        if current_line == range.start.line && current_col == range.start.column {
-            start_byte = Some(i);
-        }
-        if current_line == range.end.line && current_col == range.end.column {
-            end_byte = Some(i);
-            break;
-        }
-        if ch == '\n' {
-            current_line += 1;
-            current_col = 0;
-        } else {
-            current_col += 1;
-        }
-    }
-
-    // Handle end at EOF
-    if end_byte.is_none() && current_line == range.end.line && current_col == range.end.column {
-        end_byte = Some(file_text.len());
-    }
-
-    match (start_byte, end_byte) {
-        (Some(s), Some(e)) => Some(file_text[s..e].to_string()),
-        _ => None,
+fn extract_range_text(file_text: &str, range: &rowan::TextRange) -> Option<String> {
+    let start = usize::from(range.start());
+    let end = usize::from(range.end());
+    if start <= end && end <= file_text.len() {
+        Some(file_text[start..end].to_string())
+    } else {
+        None
     }
 }
 
@@ -445,7 +422,7 @@ fn generate_pin_seed_schema_action(diagnostic: &Diagnostic) -> Vec<CodeActionKin
 /// A text edit: replace a range with new text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEditSuggestion {
-    pub range: Range,
+    pub range: rowan::TextRange,
     pub new_text: String,
 }
 
@@ -545,7 +522,7 @@ pub fn find_inline_cte_suggestion(file_text: &str, line: u32, col: u32) -> Optio
     if from_join_refs.len() == 1 {
         // Replace the single FROM/JOIN reference with `(body) alias` as a subquery
         // Use the CTE name as the alias so qualifiers like `cte.col` still work
-        let ref_range = ast::text_range_to_range(file_text, from_join_refs[0]);
+        let ref_range = from_join_refs[0];
         edits.push(TextEditSuggestion {
             range: ref_range,
             new_text: format!("({}) {}", body, cte_name),
@@ -572,12 +549,12 @@ pub fn find_inline_cte_suggestion(file_text: &str, line: u32, col: u32) -> Optio
         }
         let removal_range = rowan::TextRange::new(wc_range.start(), end);
         edits.push(TextEditSuggestion {
-            range: ast::text_range_to_range(file_text, removal_range),
+            range: removal_range,
             new_text: String::new(),
         });
     } else {
         // Remove just this CTE from the WITH clause, keeping others
-        let cte_removal_range = compute_cte_removal_range(file_text, &target_cte, &all_ctes);
+        let cte_removal_range = compute_cte_removal_range(&target_cte, &all_ctes);
         edits.push(TextEditSuggestion {
             range: cte_removal_range,
             new_text: String::new(),
@@ -600,11 +577,9 @@ pub fn find_inline_cte_suggestion(file_text: &str, line: u32, col: u32) -> Optio
 /// Compute the range to remove for a single CTE within a multi-CTE WITH clause.
 /// Handles the comma separator (removes trailing comma if last CTE, leading comma if not).
 fn compute_cte_removal_range(
-    file_text: &str,
     target_cte: &smelt_parser::ast::Cte,
     all_ctes: &[smelt_parser::ast::Cte],
-) -> Range {
-    use smelt_parser::ast::text_range_to_range;
+) -> rowan::TextRange {
     use smelt_parser::syntax_kind::SyntaxKind;
 
     let target_range = target_cte.syntax().text_range();
@@ -629,8 +604,7 @@ fn compute_cte_removal_range(
                 break;
             }
         }
-        let removal_range = rowan::TextRange::new(comma_start, target_range.end());
-        text_range_to_range(file_text, removal_range)
+        rowan::TextRange::new(comma_start, target_range.end())
     } else {
         // Not last CTE: remove the CTE + comma after it + whitespace
         let parent = target_cte.syntax().parent().unwrap();
@@ -651,8 +625,7 @@ fn compute_cte_removal_range(
                 }
             }
         }
-        let removal_range = rowan::TextRange::new(target_range.start(), end);
-        text_range_to_range(file_text, removal_range)
+        rowan::TextRange::new(target_range.start(), end)
     }
 }
 
@@ -727,33 +700,24 @@ pub fn find_extract_cte_suggestion(
         cte_name.clone()
     };
 
-    let table_ref_range =
-        smelt_parser::ast::text_range_to_range(file_text, table_ref_node.text_range());
+    let table_ref_range = table_ref_node.text_range();
 
     let mut edits = Vec::new();
 
     if let Some(with_clause) = select_stmt.with_clause() {
         // Append to existing WITH clause: insert ", cte_name AS (body)" after the last CTE
         let last_cte = with_clause.ctes().last()?;
-        let last_cte_end =
-            smelt_parser::ast::text_range_to_range(file_text, last_cte.syntax().text_range());
+        let last_cte_end = last_cte.syntax().text_range();
         // Insert after the last CTE
         edits.push(TextEditSuggestion {
-            range: Range {
-                start: last_cte_end.end,
-                end: last_cte_end.end,
-            },
+            range: rowan::TextRange::empty(last_cte_end.end()),
             new_text: format!(",\n{} AS ({})", cte_name, body),
         });
     } else {
         // Create new WITH clause at the start of the SELECT statement
-        let select_start =
-            smelt_parser::ast::text_range_to_range(file_text, select_stmt_node.text_range());
+        let select_start = select_stmt_node.text_range();
         edits.push(TextEditSuggestion {
-            range: Range {
-                start: select_start.start,
-                end: select_start.start,
-            },
+            range: rowan::TextRange::empty(select_start.start()),
             new_text: format!("WITH {} AS ({})\n", cte_name, body),
         });
     }

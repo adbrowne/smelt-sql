@@ -479,6 +479,230 @@ async fn staging_from_sources() {
     assert_example_workspace_clean("staging_from_sources").await;
 }
 
+#[tokio::test]
+async fn non_ascii_columns() {
+    assert_example_workspace_clean("non_ascii_columns").await;
+}
+
+// ---------------------------------------------------------------------------
+// Emission-body diagnostics: broken fixture LSP tests.
+// These mirror the CLI broken-fixture tests to satisfy the Workspace-Loading-
+// Parity Rule (CLAUDE.md) — both the Salsa-direct path and the real LSP
+// Backend must surface the same diagnostics.
+// ---------------------------------------------------------------------------
+
+/// LSP gate: `per_cohort_union_broken_emission_body_undeclared_column` produces
+/// at least one diagnostic (specifically `UndeclaredColumn`) via the real LSP.
+#[tokio::test]
+async fn per_cohort_union_broken_emission_body_undeclared_column() {
+    let workspace = examples_root().join("per_cohort_union_broken_emission_body_undeclared_column");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    // Collect all diagnostics across all files.
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+    let has_undeclared = all_diags.iter().any(|d| {
+        d.code.as_ref().is_some_and(
+            |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "undeclared-column"),
+        )
+    });
+    assert!(
+        has_undeclared,
+        "expected UndeclaredColumn diagnostic via LSP for broken emission body, \
+         got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// LSP gate: `per_cohort_union_broken_emission_body_parse_error` produces
+/// at least one ParseError diagnostic via the real LSP.
+#[tokio::test]
+async fn per_cohort_union_broken_emission_body_parse_error() {
+    let workspace = examples_root().join("per_cohort_union_broken_emission_body_parse_error");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+    let has_parse_error = all_diags.iter().any(|d| {
+        d.code.as_ref().is_some_and(
+            |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "parse-error"),
+        )
+    });
+    assert!(
+        has_parse_error,
+        "expected ParseError diagnostic via LSP for broken emission body, \
+         got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// LSP gate: `per_cohort_union_broken_emission_body_cte_cycle` produces
+/// at least one CteCycle diagnostic via the real LSP.
+#[tokio::test]
+async fn per_cohort_union_broken_emission_body_cte_cycle() {
+    let workspace = examples_root().join("per_cohort_union_broken_emission_body_cte_cycle");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+    let has_cte_cycle = all_diags.iter().any(|d| {
+        d.code
+            .as_ref()
+            .is_some_and(|c| matches!(c, lsp_types::NumberOrString::String(s) if s == "cte-cycle"))
+    });
+    assert!(
+        has_cte_cycle,
+        "expected CteCycle diagnostic via LSP for broken emission body, \
+         got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// LSP gate: `per_cohort_union_broken_emission_body_collision_suppression` produces
+/// a ModelDefDuplicateName diagnostic and zero UndeclaredColumn diagnostics via the real LSP.
+#[tokio::test]
+async fn per_cohort_union_broken_emission_body_collision_suppression() {
+    let workspace =
+        examples_root().join("per_cohort_union_broken_emission_body_collision_suppression");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+
+    let has_duplicate_name = all_diags.iter().any(|d| {
+        d.code.as_ref().is_some_and(
+            |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "model-def-duplicate-name"),
+        )
+    });
+    assert!(
+        has_duplicate_name,
+        "expected model-def-duplicate-name diagnostic via LSP, got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+
+    let undeclared_diags: Vec<_> = all_diags
+        .iter()
+        .filter(|d| {
+            d.code.as_ref().is_some_and(
+                |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "undeclared-column"),
+            )
+        })
+        .collect();
+    assert!(
+        undeclared_diags.is_empty(),
+        "expected zero UndeclaredColumn diagnostics (discarded emission must not be analysed), \
+         got: {:?}",
+        undeclared_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// LSP gate: `non_ascii_broken` produces at least one `UndeclaredColumn` diagnostic
+/// via the real LSP backend. The body `SELECT 1 AS α, nonexistent_column FROM smelt.upstream`
+/// has a 2-byte Greek letter before the undeclared column; this test confirms the
+/// diagnostic surfaces through the full LSP pipeline (not just the Salsa-direct path).
+#[tokio::test]
+async fn non_ascii_broken_undeclared_column() {
+    let workspace = examples_root().join("non_ascii_broken");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+    let has_undeclared = all_diags.iter().any(|d| {
+        d.code.as_ref().is_some_and(
+            |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "undeclared-column"),
+        )
+    });
+    assert!(
+        has_undeclared,
+        "expected UndeclaredColumn diagnostic via LSP for non_ascii_broken fixture, \
+         got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Multi-project workspace case — the project isolation rule.
 // ---------------------------------------------------------------------------

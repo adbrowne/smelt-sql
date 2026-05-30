@@ -320,9 +320,10 @@ impl TestWorkspace {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
-                (r.start.line < line || (r.start.line == line && r.start.column <= col))
-                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+                let r =
+                    smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(&text, d.range);
+                (r.start.line < line || (r.start.line == line && r.start.character <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.character >= col))
             })
             .collect();
 
@@ -389,9 +390,10 @@ impl TestWorkspace {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
-                (r.start.line < line || (r.start.line == line && r.start.column <= col))
-                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+                let r =
+                    smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(&text, d.range);
+                (r.start.line < line || (r.start.line == line && r.start.character <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.character >= col))
             })
             .collect();
 
@@ -420,9 +422,10 @@ impl TestWorkspace {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
-                (r.start.line < line || (r.start.line == line && r.start.column <= col))
-                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+                let r =
+                    smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(&text, d.range);
+                (r.start.line < line || (r.start.line == line && r.start.character <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.character >= col))
             })
             .collect();
 
@@ -479,6 +482,7 @@ impl TestWorkspace {
                         all_file_path_refs
                             .into_iter()
                             .flat_map(|(p, refs)| {
+                                let file_text = std::fs::read_to_string(&p).unwrap_or_default();
                                 refs.into_iter()
                                     .filter(|r| {
                                         r.path.first().map(|s| s.as_str()) == Some("models")
@@ -486,7 +490,10 @@ impl TestWorkspace {
                                                 == Some(model_name.as_str())
                                     })
                                     .map(move |r| {
-                                        (p.clone(), (r.range.start.line, r.range.start.column))
+                                        let lc = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &file_text, r.range,
+                                        );
+                                        (p.clone(), (lc.start.line, lc.start.character))
                                     })
                             })
                             .collect()
@@ -506,6 +513,7 @@ impl TestWorkspace {
                         all_file_path_refs
                             .into_iter()
                             .flat_map(|(p, refs)| {
+                                let file_text = std::fs::read_to_string(&p).unwrap_or_default();
                                 refs.into_iter()
                                     .filter(|r| {
                                         r.path.first().map(|s| s.as_str()) == Some("sources")
@@ -515,7 +523,10 @@ impl TestWorkspace {
                                                 == Some(table_name.as_str())
                                     })
                                     .map(move |r| {
-                                        (p.clone(), (r.range.start.line, r.range.start.column))
+                                        let lc = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &file_text, r.range,
+                                        );
+                                        (p.clone(), (lc.start.line, lc.start.character))
                                     })
                             })
                             .collect()
@@ -529,8 +540,10 @@ impl TestWorkspace {
                 cte_refs
                     .into_iter()
                     .map(|text_range| {
-                        let r = smelt_parser::ast::text_range_to_range(&text, text_range);
-                        (path.clone(), (r.start.line, r.start.column))
+                        let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text, text_range,
+                        );
+                        (path.clone(), (r.start.line, r.start.character))
                     })
                     .collect()
             }
@@ -561,8 +574,15 @@ impl TestWorkspace {
                 for cte in with_clause.ctes() {
                     if cte.name().as_deref() == Some(&name) {
                         let name_range = cte.name_range()?;
-                        let r = smelt_parser::ast::text_range_to_range(&text, name_range);
-                        return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                        let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text, name_range,
+                        );
+                        return Some((
+                            r.start.line,
+                            r.start.character,
+                            r.end.line,
+                            r.end.character,
+                        ));
                     }
                 }
                 None
@@ -575,9 +595,16 @@ impl TestWorkspace {
                     .filter_map(smelt_parser::ast::SmeltPathRef::cast)
                 {
                     if path_ref.segments() == segments {
-                        let r =
-                            smelt_parser::ast::text_range_to_range(&text, path_ref.text_range());
-                        return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                        let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text,
+                            path_ref.text_range(),
+                        );
+                        return Some((
+                            r.start.line,
+                            r.start.character,
+                            r.end.line,
+                            r.end.character,
+                        ));
                     }
                 }
                 None
@@ -659,16 +686,16 @@ impl TestWorkspace {
                     if segs.first().map(|s| s.as_str()) == Some("models")
                         && segs.get(1).map(|s| s.as_str()) == Some(model_name.as_str())
                     {
-                        let r = smelt_parser::ast::text_range_to_range(
+                        let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
                             &ref_text,
                             path_ref.text_range(),
                         );
                         text_edits.push((
                             ref_path.clone(),
                             r.start.line,
-                            r.start.column,
+                            r.start.character,
                             r.end.line,
-                            r.end.column,
+                            r.end.character,
                         ));
                     }
                 }
@@ -723,12 +750,13 @@ impl TestWorkspace {
         let refs = smelt_db::references::find_cte_references(&file, &text, &cte_name);
         refs.into_iter()
             .map(|text_range| {
-                let r = smelt_parser::ast::text_range_to_range(&text, text_range);
+                let r =
+                    smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(&text, text_range);
                 (
                     r.start.line,
-                    r.start.column,
+                    r.start.character,
                     r.end.line,
-                    r.end.column,
+                    r.end.character,
                     new_name.to_string(),
                 )
             })
@@ -797,16 +825,16 @@ impl TestWorkspace {
                         && segs.get(2).map(|s| s.as_str()) == Some(old_table_name.as_str())
                     {
                         // Return the full path ref range (rename changes the table name segment)
-                        let r = smelt_parser::ast::text_range_to_range(
+                        let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
                             &ref_text,
                             path_ref.text_range(),
                         );
                         sql_edits.push((
                             ref_path.clone(),
                             r.start.line,
-                            r.start.column,
+                            r.start.character,
                             r.end.line,
-                            r.end.column,
+                            r.end.character,
                         ));
                     }
                 }
@@ -874,12 +902,15 @@ impl TestWorkspace {
         let mut local_edits: Vec<(u32, u32, u32, u32)> = local_refs
             .iter()
             .map(|r| {
-                let range = smelt_parser::ast::text_range_to_range(&text, r.name_range);
+                let range = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                    &text,
+                    r.name_range,
+                );
                 (
                     range.start.line,
-                    range.start.column,
+                    range.start.character,
                     range.end.line,
-                    range.end.column,
+                    range.end.character,
                 )
             })
             .collect();
@@ -888,12 +919,13 @@ impl TestWorkspace {
         if let Some(def_range) =
             smelt_db::references::find_column_definition_in_select(&file, &column_name)
         {
-            let range = smelt_parser::ast::text_range_to_range(&text, def_range);
+            let range =
+                smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(&text, def_range);
             let edit = (
                 range.start.line,
-                range.start.column,
+                range.start.character,
                 range.end.line,
-                range.end.column,
+                range.end.character,
             );
             if !local_edits.contains(&edit) {
                 local_edits.push(edit);
@@ -1027,16 +1059,16 @@ impl TestWorkspace {
                             None,
                         );
                         for col_ref in &down_refs_found {
-                            let r = smelt_parser::ast::text_range_to_range(
+                            let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
                                 &down_text,
                                 col_ref.name_range,
                             );
                             cross_file_edits.push((
                                 downstream_path.clone(),
                                 r.start.line,
-                                r.start.column,
+                                r.start.character,
                                 r.end.line,
-                                r.end.column,
+                                r.end.character,
                             ));
                         }
 
@@ -1123,13 +1155,15 @@ impl TestWorkspace {
             if let Some(def_range) =
                 smelt_db::references::find_column_definition_in_select(&up_file, column_name)
             {
-                let r = smelt_parser::ast::text_range_to_range(&up_text, def_range);
+                let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+                    &up_text, def_range,
+                );
                 edits.push((
                     model_path.to_path_buf(),
                     r.start.line,
-                    r.start.column,
+                    r.start.character,
                     r.end.line,
-                    r.end.column,
+                    r.end.character,
                 ));
                 return true;
             }
@@ -1253,8 +1287,13 @@ sources:
 
         assert_eq!(diags.len(), 1);
         // The ref is on line 2 (0-indexed)
-        assert_eq!(diags[0].range.start.line, 2);
-        assert_eq!(diags[0].range.end.line, 2);
+        let model_text = ws.file_text(&ws.model_path("broken"));
+        let r = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(
+            &model_text,
+            diags[0].range,
+        );
+        assert_eq!(r.start.line, 2);
+        assert_eq!(r.end.line, 2);
     }
 
     #[test]
@@ -4367,13 +4406,12 @@ fn test_extract_cte_creates_with_clause() {
 
 /// Apply text edits to a string, processing from end to start to maintain positions.
 fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggestion]) -> String {
-    // Convert to byte offsets and sort by position (end to start)
+    // TextEditSuggestion::range is now a TextRange (byte offsets); use directly.
     let mut edits_with_offsets: Vec<_> = edits
         .iter()
         .map(|edit| {
-            let start =
-                position_to_byte_offset(text, edit.range.start.line, edit.range.start.column);
-            let end = position_to_byte_offset(text, edit.range.end.line, edit.range.end.column);
+            let start = usize::from(edit.range.start());
+            let end = usize::from(edit.range.end());
             (start, end, &edit.new_text)
         })
         .collect();
@@ -4387,6 +4425,7 @@ fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggest
 }
 
 /// Convert (line, col) to byte offset in text.
+#[allow(dead_code)]
 fn position_to_byte_offset(text: &str, line: u32, col: u32) -> usize {
     let mut current_line = 0u32;
     let mut current_col = 0u32;
@@ -4733,10 +4772,10 @@ fn goto_def_on_emitted_model_resolves_to_modeldef_name_in_generator_file() {
     let em = &result.emissions[0];
     // Convert the CST text range to an LSP Range using the generator file's text.
     let gen_text = std::fs::read_to_string(&em.generator_file).expect("read gen file");
-    let pr = smelt_parser::ast::text_range_to_range(&gen_text, em.name_span);
+    let pr = smelt_lsp::diagnostics_boundary::text_range_to_lsp_codepoint(&gen_text, em.name_span);
     let name_range = Range {
-        start: Position::new(pr.start.line, pr.start.column),
-        end: Position::new(pr.end.line, pr.end.column),
+        start: Position::new(pr.start.line, pr.start.character),
+        end: Position::new(pr.end.line, pr.end.character),
     };
 
     let location = goto_def_for_emitted_model_reference(&em.generator_file, name_range);

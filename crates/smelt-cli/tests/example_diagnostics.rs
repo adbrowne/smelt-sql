@@ -5,6 +5,7 @@
 //! Regressions introduced by parser, type-inference, or example changes are
 //! caught here.
 
+use line_index::LineIndex;
 use smelt_cli::{init_db, Config, ModelDiscovery};
 use smelt_db::{DiagnosticAcc, Workspace};
 use std::path::Path;
@@ -1821,10 +1822,84 @@ fn per_cohort_union_example_has_zero_diagnostics() {
     check_workspace_no_diagnostics("examples/per_cohort_union");
 }
 
+/// Phase 2 (VALUES-derived-table-typing) TDD item 3: `examples/per_cohort_union/models/orders.sql`
+/// exports five concrete-typed columns via a VALUES-derived table.
+///
+/// `orders.sql` selects from a `(VALUES (…), …) AS t(id, user_id, region, revenue, created_at)`
+/// subquery. Phase 2 integrates VALUES-column typing into `typed_model_schema`, so each of the
+/// five columns must resolve to a concrete, non-Unknown type.
+///
+/// Note: `all_cohorts_unioned.sql` and the generator-emitted cohort models are NOT asserted here
+/// — their schemas are still Unknown because they depend on generator-emission schema inference,
+/// which is out of scope for this phase (tracked in `docs/specs/meta_language.md`).
+#[test]
+fn per_cohort_union_orders_has_concrete_typed_schema() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::Workspace;
+    use std::path::Path;
+
+    let example_dir = "examples/per_cohort_union";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    // Find orders.sql
+    let orders_path = path.join("models").join("orders.sql");
+    let orders_file = db
+        .source_file(&orders_path)
+        .expect("orders.sql not found in workspace");
+
+    let schema = smelt_db::typed_model_schema(&db, ws, orders_file);
+
+    assert_eq!(
+        schema.columns.len(),
+        5,
+        "orders.sql should export exactly 5 columns, got {}:\n  {:?}",
+        schema.columns.len(),
+        schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+
+    for col in &schema.columns {
+        let typed = col.data_type.as_ref().unwrap_or_else(|| {
+            panic!(
+                "orders.sql column '{}' has no TypedColumn (data_type is None)",
+                col.name
+            )
+        });
+        assert_ne!(
+            typed.data_type,
+            smelt_db::DataType::Unknown,
+            "orders.sql column '{}' should have a concrete type, got Unknown",
+            col.name
+        );
+    }
+}
+
 /// Phase E2 TDD: `examples/staging_from_sources/` produces zero diagnostics.
 #[test]
 fn staging_from_sources_example_has_zero_diagnostics() {
     check_workspace_no_diagnostics("examples/staging_from_sources");
+}
+
+/// Non-ASCII fixture: `examples/non_ascii_columns/` has Greek-letter column
+/// aliases and must produce zero diagnostics.
+#[test]
+fn non_ascii_columns_example_has_zero_diagnostics() {
+    check_workspace_no_diagnostics("examples/non_ascii_columns");
 }
 
 /// Phase E2 TDD: `GeneratesUnknownValue` — `generates: views` fires.
@@ -2252,5 +2327,623 @@ fn functions_broken_struct_field_type_emits_invalid_type_ref() {
         example_dir,
         target_diags[0].code,
         target_diags[0].message
+    );
+}
+
+// ===== AliasColumnArityMismatch broken-fixture TDD tests =====
+//
+// `examples/values_broken_alias_arity/` and
+// `examples/cte_broken_alias_arity/` each contain one model that
+// intentionally declares a mismatched alias column list.  Each workspace
+// must emit exactly one `AliasColumnArityMismatch` diagnostic at the
+// broken model; no other file in the workspace may emit that code.
+
+/// Helper: loads `example_dir` as a workspace and checks that exactly one
+/// `AliasColumnArityMismatch` diagnostic fires for the file ending in
+/// `expected_file`, and that no other file in the workspace emits that code.
+fn check_workspace_emits_exactly_one_alias_arity_mismatch(example_dir: &str, expected_file: &str) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let is_target_code = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code == Some(&smelt_db::DiagnosticCode::AliasColumnArityMismatch)
+    };
+
+    let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_target_code(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.clone());
+            } else {
+                other_diags.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_target_code(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.0.clone());
+            } else {
+                other_diags.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_diags.is_empty(),
+        "expected zero AliasColumnArityMismatch diagnostics from files other than '{}' in {}, \
+         got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_diags.len(),
+        other_diags
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags.len(),
+        1,
+        "expected exactly 1 AliasColumnArityMismatch from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_diags.len(),
+        target_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags[0].code,
+        Some(smelt_db::DiagnosticCode::AliasColumnArityMismatch),
+        "expected AliasColumnArityMismatch from '{}' in {}, got {:?}: {}",
+        expected_file,
+        example_dir,
+        target_diags[0].code,
+        target_diags[0].message
+    );
+}
+
+/// Phase 3 TDD: `examples/values_broken_alias_arity/` emits exactly one
+/// `AliasColumnArityMismatch` at `models/broken_arity.sql`.
+#[test]
+fn values_broken_alias_arity_emits_arity_mismatch() {
+    check_workspace_emits_exactly_one_alias_arity_mismatch(
+        "examples/values_broken_alias_arity",
+        "models/broken_arity.sql",
+    );
+}
+
+/// Phase 3 TDD: `examples/cte_broken_alias_arity/` emits exactly one
+/// `AliasColumnArityMismatch` at `models/broken_arity.sql`.
+#[test]
+fn cte_broken_alias_arity_emits_arity_mismatch() {
+    check_workspace_emits_exactly_one_alias_arity_mismatch(
+        "examples/cte_broken_alias_arity",
+        "models/broken_arity.sql",
+    );
+}
+
+// ===== Generator-emission typed schema TDD tests =====
+
+/// Phase 2 closure assertion: `examples/per_cohort_union/models/all_cohorts_unioned.sql`
+/// is a UNION ALL of three generator-emitted cohort models. Each emitted model's typed
+/// schema is propagated to the consumer through the `smelt.<path>` resolver. All five
+/// output columns must resolve to a concrete, non-Unknown type.
+///
+/// Prior to Phase 2 the FROM-clause typing path did not consult the emission registry,
+/// so every projected column typed as Unknown.
+#[test]
+fn per_cohort_union_all_cohorts_unioned_has_concrete_typed_schema() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::Workspace;
+    use std::path::Path;
+
+    let example_dir = "examples/per_cohort_union";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    // Find all_cohorts_unioned.sql
+    let consumer_path = path.join("models").join("all_cohorts_unioned.sql");
+    let consumer_file = db
+        .source_file(&consumer_path)
+        .expect("all_cohorts_unioned.sql not found in workspace");
+
+    let schema = smelt_db::typed_model_schema(&db, ws, consumer_file);
+
+    assert_eq!(
+        schema.columns.len(),
+        5,
+        "all_cohorts_unioned.sql should export 5 columns, got {}:\n  {:?}",
+        schema.columns.len(),
+        schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+
+    for col in &schema.columns {
+        let dt = col
+            .data_type
+            .as_ref()
+            .map(|tc| tc.data_type.clone())
+            .unwrap_or(smelt_db::DataType::Unknown);
+        assert_ne!(
+            dt,
+            smelt_db::DataType::Unknown,
+            "all_cohorts_unioned.sql column '{}' should be concrete (from emitted cohort), \
+             got Unknown",
+            col.name
+        );
+    }
+}
+
+// ===== Emission-body diagnostics TDD tests =====
+//
+// Layout:
+//   - `examples/per_cohort_union/`                                    — regression: still zero diagnostics
+//   - `examples/staging_from_sources/`                                — regression: still zero diagnostics
+//   - `examples/per_cohort_union_broken_emission_body_undeclared_column/`   — UndeclaredColumn in body
+//   - `examples/per_cohort_union_broken_emission_body_parse_error/`         — ParseError in body
+//   - `examples/per_cohort_union_broken_emission_body_cte_cycle/`           — CteCycle in body
+//   - `examples/per_cohort_union_broken_emission_body_collision_suppression/` — ModelDefDuplicateName, zero body diags
+
+/// Helper: loads `example_dir`, asserts exactly one emission-body diagnostic fires
+/// for the file ending in `expected_file`, and that no other file emits the target code.
+fn check_workspace_emits_exactly_one_emission_body_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_target_code =
+        |code: Option<&smelt_db::DiagnosticCode>| -> bool { code == Some(&expected_code) };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_target_code(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.clone());
+            } else {
+                other_diags.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_target_code(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.0.clone());
+            } else {
+                other_diags.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_diags.is_empty(),
+        "expected zero {:?} diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        other_diags.len(),
+        other_diags
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags.len(),
+        1,
+        "expected exactly 1 {:?} diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_diags.len(),
+        target_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags[0].code,
+        Some(expected_code),
+        "expected {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_diags[0].code,
+        target_diags[0].message
+    );
+}
+
+/// Emission-body TDD: `examples/per_cohort_union_broken_emission_body_undeclared_column/`
+/// produces exactly one `UndeclaredColumn` diagnostic anchored in the generator file body.
+/// The body references `nonexistent_column` which is not declared in `smelt.orders`.
+#[test]
+fn per_cohort_union_broken_emission_body_undeclared_column() {
+    check_workspace_emits_exactly_one_emission_body_diagnostic(
+        "examples/per_cohort_union_broken_emission_body_undeclared_column",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::UndeclaredColumn,
+    );
+
+    // Position regression: the diagnostic must land inside the body (line >= 3,
+    // 0-indexed), not at the YAML frontmatter delimiter (line 0).
+    // The fixture body is on line 3 of broken.gen.sql:
+    //   line 0: ---
+    //   line 1: generates: models
+    //   line 2: ---
+    //   line 3: [ModelDef { name: 'x', body: SELECT nonexistent_column FROM smelt.orders }]
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let example_dir = "examples/per_cohort_union_broken_emission_body_undeclared_column";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut undeclared_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        if !rel.replace('\\', "/").ends_with("models/broken.gen.sql") {
+            continue;
+        }
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if d.code == Some(smelt_db::DiagnosticCode::UndeclaredColumn) {
+                undeclared_diags.push(d.clone());
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if d.0.code == Some(smelt_db::DiagnosticCode::UndeclaredColumn) {
+                undeclared_diags.push(d.0.clone());
+            }
+        }
+    }
+
+    assert_eq!(
+        undeclared_diags.len(),
+        1,
+        "expected exactly one UndeclaredColumn diagnostic"
+    );
+    // Convert the TextRange byte-offset to a line number for the assertion.
+    let broken_model_path = path.join("models/broken.gen.sql");
+    let broken_text =
+        std::fs::read_to_string(&broken_model_path).expect("could not read broken.gen.sql");
+    let li = LineIndex::new(&broken_text);
+    let diag_start_line = li.line_col(undeclared_diags[0].range.start()).line;
+    assert!(
+        diag_start_line >= 3,
+        "expected UndeclaredColumn diagnostic anchored inside the body (line >= 3, 0-indexed), \
+         got line {} — diagnostic is likely pinned to the frontmatter delimiter (line 0) \
+         rather than the body content",
+        diag_start_line,
+    );
+}
+
+/// Emission-body TDD: `examples/per_cohort_union_broken_emission_body_parse_error/`
+/// produces exactly one `ParseError` diagnostic anchored at the body span.
+/// The body contains a SQL syntax error (`SELEKT` keyword typo).
+#[test]
+fn per_cohort_union_broken_emission_body_parse_error() {
+    check_workspace_emits_exactly_one_emission_body_diagnostic(
+        "examples/per_cohort_union_broken_emission_body_parse_error",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::ParseError,
+    );
+}
+
+/// Emission-body TDD: `examples/per_cohort_union_broken_emission_body_cte_cycle/`
+/// produces exactly one `CteCycle` diagnostic anchored in the generator body's WITH clause.
+#[test]
+fn per_cohort_union_broken_emission_body_cte_cycle() {
+    check_workspace_emits_exactly_one_emission_body_diagnostic(
+        "examples/per_cohort_union_broken_emission_body_cte_cycle",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::CteCycle,
+    );
+}
+
+/// Emission-body TDD: discarded-emission suppression.
+///
+/// `examples/per_cohort_union_broken_emission_body_collision_suppression/` declares a
+/// generator that emits two `ModelDef`s with the same name `dup`, where the second body
+/// also contains an `UndeclaredColumn` reference. Exactly one `ModelDefDuplicateName`
+/// diagnostic fires (the W3 collision diagnostic); zero `UndeclaredColumn` diagnostics
+/// fire because the discarded emission's body is not analysed.
+#[test]
+fn per_cohort_union_broken_emission_body_collision_suppression() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let example_dir = "examples/per_cohort_union_broken_emission_body_collision_suppression";
+    let expected_gen = "models/broken.gen.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut duplicate_name_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut undeclared_column_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            match d.code {
+                Some(smelt_db::DiagnosticCode::ModelDefDuplicateName) => {
+                    duplicate_name_diags.push(d.clone());
+                }
+                Some(smelt_db::DiagnosticCode::UndeclaredColumn) => {
+                    undeclared_column_diags.push(d.clone());
+                }
+                _ => {}
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            match d.0.code {
+                Some(smelt_db::DiagnosticCode::ModelDefDuplicateName) => {
+                    duplicate_name_diags.push(d.0.clone());
+                }
+                Some(smelt_db::DiagnosticCode::UndeclaredColumn) => {
+                    undeclared_column_diags.push(d.0.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Must have exactly one ModelDefDuplicateName.
+    assert_eq!(
+        duplicate_name_diags.len(),
+        1,
+        "expected exactly 1 ModelDefDuplicateName in {}/{}, got {}:\n  {}",
+        example_dir,
+        expected_gen,
+        duplicate_name_diags.len(),
+        duplicate_name_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    // Must have zero UndeclaredColumn (discarded emission body not analysed).
+    assert!(
+        undeclared_column_diags.is_empty(),
+        "expected zero UndeclaredColumn diagnostics (discarded emission body must not be analysed) \
+         in {}, got {}:\n  {}",
+        example_dir,
+        undeclared_column_diags.len(),
+        undeclared_column_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// Regression: each of `cohorts.us_west`, `cohorts.us_east`, and `cohorts.eu`
+/// emitted by `examples/per_cohort_union/models/cohorts.gen.sql` must have
+/// five typed (non-Unknown) columns after Phase 1 lands.
+///
+/// Prior to Phase 1 the emitted-model typed-schema query did not exist and
+/// emitted models carried no column type information.
+#[test]
+fn per_cohort_union_emitted_cohorts_have_typed_schemas() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::Workspace;
+    use std::path::Path;
+
+    let example_dir = "examples/per_cohort_union";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let gen_path = path.join("models").join("cohorts.gen.sql");
+    let gen_file = db
+        .source_file(&gen_path)
+        .expect("cohorts.gen.sql registered in workspace");
+
+    // Each cohort emission must have 5 typed (non-Unknown) columns.
+    let emission_names = ["us_west", "us_east", "eu"];
+    for name in &emission_names {
+        let schema = smelt_db::emitted_model_typed_schema(&db, ws, gen_file, name.to_string());
+        assert_eq!(
+            schema.columns.len(),
+            5,
+            "emission '{}' should have 5 columns, got {}: {:?}",
+            name,
+            schema.columns.len(),
+            schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        for col in &schema.columns {
+            let dt = col
+                .data_type
+                .as_ref()
+                .map(|tc| tc.data_type.clone())
+                .unwrap_or(smelt_db::DataType::Unknown);
+            assert_ne!(
+                dt,
+                smelt_db::DataType::Unknown,
+                "emission '{}' column '{}' should be concrete, got Unknown",
+                name,
+                col.name
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Non-ASCII broken fixture: E2E non-ASCII diagnostic anchoring gate
+// ---------------------------------------------------------------------------
+
+/// CLI gate: `examples/non_ascii_broken/` produces exactly one `UndeclaredColumn`
+/// diagnostic anchored in `models/broken.gen.sql`.
+///
+/// The generator body `SELECT 1 AS α, nonexistent_column FROM smelt.upstream`
+/// uses a 2-byte Greek letter (α, U+03B1) before the undeclared column, so the
+/// byte-column position of the diagnostic differs from the UTF-16 position.
+/// This fixture is used by the E2E position-encoding test to verify that
+/// `publishDiagnostics` emits the correct `character` field under both encodings.
+#[test]
+fn non_ascii_broken_undeclared_column() {
+    check_workspace_emits_exactly_one_emission_body_diagnostic(
+        "examples/non_ascii_broken",
+        "models/broken.gen.sql",
+        smelt_db::DiagnosticCode::UndeclaredColumn,
     );
 }

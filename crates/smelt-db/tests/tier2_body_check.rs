@@ -245,8 +245,8 @@ fn tier3_body_return_mismatch_errors_at_return_expression() {
     // since the body expression is inside `AS (...)`).
     let diag = return_errors[0];
     assert!(
-        diag.range.start.column > 0 || diag.range.start.line > 0,
-        "ReturnTypeMismatch must carry a valid body range, got {:?}",
+        usize::from(diag.range.start()) > 0,
+        "ReturnTypeMismatch must carry a valid body range (start > 0), got {:?}",
         diag.range
     );
 }

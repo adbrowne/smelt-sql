@@ -180,12 +180,11 @@ smelt.define session_rollup(
     body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
     body_ctx.add_function_param("filters", TypedColumn::nullable(DataType::Boolean));
 
-    let (arg_expr, arg_range, arg_text) = parse_arg_expr("SUM(session_id)");
+    let (arg_expr, arg_range, _arg_text) = parse_arg_expr("SUM(session_id)");
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
 
-    let diags =
-        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
+    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
     let missing: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))
@@ -244,12 +243,11 @@ smelt.define session_rollup(
     body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
     body_ctx.add_function_param("filters", TypedColumn::nullable(DataType::Boolean));
 
-    let (arg_expr, arg_range, arg_text) = parse_arg_expr("SUM(xyz)");
+    let (arg_expr, arg_range, _arg_text) = parse_arg_expr("SUM(xyz)");
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
 
-    let diags =
-        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
+    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
     let missing: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))

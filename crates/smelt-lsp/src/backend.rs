@@ -126,6 +126,9 @@ pub struct Backend {
     /// the `file.sql::model_name` convention and start_line_offset is the
     /// 0-based line in the original file where the section's SQL begins.
     multi_model_files: Arc<Mutex<HashMap<PathBuf, MultiModelEntry>>>,
+    /// The position encoding negotiated with the client during `initialize`.
+    /// Defaults to UTF-16 (LSP default when the client advertises no preference).
+    negotiated_encoding: Arc<Mutex<PositionEncodingKind>>,
 }
 
 /// Collect every `smelt.functions.<name>(...)` call-site path range across
@@ -135,17 +138,15 @@ fn collect_function_call_sites(
     db: &smelt_db::Database,
     files: &[smelt_db::SourceFile],
     name: &str,
-) -> Vec<(PathBuf, smelt_parser::ast::Range)> {
+) -> Vec<(PathBuf, rowan::TextRange)> {
     let mut out = Vec::new();
     for f in files {
         let parse = smelt_db::parse_file(db, *f);
         let Some(ast) = AstFile::cast(parse.syntax()) else {
             continue;
         };
-        let f_text = f.text(db);
         for trange in smelt_db::references::find_function_call_sites_in_file(&ast, name) {
-            let r = smelt_parser::ast::text_range_to_range(f_text, trange);
-            out.push((f.path(db).clone(), r));
+            out.push((f.path(db).clone(), trange));
         }
     }
     out
@@ -163,6 +164,8 @@ impl Backend {
             python_diagnostics: Arc::new(Mutex::new(HashMap::new())),
             project_roots: Arc::new(Mutex::new(Vec::new())),
             multi_model_files: Arc::new(Mutex::new(HashMap::new())),
+            // Default: UTF-16, as required by LSP spec §3.17 general capabilities.
+            negotiated_encoding: Arc::new(Mutex::new(PositionEncodingKind::UTF16)),
         }
     }
 
@@ -183,24 +186,27 @@ impl Backend {
         }
     }
 
-    /// Convert (PathBuf, Range) reference locations to LSP Location objects.
-    async fn ref_locations_to_lsp(
-        &self,
-        refs: &[(PathBuf, smelt_parser::ast::Range)],
-    ) -> Vec<Location> {
+    /// Convert (PathBuf, TextRange) reference locations to LSP Location objects.
+    async fn ref_locations_to_lsp(&self, refs: &[(PathBuf, rowan::TextRange)]) -> Vec<Location> {
         let py_sources = self.python_model_sources.lock().await;
         refs.iter()
-            .filter_map(|(path, range)| {
+            .filter_map(|(path, text_range)| {
                 let (actual_path, line_offset) = py_sources
                     .get(path)
                     .map(|(p, line)| (p.clone(), *line))
                     .unwrap_or((path.clone(), 0));
                 let uri = Url::from_file_path(&actual_path).ok()?;
+                // Convert TextRange (byte offset) to line/col via file text.
+                let file_text = std::fs::read_to_string(&actual_path).unwrap_or_default();
+                let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                    &file_text,
+                    *text_range,
+                );
                 Some(Location {
                     uri,
                     range: Range {
-                        start: Position::new(range.start.line + line_offset, range.start.column),
-                        end: Position::new(range.end.line + line_offset, range.end.column),
+                        start: Position::new(pr.start.line + line_offset, pr.start.character),
+                        end: Position::new(pr.end.line + line_offset, pr.end.character),
                     },
                 })
             })
@@ -208,7 +214,11 @@ impl Backend {
     }
 
     /// Convert our database diagnostic to LSP diagnostic
-    fn to_lsp_diagnostic(&self, diag: &DbDiagnostic) -> lsp_types::Diagnostic {
+    fn to_lsp_diagnostic(
+        &self,
+        diag: &DbDiagnostic,
+        converter: &crate::diagnostics_boundary::BoundaryConverter,
+    ) -> lsp_types::Diagnostic {
         let code = diag.code.map(|c| {
             let code_str = match c {
                 DbCode::ParseError => "parse-error",
@@ -352,6 +362,9 @@ impl Backend {
                 // Timeseries frontmatter validation diagnostic codes.
                 DbCode::TimeseriesRequiredForIncremental => "timeseries-required-for-incremental",
                 DbCode::MalformedTimeseries => "malformed-timeseries",
+                // VALUES / CTE alias-column-list diagnostic codes.
+                DbCode::AliasColumnArityMismatch => "alias-column-arity-mismatch",
+                DbCode::EmptyValuesClause => "empty-values-clause",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -424,16 +437,7 @@ impl Backend {
         let (message, related_information) = render_expansion_frames(diag);
 
         lsp_types::Diagnostic {
-            range: Range {
-                start: Position {
-                    line: diag.range.start.line,
-                    character: diag.range.start.column,
-                },
-                end: Position {
-                    line: diag.range.end.line,
-                    character: diag.range.end.column,
-                },
-            },
+            range: converter.convert(diag),
             severity: Some(match diag.severity {
                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
@@ -558,6 +562,17 @@ impl Backend {
         self.db.lock().await.clone()
     }
 
+    /// Build a `BoundaryConverter` for `text` using the encoding negotiated
+    /// with the client during `initialize`. Falls back to UTF-16 before
+    /// negotiation completes (i.e. during the `initialize` request itself).
+    async fn boundary_converter(
+        &self,
+        text: &str,
+    ) -> crate::diagnostics_boundary::BoundaryConverter {
+        let kind = self.negotiated_encoding.lock().await.clone();
+        crate::diagnostics_boundary::BoundaryConverter::new_from_kind(text, &kind)
+    }
+
     /// Rebuild the `Workspace` singleton from every currently-registered
     /// `SourceFile` + `ProjectInput`. Call after any input-set change so
     /// `all_models` / `resolve_ref` / diagnostics see the new set.
@@ -588,9 +603,11 @@ impl Backend {
             if let Some(virtual_entries) = multi_entries {
                 let mut lsp_diagnostics = Vec::new();
                 for (virtual_path, start_line) in virtual_entries {
+                    let virtual_text = file_text(&db, &virtual_path);
+                    let converter = self.boundary_converter(&virtual_text).await;
                     let diagnostics = diagnostics_for(&db, &virtual_path);
                     for d in &diagnostics {
-                        let mut lsp_diag = self.to_lsp_diagnostic(d);
+                        let mut lsp_diag = self.to_lsp_diagnostic(d, &converter);
                         lsp_diag.range.start.line += start_line;
                         lsp_diag.range.end.line += start_line;
                         lsp_diagnostics.push(lsp_diag);
@@ -598,9 +615,11 @@ impl Backend {
                 }
                 lsp_diagnostics
             } else {
+                let text = file_text(&db, &path);
+                let converter = self.boundary_converter(&text).await;
                 diagnostics_for(&db, &path)
                     .iter()
-                    .map(|d| self.to_lsp_diagnostic(d))
+                    .map(|d| self.to_lsp_diagnostic(d, &converter))
                     .collect()
             };
 
@@ -670,6 +689,7 @@ impl Backend {
         let py_diags = self.python_diagnostics.clone();
         let cache = self.python_cache.clone();
         let client = self.client.clone();
+        let negotiated_encoding = self.negotiated_encoding.clone();
 
         // Build context from current model list
         let context_json = {
@@ -818,23 +838,19 @@ impl Backend {
             // Republish all diagnostics since ref resolution may have changed
             let files = tracked_files.lock().await.clone();
             let db_snapshot = db.lock().await.clone();
+            let enc_kind = negotiated_encoding.lock().await.clone();
 
             for path in files.iter() {
                 if let Ok(uri) = Url::from_file_path(path) {
                     let diagnostics = diagnostics_for(&db_snapshot, path);
+                    let file_text = crate::db_helpers::file_text(&db_snapshot, path);
+                    let converter = crate::diagnostics_boundary::BoundaryConverter::new_from_kind(
+                        &file_text, &enc_kind,
+                    );
                     let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
                         .iter()
                         .map(|d| lsp_types::Diagnostic {
-                            range: Range {
-                                start: Position {
-                                    line: d.range.start.line,
-                                    character: d.range.start.column,
-                                },
-                                end: Position {
-                                    line: d.range.end.line,
-                                    character: d.range.end.column,
-                                },
-                            },
+                            range: converter.convert(d),
                             severity: Some(match d.severity {
                                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
@@ -1057,8 +1073,38 @@ impl LanguageServer for Backend {
         // Store errors for reporting after initialized notification
         *self.init_errors.lock().await = Some(init_errors);
 
+        // Negotiate position encoding with the client.
+        //
+        // The server supports UTF-16 and UTF-8. Preference order: UTF-16 first
+        // (LSP default), then UTF-8. If the client advertises a list, pick the
+        // first mutually-supported encoding. Unknown/unsupported encodings are
+        // skipped; if none match, fall back to UTF-16.
+        let client_encodings: Vec<PositionEncodingKind> = params
+            .capabilities
+            .general
+            .as_ref()
+            .and_then(|g| g.position_encodings.clone())
+            .unwrap_or_default();
+
+        let negotiated = if client_encodings.is_empty() {
+            // Client advertised no preference → LSP default is UTF-16.
+            PositionEncodingKind::UTF16
+        } else {
+            // Pick the first encoding the client listed that we support.
+            // Supported: UTF-8 and UTF-16.
+            client_encodings
+                .iter()
+                .find(|e| **e == PositionEncodingKind::UTF8 || **e == PositionEncodingKind::UTF16)
+                .cloned()
+                .unwrap_or(PositionEncodingKind::UTF16)
+        };
+
+        *self.negotiated_encoding.lock().await = negotiated.clone();
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
+                // Advertise the negotiated encoding back to the client.
+                position_encoding: Some(negotiated),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
@@ -1438,16 +1484,16 @@ impl LanguageServer for Backend {
                                 if let Some(with_clause) = select_stmt.with_clause() {
                                     for cte in with_clause.ctes() {
                                         if cte.name().as_deref() == Some(name.as_str()) {
-                                            let pr = smelt_parser::ast::text_range_to_range(
+                                            let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                 &text,
                                                 cte.syntax().text_range(),
                                             );
                                             result = Some(GotoTarget::SameFile(Range {
                                                 start: Position::new(
                                                     pr.start.line,
-                                                    pr.start.column,
+                                                    pr.start.character,
                                                 ),
-                                                end: Position::new(pr.end.line, pr.end.column),
+                                                end: Position::new(pr.end.line, pr.end.character),
                                             }));
                                             break;
                                         }
@@ -1512,16 +1558,16 @@ impl LanguageServer for Backend {
                                     if let Some(with_clause) = select_stmt.with_clause() {
                                         for cte in with_clause.ctes() {
                                             if cte.name().as_deref() == Some(qualifier_str) {
-                                                let pr = smelt_parser::ast::text_range_to_range(
+                                                let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &text,
                                                     cte.syntax().text_range(),
                                                 );
                                                 result = Some(GotoTarget::SameFile(Range {
                                                     start: Position::new(
                                                         pr.start.line,
-                                                        pr.start.column,
+                                                        pr.start.character,
                                                     ),
-                                                    end: Position::new(pr.end.line, pr.end.column),
+                                                    end: Position::new(pr.end.line, pr.end.character),
                                                 }));
                                                 break;
                                             }
@@ -1548,18 +1594,18 @@ impl LanguageServer for Backend {
                                                     || table_ref.identifier().as_deref()
                                                         == Some(qualifier_str);
                                                 if matches {
-                                                    let pr = smelt_parser::ast::text_range_to_range(
+                                                    let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                         &text,
                                                         table_ref.syntax().text_range(),
                                                     );
                                                     result = Some(GotoTarget::SameFile(Range {
                                                         start: Position::new(
                                                             pr.start.line,
-                                                            pr.start.column,
+                                                            pr.start.character,
                                                         ),
                                                         end: Position::new(
                                                             pr.end.line,
-                                                            pr.end.column,
+                                                            pr.end.character,
                                                         ),
                                                     }));
                                                     break;
@@ -1692,14 +1738,14 @@ impl LanguageServer for Backend {
                                             continue;
                                         }
                                         // Convert the binder range to an LSP Range.
-                                        let pr = smelt_parser::ast::text_range_to_range(
+                                        let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                             &text,
                                             binder_range,
                                         );
                                         return Some(GotoTarget::LambdaParam {
                                             binder_start: pr.start.line,
-                                            binder_col: pr.start.column,
-                                            binder_end_col: pr.end.column,
+                                            binder_col: pr.start.character,
+                                            binder_end_col: pr.end.character,
                                         });
                                     }
                                 }
@@ -1797,18 +1843,18 @@ impl LanguageServer for Backend {
                                         // Convert the name_span (TextRange) to an LSP Range.
                                         let gen_text = std::fs::read_to_string(&em.generator_file)
                                             .unwrap_or_default();
-                                        let pr_range = smelt_parser::ast::text_range_to_range(
+                                        let pr_range = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                             &gen_text,
                                             em.name_span,
                                         );
                                         let name_range = Range {
                                             start: Position::new(
                                                 pr_range.start.line,
-                                                pr_range.start.column,
+                                                pr_range.start.character,
                                             ),
                                             end: Position::new(
                                                 pr_range.end.line,
-                                                pr_range.end.column,
+                                                pr_range.end.character,
                                             ),
                                         };
                                         return Some(GotoTarget::EmittedModelRef {
@@ -1954,8 +2000,14 @@ impl LanguageServer for Backend {
                 // frontmatter-stripped source (parse_file strips before
                 // parsing). Strip here too so byte→line/col mapping aligns.
                 let stripped = smelt_parser::strip_frontmatter(&target_text);
-                let start = smelt_parser::ast::offset_to_position(&stripped, name_start as usize);
-                let end = smelt_parser::ast::offset_to_position(&stripped, name_end as usize);
+                let start = crate::diagnostics_boundary::offset_to_codepoint_position(
+                    &stripped,
+                    name_start as usize,
+                );
+                let end = crate::diagnostics_boundary::offset_to_codepoint_position(
+                    &stripped,
+                    name_end as usize,
+                );
                 Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: target_uri,
                     range: Range {
@@ -1995,7 +2047,7 @@ impl LanguageServer for Backend {
         // Collect reference data as plain types.
         // We use an enum to avoid holding AST nodes across await points.
         enum RefResult {
-            PathRanges(Vec<(PathBuf, smelt_parser::ast::Range)>),
+            PathRanges(Vec<(PathBuf, rowan::TextRange)>),
             CteRanges(PathBuf, Vec<(u32, u32, u32, u32)>),
             Empty,
         }
@@ -2032,7 +2084,7 @@ impl LanguageServer for Backend {
 
                     match symbol_at_cursor(&file, &text, cursor_offset) {
                         Some(SymbolAtCursor::PathRef { segments }) => {
-                            let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> = Vec::new();
+                            let mut all_refs: Vec<(PathBuf, rowan::TextRange)> = Vec::new();
                             for f in &project_files {
                                 let path_refs = smelt_db::model_path_refs(&db, *f);
                                 for loc in path_refs.iter() {
@@ -2075,8 +2127,11 @@ impl LanguageServer for Backend {
                                 .iter()
                                 .map(|text_range| {
                                     let r =
-                                        smelt_parser::ast::text_range_to_range(&text, *text_range);
-                                    (r.start.line, r.start.column, r.end.line, r.end.column)
+                                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &text,
+                                            *text_range,
+                                        );
+                                    (r.start.line, r.start.character, r.end.line, r.end.character)
                                 })
                                 .collect();
                             RefResult::CteRanges(effective_path.clone(), ranges)
@@ -2138,6 +2193,7 @@ impl LanguageServer for Backend {
 
         let db = self.snapshot().await;
         let text = file_text(&db, &effective_path);
+        let converter = self.boundary_converter(&text).await;
 
         // Collect diagnostics overlapping the request range
         let all_diags = diagnostics_for(&db, &effective_path);
@@ -2149,14 +2205,14 @@ impl LanguageServer for Backend {
         let matching: Vec<_> = all_diags
             .into_iter()
             .filter(|d| {
-                let r = &d.range;
+                let r = converter.convert(d);
                 // Diagnostic overlaps the request range
                 !(r.end.line < adj_start_line
                     || (r.end.line == adj_start_line
-                        && r.end.column < request_range.start.character)
+                        && r.end.character < request_range.start.character)
                     || r.start.line > adj_end_line
                     || (r.start.line == adj_end_line
-                        && r.start.column > request_range.end.character))
+                        && r.start.character > request_range.end.character))
             })
             .collect();
 
@@ -2179,15 +2235,13 @@ impl LanguageServer for Backend {
             for kind in action_kinds {
                 match kind {
                     CAK::TextEdit(suggestion) => {
+                        let pr = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                            &text,
+                            suggestion.range,
+                        );
                         let range = Range {
-                            start: Position::new(
-                                suggestion.range.start.line + line_offset,
-                                suggestion.range.start.column,
-                            ),
-                            end: Position::new(
-                                suggestion.range.end.line + line_offset,
-                                suggestion.range.end.column,
-                            ),
+                            start: Position::new(pr.start.line + line_offset, pr.start.character),
+                            end: Position::new(pr.end.line + line_offset, pr.end.character),
                         };
                         let edit = TextEdit {
                             range,
@@ -2321,15 +2375,16 @@ impl LanguageServer for Backend {
             let edits: Vec<TextEdit> = result
                 .edits
                 .iter()
-                .map(|e| TextEdit {
-                    range: Range {
-                        start: Position::new(
-                            e.range.start.line + line_offset,
-                            e.range.start.column,
-                        ),
-                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
-                    },
-                    new_text: e.new_text.clone(),
+                .map(|e| {
+                    let pr =
+                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, e.range);
+                    TextEdit {
+                        range: Range {
+                            start: Position::new(pr.start.line + line_offset, pr.start.character),
+                            end: Position::new(pr.end.line + line_offset, pr.end.character),
+                        },
+                        new_text: e.new_text.clone(),
+                    }
                 })
                 .collect();
             let mut changes = std::collections::HashMap::new();
@@ -2353,15 +2408,16 @@ impl LanguageServer for Backend {
             let edits: Vec<TextEdit> = result
                 .edits
                 .iter()
-                .map(|e| TextEdit {
-                    range: Range {
-                        start: Position::new(
-                            e.range.start.line + line_offset,
-                            e.range.start.column,
-                        ),
-                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
-                    },
-                    new_text: e.new_text.clone(),
+                .map(|e| {
+                    let pr =
+                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(&text, e.range);
+                    TextEdit {
+                        range: Range {
+                            start: Position::new(pr.start.line + line_offset, pr.start.character),
+                            end: Position::new(pr.end.line + line_offset, pr.end.character),
+                        },
+                        new_text: e.new_text.clone(),
+                    }
                 })
                 .collect();
             let mut changes = std::collections::HashMap::new();
@@ -2433,14 +2489,14 @@ impl LanguageServer for Backend {
                                 for cte in with_clause.ctes() {
                                     if cte.name().as_deref() == Some(&name) {
                                         if let Some(name_range) = cte.name_range() {
-                                            let r = smelt_parser::ast::text_range_to_range(
+                                            let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                 &text, name_range,
                                             );
                                             found_range = Some((
                                                 r.start.line,
-                                                r.start.column,
+                                                r.start.character,
                                                 r.end.line,
-                                                r.end.column,
+                                                r.end.character,
                                             ));
                                         }
                                         break;
@@ -2482,15 +2538,15 @@ impl LanguageServer for Backend {
                                                 None
                                             };
                                             if let Some(tok) = name_token {
-                                                let r = smelt_parser::ast::text_range_to_range(
+                                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &text,
                                                     tok.text_range(),
                                                 );
                                                 best_range = Some((
                                                     r.start.line,
-                                                    r.start.column,
+                                                    r.start.character,
                                                     r.end.line,
-                                                    r.end.column,
+                                                    r.end.character,
                                                 ));
                                                 best_len = len;
                                             }
@@ -2509,15 +2565,15 @@ impl LanguageServer for Backend {
                             .filter_map(smelt_parser::ast::SmeltPathRef::cast)
                         {
                             if path_ref.segments() == segments {
-                                let r = smelt_parser::ast::text_range_to_range(
+                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                     &text,
                                     path_ref.text_range(),
                                 );
                                 let placeholder = segments.last().cloned().unwrap_or_default();
                                 return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
                                     range: Range {
-                                        start: Position::new(r.start.line, r.start.column),
-                                        end: Position::new(r.end.line, r.end.column),
+                                        start: Position::new(r.start.line, r.start.character),
+                                        end: Position::new(r.end.line, r.end.character),
                                     },
                                     placeholder,
                                 }));
@@ -2535,11 +2591,13 @@ impl LanguageServer for Backend {
                                 (start_byte as u32).into(),
                                 (end_byte as u32).into(),
                             );
-                            let r = smelt_parser::ast::text_range_to_range(&text, range);
+                            let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                &text, range,
+                            );
                             return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
                                 range: Range {
-                                    start: Position::new(r.start.line, r.start.column),
-                                    end: Position::new(r.end.line, r.end.column),
+                                    start: Position::new(r.start.line, r.start.character),
+                                    end: Position::new(r.end.line, r.end.character),
                                 },
                                 placeholder,
                             }));
@@ -2654,8 +2712,11 @@ impl LanguageServer for Backend {
                                 .iter()
                                 .map(|text_range| {
                                     let r =
-                                        smelt_parser::ast::text_range_to_range(&text, *text_range);
-                                    (r.start.line, r.start.column, r.end.line, r.end.column)
+                                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &text,
+                                            *text_range,
+                                        );
+                                    (r.start.line, r.start.character, r.end.line, r.end.character)
                                 })
                                 .collect();
                             Some(RenameKind::Cte { edits })
@@ -2674,12 +2735,15 @@ impl LanguageServer for Backend {
                                 .iter()
                                 .map(|r| {
                                     let range =
-                                        smelt_parser::ast::text_range_to_range(&text, r.name_range);
+                                        crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                            &text,
+                                            r.name_range,
+                                        );
                                     (
                                         range.start.line,
-                                        range.start.column,
+                                        range.start.character,
                                         range.end.line,
-                                        range.end.column,
+                                        range.end.character,
                                     )
                                 })
                                 .collect();
@@ -2692,12 +2756,14 @@ impl LanguageServer for Backend {
                                 )
                             {
                                 let range =
-                                    smelt_parser::ast::text_range_to_range(&text, def_range);
+                                    crate::diagnostics_boundary::text_range_to_lsp_codepoint(
+                                        &text, def_range,
+                                    );
                                 let edit = (
                                     range.start.line,
-                                    range.start.column,
+                                    range.start.character,
                                     range.end.line,
-                                    range.end.column,
+                                    range.end.character,
                                 );
                                 if !local_edits.contains(&edit) {
                                     local_edits.push(edit);
@@ -2820,16 +2886,16 @@ impl LanguageServer for Backend {
                                             None,
                                         );
                                             for col_ref in &col_refs {
-                                                let r = smelt_parser::ast::text_range_to_range(
+                                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &down_text,
                                                     col_ref.name_range,
                                                 );
                                                 cross_file_edits.push((
                                                     down_path.clone(),
                                                     r.start.line,
-                                                    r.start.column,
+                                                    r.start.character,
                                                     r.end.line,
-                                                    r.end.column,
+                                                    r.end.character,
                                                 ));
                                             }
                                             // Check for SELECT * passthrough
@@ -2894,16 +2960,16 @@ impl LanguageServer for Backend {
                                                 && segs.get(1).map(|s| s.as_str())
                                                     == Some(model_name.as_str())
                                             {
-                                                let r = smelt_parser::ast::text_range_to_range(
+                                                let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &f_text,
                                                     path_ref.text_range(),
                                                 );
                                                 edits.push((
                                                     path.clone(),
                                                     r.start.line,
-                                                    r.start.column,
+                                                    r.start.character,
                                                     r.end.line,
-                                                    r.end.column,
+                                                    r.end.character,
                                                 ));
                                             }
                                         }

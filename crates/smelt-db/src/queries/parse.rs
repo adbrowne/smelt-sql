@@ -11,7 +11,7 @@ use std::sync::Arc;
 use smelt_core::metadata::{extract_file_metadata, FileMetadata};
 use smelt_parser::{self, ast::SmeltPathRef, File as AstFile};
 
-use crate::{Model, Range, SourceFile, SourceLocation};
+use crate::{Model, SourceFile, SourceLocation};
 
 // ============================================================================
 // Syntax queries
@@ -68,7 +68,7 @@ pub fn parse_model(db: &dyn salsa::Database, file: SourceFile) -> Option<Arc<Mod
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathRefLocation {
     pub path: Vec<String>,
-    pub range: Range,
+    pub range: rowan::TextRange,
     /// True when this ref appears in a `TableExpr` (FROM/JOIN) position.
     /// Phase 2a uses this to gate kind-mismatch diagnostics: a path
     /// resolving to a `Test` is invalid in `TableExpr` positions.
@@ -84,7 +84,6 @@ pub struct PathRefLocation {
 #[salsa::tracked]
 pub fn model_path_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<PathRefLocation>> {
     let parse = parse_file(db, file);
-    let text = file.text(db);
     let syntax = parse.syntax();
 
     let Some(ast) = AstFile::cast(syntax) else {
@@ -104,7 +103,7 @@ pub fn model_path_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<Pa
         }
         let in_table_expr_position = is_in_table_expr_position(path_ref.syntax());
         let path = path_ref.segments();
-        let range = smelt_parser::ast::text_range_to_range(text, path_ref.text_range());
+        let range = path_ref.text_range();
         out.push(PathRefLocation {
             path,
             range,
@@ -136,9 +135,42 @@ pub fn model_sources(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<Sour
 
 #[cfg(test)]
 mod tests {
+    use line_index::LineIndex;
     use smelt_parser::SyntaxKind;
 
     use crate::{Database, DiagnosticCode, SourceFile};
+
+    /// Lightweight position for test assertions.
+    #[derive(Debug, Clone, Copy)]
+    struct LcPos {
+        pub line: u32,
+        pub column: u32,
+    }
+
+    /// Lightweight range for test assertions.
+    #[derive(Debug, Clone, Copy)]
+    struct Lc {
+        pub start: LcPos,
+        pub end: LcPos,
+    }
+
+    /// Convert a `TextRange` (byte offsets) to `(line, col)` for assertion
+    /// readability. Uses `LineIndex` (byte-based columns; ASCII-safe).
+    fn lc(source: &str, range: &rowan::TextRange) -> Lc {
+        let li = LineIndex::new(source);
+        let s = li.line_col(range.start());
+        let e = li.line_col(range.end());
+        Lc {
+            start: LcPos {
+                line: s.line,
+                column: s.col,
+            },
+            end: LcPos {
+                line: e.line,
+                column: e.col,
+            },
+        }
+    }
 
     /// Build a minimal Salsa database with one source file and return the
     /// file handle. Does not register a workspace or project — the tests in
@@ -254,18 +286,19 @@ mod tests {
         // Anchor precision: must cover only the `SELECT` keyword token (line 3,
         // column 0, length 6), not the full statement.
         let range = &bare_select_diag.unwrap().range;
+        let r = lc(source, range);
         assert_eq!(
-            range.start.line, 3,
+            r.start.line, 3,
             "anchor line should be 3 (body starts at line 3), got: {:?}",
             range
         );
         assert_eq!(
-            range.start.column, 0,
+            r.start.column, 0,
             "anchor column should be 0, got: {:?}",
             range
         );
         assert_eq!(
-            range.end.column - range.start.column,
+            r.end.column - r.start.column,
             "SELECT".len() as u32,
             "anchor span should cover exactly 'SELECT' ({} chars), got: {:?}",
             "SELECT".len(),
@@ -290,18 +323,19 @@ mod tests {
         // Anchor precision: must cover only the `WITH` keyword token (line 3,
         // column 0, length 4), not the full statement.
         let range = &bare_select_diag.unwrap().range;
+        let r = lc(source, range);
         assert_eq!(
-            range.start.line, 3,
+            r.start.line, 3,
             "anchor line should be 3 (body starts at line 3), got: {:?}",
             range
         );
         assert_eq!(
-            range.start.column, 0,
+            r.start.column, 0,
             "anchor column should be 0, got: {:?}",
             range
         );
         assert_eq!(
-            range.end.column - range.start.column,
+            r.end.column - r.start.column,
             "WITH".len() as u32,
             "anchor span should cover exactly 'WITH' ({} chars), got: {:?}",
             "WITH".len(),
@@ -326,18 +360,19 @@ mod tests {
         // Anchor precision: must cover only the `VALUES` keyword token (line 3,
         // column 0, length 6), not the full statement.
         let range = &bare_select_diag.unwrap().range;
+        let r = lc(source, range);
         assert_eq!(
-            range.start.line, 3,
+            r.start.line, 3,
             "anchor line should be 3 (body starts at line 3), got: {:?}",
             range
         );
         assert_eq!(
-            range.start.column, 0,
+            r.start.column, 0,
             "anchor column should be 0, got: {:?}",
             range
         );
         assert_eq!(
-            range.end.column - range.start.column,
+            r.end.column - r.start.column,
             "VALUES".len() as u32,
             "anchor span should cover exactly 'VALUES' ({} chars), got: {:?}",
             "VALUES".len(),
@@ -435,12 +470,13 @@ mod tests {
             .find(|d| d.code == Some(DiagnosticCode::GenerateFileBareSelectForbidden));
         let diag = bare_select_diag.expect("expected GenerateFileBareSelectForbidden");
 
-        // Line numbers in Range are 0-based in the LSP convention used internally.
+        // Line numbers are 0-based in the LSP convention used internally.
         // The body starts at line 3 (0-based) — after the three-line frontmatter.
+        let r = lc(source, &diag.range);
         assert!(
-            diag.range.start.line >= 3,
+            r.start.line >= 3,
             "diagnostic line {} must be >= 3 (body starts after frontmatter)",
-            diag.range.start.line
+            r.start.line
         );
     }
 }

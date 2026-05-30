@@ -11,6 +11,8 @@ Each source is declared as a single `.yml` file placed under any directory liste
 
 The address follows universal path addressing: the scan-root prefix (`models/`) is stripped, the directory path and stem become the address segments.
 
+A `smelt.sources.<path>` reference always resolves under the sources namespace; a model whose name happens to collide with a leaf segment does not shadow the source.
+
 ## Top-level keys
 
 | Key | Required | Default | Meaning |

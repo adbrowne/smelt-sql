@@ -19,7 +19,9 @@ use crate::queries::functions::{file_signature_inputs, resolve_function};
 use crate::queries::parse::parse_file;
 use crate::queries::project::{project_seeds, project_sources, sources_config};
 use crate::schema::{self, Column, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema};
-use crate::type_inference::{self, infer_cte_columns, infer_select_column_types, TypeContext};
+use crate::type_inference::{
+    self, infer_cte_columns, infer_select_column_types, infer_values_columns, TypeContext,
+};
 use crate::{find_project, resolve_ref_leaf, SourceFile, Workspace};
 
 use smelt_core::{SourceInfo, SourcesConfig};
@@ -226,6 +228,28 @@ pub trait RefSchemaProvider {
     /// loop wants to distinguish them (CSV files don't participate in
     /// SELECT * schema resolution, etc.).
     fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+    /// Returns the typed columns for a `smelt.<path>` reference identified by
+    /// its full path segments, including generator-emitted models.
+    ///
+    /// The default implementation delegates to `resolved_columns` using the
+    /// last segment (the leaf name). `SalsaRefSchemaProvider` overrides this
+    /// to also consult the emission registry via `emitted_model_typed_schema`
+    /// after the hand-authored lookup returns `None` — preserving the
+    /// `ModelDefHandAuthoredCollision` tie-break rule (hand-authored wins).
+    ///
+    /// The `entity_name` out-parameter is set to the name that should be used
+    /// as the key for `ctx.add_model_column` and `ctx.add_alias`. For
+    /// hand-authored models this is the leaf segment; for emitted models it is
+    /// the full dot-joined path (the smelt path), which matches how `resolve_ref`
+    /// keys them.
+    fn resolved_columns_for_path(
+        &self,
+        segments: &[String],
+    ) -> Option<(String, Vec<(String, TypedColumn)>)> {
+        let model_name = segments.last()?.clone();
+        self.resolved_columns(&model_name)
+            .map(|cols| (model_name, cols))
+    }
     /// Returns the typed columns for the `smelt.functions.<name>(...)` call in
     /// FROM position, by resolving the function's `TableExpr` return schema.
     /// The default implementation returns `None`; `SalsaRefSchemaProvider`
@@ -304,12 +328,17 @@ impl SalsaRefSchemaProvider<'_> {
         }
 
         // smelt.<path> value-form in FROM/JOIN position.
+        // Consult the full-path resolver (which covers hand-authored models
+        // and generator-emitted models) as well as seeds.
         if let Some(path_ref) = table_ref.smelt_path_ref() {
             let segs = path_ref.segments();
-            let model_name = segs.last().cloned().unwrap_or_default();
             let seed_key = segs.join("_");
+            // resolved_columns_for_path returns (entity_name, cols); we only
+            // need cols here (the entity_name is used for ctx binding in
+            // process_table_ref_pure, not needed for the join-schema resolver).
             return self
-                .resolved_columns(&model_name)
+                .resolved_columns_for_path(&segs)
+                .map(|(_, cols)| cols)
                 .or_else(|| self.seed_columns(&seed_key));
         }
 
@@ -610,6 +639,87 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
         None
     }
 
+    /// Resolve a `smelt.<path>` reference by its full path segments.
+    ///
+    /// Resolution order (preserves `ModelDefHandAuthoredCollision` tie-break rule):
+    ///   1. Hand-authored model lookup via `resolve_ref` (leaf name, project-scoped).
+    ///      If found, return its schema.
+    ///   2. Generator-emitted model lookup via `emitted_model_typed_schema`.
+    ///      The W3 collision pass already discards any emission whose smelt path
+    ///      collides with a hand-authored model, so step 2 can never shadow step 1
+    ///      even without an explicit guard here. We keep the ordered fallback for
+    ///      clarity and future safety.
+    ///
+    /// The returned `entity_name` is the full dot-joined smelt path for emitted
+    /// models, matching the key used by `ctx.add_model_column` / `ctx.add_alias`
+    /// in `process_table_ref_pure`.
+    fn resolved_columns_for_path(
+        &self,
+        segments: &[String],
+    ) -> Option<(String, Vec<(String, TypedColumn)>)> {
+        let model_name = segments.last()?.clone();
+
+        // Step 1: hand-authored lookup (project-scoped via `resolve_ref`).
+        if let Some(cols) = self.resolved_columns(&model_name) {
+            return Some((model_name, cols));
+        }
+
+        // Step 2: generator-emitted model lookup.
+        // Find the project root so we can scope the search.
+        let project = self.project?;
+        let project_root = project.root(self.db).clone();
+        let scan_roots = crate::queries::project::project_paths(self.db, project);
+
+        let emitted = crate::queries::project::emitted_models(self.db, self.workspace);
+        for emitted_model in &emitted.survivors {
+            // Project isolation: only consider emissions from this project.
+            if !emitted_model.generator_file.starts_with(&project_root) {
+                continue;
+            }
+            let smelt_name = crate::queries::project::emitted_model_smelt_path(
+                &emitted_model.generator_file,
+                &project_root,
+                scan_roots.as_slice(),
+                &emitted_model.name,
+            );
+            let emitted_path: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+            if emitted_path == segments {
+                // Found a matching emission — look up its generator SourceFile
+                // so we can call `emitted_model_typed_schema`.
+                let gen_file = self
+                    .workspace
+                    .files(self.db)
+                    .iter()
+                    .copied()
+                    .find(|f| f.path(self.db) == &emitted_model.generator_file)?;
+
+                let schema = crate::queries::project::emitted_model_typed_schema(
+                    self.db,
+                    self.workspace,
+                    gen_file,
+                    emitted_model.name.clone(),
+                );
+                let cols: Vec<(String, TypedColumn)> = schema
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        });
+                        (col.name.clone(), typed_col)
+                    })
+                    .collect();
+                // Use the full smelt path as the entity name so that
+                // `ctx.add_model_column(entity_name, …)` and
+                // `ctx.add_alias(bind_to, entity_name)` use a stable, unique key.
+                return Some((smelt_name, cols));
+            }
+        }
+
+        None
+    }
+
     fn smelt_path_call_columns(
         &self,
         call: &smelt_parser::ast::SmeltPathCall,
@@ -806,30 +916,49 @@ fn process_table_ref_pure(
         let segments = path_ref.segments();
         let model_name = segments.last().cloned().unwrap_or_default();
         let seed_key = segments.join("_");
-        // Try seed first, then model.
+
+        // `smelt.sources.*` path refs take priority over the seed/model fallback.
+        //
+        // A `smelt.sources.<path>` reference resolves under the sources
+        // namespace; a model whose leaf name happens to collide with a source's
+        // leaf segment must not shadow the source schema. Source columns are
+        // installed into `ctx` by `add_source_info_to_type_context` (called
+        // after this builder returns). We register only the alias here so that
+        // `lookup_identifier` can resolve `alias → entity_name` and correctly
+        // validate qualified column refs like `alias.col_name`.
+        //
+        // Not consulting `refs.resolved_columns` here is intentional: doing so
+        // would look up the model of the same leaf name and write its
+        // (potentially Unknown) columns into `ctx.model_columns`, shadowing the
+        // correctly-typed source entries that land in `ctx.source_columns`.
+        if segments.first().map(|s| s.as_str()) == Some("sources") {
+            let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
+            ctx.add_alias(&bind_to, &model_name);
+            return;
+        }
+
+        // For seeds, hand-authored models, and generator-emitted models:
+        // try seed first, then consult `resolved_columns_for_path` which
+        // handles both hand-authored models (via `resolve_ref`) and
+        // generator-emitted models (via `emitted_model_typed_schema`).
+        // The `resolved_columns_for_path` default and the `SalsaRefSchemaProvider`
+        // override both preserve the `ModelDefHandAuthoredCollision` tie-break:
+        // hand-authored models are checked first; emitted models are only
+        // consulted when no hand-authored model matches.
         if let Some((entity_name, cols)) = refs
             .seed_columns(&seed_key)
             .map(|c| (seed_key.clone(), c))
-            .or_else(|| {
-                refs.resolved_columns(&model_name)
-                    .map(|c| (model_name.clone(), c))
-            })
+            .or_else(|| refs.resolved_columns_for_path(&segments))
         {
             for (col_name, typed_col) in &cols {
                 ctx.add_model_column(&entity_name, col_name, typed_col.clone());
             }
-            let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
-            ctx.add_alias(&bind_to, &entity_name);
-        } else if segments.first().map(|s| s.as_str()) == Some("sources") {
-            // smelt.sources.<source_name>.<table_name> path refs. The source
-            // columns were already seeded into `ctx` by `build_type_context`
-            // (via `add_source_column`). We just need to register the alias
-            // so that `lookup_identifier` can resolve `alias → entity_name`
-            // and correctly validate qualified refs like `alias.col_name`
-            // as well as bare alias references (e.g. `smelt.functions.f(e)`
-            // where `e` is an alias for a source table).
+            // Bind the alias (or the last path segment, for unaliased refs).
+            // For emitted models, `entity_name` is the full smelt path;
+            // an unaliased `smelt.cohorts.us_west` binds `us_west` → the entity_name
+            // so that `SELECT id FROM smelt.cohorts.us_west` works without a qualifier.
             let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
-            ctx.add_alias(&bind_to, &model_name);
+            ctx.add_alias(&bind_to, &entity_name);
         }
         return;
     }
@@ -897,6 +1026,27 @@ fn process_table_ref_pure(
                         ctx.add_cte_column(&alias, &col_name, typed_col);
                     }
 
+                    ctx.add_alias(&alias, &alias);
+                }
+            } else if let Some(values_clause) = subquery.values_clause() {
+                // `(VALUES (e1, e2, …), …) AS t(c1, c2, …)` — infer column
+                // types by unifying row elements column-wise via the existing
+                // promotion lattice.  When the VALUES clause is empty,
+                // `infer_values_columns` returns `Err`; the `EmptyValuesClause`
+                // diagnostic is emitted by `check_table_ref_values_arity`.
+                if let Ok(column_types) = infer_values_columns(&values_clause, ctx) {
+                    // Column names: prefer the explicit alias column list from
+                    // `AS t(c1, c2, …)`; fall back to `col1`, `col2`, … when
+                    // the list is absent.
+                    let alias_names = table_ref.alias_column_names();
+                    for (i, typed_col) in column_types.into_iter().enumerate() {
+                        let col_name = alias_names
+                            .as_ref()
+                            .and_then(|names| names.get(i))
+                            .cloned()
+                            .unwrap_or_else(|| format!("col{}", i + 1));
+                        ctx.add_cte_column(&alias, &col_name, typed_col);
+                    }
                     ctx.add_alias(&alias, &alias);
                 }
             }
@@ -1402,6 +1552,43 @@ pub fn columns_to_column_ref_values(
         .collect()
 }
 
+/// Collect `alias → entity_name` mappings for all smelt path references in a single
+/// `SelectStmt`'s FROM clause and JOINs.  This is a pure CST walk — no Salsa calls.
+fn collect_from_aliases(select_stmt: &smelt_parser::ast::SelectStmt) -> HashMap<String, String> {
+    let mut alias_to_ref: HashMap<String, String> = HashMap::new();
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if let Some(path_ref) = table_ref.smelt_path_ref() {
+                let segs = path_ref.segments();
+                if let Some(entity_name) = segs.last().cloned() {
+                    if !entity_name.is_empty() {
+                        alias_to_ref.insert(entity_name.clone(), entity_name.clone());
+                        if let Some(alias) = table_ref.alias() {
+                            alias_to_ref.insert(alias, entity_name);
+                        }
+                    }
+                }
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                if let Some(path_ref) = table_ref.smelt_path_ref() {
+                    let segs = path_ref.segments();
+                    if let Some(entity_name) = segs.last().cloned() {
+                        if !entity_name.is_empty() {
+                            alias_to_ref.insert(entity_name.clone(), entity_name.clone());
+                            if let Some(alias) = table_ref.alias() {
+                                alias_to_ref.insert(alias, entity_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    alias_to_ref
+}
+
 #[salsa::tracked]
 pub fn model_input_constraints(
     db: &dyn salsa::Database,
@@ -1424,48 +1611,37 @@ pub fn model_input_constraints(
         None => return Arc::new(vec![]),
     };
 
-    let mut alias_to_ref: HashMap<String, String> = HashMap::new();
-    if let Some(from_clause) = select_stmt.from_clause() {
-        for table_ref in from_clause.table_refs() {
-            // smelt.<path> table references in FROM position.
-            if let Some(path_ref) = table_ref.smelt_path_ref() {
-                let segs = path_ref.segments();
-                if let Some(entity_name) = segs.last().cloned() {
-                    if !entity_name.is_empty() {
-                        alias_to_ref.insert(entity_name.clone(), entity_name.clone());
-                        if let Some(alias) = table_ref.alias() {
-                            alias_to_ref.insert(alias, entity_name);
-                        }
-                    }
-                }
-            }
-        }
-        for join in from_clause.joins() {
-            if let Some(table_ref) = join.table_ref() {
-                // smelt.<path> table references in JOIN position.
-                if let Some(path_ref) = table_ref.smelt_path_ref() {
-                    let segs = path_ref.segments();
-                    if let Some(entity_name) = segs.last().cloned() {
-                        if !entity_name.is_empty() {
-                            alias_to_ref.insert(entity_name.clone(), entity_name.clone());
-                            if let Some(alias) = table_ref.alias() {
-                                alias_to_ref.insert(alias, entity_name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // Collect all branches of the set-operation chain (UNION / INTERSECT / EXCEPT).
+    // Each branch owns its own alias map — unqualified column refs in branch N are
+    // attributed to branch N's unique FROM ref (if there is exactly one).
+    let mut branches: Vec<(smelt_parser::ast::SelectStmt, HashMap<String, String>)> = Vec::new();
+    let mut current: Option<smelt_parser::ast::SelectStmt> = Some(select_stmt);
+    while let Some(branch) = current {
+        let local_aliases = collect_from_aliases(&branch);
+        let next = branch.set_operation_select();
+        branches.push((branch, local_aliases));
+        current = next;
     }
 
-    if alias_to_ref.is_empty() {
+    // Early-out: no branch has any smelt FROM ref.
+    let any_ref = branches.iter().any(|(_, aliases)| !aliases.is_empty());
+    if !any_ref {
         return Arc::new(vec![]);
     }
 
-    let mut constraints_map: HashMap<String, HashMap<String, ColumnConstraint>> = HashMap::new();
+    let mut constraints_map: HashMap<String, std::collections::BTreeMap<String, ColumnConstraint>> =
+        HashMap::new();
 
-    let mut record_constraint =
-        |ref_name: &str, col_name: &str, expected_type: Option<TypedColumn>, range: TextRange| {
+    for (branch_stmt, alias_to_ref) in &branches {
+        if alias_to_ref.is_empty() {
+            // This branch has no smelt FROM refs; skip column walking for it.
+            continue;
+        }
+
+        let mut record_constraint = |ref_name: &str,
+                                     col_name: &str,
+                                     expected_type: Option<TypedColumn>,
+                                     range: TextRange| {
             let entry = constraints_map
                 .entry(ref_name.to_string())
                 .or_default()
@@ -1480,7 +1656,6 @@ pub fn model_input_constraints(
             entry.usage_sites.push(range);
         };
 
-    {
         let mut visitor = |qualifier: Option<&str>,
                            col_name: &str,
                            type_hint: Option<&TypedColumn>,
@@ -1511,16 +1686,18 @@ pub fn model_input_constraints(
             }
         };
 
-        type_inference::walk_select_columns_with_visitor(&select_stmt, &ctx, None, &mut visitor);
+        type_inference::walk_select_columns_with_visitor(branch_stmt, &ctx, None, &mut visitor);
     }
 
-    let constraints: Vec<InputConstraint> = constraints_map
+    let mut constraints: Vec<InputConstraint> = constraints_map
         .into_iter()
         .map(|(ref_name, required_columns)| InputConstraint {
             ref_name,
             required_columns,
         })
         .collect();
+    // Sort by ref_name for deterministic output regardless of HashMap iteration order.
+    constraints.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
 
     Arc::new(constraints)
 }

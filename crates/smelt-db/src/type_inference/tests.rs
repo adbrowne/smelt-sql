@@ -1577,7 +1577,7 @@ fn list_literal_heterogeneous_emits_diagnostic() {
     let ctx = TypeContext::new();
     let span = rowan::TextRange::new(7.into(), 20.into()); // approximate span
                                                            // Pass "" as text — unit tests don't assert specific line/column ranges.
-    let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span, "");
+    let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span);
     assert_eq!(
         diags.len(),
         1,
@@ -1602,7 +1602,7 @@ fn list_literal_empty_unknown_target_emits_diagnostic() {
     let ctx = TypeContext::new();
     let span = rowan::TextRange::new(7.into(), 9.into());
     // Pass "" as text — unit tests don't assert specific line/column ranges.
-    let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span, "");
+    let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span);
     assert_eq!(
         diags.len(),
         1,
@@ -1628,7 +1628,7 @@ fn spread_in_select_list_expands() {
     let select = parse_select_stmt(sql);
     let ctx = TypeContext::new();
     // Pass "" as text — unit tests don't assert specific line/column ranges.
-    let result = check_select_list_spreads(&select, &ctx, "");
+    let result = check_select_list_spreads(&select, &ctx);
     // Must find the spread and report expanded count = 2 (for a, b)
     assert_eq!(
         result.expanded_item_count, 2,
@@ -1665,7 +1665,7 @@ fn spread_empty_list_elides() {
     let select = parse_select_stmt(sql);
     let ctx = TypeContext::new();
     // Pass "" as text — unit tests don't assert specific line/column ranges.
-    let result = check_select_list_spreads(&select, &ctx, "");
+    let result = check_select_list_spreads(&select, &ctx);
     assert_eq!(
         result.expanded_item_count, 0,
         "spread of empty list must expand to 0 items (elision), got: {}",
@@ -1691,7 +1691,7 @@ fn spread_in_where_clause_emits_diagnostic() {
     let select = parse_select_stmt(sql);
     let ctx = TypeContext::new();
     // Pass "" as text — unit tests don't assert specific line/column ranges.
-    let diags = check_forbidden_position_spreads(&select, &ctx, "");
+    let diags = check_forbidden_position_spreads(&select, &ctx);
     assert!(
         !diags.is_empty(),
         "spread in WHERE must produce MetaSpreadInForbiddenPosition diagnostic"
@@ -1720,7 +1720,7 @@ fn spread_on_non_list_emits_diagnostic() {
         smelt_types::TypedColumn::not_null(DataType::Integer),
     );
     // Pass "" as text — unit tests don't assert specific line/column ranges.
-    let result = check_select_list_spreads(&select, &ctx, "");
+    let result = check_select_list_spreads(&select, &ctx);
     assert_eq!(
         result.diagnostics.len(),
         1,
@@ -2356,7 +2356,7 @@ fn smelt_define_named_map_emits_hof_name_shadowed() {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
     let define: SmeltDefine = file.defines().next().expect("one smelt.define");
-    let diags = check_define_name_shadowing(&define, "");
+    let diags = check_define_name_shadowing(&define);
     assert!(
         diags
             .iter()
@@ -2374,7 +2374,7 @@ fn smelt_define_named_concat_emits_reducer_name_shadowed() {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
     let define: SmeltDefine = file.defines().next().expect("one smelt.define");
-    let diags = check_define_name_shadowing(&define, "");
+    let diags = check_define_name_shadowing(&define);
     assert!(
         diags
             .iter()
@@ -2494,7 +2494,7 @@ fn columns_of_arg_must_be_table_expr() {
     let sql = "SELECT smelt.columns_of(42) FROM t";
     let select = parse_select_stmt(sql);
     let ctx = TypeContext::new();
-    let diags = check_columns_of_diagnostics(&select, &ctx, "");
+    let diags = check_columns_of_diagnostics(&select, &ctx);
     assert!(
         diags
             .iter()
@@ -2515,7 +2515,7 @@ fn columns_of_arg_must_be_table_expr() {
     // We use a bare path reference — the type-checker resolves it as TableExpr.
     let sql_ok = "SELECT smelt.columns_of(smelt.models.orders) FROM t";
     let select_ok = parse_select_stmt(sql_ok);
-    let diags_ok = check_columns_of_diagnostics(&select_ok, &ctx, "");
+    let diags_ok = check_columns_of_diagnostics(&select_ok, &ctx);
     assert!(
         !diags_ok
             .iter()
@@ -2531,7 +2531,7 @@ fn columns_of_rejects_named_argument() {
     let sql = "SELECT smelt.columns_of(t => orders) FROM t";
     let select = parse_select_stmt(sql);
     let ctx = TypeContext::new();
-    let diags = check_columns_of_diagnostics(&select, &ctx, "");
+    let diags = check_columns_of_diagnostics(&select, &ctx);
     assert!(
         diags
             .iter()
@@ -2551,7 +2551,7 @@ fn columns_of_rejects_named_argument() {
     // Positional arg must not emit ColumnsOfNamedArgument.
     let sql_ok = "SELECT smelt.columns_of(orders) FROM t";
     let select_ok = parse_select_stmt(sql_ok);
-    let diags_ok = check_columns_of_diagnostics(&select_ok, &ctx, "");
+    let diags_ok = check_columns_of_diagnostics(&select_ok, &ctx);
     assert!(
         !diags_ok
             .iter()
@@ -2635,7 +2635,7 @@ fn column_ref_field_projection_rejects_unknown_field() {
     let sql = "SELECT c.foo FROM t";
     let select = parse_select_stmt(sql);
     // Pass the actual source text so that to_range() can compute line/column positions.
-    let diags = check_column_ref_field_diagnostics(&select, &ctx, sql);
+    let diags = check_column_ref_field_diagnostics(&select, &ctx);
     assert!(
         diags
             .iter()
@@ -2653,22 +2653,22 @@ fn column_ref_field_projection_rejects_unknown_field() {
     );
     // Pin the diagnostic to the `foo` field-token span, not the whole `c.foo` expression.
     // Spec invariant: ColumnRefFieldUnknown must anchor at the field name token only.
+    // In "SELECT c.foo FROM t", `foo` is at byte offset 9..12.
     let unknown_diag = diags
         .iter()
         .find(|d| d.code == Some(crate::DiagnosticCode::ColumnRefFieldUnknown))
         .expect("already asserted above");
+    let foo_start = sql.find("foo").expect("`foo` in sql");
+    let foo_end = foo_start + "foo".len();
     assert_eq!(
-        unknown_diag.range.start,
-        smelt_parser::ast::Position { line: 0, column: 9 },
-        "diagnostic must start at the `foo` token (col 9), not the start of `c.foo`"
+        usize::from(unknown_diag.range.start()),
+        foo_start,
+        "diagnostic must start at the `foo` token byte offset, not the start of `c.foo`"
     );
     assert_eq!(
-        unknown_diag.range.end,
-        smelt_parser::ast::Position {
-            line: 0,
-            column: 12
-        },
-        "diagnostic must end after `foo` (col 12)"
+        usize::from(unknown_diag.range.end()),
+        foo_end,
+        "diagnostic must end after `foo`"
     );
 }
 
@@ -3411,7 +3411,7 @@ fn model_ref_field_projection_rejects_unknown_field() {
     // m.foo — unknown field on ModelRef → ModelRefFieldUnknown
     let sql = "SELECT m.foo FROM t";
     let select = parse_select_stmt(sql);
-    let diags = check_model_ref_source_ref_field_diagnostics(&select, &ctx, sql);
+    let diags = check_model_ref_source_ref_field_diagnostics(&select, &ctx);
     assert!(
         diags
             .iter()
@@ -3438,7 +3438,7 @@ fn model_ref_field_projection_rejects_unknown_field() {
     // s.bar — unknown field on SourceRef → SourceRefFieldUnknown
     let sql_s = "SELECT s.bar FROM t";
     let select_s = parse_select_stmt(sql_s);
-    let diags_s = check_model_ref_source_ref_field_diagnostics(&select_s, &ctx, sql_s);
+    let diags_s = check_model_ref_source_ref_field_diagnostics(&select_s, &ctx);
     assert!(
         diags_s
             .iter()
@@ -3484,7 +3484,7 @@ fn model_ref_assignable_to_table_expr_in_columns_of_arg() {
     // smelt.columns_of(m) — m is ModelRef; must produce no ColumnsOfRequiresTableExpr diagnostic.
     let sql = "SELECT smelt.columns_of(m) FROM t";
     let select = parse_select_stmt(sql);
-    let diags = check_columns_of_diagnostics(&select, &ctx, sql);
+    let diags = check_columns_of_diagnostics(&select, &ctx);
     let table_expr_errors: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
@@ -3514,7 +3514,7 @@ fn source_ref_assignable_to_table_expr_in_columns_of_arg() {
 
     let sql = "SELECT smelt.columns_of(s) FROM t";
     let select = parse_select_stmt(sql);
-    let diags = check_columns_of_diagnostics(&select, &ctx, sql);
+    let diags = check_columns_of_diagnostics(&select, &ctx);
     let table_expr_errors: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
@@ -3624,7 +3624,7 @@ fn m_columns_equivalent_to_smelt_columns_of_m() {
     // smelt.columns_of(m) via smelt path call — check no ColumnsOfRequiresTableExpr.
     let sql = "SELECT smelt.columns_of(m) FROM t";
     let select = parse_select_stmt(sql);
-    let diags = check_columns_of_diagnostics(&select, &ctx, sql);
+    let diags = check_columns_of_diagnostics(&select, &ctx);
     let table_expr_errors: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
@@ -5021,7 +5021,7 @@ fn load_yaml_path_must_be_literal_emits_diagnostic() {
     // `some_var` is not a string literal — should emit ConfigLoaderPathNotLiteral.
     let src = "SELECT smelt.config.load_yaml(some_var, {f: Text}) FROM t";
     let root = parse_loader_sql(src);
-    let diags = check_loader_call_diagnostics(&root, &no_files, &empty_registry(), "");
+    let diags = check_loader_call_diagnostics(&root, &no_files, &empty_registry());
     let not_literal: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderPathNotLiteral))
@@ -5050,7 +5050,7 @@ fn load_yaml_path_escapes_workspace_emits_diagnostic() {
             path_literal
         );
         let root = parse_loader_sql(&src);
-        let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+        let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry());
         let escapes: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderPathEscapesWorkspace))
@@ -5071,10 +5071,7 @@ fn load_yaml_path_escapes_workspace_emits_diagnostic() {
 fn load_yaml_path_backslash_emits_diagnostic() {
     // Note: in SQL, backslash in a string literal must be doubled or escaped.
     // We test the check_loader_path pure function directly.
-    let zero_range = crate::Range {
-        start: smelt_parser::ast::Position { line: 0, column: 0 },
-        end: smelt_parser::ast::Position { line: 0, column: 0 },
-    };
+    let zero_range = TextRange::empty(rowan::TextSize::from(0));
     let outcome = check_loader_path(
         "configs\\cohorts.yaml",
         zero_range,
@@ -5095,7 +5092,7 @@ fn load_yaml_file_not_found_emits_diagnostic() {
     let src = "SELECT smelt.config.load_yaml('nope.yaml', {f: Text}) FROM t";
     let root = parse_loader_sql(src);
     // file_exists always returns false.
-    let diags = check_loader_call_diagnostics(&root, &no_files, &empty_registry(), "");
+    let diags = check_loader_call_diagnostics(&root, &no_files, &empty_registry());
     let not_found: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderFileNotFound))
@@ -5120,7 +5117,7 @@ fn load_yaml_schema_forbidden_emits_diagnostic() {
     // `Integer` is a bare scalar — forbidden as a loader schema.
     let src = "SELECT smelt.config.load_yaml('c.yaml', Integer) FROM t";
     let root = parse_loader_sql(src);
-    let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+    let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry());
     let forbidden: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
@@ -5135,7 +5132,7 @@ fn load_yaml_schema_forbidden_emits_diagnostic() {
     // `Text` is a bare scalar — also forbidden.
     let src2 = "SELECT smelt.config.load_yaml('c.yaml', Text) FROM t";
     let root2 = parse_loader_sql(src2);
-    let diags2 = check_loader_call_diagnostics(&root2, &all_files_exist, &empty_registry(), "");
+    let diags2 = check_loader_call_diagnostics(&root2, &all_files_exist, &empty_registry());
     let forbidden2: Vec<_> = diags2
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
@@ -5150,7 +5147,7 @@ fn load_yaml_schema_forbidden_emits_diagnostic() {
     // `Lambda<Text>` is a reflection witness — forbidden as a loader schema.
     let src3 = "SELECT smelt.config.load_yaml('c.yaml', Lambda<Text>) FROM t";
     let root3 = parse_loader_sql(src3);
-    let diags3 = check_loader_call_diagnostics(&root3, &all_files_exist, &empty_registry(), "");
+    let diags3 = check_loader_call_diagnostics(&root3, &all_files_exist, &empty_registry());
     let forbidden3: Vec<_> = diags3
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
@@ -5165,7 +5162,7 @@ fn load_yaml_schema_forbidden_emits_diagnostic() {
     // `ColumnRef` is a reflection witness — forbidden as a loader schema.
     let src4 = "SELECT smelt.config.load_yaml('c.yaml', ColumnRef) FROM t";
     let root4 = parse_loader_sql(src4);
-    let diags4 = check_loader_call_diagnostics(&root4, &all_files_exist, &empty_registry(), "");
+    let diags4 = check_loader_call_diagnostics(&root4, &all_files_exist, &empty_registry());
     let forbidden4: Vec<_> = diags4
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderSchemaForbidden))
@@ -5184,7 +5181,7 @@ fn load_yaml_schema_forbidden_emits_diagnostic() {
 fn load_toml_emits_reserved_diagnostic() {
     let src = "SELECT smelt.config.load_toml('c.toml', {f: Text}) FROM t";
     let root = parse_loader_sql(src);
-    let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+    let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry());
     let reserved: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(crate::DiagnosticCode::ConfigLoaderTomlNotYetSupported))
@@ -5216,7 +5213,7 @@ fn load_yaml_synthesises_schema_type_on_happy_path() {
     let src =
         "SELECT smelt.config.load_yaml('cohorts.yaml', {name: Text, threshold: Integer}) FROM t";
     let root = parse_loader_sql(src);
-    let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry(), "");
+    let diags = check_loader_call_diagnostics(&root, &all_files_exist, &empty_registry());
     // On the happy path, the pure function emits zero diagnostics.
     // (The actual validation diagnostics — from parsing the file — are
     //  emitted by the Salsa `loader_resolved_value` orchestration layer,
@@ -5804,7 +5801,7 @@ fn ternary_keyword_shadowed_smelt_define() {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
     let define: SmeltDefine = file.defines().next().expect("one smelt.define");
-    let diags = check_define_name_shadowing(&define, "");
+    let diags = check_define_name_shadowing(&define);
     assert!(
         diags
             .iter()

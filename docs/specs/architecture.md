@@ -317,6 +317,26 @@ The invariant exists because incidents trace to two failure modes at different l
 
 The standing CI gate is `cargo test -p smelt-runtime --test execute_parity`, which runs the same fixture project through both `smelt-cli` and `smelt-ui` entry points and asserts identical model outputs, manifest contents, and selection sets. The fixture set includes test models (filter), generators (expansion), `smelt.fn.*` calls (compile), incremental models (batch dispatch), and cumulative aggregates (rule dispatch) — each one a known failure-mode-B class.
 
+### Diagnostic range encoding rule
+
+Diagnostics carry **byte-offset `TextRange` values internally**, never `(line, column)` form. Conversion to `(line, column)` happens **exactly once, at the boundary** between smelt's analysis layer and an external consumer — the LSP protocol, the CLI's human-readable terminal output, or any other surface. The boundary converter is backed by a per-file `LineIndex` (the `line-index` crate from `rust-lang/rust-analyzer`) that maps `TextSize` ↔ `(line, column)` in the encoding the consumer requested.
+
+The invariant exists because mid-flight `(line, column)` conversion has two failure modes that compound:
+
+- **Encoding ambiguity.** `(line, column)` is meaningless without an encoding: a column index in bytes, in UTF-16 code units (LSP's default), and in Unicode codepoints diverge for any non-ASCII text. Converting early forces a choice the analysis layer cannot make — only the consumer knows whether it's serving LSP (UTF-16 by default, configurable via `positionEncodingKind`), a Unix terminal (codepoints), or a binary protocol (bytes).
+- **Repeat conversion cost.** Re-running a `TextSize → (line, column)` scan at every diagnostic emission site is O(N) per call. A `LineIndex` built once per file is O(log N) per lookup with the binary-search cache. The "convert at the boundary" pattern is what rust-analyzer / rustc / Roslyn / TypeScript all do, and is the only design that doesn't degrade quadratically on large files.
+
+The rule reaches every type in `smelt-db`'s diagnostic surface, every diagnostic-producing function, every consumer of `Diagnostic`. `smelt_db::Diagnostic::range` is a `TextRange`. The four LSP / CLI emission points (`smelt-lsp::backend::publish_diagnostics`, `smelt-cli::commands::type_::run`, `smelt-cli::commands::run::report_diagnostic`, `smelt-runtime::reporter::emit_diagnostic`) each build a `LineIndex` for the source file and convert at the protocol/terminal boundary, in the encoding negotiated with the client (LSP `positionEncodingKind`) or fixed by the surface (terminal: codepoints, matching rustc).
+
+**The rule in practice:**
+- **DO** carry `rowan::TextRange` through every analysis function, every `Diagnostic`, every Salsa query that returns positions.
+- **DO** construct the `LineIndex` once per file at the boundary and reuse it across every diagnostic for that file.
+- **DO** consult the LSP `positionEncodingKind` capability when constructing diagnostics for an LSP client; default to UTF-16 (LSP default) when the client advertises no preference.
+- **DON'T** convert `TextRange` to `(line, column)` inside `smelt-db`, `smelt-parser`, or any other analysis crate.
+- **DON'T** store `Position` / `Range` fields on `Diagnostic` or any intermediate. The `text_range_to_range` / `offset_to_position` family of helpers exist only inside boundary converters.
+
+The standing CI gate is `cargo test -p smelt-lsp --test position_encoding`, which opens a workspace fixture containing non-ASCII identifiers and asserts that LSP diagnostics report the correct UTF-16 column at the diagnostic site under both the default UTF-16 and the negotiated UTF-8 (byte) encoding. ASCII-only fixtures continue to pass before and after this rule lands (since byte / UTF-16 / codepoint columns are identical for ASCII), so the existing `example_diagnostics` and `example_workspaces` gates are the regression baseline.
+
 ### Planner scope
 
 The planner handles cross-model and execution-shape transforms only:

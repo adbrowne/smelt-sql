@@ -15,7 +15,7 @@ use smelt_parser::ast::{ColumnRef, Expr, SelectStmt};
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_planner::logical::{JoinSpec, Provenance};
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticSeverity, Position, Range};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 
 /// Collect all column-reference names (recursively) from an expression subtree.
 ///
@@ -55,7 +55,7 @@ pub fn collect_expr_column_refs(root: &SyntaxNode) -> Vec<(Option<String>, Strin
 pub fn validate_provenance(
     select: &SelectStmt,
     provenance: &Provenance,
-    anchor_range: Range,
+    anchor_range: rowan::TextRange,
 ) -> Vec<Diagnostic> {
     let declared_entries = match provenance {
         Provenance::Declared(entries) => entries,
@@ -162,7 +162,7 @@ pub fn validate_provenance(
 pub fn validate_joins(
     select: &SelectStmt,
     joins: &[JoinSpec],
-    anchor_range: Range,
+    anchor_range: rowan::TextRange,
 ) -> Vec<Diagnostic> {
     if joins.is_empty() {
         return Vec::new();
@@ -264,10 +264,7 @@ pub fn provenance_validator_diagnostics_for_file(
             .iter()
             .find(|s| s.name == name)
             .map(|s| s.name_range)
-            .unwrap_or(Range {
-                start: Position { line: 0, column: 0 },
-                end: Position { line: 0, column: 0 },
-            });
+            .unwrap_or(rowan::TextRange::empty(rowan::TextSize::from(0)));
 
         // Get the outermost SELECT from the body
         let Some(body) = define.body() else {

@@ -27,7 +27,7 @@ pub enum RefKind {
 /// - Row polymorphism (wildcard expansion, input constraints)
 use rowan::TextRange;
 use smelt_types::TypedColumn;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Represents a column in a model's output schema
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +91,7 @@ pub struct RowExtension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputConstraint {
     pub ref_name: String,
-    pub required_columns: HashMap<String, ColumnConstraint>,
+    pub required_columns: BTreeMap<String, ColumnConstraint>,
 }
 
 /// A single column constraint within an InputConstraint

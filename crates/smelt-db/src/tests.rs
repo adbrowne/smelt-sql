@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::test_harness::TestDb;
+use line_index::LineIndex;
 use std::path::PathBuf;
 
 #[test]
@@ -183,9 +184,11 @@ fn test_undefined_ref_diagnostic_position() {
         diag.message
     );
 
-    // Check position - should be on line 0
-    assert_eq!(diag.range.start.line, 0);
-    assert_eq!(diag.range.end.line, 0);
+    // Check position - should be on line 0 (single-line source)
+    let content_single = "SELECT * FROM smelt.models.nonexistent_model";
+    let li = LineIndex::new(content_single);
+    assert_eq!(li.line_col(diag.range.start()).line, 0);
+    assert_eq!(li.line_col(diag.range.end()).line, 0);
 }
 
 #[test]
@@ -220,11 +223,12 @@ fn test_undefined_ref_diagnostic_position_multiline() {
     // Check it starts on line 2 (0-indexed). The end may be line 2 or 3
     // depending on whether the path node's text range includes the trailing
     // newline — either is acceptable; the important thing is start line.
-    assert_eq!(diag.range.start.line, 2);
+    let li = LineIndex::new(content);
+    assert_eq!(li.line_col(diag.range.start()).line, 2);
     assert!(
-        diag.range.end.line >= 2,
-        "end line should be >= 2, got: {:?}",
-        diag.range.end
+        li.line_col(diag.range.end()).line >= 2,
+        "end line should be >= 2, got: line {}",
+        li.line_col(diag.range.end()).line
     );
 }
 

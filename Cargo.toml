@@ -63,3 +63,5 @@ pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py39"] }
 proptest = "1.4"
 # CSV parsing (strict tokenisation / quoting)
 csv = "1.3"
+# Line-index for TextSize ↔ (line, column) conversion at diagnostic boundaries
+line-index = "0.1.2"

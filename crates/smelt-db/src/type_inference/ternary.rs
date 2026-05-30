@@ -354,26 +354,13 @@ fn compute_ternary_lub(then_ty: &SmeltType, else_ty: &SmeltType) -> LubResult {
 /// parser's error recovery may eject `THEN_KW` tokens to the top-level FILE node
 /// when they appear in an unexpected expression position.
 ///
-/// Pure function — no Salsa dependency. `text` is the raw source for span
-/// conversion; pass `""` in unit tests where exact position is not under test.
+/// Pure function — no Salsa dependency.
 pub fn check_dangling_ternary_keywords(
     file_syntax: &smelt_parser::syntax_kind::SyntaxNode,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::SyntaxKind::{TERNARY_EXPR, THEN_KW, WHEN_CLAUSE};
 
     let mut diags: Vec<crate::Diagnostic> = Vec::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
 
     // Walk all tokens in the full file to find dangling THEN_KW.
     for elem in file_syntax.descendants_with_tokens() {
@@ -401,7 +388,7 @@ pub fn check_dangling_ternary_keywords(
                     None,
                     None,
                 ),
-                range: to_range(token.text_range()),
+                range: token.text_range(),
                 code: Some(crate::DiagnosticCode::TernaryDanglingThen),
                 data: None,
             });
@@ -422,28 +409,15 @@ pub fn check_dangling_ternary_keywords(
 /// This function only walks the `SelectStmt` subtree and cannot reach FILE-level tokens
 /// that the parser may have ejected during error recovery.
 ///
-/// Pure function — no Salsa dependency. `text` is the raw source for span
-/// conversion; pass `""` in unit tests where exact position is not under test.
+/// Pure function — no Salsa dependency.
 pub fn check_ternary_expr_diagnostics(
     select_stmt: &smelt_parser::ast::SelectStmt,
     ctx: &TypeContext,
-    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::SyntaxKind::TERNARY_EXPR;
     use smelt_types::format_smelt_type_hover;
 
     let mut diags: Vec<crate::Diagnostic> = Vec::new();
-
-    let to_range = |range: rowan::TextRange| -> crate::Range {
-        if text.is_empty() {
-            crate::Range {
-                start: smelt_parser::ast::Position { line: 0, column: 0 },
-                end: smelt_parser::ast::Position { line: 0, column: 0 },
-            }
-        } else {
-            smelt_parser::ast::text_range_to_range(text, range)
-        }
-    };
 
     let root = select_stmt.syntax();
 
@@ -470,7 +444,7 @@ pub fn check_ternary_expr_diagnostics(
                             None,
                             None,
                         ),
-                        range: to_range(node.text_range()),
+                        range: node.text_range(),
                         code: Some(crate::DiagnosticCode::TernaryDanglingElse),
                         data: None,
                     });
@@ -487,8 +461,8 @@ pub fn check_ternary_expr_diagnostics(
                         // Anchor at the condition expression span.
                         let cond_range = ternary
                             .condition()
-                            .map(|e| to_range(e.text_range()))
-                            .unwrap_or_else(|| to_range(node.text_range()));
+                            .map(|e| e.text_range())
+                            .unwrap_or_else(|| node.text_range());
                         let found_str = format_smelt_type_hover(found);
                         diags.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
@@ -518,8 +492,8 @@ pub fn check_ternary_expr_diagnostics(
                             node.children_with_tokens()
                                 .filter_map(|e| e.into_token())
                                 .find(|t| t.kind() == ELSE_KW)
-                                .map(|t| to_range(t.text_range()))
-                                .unwrap_or_else(|| to_range(node.text_range()))
+                                .map(|t| t.text_range())
+                                .unwrap_or_else(|| node.text_range())
                         };
                         let then_str = format_smelt_type_hover(then_type);
                         let else_str = format_smelt_type_hover(else_type);
@@ -669,7 +643,7 @@ mod tests {
         let select = file.select_stmt().expect("SelectStmt");
 
         let ctx = TypeContext::new();
-        let diags = check_ternary_expr_diagnostics(&select, &ctx, "");
+        let diags = check_ternary_expr_diagnostics(&select, &ctx);
 
         assert!(
             diags

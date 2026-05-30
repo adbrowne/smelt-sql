@@ -81,21 +81,19 @@ fn test_not_from_position_complete_table_ref() {
 // `Backend` / tower-lsp `Client` to validate the renderer contract.
 // =====================================================================
 
+use rowan::{TextRange, TextSize};
 use smelt_db::{
     Diagnostic as DbDiagnosticT, DiagnosticCode, DiagnosticData, DiagnosticSeverity as DbSeverityT,
-    Range as DbRange,
 };
-use smelt_parser::ast::Position as DbPosition;
 use smelt_types::FrameInfo;
 
-fn make_db_range(line: u32, col: u32) -> DbRange {
-    DbRange {
-        start: DbPosition { line, column: col },
-        end: DbPosition {
-            line,
-            column: col + 1,
-        },
-    }
+/// Build a `TextRange` for use in test fixtures.
+/// Maps `(line, col)` to byte offsets via the simple formula `line * 100 + col`
+/// so that `line=0,col=0` → `[0, 1)` and distinct (line, col) pairs give
+/// distinct ranges without requiring real source text in unit tests.
+fn make_db_range(line: u32, col: u32) -> TextRange {
+    let start = line * 100 + col;
+    TextRange::new(TextSize::from(start), TextSize::from(start + 1))
 }
 
 fn make_frame(function: &str, param: &str, bound_type: &str, decl_line: u32) -> FrameInfo {
