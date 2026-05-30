@@ -1,0 +1,31 @@
+name: incremental_idempotency
+version: 1
+
+# Hermetic fixture for the incremental DELETE+INSERT contract
+# (docs/specs/incremental_models.md). The integration test
+# crates/smelt-cli/tests/incremental_idempotency.rs pre-seeds raw.events,
+# then drives `smelt run` with event-time flags to assert:
+#   - Constraint #7: idempotence under fixed input (re-run same window => same state)
+#   - Constraint #6: per-partition equivalence with a full refresh
+#   - exclusive end bound (Surface: --event-time-end is exclusive)
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+models:
+  daily_events:
+    materialization: table
+    incremental:
+      enabled: true
+    timeseries:
+      event_time_column: event_ts
+      partition_column: event_date
+      granularity: day

@@ -1,0 +1,6 @@
+description: Raw pulse event stream; pre-loaded by the integration test
+columns:
+- name: event_ts
+  type: TIMESTAMP
+- name: user_id
+  type: INTEGER
