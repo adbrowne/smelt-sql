@@ -895,6 +895,26 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         // range on the CLI invocation. The driving source's timeseries: comes
         // from the upstream model's metadata, gathered from the logical graph.
         if phys_node.materialization == Materialization::CumulativeAggregate {
+            // Build the source_timeseries map from the logical graph: every
+            // dependency whose declared `timeseries:` block is non-None. Built
+            // up-front so the classifier can run on BOTH the windowed and the
+            // no-window full-refresh path.
+            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
+            if let Ok(node) = graph.get_node(model_name) {
+                for dep_name in &node.dependencies {
+                    if let Ok(dep_node) = graph.get_node(dep_name) {
+                        if let Some(ts) = &dep_node.timeseries {
+                            // Key by the smelt.<path> reference as it appears
+                            // in the model SQL — the dep_node carries
+                            // address_segments.
+                            let smelt_key =
+                                format!("smelt.{}", dep_node.model_file.address_segments.join("."));
+                            source_timeseries.insert(smelt_key, ts.clone());
+                        }
+                    }
+                }
+            }
+
             // Without a time range, fall back to single-shot full refresh: the
             // SELECT is run once, with no per-partition source filter, and the
             // result is CREATE TABLE AS'd. This makes `smelt build` work
@@ -908,6 +928,19 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                         model_name
                     );
                     let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+                    // Classify even on the no-window full-refresh path: a
+                    // classifier rejection must REFUSE the model
+                    // (cumulative_aggregate.md Constraint #10 — "No silent
+                    // downgrade. … No fallback to full-refresh"), never silently
+                    // materialise forbidden cumulative SQL as a plain table.
+                    smelt_runtime::classify_cumulative_sql(
+                        model_name,
+                        &clean_sql,
+                        &source_timeseries,
+                    )
+                    .with_context(|| {
+                        format!("Failed to execute cumulative model: {}", model_name)
+                    })?;
                     let compiled = compiler
                         .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
                         .with_context(|| format!("Failed to compile model: {}", model_name))?;
@@ -943,24 +976,6 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     continue;
                 }
             };
-
-            // Build the source_timeseries map from the logical graph: every
-            // dependency whose declared `timeseries:` block is non-None.
-            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
-            if let Ok(node) = graph.get_node(model_name) {
-                for dep_name in &node.dependencies {
-                    if let Ok(dep_node) = graph.get_node(dep_name) {
-                        if let Some(ts) = &dep_node.timeseries {
-                            // Key by the smelt.<path> reference as it appears
-                            // in the model SQL — the dep_node carries
-                            // address_segments.
-                            let smelt_key =
-                                format!("smelt.{}", dep_node.model_file.address_segments.join("."));
-                            source_timeseries.insert(smelt_key, ts.clone());
-                        }
-                    }
-                }
-            }
 
             let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
             let result = smelt_runtime::execute_cumulative_aggregate(

@@ -374,6 +374,24 @@ fn collect_refs_from_sql(sql: &str) -> Vec<String> {
     refs.into_iter().collect()
 }
 
+/// Classify a cumulative model's SQL, collecting its `smelt.<path>` refs and
+/// looking the driving source up in `source_timeseries`. Returns the
+/// classification on success or a formatted error on rejection.
+///
+/// This is the single entry point both run-pipeline paths use to enforce the
+/// classifier — including the **no-window full-refresh** path. A classifier
+/// rejection must refuse the model rather than silently materialise forbidden
+/// SQL (`cumulative_aggregate.md` Constraint #10 — "No silent downgrade").
+pub fn classify_cumulative_sql(
+    model_name: &str,
+    clean_sql: &str,
+    source_timeseries: &SourceTimeseriesMap,
+) -> Result<CumulativeClassification> {
+    let refs = collect_refs_from_sql(clean_sql);
+    classify_cumulative(clean_sql, &refs, source_timeseries)
+        .map_err(|diags| format_classifier_error(model_name, &diags))
+}
+
 /// Format classifier diagnostics into a single error message for the CLI.
 fn format_classifier_error(
     model_name: &str,

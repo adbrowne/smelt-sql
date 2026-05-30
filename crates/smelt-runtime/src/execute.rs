@@ -422,6 +422,18 @@ pub async fn execute_project(
                     // `smelt build` / `smelt run` without an event-time
                     // window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
+                    // Classify even on the no-window full-refresh path: a
+                    // classifier rejection must REFUSE the model
+                    // (cumulative_aggregate.md Constraint #10 — "No silent
+                    // downgrade. … No fallback to full-refresh"). Without this,
+                    // forbidden cumulative SQL (e.g. a non-allowlisted
+                    // aggregator) would be silently materialised as a plain
+                    // full refresh whenever no event-time window is supplied.
+                    crate::cumulative::classify_cumulative_sql(
+                        &plan.name,
+                        &clean_sql,
+                        &source_timeseries,
+                    )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
                         &plan.model_file,
                         schema,

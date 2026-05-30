@@ -1,0 +1,23 @@
+name: cumulative_classifier_gate
+version: 1
+
+# Hermetic fixture for the cumulative_aggregate classifier gate
+# (docs/specs/cumulative_aggregate.md §"Classifier checks", Constraint #10:
+# "No silent downgrade"). The driving source is a self-contained VALUES literal
+# so the workspace runs via `smelt run`/`build` with no external seed.
+#
+# Driven by crates/smelt-cli/tests/cumulative_classifier_gate.rs:
+#   - edges_valid: a well-formed cumulative builds (guards against over-rejection)
+#   - edges_bad_aggregator: STRING_AGG must be REFUSED even with no run window
+#     (the classifier must run on the no-window full-refresh path too).
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
