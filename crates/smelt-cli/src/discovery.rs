@@ -298,14 +298,15 @@ impl ModelDiscovery {
                     _ => None,
                 };
 
-                let name = model_metadata
-                    .as_ref()
-                    .and_then(|m| m.name.clone())
-                    .or_else(|| {
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.to_string())
-                    })
+                // Spec `models.md` §"Model naming": for single-model files the
+                // file stem is *always* authoritative; the `name:` frontmatter
+                // key is accepted but has no effect on identity. Mirrors
+                // `smelt-core::discovery::parse_sql_file` and `smelt-db`'s
+                // `parse_model` so all discovery paths agree on the name.
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
                     .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
 
                 let clean_content = smelt_parser::strip_frontmatter(&content);

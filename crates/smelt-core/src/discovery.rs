@@ -322,14 +322,15 @@ pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<Model
                 _ => None,
             };
 
-            let name = model_metadata
-                .as_ref()
-                .and_then(|m| m.name.clone())
-                .or_else(|| {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                })
+            // Spec `models.md` §"Model naming": for single-model files the file
+            // stem is *always* authoritative. The `name:` frontmatter key is
+            // accepted (so YAML round-trips) but has no effect on identity. This
+            // matches `smelt-db`'s `parse_model` (which keys on `file_stem`);
+            // honouring `name:` here would create an LSP↔CLI naming asymmetry.
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
                 .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
 
             // Strip frontmatter before parsing so the parser sees only SQL
@@ -647,5 +648,38 @@ SELECT 2 AS id
         let models = discovery.discover_models().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].canonical_path(), "users");
+    }
+
+    /// Spec `models.md` §"Model naming" + §Design: in a single-model file the
+    /// file stem is **always** authoritative; the `name:` frontmatter key is
+    /// accepted but has no effect on the model's identity. A file
+    /// `daily_revenue.sql` declaring `name: something_else` must still resolve
+    /// to the model name `daily_revenue` (and canonical path `daily_revenue`),
+    /// not `something_else`.
+    #[test]
+    fn single_model_frontmatter_name_does_not_override_file_stem() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let content = "---\nname: something_else\nmaterialization: table\n---\nSELECT 1 AS x";
+        std::fs::File::create(models_dir.join("daily_revenue.sql"))
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].name, "daily_revenue",
+            "single-model identity must come from the file stem, not frontmatter name:"
+        );
+        assert_eq!(
+            models[0].canonical_path(),
+            "daily_revenue",
+            "canonical path leaf must be the file stem, not frontmatter name:"
+        );
     }
 }
