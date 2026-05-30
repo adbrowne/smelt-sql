@@ -484,14 +484,18 @@ async fn staging_from_sources() {
 // ---------------------------------------------------------------------------
 
 /// Find-references on a `smelt.functions.<name>(...)` call site returns at
-/// least the call site itself. Reproduces the VSCode case the user hit:
+/// least the call site itself. Uses `parse_event_payload`, called from
+/// `models/silver/events_parsed.sql`. Reproduces the VSCode case the user hit:
 /// open `examples/web_analytics/` as the workspace folder and "Find All
 /// References" on the `sessionize` token inside the
 /// `smelt.functions.sessionize(...)` call in `models/silver/sessions.sql`.
 #[tokio::test]
 async fn find_references_on_function_call_in_web_analytics() {
     let workspace = examples_root().join("web_analytics");
-    let target_file = workspace.join("models").join("silver").join("sessions.sql");
+    let target_file = workspace
+        .join("models")
+        .join("silver")
+        .join("events_parsed.sql");
     assert!(
         target_file.exists(),
         "fixture not found: {}",
@@ -502,66 +506,66 @@ async fn find_references_on_function_call_in_web_analytics() {
     client
         .open_file(&target_file)
         .await
-        .expect("open sessions.sql");
+        .expect("open events_parsed.sql");
 
     // Drain initial diagnostics so subsequent requests don't race with them.
     let _ = client.collect_diagnostics(1000).await;
 
-    // models/silver/sessions.sql line 34 (1-indexed):
-    //     FROM smelt.functions.sessionize(
-    // Cursor on "sessionize" word — char 28 is inside the token.
+    // models/silver/events_parsed.sql line 27 (1-indexed):
+    //     smelt.functions.parse_event_payload(payload).*
+    // Cursor on "parse_event_payload" word — char 25 is inside the token.
     let file_uri = format!("file://{}", target_file.display());
-    let locations = client.references(&file_uri, 33, 28).await;
+    let locations = client.references(&file_uri, 26, 25).await;
     client.shutdown().await;
 
     assert!(
         !locations.is_empty(),
-        "expected at least one reference for smelt.functions.sessionize, got 0"
+        "expected at least one reference for smelt.functions.parse_event_payload, got 0"
     );
     let on_target = locations
         .iter()
-        .any(|loc| loc.uri.as_str().contains("sessions.sql"));
+        .any(|loc| loc.uri.as_str().contains("events_parsed.sql"));
     assert!(
         on_target,
-        "expected the call site in sessions.sql among references; got: {:?}",
+        "expected the call site in events_parsed.sql among references; got: {:?}",
         locations
     );
 }
 
 /// Find-references on the `smelt.define <name>` declaration name token
 /// returns the call sites in the same project. This mirrors the VSCode
-/// case where the user puts the cursor on `sessionize` inside
-/// `examples/web_analytics/functions/sessionize.sql`'s
-/// `smelt.define sessionize(...)` line and asks "find all callers".
+/// case where the user puts the cursor on `parse_event_payload` inside
+/// `examples/web_analytics/functions/parse_event_payload.sql`'s
+/// `smelt.define parse_event_payload(...)` line and asks "find all callers".
 #[tokio::test]
 async fn find_references_from_function_definition_in_web_analytics() {
     let workspace = examples_root().join("web_analytics");
-    let target_file = workspace.join("functions").join("sessionize.sql");
+    let target_file = workspace.join("functions").join("parse_event_payload.sql");
     assert!(target_file.exists());
 
     let mut client = TestClient::open_workspace(&workspace).await;
     client
         .open_file(&target_file)
         .await
-        .expect("open sessionize.sql");
+        .expect("open parse_event_payload.sql");
     let _ = client.collect_diagnostics(1000).await;
 
-    // Line 20 (1-indexed) = line 19 (0-indexed) is `smelt.define sessionize(`.
-    // The `sessionize` token starts at character 13.
+    // Line 5 (1-indexed) = line 4 (0-indexed) is `smelt.define parse_event_payload(`.
+    // The `parse_event_payload` token starts at character 13.
     let file_uri = format!("file://{}", target_file.display());
-    let locations = client.references(&file_uri, 19, 16).await;
+    let locations = client.references(&file_uri, 4, 16).await;
     client.shutdown().await;
 
     assert!(
         !locations.is_empty(),
-        "expected ≥1 reference for the sessionize define-name token, got 0"
+        "expected ≥1 reference for the parse_event_payload define-name token, got 0"
     );
     let has_call_site = locations
         .iter()
-        .any(|loc| loc.uri.as_str().contains("sessions.sql"));
+        .any(|loc| loc.uri.as_str().contains("events_parsed.sql"));
     assert!(
         has_call_site,
-        "expected the sessions.sql call site among references; got: {:?}",
+        "expected the events_parsed.sql call site among references; got: {:?}",
         locations
     );
 }

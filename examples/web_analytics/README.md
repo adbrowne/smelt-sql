@@ -80,9 +80,7 @@ Source files:
 - [`models/bronze/raw_events.sql`](models/bronze/raw_events.sql)
 - [`models/silver/events_parsed.sql`](models/silver/events_parsed.sql) +
   [`functions/parse_event_payload.sql`](functions/parse_event_payload.sql)
-- [`models/silver/sessions.sql`](models/silver/sessions.sql) +
-  [`functions/sessionize.sql`](functions/sessionize.sql) +
-  [`functions/compute_session_start_date.sql`](functions/compute_session_start_date.sql) (see [Known divergences](#known-divergences))
+- [`models/silver/sessions.sql`](models/silver/sessions.sql) (bounded cross-midnight sessionization — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
 - [`models/silver/device_user_edges.sql`](models/silver/device_user_edges.sql)
 - [`models/gold/identity_forward_only.sql`](models/gold/identity_forward_only.sql)
 - [`models/gold/identity_backward_fill.sql`](models/gold/identity_backward_fill.sql)
@@ -176,16 +174,32 @@ rather than retroactively backfilling history every run.  `verify_incremental_eq
 asserts the local-column equality and prints the global-column divergence as
 a sanity check.
 
-### One known cost: `sessions` reads all events per partition
+### Why `sessions` spans midnight with a bounded lookback
 
-Smelt injects the partition filter on the *outermost* SELECT only. Because
-`sessionize` is a transparent function, its `LAG OVER` runs over the entire
-`silver/events_parsed` table on every iteration before the outer
-`WHERE session_start_date >= D AND session_start_date < D+1` filter is
-applied. The output is correct and only today's rows are written, but the
-compute scales with all-history events, not just today's. Source-level filter
-pushdown is on smelt's roadmap; until it lands, this is the price of running
-`sessionize` inside an incremental model.
+`silver/sessions` reconstructs sessions across midnight while reading and
+writing only a bounded window — the property that keeps per-day cost flat as
+history grows.
+
+The sessionization is inlined in the model body so the planner can *see* its
+window functions (Form A bound derivation runs on the outer SQL, not inside
+`smelt.define` bodies). Each `LAG`/`MAX OVER` carries a
+`RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW` frame: the planner
+derives a 1-day lookback and widens the `silver/events_parsed` read to the
+previous day, so a session whose events straddle midnight is reconstructed as
+**one** row instead of being split at the partition boundary. The 1-day frame
+is also the cap — a session whose sub-30-minute activity chain runs longer than
+the lookback is clipped at the frame edge rather than reading unbounded history.
+
+Because the partition column `session_start_date` is *derived* and can skew
+earlier than the events that update it (a session that started yesterday gains
+events today), the model carries a Form B filter
+(`event_date BETWEEN session_start_date - INTERVAL '1 day' AND … + INTERVAL '1 day'`)
+that widens the **write** window to `[D-1, D+1)`. The planner's DELETE+INSERT
+deletes the same widened window the INSERT writes, so re-running consecutive
+days stays idempotent (no duplicate rows in the lookback partition).
+
+Session identity is `(device_id, session_start_ts)` — stable across run windows,
+so a session reprocessed in a different window keeps the same `session_id`.
 
 ## Run locally
 
@@ -355,26 +369,21 @@ cases rather than aggregate statistics.
 
 ## Known divergences
 
-### `compute_session_start_date.sql` is retained
+### Function-encapsulated window lookback is not yet derived
 
-`silver/sessions.sql` would ideally inline `FIRST_VALUE(event_ts) OVER
-(PARTITION BY device_id, session_seq ORDER BY event_ts) AS session_start_date`
-directly. However, the planner's batch-safety classifier admits an `OVER`
-clause only when its `PARTITION BY` list includes the model's
-`partition_column`. For `silver/sessions` the `partition_column` is
-`session_start_date`, but `session_start_date` is the *output* of the window
-function — it cannot appear in that same OVER's PARTITION BY. The inlined
-shape therefore fails the safety check and the model would be refused
-incrementality.
-
-`functions/compute_session_start_date.sql` hides the `OVER` inside a
-transparent function body, which the outer-body safety scan does not reach.
-The file exists solely to keep `silver/sessions` classified as incremental
-until the planner gains the ability to admit `OVER` clauses whose PARTITION
-BY keys *determine* the partition_column (i.e., `{device_id, session_seq}`
-is a functional determinant of `session_start_date`). That classifier
-improvement is tracked separately and does not block any other part of this
-pipeline.
+`silver/sessions` inlines its window functions in the model body rather than
+calling a `smelt.define` sessionize function. This is deliberate: the planner's
+Form A bound derivation runs on the outer SQL only, so a `RANGE BETWEEN INTERVAL`
+frame hidden inside a function body is invisible and the model would silently
+default to a zero-lookback read (splitting cross-midnight sessions). Inlining
+keeps the `RANGE` frames visible, so the 1-day lookback is derived directly. The
+window functions partition by `device_id` — which does *not* include the model's
+`partition_column` (`session_start_date`) — yet are admitted because each carries
+a bounded `RANGE BETWEEN INTERVAL '1 day' PRECEDING` frame; the bounded frame
+proves the window is partition-local up to the lookback (see
+`docs/specs/incremental_models.md` § "Batch safety classification"). Restoring a
+reusable sessionize function awaits expanded-CST bound derivation (tracked in
+`docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`).
 
 ## How this example was built
 
