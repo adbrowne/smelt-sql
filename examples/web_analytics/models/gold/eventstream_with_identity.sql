@@ -77,3 +77,11 @@ LEFT JOIN smelt.gold.identity_backward_fill b
     ON e.device_id = b.device_id
 LEFT JOIN smelt.gold.identity_connected_components c
     ON e.device_id = c.device_id
+-- Form B: a session that started on the previous day can own an event on this
+-- day across midnight. Declaring that session_start_date stays within 1 day of
+-- event_date widens the sessions read to the previous partition, so the day-D
+-- event still finds its D-1-started session. Kept as a WHERE filter rather than
+-- a JOIN condition so the incremental safety classifier reads it cleanly.
+WHERE s.session_start_date
+    BETWEEN e.event_date - INTERVAL '1 day'
+        AND e.event_date + INTERVAL '1 day'

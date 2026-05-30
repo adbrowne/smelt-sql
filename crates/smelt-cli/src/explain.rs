@@ -92,7 +92,10 @@ fn is_self_origin(origins: &[String]) -> bool {
 }
 
 /// Build the explain output from the logical graph (config already resolved on nodes).
-pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
+pub fn build_explain_output(
+    graph: &LogicalGraph,
+    fn_bodies: &smelt_runtime::FnBodyMap,
+) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
     let mut models = BTreeMap::new();
@@ -102,9 +105,16 @@ pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
 
         let incremental = match (&node.incremental, &node.timeseries) {
             (Some(inc), Some(ts)) => {
-                let batch_safety = compute_batch_safety_label(&node.name, model_file, inc, ts);
-                let source_bounds =
-                    compute_source_bounds_for_node(node, &model_file.content, graph);
+                // Classify and derive bounds on the *expanded* SQL so a
+                // `RANGE BETWEEN INTERVAL` (or any Form A/B pattern) declared
+                // inside a `smelt.define` body is seen — matching the execution
+                // path. The planner is pure (no function registry), so the
+                // expansion happens here in the CLI layer.
+                let expanded_sql =
+                    smelt_runtime::expand_function_calls(&model_file.content, fn_bodies);
+                let batch_safety =
+                    compute_batch_safety_label(&node.name, &expanded_sql, model_file, inc, ts);
+                let source_bounds = compute_source_bounds_for_node(node, &expanded_sql, graph);
                 Some(ExplainIncremental {
                     granularity: ts.granularity.clone(),
                     partition_column: ts.partition_column.clone(),
@@ -256,13 +266,14 @@ fn compute_source_bounds_for_node(
 
 fn compute_batch_safety_label(
     name: &str,
+    sql: &str,
     model_file: &ModelFile,
     inc: &IncrementalConfig,
     ts: &TimeseriesConfig,
 ) -> String {
     let model_info = ModelInfo {
         name: name.to_string(),
-        sql: model_file.content.clone(),
+        sql: sql.to_string(),
         refs: model_file
             .refs
             .iter()
@@ -353,6 +364,72 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_safety_uses_expanded_function_body() {
+        use smelt_core::config::TimeseriesConfig;
+        use smelt_core::{Granularity, IncrementalConfig};
+
+        // A model whose only lookback lives inside a `smelt.define` body must
+        // classify as `bounded_safe` — but only when the explain path expands
+        // the function. With no registry the outer SQL shows no lookback and it
+        // falls back to `fully_batch_safe`. This is the classification-path
+        // counterpart to the execution-path expansion.
+        let content = "SELECT device_id, d FROM smelt.functions.windowed(src => raw_events)";
+        let models = vec![make_model("sessions", vec![], content)];
+        let config = make_config(vec![(
+            "sessions",
+            ModelConfig {
+                materialization: Some(Materialization::Table),
+                timeseries: Some(TimeseriesConfig {
+                    event_time_column: "d".to_string(),
+                    partition_column: "d".to_string(),
+                    granularity: Granularity::Day,
+                    week_start: None,
+                }),
+                incremental: Some(IncrementalConfig {
+                    enabled: true,
+                    unique_key: vec![],
+                    safety_overrides: Default::default(),
+                }),
+                tags: vec![],
+                target: None,
+            },
+        )]);
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+
+        let mut fn_bodies: smelt_runtime::FnBodyMap = HashMap::new();
+        fn_bodies.insert(
+            "windowed".to_string(),
+            (
+                vec![("src".to_string(), None)],
+                "(SELECT device_id, d, LAG(d) OVER (PARTITION BY device_id ORDER BY d \
+                 RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS p FROM src)"
+                    .to_string(),
+            ),
+        );
+
+        let bs = |fns: &smelt_runtime::FnBodyMap| {
+            build_explain_output(&graph, fns).unwrap().models["sessions"]
+                .incremental
+                .as_ref()
+                .unwrap()
+                .batch_safety
+                .clone()
+        };
+
+        let with_registry = bs(&fn_bodies);
+        let without_registry = bs(&HashMap::new());
+
+        assert!(
+            with_registry.starts_with("bounded_safe"),
+            "with the registry the function-internal RANGE is seen: {with_registry}"
+        );
+        assert_eq!(
+            without_registry, "fully_batch_safe",
+            "without the registry the outer SQL shows no lookback: {without_registry}"
+        );
+    }
+
+    #[test]
     fn test_explain_basic() {
         let models = vec![
             make_model("orders", vec![], "SELECT * FROM raw_orders"),
@@ -365,7 +442,7 @@ mod tests {
         let config = make_config(vec![]);
         let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph).unwrap();
+        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -415,7 +492,7 @@ mod tests {
         )]);
         let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph).unwrap();
+        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -433,7 +510,7 @@ mod tests {
         let config = make_config(vec![]);
         let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph).unwrap();
+        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
@@ -549,7 +626,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut output = build_explain_output(&graph).unwrap();
+        let mut output = build_explain_output(&graph, &HashMap::new()).unwrap();
         output.physical = Some(build_physical_explain(&pg, &graph));
 
         let json = serde_json::to_string_pretty(&output).unwrap();
@@ -572,7 +649,7 @@ mod tests {
         let config = make_config(vec![]);
         let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph).unwrap();
+        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")

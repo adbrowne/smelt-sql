@@ -685,6 +685,61 @@ fn test_window_frame_groups() {
 }
 
 #[test]
+fn test_interval_literal_is_not_a_column_ref() {
+    // `INTERVAL '1 day'` lexes as IDENT("INTERVAL") + STRING; as_column_ref
+    // must NOT mistake it for a column named "INTERVAL" (regression for a
+    // false "Column 'INTERVAL' not found" diagnostic on `col - INTERVAL '…'`).
+    let parse = parse("SELECT d - INTERVAL '1 day' AS x FROM t");
+    assert_eq!(parse.errors.len(), 0, "{:?}", parse.errors);
+    let file = File::cast(parse.syntax()).expect("file");
+    let select = file.select_stmt().expect("select");
+    let item = select
+        .select_list()
+        .expect("list")
+        .items()
+        .next()
+        .expect("item");
+    let expr = item.expression().expect("expr");
+    let binary = expr
+        .as_binary()
+        .expect("binary expr (d - INTERVAL '1 day')");
+    let lhs = binary.left().expect("lhs");
+    let rhs = binary.right().expect("rhs");
+    assert_eq!(
+        lhs.as_column_ref().map(|c| c.name().to_string()),
+        Some("d".to_string()),
+        "the bare identifier `d` is a column ref"
+    );
+    assert!(
+        rhs.as_column_ref().is_none(),
+        "INTERVAL literal must not be a column ref, got {:?}",
+        rhs.as_column_ref().map(|c| c.name().to_string())
+    );
+}
+
+#[test]
+fn test_window_frame_range_interval_preceding() {
+    // RANGE BETWEEN INTERVAL '...' PRECEDING is the spec's Form A lookback
+    // declaration (incremental_models.md). DuckDB supports it; the parser must too.
+    let input = "SELECT LAG(ts) OVER (PARTITION BY device_id ORDER BY ts RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) FROM events";
+    let parse = parse(input);
+    if !parse.errors.is_empty() {
+        eprintln!("Errors: {:?}", parse.errors);
+    }
+    assert_eq!(parse.errors.len(), 0);
+}
+
+#[test]
+fn test_window_frame_range_interval_both_bounds() {
+    let input = "SELECT SUM(x) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '2 hours' PRECEDING AND INTERVAL '1 hour' FOLLOWING) FROM events";
+    let parse = parse(input);
+    if !parse.errors.is_empty() {
+        eprintln!("Errors: {:?}", parse.errors);
+    }
+    assert_eq!(parse.errors.len(), 0);
+}
+
+#[test]
 fn test_multiple_window_functions() {
     let input = "SELECT
                    ROW_NUMBER() OVER (ORDER BY date),

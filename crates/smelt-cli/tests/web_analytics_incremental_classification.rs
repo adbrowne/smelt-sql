@@ -84,9 +84,13 @@ fn assert_incremental_and_fully_batch_safe(
 fn web_analytics_incremental_models_classify_as_safe() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, _db) =
+    let (graph, db) =
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
-    let output = build_explain_output(&graph).expect("build explain output");
+    let fn_bodies = smelt_runtime::build_fn_body_map(
+        &db,
+        smelt_db::Workspace::try_get(&db).expect("workspace"),
+    );
+    let output = build_explain_output(&graph, &fn_bodies).expect("build explain output");
 
     // Models without a Form B date filter: must stay fully_batch_safe.
     // Listed explicitly so adding a new incremental model without a
@@ -101,18 +105,28 @@ fn web_analytics_incremental_models_classify_as_safe() {
     //   events_parsed               → silver.events_parsed
     //   eventstream_with_identity   → gold.eventstream_with_identity
     //   daily_active_users_by_method → marts.daily_active_users_by_method
-    for model in &[
-        "silver.sessions",
-        "silver.events_parsed",
-        "gold.eventstream_with_identity",
-        "marts.daily_active_users_by_method",
-    ] {
+    for model in &["silver.events_parsed", "marts.daily_active_users_by_method"] {
         assert_incremental_and_fully_batch_safe(&output, model);
     }
 
-    // identity_forward_only carries a Form B BETWEEN filter on event_date.
-    // The planner derives its 1-day lookback from that filter, so it
-    // classifies as bounded_safe rather than fully_batch_safe.  Both are
-    // safe; the assertion accepts either to guard against silent downgrades.
-    assert_incremental_and_safe(&output, "gold.identity_forward_only");
+    // Models that carry an explicit lookback bound classify as bounded_safe
+    // (a safe class — the planner widens the source read by the derived bound).
+    // Both are safe; the assertion accepts either fully_batch_safe or
+    // bounded_safe to guard only against silent downgrades to the refused class.
+    //
+    //   silver.sessions                 — RANGE INTERVAL frames (Form A) on the
+    //                                     LAG/MAX window functions plus a Form B
+    //                                     BETWEEN filter widening the write window
+    //                                     for cross-midnight sessions.
+    //   gold.eventstream_with_identity  — Form B BETWEEN filter widening the
+    //                                     sessions read so day-D events attach to
+    //                                     a session that started on D-1.
+    //   gold.identity_forward_only      — Form B BETWEEN filter on event_date.
+    for model in &[
+        "silver.sessions",
+        "gold.eventstream_with_identity",
+        "gold.identity_forward_only",
+    ] {
+        assert_incremental_and_safe(&output, model);
+    }
 }

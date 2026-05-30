@@ -32,9 +32,13 @@ fn examples_dir() -> &'static Path {
 fn sessions_explain() -> smelt_cli::explain::ExplainOutput {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, _db) =
+    let (graph, db) =
         build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
-    build_explain_output(&graph).expect("build explain output")
+    let fn_bodies = smelt_runtime::build_fn_body_map(
+        &db,
+        smelt_db::Workspace::try_get(&db).expect("workspace"),
+    );
+    build_explain_output(&graph, &fn_bodies).expect("build explain output")
 }
 
 /// Convert `SourceBoundJson` from the explain output to `SourceBound` for `inject_source_filters`.
@@ -190,7 +194,7 @@ fn test_full_run_equivalent_with_pushdown() {
         "Pushdown result must contain SELECT: {result_with_pushdown}"
     );
 
-    // The top-level CTEs (WITH sessionized AS ...) must still be present.
+    // The top-level CTE (WITH sessionized AS ...) must still be present.
     assert!(
         result_with_pushdown.contains("WITH sessionized AS"),
         "CTE structure must be preserved after pushdown: {result_with_pushdown}"
@@ -202,7 +206,8 @@ fn test_full_run_equivalent_with_pushdown() {
         "Outer GROUP BY must survive pushdown: {result_with_pushdown}"
     );
 
-    // The function call wrapper (smelt.functions.sessionize) must be present.
+    // The sessionize function call must survive pushdown (it is expanded later,
+    // at compile time, not by source-filter pushdown).
     assert!(
         result_with_pushdown.contains("smelt.functions.sessionize"),
         "Function call must survive pushdown: {result_with_pushdown}"

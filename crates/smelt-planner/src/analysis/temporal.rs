@@ -6,7 +6,7 @@
 //! the effective window for incremental execution.
 
 use serde::Serialize;
-use smelt_parser::{parse, File, FrameUnit};
+use smelt_parser::{parse, File, FrameUnit, SelectStmt};
 
 /// How much temporal context a query needs beyond its requested time range.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -131,29 +131,70 @@ pub fn analyze_temporal_dependencies(sql: &str) -> TemporalDependency {
     };
 
     let mut dep = TemporalDependency::default();
+    analyze_one_select(&select, &mut dep);
+    // Window-frame RANGE INTERVAL lookbacks declared inside a derived table or
+    // an inlined `smelt.define` body are invisible to the AST scan above (it
+    // only reaches the outer SELECT list, and the expanded body lands as a
+    // derived table the re-parse may not surface cleanly). Scan the whole
+    // statement text for explicit `RANGE BETWEEN INTERVAL … PRECEDING/FOLLOWING`
+    // frames as a robust catch. Only explicit INTERVAL frames are recognized,
+    // so this only ever adds a *bounded* lookback; bounds merge via `max_with`,
+    // so re-seeing the outer frame already handled by the AST is harmless.
+    analyze_subquery_range_frames(stripped, &mut dep);
+    dep
+}
 
-    // Analyze SELECT items for window functions and LAG/LEAD
+/// Analyze a single SELECT level — its window functions (SELECT list), WHERE
+/// time filters, and JOIN time filters — merging the findings into `dep`. Does
+/// not descend into subqueries; the caller walks those separately.
+fn analyze_one_select(select: &SelectStmt, dep: &mut TemporalDependency) {
     if let Some(select_list) = select.select_list() {
         for item in select_list.items() {
             if let Some(expr) = item.expression() {
-                analyze_expr_temporal(&expr, &mut dep);
+                analyze_expr_temporal(&expr, dep);
             }
         }
     }
 
-    // Analyze WHERE clause for temporal offsets
     if let Some(where_clause) = select.where_clause() {
         let where_text = where_clause.text().to_uppercase();
-        analyze_where_temporal(&where_text, &mut dep);
+        analyze_where_temporal(&where_text, dep);
     }
 
-    // Analyze JOIN conditions for temporal offsets
     if let Some(from_clause) = select.from_clause() {
         let from_text = from_clause.text();
-        analyze_join_temporal(&from_text, &mut dep);
+        analyze_join_temporal(&from_text, dep);
     }
+}
 
-    dep
+/// Text scan for window-frame `RANGE BETWEEN INTERVAL '…' PRECEDING/FOLLOWING`
+/// lookbacks anywhere in the statement — notably inside a derived table or an
+/// inlined `smelt.define` body, which the AST window scan (outer SELECT list
+/// only) does not reach and which the re-parse may not surface as a clean
+/// subquery. Only explicit `INTERVAL` frames are recognized, so this only ever
+/// adds a *bounded* lookback — it never introduces an unbounded classification
+/// for a default-frame window.
+fn analyze_subquery_range_frames(sql_text: &str, dep: &mut TemporalDependency) {
+    let upper = sql_text.to_uppercase();
+    if !upper.contains("RANGE BETWEEN") || !upper.contains("INTERVAL") {
+        return;
+    }
+    let Some(days) = find_interval_in_text(&upper) else {
+        return;
+    };
+    if days == 0 {
+        return;
+    }
+    if upper.contains("PRECEDING") {
+        dep.sources.push(TemporalSource::WindowFrame {
+            function: "(derived table)".to_string(),
+            frame: format!("RANGE BETWEEN INTERVAL '{} day' PRECEDING", days),
+        });
+        dep.lookback = dep.lookback.max_with(&TemporalOffset::Days(days));
+    }
+    if upper.contains("FOLLOWING") && !upper.contains("UNBOUNDED FOLLOWING") {
+        dep.lookahead = dep.lookahead.max_with(&TemporalOffset::Days(days));
+    }
 }
 
 /// Analyze an expression for temporal dependencies (window functions, LAG/LEAD).
