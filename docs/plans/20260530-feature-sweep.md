@@ -33,7 +33,7 @@ A lot of functionality has landed across 26 specs in `docs/specs/`. This plan dr
 | A1 | architecture | done | 0 fixed, 2 needs-review | (below) | 2026-05-30 |
 | A2 | incremental_models | pending | | | |
 | A3 | cli | pending | | | |
-| A4 | functions | pending | | | |
+| A4 | functions | done | 0 fixed, 1 needs-review (mature; gates+1000-case proptests green) | (below) | 2026-05-30 |
 | A5 | meta_language | pending | | | |
 | B1 | expansion | pending | | | |
 | B2 | function_schema_inference | pending | | | |
