@@ -13,7 +13,7 @@ The planner (`smelt-planner`) is a pure library and depends on neither `smelt-ru
 
 In scope: the `build_explain_output` classification path (`smelt explain --json` `batch_safety`, and the standing `web_analytics_incremental_classification` gate).
 
-Out of scope (documented, not changed): the run/execute batching call sites (`backfill.rs`, `commands/run.rs`, `smelt-runtime/execute.rs`) also classify on outer SQL, but execution correctness is already carried by the L1 bound-pushdown (which expands) plus, for the example, the outer Form B filter. A function-RANGE-*only* model with no outer Form B would still mis-*chunk* at execution; no such model exists in the examples. Folding those call sites in is a follow-up if a real case appears.
+Also folded in (Phase 4): the run/UI chunk-sizing call sites — `compute_batches_for_model` (the `smelt run --start/--end` path, expanded at the run.rs caller) and `smelt-runtime/execute.rs` (the UI path, which now builds the `FnBodyMap` up-front and expands each model before `analyze_batch_safety`). Still on outer SQL (benign, no real model affected): the bound-`NotDerivable` refusal gate (`derive_model_source_bounds`, pure planner) and the `smelt backbuild` range-expansion command.
 
 ## Phases
 
@@ -36,4 +36,5 @@ Update `docs/specs/incremental_models.md` Known Divergence to reflect the explai
 ## Progress
 - Phase 1: done — free `expand_function_calls(sql, &FnBodyMap)`; `SqlCompiler` method delegates.
 - Phase 2: done — `build_explain_output` takes `&FnBodyMap` and expands per model before classification + bound derivation; callers updated. Surfaced a second gap: the batch-safety temporal analyzer only inspected the outer SELECT, so an inlined function body (a derived table) was invisible; added a text scan for `RANGE BETWEEN INTERVAL` frames over the whole statement (only adds *bounded* lookback, never unbounded). Red-green test `test_batch_safety_uses_expanded_function_body`.
-- Phase 3: done — spec Known Divergence narrowed to the run/backfill chunk-sizing call sites.
+- Phase 3: done — spec Known Divergence narrowed.
+- Phase 4: done — run/UI chunk-sizing call sites (`compute_batches_for_model` via the run.rs caller; `smelt-runtime/execute.rs` builds the registry up-front and expands per model). Divergence now covers only the refusal gate + `smelt backbuild`.

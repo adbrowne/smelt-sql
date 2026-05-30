@@ -1103,9 +1103,13 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     })?;
                 }
 
-                // Compute smart batching based on batch safety analysis
+                // Compute smart batching based on batch safety analysis. Classify
+                // on the *expanded* SQL so a lookback declared inside a
+                // `smelt.define` body is reflected in the chunk sizing — parity
+                // with the source-bound derivation below and the explain path.
+                let expanded_for_safety = compiler.expand_function_calls(&model.content);
                 let (batch_safety, batches) = compute_batches_for_model(
-                    &model.content,
+                    &expanded_for_safety,
                     inc_config,
                     inc_ts,
                     range,
