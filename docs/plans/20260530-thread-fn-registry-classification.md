@@ -38,3 +38,50 @@ Update `docs/specs/incremental_models.md` Known Divergence to reflect the explai
 - Phase 2: done — `build_explain_output` takes `&FnBodyMap` and expands per model before classification + bound derivation; callers updated. Surfaced a second gap: the batch-safety temporal analyzer only inspected the outer SELECT, so an inlined function body (a derived table) was invisible; added a text scan for `RANGE BETWEEN INTERVAL` frames over the whole statement (only adds *bounded* lookback, never unbounded). Red-green test `test_batch_safety_uses_expanded_function_body`.
 - Phase 3: done — spec Known Divergence narrowed.
 - Phase 4: done — run/UI chunk-sizing call sites (`compute_batches_for_model` via the run.rs caller; `smelt-runtime/execute.rs` builds the registry up-front and expands per model). Divergence now covers only the refusal gate + `smelt backbuild`.
+
+## Remaining outer-SQL call sites (not changed)
+
+Two lower-traffic spots still classify/derive on the outer `model.sql`:
+
+1. **Bound-`NotDerivable` refusal gate** — `derive_model_source_bounds`
+   (`smelt-planner/src/rules/incremental.rs`), called from `commands/run.rs` and
+   the backfill path. It lives in the *pure* planner crate, which depends on
+   neither `smelt-runtime` nor `smelt-db`, so it cannot call
+   `expand_function_calls` itself; closing it means pre-expanding in the CLI
+   before the call (and the CLI building the registry earlier than it does today
+   — the gate currently runs before `build_fn_body_map`).
+2. **`smelt backbuild` range expansion** — `compute_backbuild_plans`
+   (`smelt-cli/src/backfill.rs`) walks the DAG building upstream ranges from each
+   model's `compute_incremental_windows`, on raw content.
+
+Both are benign for every model in the repo: the only case that behaves
+differently is a model whose lookback lives *only* inside a function body with
+no outer Form B filter, and none exists.
+
+## Open design question: expansion level is a pipeline contract, not an ad-hoc step
+
+The pattern in this plan — "expand `smelt.define` bodies, then run the analysis"
+— is applied at each call site individually, which is why the coverage came in
+piecemeal. That ad-hoc-ness is a symptom: **the level of expansion a piece of
+analysis needs is a real design decision, and different planner rules legitimately
+want the CST at different levels.** There are at least three:
+
+- **raw** — frontmatter-stripped outer SQL, as authored. A rule reasoning about
+  the *user's* structure (e.g. "did the author write a window function in the
+  outer body?", or surfacing diagnostics anchored to the source) wants this.
+- **function-expanded** — `smelt.define` bodies inlined, `smelt.<path>` refs left
+  intact (what `expand_function_calls` produces). Lookback/bound derivation and
+  batch-safety classification want this — a window's lookback can be encapsulated
+  in a function, and the bound is a property of the *expanded* logic.
+- **fully resolved** — `smelt.<path>` rewritten to physical names, casts and
+  time filters injected (the compiled SQL). Physical-plan / cost rules want this.
+
+Today every analysis is handed whichever level its caller happened to pass, and
+the planner being *pure* (no registry) hard-codes that it can only ever see what
+the CST it was given already contains. A cleaner model would make expansion level
+an explicit input to each planner entry point (or stage), so a rule declares the
+level it consumes and the pipeline provides the CST at that level once, rather
+than each call site re-deriving it. The two remaining outer-SQL spots above are
+not really "bugs to patch one by one" — they are the same missing abstraction
+showing through. Worth a dedicated design pass (research doc) before adding more
+per-call-site expansion; see `docs/research/` for where that would live.
