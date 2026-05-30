@@ -161,6 +161,30 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   echo "Memory log: ${memlog}"
   echo
 
+  # Keep the long-running sweep branch current with main before probing.
+  # Placed here because the tree is clean at the top of an iteration (the
+  # previous iteration committed + pushed; a relaunch starts clean). A clean
+  # merge is committed (--no-edit) and pushed so origin stays current even if
+  # this iteration later fails; a real CONFLICT is aborted and the loop pauses
+  # for a human — never auto-resolved, since a wrong resolution would silently
+  # corrupt every downstream phase. Runs before the sampler starts, so there is
+  # no sampler to tear down on the pause paths below.
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "===== working tree dirty at iteration start — pausing (unexpected leftover) ====="
+    exit_reason="dirty_tree_pre_merge"
+    break
+  fi
+  echo "----- syncing branch with origin/main -----"
+  if git fetch origin main --quiet && git merge --no-edit origin/main; then
+    git push --quiet || echo "(merge push deferred — iteration will push at end)"
+  else
+    git merge --abort 2>/dev/null || true
+    echo "===== merge conflict with origin/main — pausing for human ====="
+    exit_reason="merge_conflict_origin_main"
+    break
+  fi
+  echo
+
   # Reset the cgroup peak counter (cgroup v2 ≥ 6.5) so memory.peak in this
   # iter's samples reflects only this iteration, not the high-water mark
   # carried over from prior iterations. Silently no-ops on older kernels.
