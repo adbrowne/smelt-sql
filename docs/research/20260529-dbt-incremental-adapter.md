@@ -1,7 +1,7 @@
-# Research: smelt as a dbt adapter for naive-model incrementalization
+# Research: smelt as a dbt adapter — planner rules for naive dbt models (incremental first)
 
 **Date**: 2026-05-29
-**Topic**: Whether smelt can add value *under* dbt — as an adapter scoped to smelt's own backends — by letting users write naive (full-refresh) dbt models that smelt then incrementalizes automatically, plus an LSP that type-checks dbt files via dbt's own artifacts. Strategic goal: a low-friction **migration on-ramp**.
+**Topic**: Whether smelt can add value *under* dbt — as an adapter scoped to smelt's own backends — by letting users write naive (full-refresh) dbt models that smelt's planner rewrites (auto-incrementalization first, then the broader rule layer: cubes/grouping-sets, cumulative aggregates), plus an LSP that type-checks dbt files via dbt's own artifacts. Strategic goal: a low-friction **migration on-ramp**, and longer-term **planner rules as a typed alternative to dbt macros**.
 **Motivating question** (Andrew): "Could smelt be used as a dbt adapter that adds value, or as a step along the way?" Refined over discussion into: *write naive dbt models, get smelt's planner-driven auto-incrementalization and LSP benefits, without rewriting the dbt project.*
 **Related**: `docs/research/20260521-incremental-as-planner-rule.md`, `docs/research/2026-05-20-incremental-gaps-from-web-analytics.md`, `docs/research/20260523-lsp-cli-ui-divergence.md`. Fills part of the acknowledged-empty `migration_from_dbt.md` gap (`docs/specs/architecture.md:383-394`).
 
@@ -18,6 +18,8 @@ Three refinements, raised in sequence, rehabilitate the idea into something genu
 The differentiator vs dbt's own microbatch (shipped 1.9) is sharp and defensible: **dbt makes you declare the time-window safety; smelt derives and proves it.** This is the project's own "derive, don't declare" principle aimed at dbt's biggest operational pain.
 
 A second, independent half — an **LSP that reads dbt's `manifest.json` + `catalog.json`** — recovers types-while-editing on dbt files without making anyone switch file formats. Both halves reward the same author behavior (less Jinja), so they reinforce each other.
+
+Incremental is the *wedge*, not the ceiling: it is one planner rule, and the same seam delivers the rest of the rule layer (cube / grouping-sets, cumulative aggregates, …). The strategic framing is **planner rules as a typed, correctness-preserving alternative to dbt macros** — see "Generalization" below.
 
 ## Scenarios considered
 
@@ -56,6 +58,25 @@ dbt 1.9 ships a microbatch incremental strategy, so the honest question is "why 
 Batch-safety classes (`incremental.rs:29-48`): `FullyBatchSafe` (no temporal dep → one query for the whole range), `BoundedSafe { max_chunk_days, context_days, reason }` (bounded lookback → auto-sized chunks), `PerPartitionOnly { reason }` (unbounded dependency → one partition per query). Classification is structural over the SELECT's window frames, `LAG`/`LEAD` offsets, and interval joins — no schema needed.
 
 This is "derive, don't declare" (a standing project principle) applied to dbt's worst operational footgun. The single most convincing validation: **find one real model where a human-declared microbatch `lookback` was unsafe and smelt's derived `context_days` catches it.**
+
+## Generalization: the planner-rule layer, not just incremental
+
+Incremental is the wedge, not the whole value. It is *one planner rule*; the same seam delivers the rest of smelt's rule layer to naive dbt models:
+
+- **Cube / grouping sets** — a naive SELECT marked as a cube over dimensions → planner rewrites to `GROUPING SETS` / `ROLLUP` (the `cube_result` model in `crates/smelt-cli/tests/planner_test.rs` is exactly this shape).
+- **Cumulative aggregates** — already its own rule (`Materialization::CumulativeAggregate`; `docs/research/20260522-cumulative-as-its-own-rule.md`).
+- **(future)** cross-model fusion, multi-backend routing.
+
+The general pitch is smelt's actual core, delivered under dbt: the user writes the logical *what* (a plain SELECT + a small declarative annotation — "this is a cube over these dims", "this is cumulative", "this is timeseries"); smelt's planner produces the optimized physical *how*, correctness-preserving. Incremental leads because its pain is sharpest, but the product is "the planner under dbt".
+
+### Planner rules as the extensibility wedge (vs macros)
+
+The strategic reframing: dbt's extension mechanism is **Jinja macros** — string templating, untyped, runtime, hard to test. smelt's is **planner rules** — typed CST transformations that are correctness-preserving and statically analyzable. That turns the on-ramp from "get incremental for free" into "**migrate off macro-hell onto planner rules**".
+
+Two honesty caveats so this isn't oversold:
+
+1. **Rules replace the *optimization* class of macros, not all macros.** Planner rules fit macros where users hand-roll a *physical strategy* in Jinja (incremental logic, grouping sets, window-based dedup, partition pruning) — the most painful, error-prone ones, so a good target. Pure **code-generation** macros (`dbt_utils.star`, surrogate keys, date spine) are a different need that maps to smelt **functions / meta-language**, not planner rules.
+2. **User-authored rules are still ahead of us.** The *built-in* rules (incremental, cumulative, cube) are real today and are the immediate value. *User-authored* planner rules — the true macro-replacement extensibility point — depend on the planner-rule API, still design-stage (`docs/planner_rule_api_design.md`). So "dbt users write their own rules instead of macros" is the destination; the on-ramp ships with the built-ins first.
 
 ## Incremental done well is a multi-query loop — smelt owns it
 
@@ -157,6 +178,18 @@ Editor (independent):
 
 This seam captures **incremental + dialect** value. It does *not* capture cross-model fusion: dbt hands models down one at a time, so smelt can't fuse across boundaries here. Acceptable for an on-ramp — incremental correctness is the wedge — but worth stating that one headline differentiator is dormant at this seam.
 
+## Config ingestion: dbt's config dict, not smelt frontmatter
+
+smelt's config *representation* is already decoupled from the frontmatter *format*, so the adapter does **not** embed smelt frontmatter (or a `-- smelt:` comment block) in dbt files — it maps dbt's own config structure onto smelt's internal structs:
+
+- The planner consumes only `ModelInfo { name, sql, refs, timeseries_config, incremental_config }` (`crates/smelt-planner/src/graph.rs:8-18`) — it has zero knowledge of YAML frontmatter.
+- Frontmatter is just a serde deserialize onto `ModelMetadata` (`crates/smelt-core/src/metadata.rs:577`); **validation is a separate pure function**, `validate_timeseries(metadata, sql_body)` (`metadata.rs:320-398`), that takes the parsed struct, not YAML. Tests already build `ModelMetadata` / `ModelInfo` directly (`metadata.rs:1325`, `planner_test.rs:108`), proving a second front-end is viable.
+- `Granularity` (hour/day/week/month/quarter/year) is a **superset** of dbt's `batch_size` (hour/day/month/year) — no coverage gap.
+
+So the path is: **`dbt manifest config dict → ModelMetadata` mapper → reuse `validate_timeseries` → extract `ModelInfo`.** smelt frontmatter and dbt config become two front-ends onto one representation. Reuse dbt-native keys (`event_time`, `batch_size`, `unique_key`); reserve `config(meta={'smelt': {...}})` only for fields dbt lacks (a distinct `partition_column`, `safety_overrides`). This supersedes the earlier `-- smelt:` commented-frontmatter idea. The one thing to keep invariant: `validate_timeseries` stays the single shared validator for both front-ends.
+
+**Declarative-vs-procedural caveat (for the LSP):** literal config values are statically readable from the editor buffer (full diagnostics); Jinja-*computed* config is only resolvable post-render via the manifest (execution-time only). Recommend literal config; manifest is the execution-time fallback.
+
 ## Real work required
 
 - **Expose a public raw `execute_sql`** on `smelt-runtime`. The method exists (`crates/smelt-backend/src/lib.rs:32`) but is crate-internal. The adapter must serve *all* of dbt's SQL — information_schema introspection, `create schema`, drops, tests — not just models. Small, mechanical, required.
@@ -176,7 +209,7 @@ This seam captures **incremental + dialect** value. It does *not* capture cross-
 
 - **Artifact coupling / two sources of truth.** manifest/catalog schema versions move with dbt releases (maintenance), and dbt's renderer vs smelt's re-parser are two parsers of the same model (divergence risk). How much drift is tolerable, and is there a conformance test?
 - **On-ramp vs coexistence.** This is a coexistence tool that doubles as a stealth on-ramp: a "naive dbt model + declarative time config" is structurally already a smelt model, so adopting it for performance drifts the highest-value models into smelt's shape with no rewrite. Is the eventual switch an explicit goal, or is durable coexistence the product?
-- **Where does the event-time/partition config live on the dbt side** — a `config()` block the smelt materialization reads, or a sidecar? Must be declarative (not procedural), to preserve "derive, don't declare."
+- ~~Where does the event-time/partition config live on the dbt side?~~ **Resolved:** reuse dbt's config structure directly (`{{ config() }}` → manifest), mapped onto `ModelMetadata` — see "Config ingestion" above. Keep config declarative (literal, not Jinja-computed) for full LSP support.
 - **State model is unsettled and broader than this work.** smelt's `RunManifest` needs refinement into a chosen posture: *stateless* (derive watermark from the warehouse, dbt-style) vs *stateful* (durable interval ledger, SQLMesh-style), selectable **per project and per model**, plus an **opt-in to SQLMesh-style environments**. This deserves its own spec; the dbt-adapter is one consumer of whatever lands. See the "Future: stateless vs. stateful" section above.
 
 ## Smallest experiment
