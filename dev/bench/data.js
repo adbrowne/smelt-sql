@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780119699421,
+  "lastUpdate": 1780119701356,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23342,6 +23342,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.429724902286445,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "07da0c4d3e6d8340f66959f5c89041a63c1d056d",
+          "message": "Merge pull request #126 from adbrowne/worktree-dbt\n\ndocs(research): smelt as a dbt adapter for naive-model incrementalization",
+          "timestamp": "2026-05-30T15:39:58+10:00",
+          "tree_id": "0ae75cd43e4f7b088c81a581ce78636b7e16891c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/07da0c4d3e6d8340f66959f5c89041a63c1d056d"
+        },
+        "date": 1780119700838,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.742210766449663,
             "unit": "MB/s"
           }
         ]
