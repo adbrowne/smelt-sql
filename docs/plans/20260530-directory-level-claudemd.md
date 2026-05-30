@@ -65,7 +65,7 @@ Crate-specific *non-rule* content (build invocations, test idioms, file-layout g
 |-------|----------|--------|------|
 | 1     | done     | ee2e57f4 | 2026-05-30 |
 | 2     | done     | d19be2e8 | 2026-05-30 |
-| 3     | done     |        | 2026-05-30 |
+| 3     | done     | 385d92f3 | 2026-05-30 |
 
 ---
 
