@@ -181,6 +181,33 @@ pub async fn execute_project(
         build_fn_body_map(db_ref, workspace)
     };
 
+    // ── Diagnostic-parity gate (analysis ↔ build) ───────────────────────
+    // Refuse to compile/execute if the analyzer (the same surface the LSP
+    // publishes) reports any `Error`-severity diagnostic on a selected model
+    // or in-DAG dep. Shared with the CLI run path via `crate::gate`. Spec:
+    // `docs/specs/architecture.md` §"Diagnostic parity rule (analysis ↔ build)".
+    //
+    // Function-definition files are gated alongside the selected models:
+    // function-body diagnostics (e.g. `CteCycle`) are reported against the
+    // `smelt.define` file, not its callers, so omitting them would let a
+    // selected model that calls a broken function build through this path while
+    // the editor flags it red (a parity gap). Paths the DB has not registered
+    // are skipped by the helper, so listing all function files is safe.
+    {
+        let mut model_paths: Vec<std::path::PathBuf> = selected
+            .iter()
+            .filter_map(|name| graph_lock.get_model(name).ok().map(|m| m.path.clone()))
+            .collect();
+        model_paths.extend(smelt_core::discover_function_file_paths(project_dir));
+        let db_guard = db.lock().await;
+        let db_ref: &smelt_db::Database = &db_guard;
+        let workspace = smelt_db::Workspace::try_get(db_ref)
+            .ok_or_else(|| anyhow::anyhow!("workspace not initialised in DB"))?;
+        if let Err(errors) = crate::gate::gate_diagnostics(db_ref, workspace, &model_paths) {
+            anyhow::bail!("{}", crate::gate::format_gate_errors(&errors));
+        }
+    }
+
     // ── Model-plan construction + ephemeral collection ──────────────────
     let mut model_plans: Vec<ModelPlan> = Vec::new();
     let mut total_batches: usize = 0;

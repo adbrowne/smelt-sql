@@ -20,6 +20,7 @@ pub mod compile;
 pub mod cumulative;
 pub mod execute;
 pub mod fn_bodies;
+pub mod gate;
 pub mod reporter;
 pub mod select;
 pub mod transformer;
@@ -35,6 +36,7 @@ pub use cumulative::{
 };
 pub use execute::{execute_project, BackendFactory, BackendFuture};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
+pub use gate::{format_gate_errors, gate_diagnostics, GateDiagnostic};
 pub use reporter::{NoOpReporter, RunReporter};
 pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{

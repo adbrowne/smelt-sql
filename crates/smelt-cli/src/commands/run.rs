@@ -177,6 +177,43 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
 
+    // ── Diagnostic-parity gate (analysis ↔ build) ────────────────────────
+    // Refuse the build if the analyzer — the same surface the LSP publishes
+    // (`file_diagnostics` + `check_type_diagnostics`) — reports any
+    // `Error`-severity diagnostic on a model or function-definition file. This
+    // runs *before* dependency validation so a loader / timeseries / scoping
+    // defect is rejected by its real diagnostic code rather than a downstream
+    // "undefined ref" dependency error or a DuckDB binder error. Shared with
+    // the UI run path via `smelt_runtime::gate_diagnostics`. Spec:
+    // `docs/specs/architecture.md` §"Diagnostic parity rule (analysis ↔ build)".
+    //
+    // The gate DB registers the *discovered* files — raw SQL models (including
+    // generator `*.gen.sql` files, so refs to generator-emitted models resolve
+    // through the `emitted_models` query) plus function-definition files —
+    // mirroring the analysis-path gate (`example_diagnostics`). It deliberately
+    // does not pre-substitute the transformed/emitted model list, which would
+    // strip the generator files that emitted-ref resolution depends on.
+    {
+        let mut gate_files: Vec<smelt_cli::ModelFile> = discovery
+            .discover_models()
+            .with_context(|| "Failed to discover models for diagnostic gate")?;
+        gate_files.extend(function_files.iter().cloned());
+        let gate_db = init_db(&project_dir, &gate_files);
+        let gate_ws =
+            smelt_db::Workspace::try_get(&gate_db).expect("workspace not initialized by init_db");
+        let gate_paths: Vec<std::path::PathBuf> =
+            gate_files.iter().map(|m| m.path.clone()).collect();
+        if let Err(errors) = smelt_runtime::gate_diagnostics(&gate_db, gate_ws, &gate_paths) {
+            for e in &errors {
+                eprintln!("error: {e}");
+            }
+            return Err(anyhow::anyhow!(
+                "{}",
+                smelt_runtime::format_gate_errors(&errors)
+            ));
+        }
+    }
+
     // Validate materialization configs (e.g. ephemeral + incremental conflicts)
     {
         let metadata_map: HashMap<String, smelt_cli::ModelMetadata> = models
@@ -671,34 +708,10 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     }
 
     // Path-prefix enforcement (spec: `docs/specs/functions.md` §"Function call
-    // syntax"): the filename stem is NOT a path component. Run file_diagnostics
-    // on every model file and fail on any UnknownSmeltFn diagnostic, which the
-    // LSP emits for stem-included or otherwise wrong-prefix call paths.
-    {
-        let mut fn_path_errors: Vec<String> = Vec::new();
-        for model in &all_models {
-            let Some(src_file) = type_db.source_file(&model.path) else {
-                continue;
-            };
-            let diags = smelt_db::file_diagnostics(&type_db, workspace, src_file);
-            for diag in &diags {
-                if diag.code == Some(smelt_db::DiagnosticCode::UnknownSmeltFn) {
-                    fn_path_errors.push(format!("model '{}': {}", model.name, diag.message));
-                }
-            }
-        }
-        if !fn_path_errors.is_empty() {
-            for err in &fn_path_errors {
-                eprintln!("error: {err}");
-            }
-            return Err(anyhow::anyhow!(
-                "Unknown smelt function call(s) in {} model(s) — the filename stem \
-                 is not a path component; see `smelt docs show concepts/functions`.\n{}",
-                fn_path_errors.len(),
-                fn_path_errors.join("\n")
-            ));
-        }
-    }
+    // syntax") — UnknownSmeltFn and every other `Error`-severity diagnostic is
+    // now caught up-front by the diagnostic-parity gate above
+    // (`smelt_runtime::gate_diagnostics`), which fails the build before this
+    // point. No code-specific block is needed here.
 
     let file_store = FileStore::new(&project_dir);
 

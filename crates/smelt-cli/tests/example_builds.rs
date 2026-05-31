@@ -202,11 +202,16 @@ const NEVER_BUILD: &[(&str, &str)] = &[
 /// *handle*, not reject. For these the broken-category check asserts `smelt
 /// build` SUCCEEDS rather than asserting a rejection.
 ///
-/// `per_cohort_union_broken_emission_body_collision_suppression` demonstrates
-/// that an emission-body name collision is silently suppressed, so the build
-/// completes successfully (exit 0) and the analyzer emits no diagnostic.
-const BROKEN_BUILDS_CLEAN: &[&str] =
-    &["per_cohort_union_broken_emission_body_collision_suppression"];
+/// Empty today: with the diagnostic-parity gate in place, any fixture whose
+/// analyzer reports an `Error` is refused at build time, so a "broken" fixture
+/// cannot both flag red in the editor and build clean.
+/// `per_cohort_union_broken_emission_body_collision_suppression` used to live
+/// here — its emission-body name collision *suppresses* the discarded body's
+/// analysis (no spurious `UndeclaredColumn`), but the surviving
+/// `ModelDefDuplicateName` is an `Error` (expansion.md structural file check),
+/// so the parity gate now correctly rejects the build. It is handled by the
+/// `broken` category (analyzer `Error`) instead.
+const BROKEN_BUILDS_CLEAN: &[&str] = &[];
 
 /// Max workspaces whose full failure detail is dumped in the assert message; the
 /// rest are summarized by name + count. Bounds the assert size when a regression

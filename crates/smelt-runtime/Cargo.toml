@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 tracing.workspace = true
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
+line-index.workspace = true
 
 [dev-dependencies]
 rowan.workspace = true
