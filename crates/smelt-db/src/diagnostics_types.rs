@@ -611,6 +611,32 @@ pub enum DiagnosticCode {
     /// cannot produce a typed schema.  Anchored at the VALUES clause span.
     /// Message: "VALUES clause has no rows; cannot infer column types"
     EmptyValuesClause,
+
+    // ── Planner-rule diagnostic codes (surfaced via the uniform rule →
+    //    diagnostics interface; see `smelt_planner::rule_diagnostics`) ──────────
+    /// `cumulative_aggregate` SELECT has no GROUP BY (the key columns).
+    CumulativeRequiresGroupBy,
+    /// A `cumulative_aggregate` projection uses a non-allowlisted aggregator or
+    /// a composite expression over aggregates.
+    CumulativeUnknownAggregator,
+    /// The `cumulative_aggregate` GROUP BY contains the driving source's
+    /// `partition_column` (a per-partition shape, not the cumulative one).
+    CumulativeGroupByContainsPartitionColumn,
+    /// Window functions (`OVER (...)`) are not allowed in a `cumulative_aggregate`.
+    CumulativeForbidsWindowFunctions,
+    /// A non-deterministic function appears in a `cumulative_aggregate` SELECT.
+    CumulativeForbidsNondeterministic,
+    /// No source in a `cumulative_aggregate`'s FROM declares a `timeseries:` block.
+    CumulativeNoDrivingSource,
+    /// Multiple timeseries-tagged sources in a `cumulative_aggregate`'s FROM (v1
+    /// supports exactly one driving source).
+    CumulativeMultipleDrivingSources,
+    /// A `cumulative_aggregate` SELECT could not be parsed for classification.
+    CumulativeSqlNotParseable,
+    /// Advisory (`Warning`): an `incremental` model's SQL is not batch-safe
+    /// under the planner's incremental safety classifier (the build does not
+    /// hard-refuse — its dispatch falls back to a safe chunking strategy).
+    IncrementalNotBatchSafe,
 }
 
 /// Structured metadata attached to diagnostics for code actions

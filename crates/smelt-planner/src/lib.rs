@@ -20,6 +20,10 @@ pub use rules::cumulative::{
     CumulativeClassification, CumulativeDiagnostic, DrivingSource, SourceTimeseriesMap,
 };
 pub use rules::incremental::{analyze_batch_safety, derive_model_source_bounds, BatchSafety};
+pub use rules::rule_diagnostics::{
+    collect_path_refs, detect_builtin_rules, CumulativeRule, IncrementalRule, PlannerRule,
+    RuleContext, RuleDiagnostic, RuleDiagnosticCode, RuleSeverity,
+};
 pub use rules::Planner;
 pub use types::{
     ExecutionStep, Frontmatter, Granularity, IncrementalConfig, IncrementalSafetyOverrides,

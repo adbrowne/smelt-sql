@@ -337,41 +337,12 @@ fn single_partition_range(partition_value: &str, ts: &TimeseriesConfig) -> TimeR
 
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
 ///
-/// Returns the deduplicated list of paths (e.g. `smelt.silver.events_parsed`)
-/// found at FROM / JOIN positions. Conservative: includes any `smelt.*`
-/// identifier the analyser would otherwise classify; we filter out
-/// `smelt.functions.*` and `smelt.config.*` because those are not data refs.
+/// Delegates to [`smelt_planner::collect_path_refs`] — the single shared
+/// implementation so the runtime's cumulative dispatch and the analysis-layer
+/// diagnostic gate reach the identical driving-source lookup (Diagnostic parity
+/// rule).
 fn collect_refs_from_sql(sql: &str) -> Vec<String> {
-    let mut refs = std::collections::BTreeSet::new();
-    let mut chars = sql.char_indices().peekable();
-    while let Some(&(i, c)) = chars.peek() {
-        if c == 's' && sql[i..].starts_with("smelt.") {
-            // Read until a non-identifier character.
-            let rest = &sql[i..];
-            let end = rest
-                .char_indices()
-                .find(|(_, c)| !(c.is_alphanumeric() || *c == '_' || *c == '.'))
-                .map(|(j, _)| j)
-                .unwrap_or(rest.len());
-            let candidate = &rest[..end];
-            // Filter out function / config references.
-            if !candidate.starts_with("smelt.functions.")
-                && !candidate.starts_with("smelt.config.")
-                && !candidate.starts_with("smelt.define")
-                && !candidate.starts_with("smelt.extern")
-                && !candidate.starts_with("smelt.metric")
-            {
-                refs.insert(candidate.to_string());
-            }
-            // Advance past the consumed identifier.
-            for _ in 0..end {
-                chars.next();
-            }
-        } else {
-            chars.next();
-        }
-    }
-    refs.into_iter().collect()
+    smelt_planner::collect_path_refs(sql)
 }
 
 /// Classify a cumulative model's SQL, collecting its `smelt.<path>` refs and

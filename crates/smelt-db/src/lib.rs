@@ -828,6 +828,65 @@ pub fn file_diagnostics(
         .collect()
 }
 
+/// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
+/// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
+/// (`architecture.md` §"Planner scope").
+fn rule_diagnostic_code(code: smelt_planner::RuleDiagnosticCode) -> DiagnosticCode {
+    use smelt_planner::RuleDiagnosticCode as R;
+    match code {
+        R::CumulativeRequiresGroupBy => DiagnosticCode::CumulativeRequiresGroupBy,
+        R::CumulativeUnknownAggregator => DiagnosticCode::CumulativeUnknownAggregator,
+        R::CumulativeGroupByContainsPartitionColumn => {
+            DiagnosticCode::CumulativeGroupByContainsPartitionColumn
+        }
+        R::CumulativeForbidsWindowFunctions => DiagnosticCode::CumulativeForbidsWindowFunctions,
+        R::CumulativeForbidsNondeterministic => DiagnosticCode::CumulativeForbidsNondeterministic,
+        R::CumulativeNoDrivingSource => DiagnosticCode::CumulativeNoDrivingSource,
+        R::CumulativeMultipleDrivingSources => DiagnosticCode::CumulativeMultipleDrivingSources,
+        R::CumulativeSqlNotParseable => DiagnosticCode::CumulativeSqlNotParseable,
+        R::IncrementalNotBatchSafe => DiagnosticCode::IncrementalNotBatchSafe,
+    }
+}
+
+/// Resolve a `smelt.<path>` ref string to its definition's frontmatter
+/// `timeseries:` block, when it resolves to a model that declares one. This
+/// reconstructs (project-scoped) the `smelt.<path> → timeseries` lookup the
+/// runtime builds from the model graph, so the cumulative classifier sees the
+/// same driving sources in the editor as it does at build time.
+fn ref_timeseries_config(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    ref_str: &str,
+) -> Option<smelt_core::config::TimeseriesConfig> {
+    let segments: Vec<String> = ref_str
+        .strip_prefix("smelt.")?
+        .split('.')
+        .map(|s| s.to_string())
+        .collect();
+    let leaf = segments.last()?.clone();
+    let resolved = resolve_ref_path(db, workspace, segments)?;
+    let file = resolved.source_file?;
+    let text = file.text(db);
+    match extract_file_metadata(text) {
+        // Hand-authored single model: the `timeseries:` is its own frontmatter.
+        Ok(FileMetadata::Single { metadata, .. }) => metadata.timeseries.clone(),
+        // Multi-model file: match the addressed section by name.
+        Ok(FileMetadata::Multi { models }) => models
+            .iter()
+            .find(|s| s.metadata.name.as_deref() == Some(leaf.as_str()))
+            .and_then(|s| s.metadata.timeseries.clone()),
+        // Generator-emitted model: `timeseries:` is inherited onto the emitted
+        // model (carried on the `EmittedModelDef`), not on the generator file's
+        // own frontmatter — mirror the runtime, which reads it from the graph.
+        Ok(FileMetadata::Generator { .. }) => emitted_models(db, workspace)
+            .survivors
+            .iter()
+            .find(|e| e.name == leaf)
+            .and_then(|e| e.timeseries_config.clone()),
+        _ => None,
+    }
+}
+
 #[salsa::tracked]
 pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, file: SourceFile) {
     let path = file.path(db);
@@ -1041,6 +1100,64 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     message,
                     range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                     code: Some(code),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+        }
+
+        // Built-in planner-rule diagnostics (cumulative classifier, incremental
+        // batch-safety) surfaced through the uniform rule → diagnostics
+        // interface. The checks live in `smelt-planner` (analysis-pure); this
+        // query only gathers inputs and aggregates, so the editor and the build
+        // reach an identical verdict (architecture.md §"Diagnostic parity rule"
+        // + §"Planner scope"). Anchored at the model SQL body start.
+        let materialization = if metadata.materialization
+            == Some(smelt_core::config::Materialization::CumulativeAggregate)
+        {
+            "cumulative_aggregate"
+        } else if metadata.incremental.is_some() {
+            "incremental"
+        } else {
+            ""
+        };
+        if !materialization.is_empty() {
+            let stripped = smelt_parser::strip_frontmatter(text);
+            let refs = smelt_planner::collect_path_refs(&stripped);
+            // The cumulative classifier resolves its driving source by looking
+            // each ref up in this map; the incremental rule does not use it.
+            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
+            if materialization == "cumulative_aggregate" {
+                for r in &refs {
+                    if let Some(ts) = ref_timeseries_config(db, workspace, r) {
+                        source_timeseries.insert(r.clone(), ts);
+                    }
+                }
+            }
+            let model_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let ctx = smelt_planner::RuleContext {
+                model_name: &model_name,
+                materialization,
+                sql: &stripped,
+                refs: &refs,
+                source_timeseries: &source_timeseries,
+                timeseries_config: metadata.timeseries.as_ref(),
+                incremental_config: metadata.incremental.as_ref(),
+            };
+            let body_start = rowan::TextSize::from(sql_offset as u32);
+            for rd in smelt_planner::detect_builtin_rules(&ctx) {
+                DiagnosticAcc(Diagnostic {
+                    severity: match rd.severity {
+                        smelt_planner::RuleSeverity::Error => DiagnosticSeverity::Error,
+                        smelt_planner::RuleSeverity::Warning => DiagnosticSeverity::Warning,
+                    },
+                    message: rd.message,
+                    range: rowan::TextRange::empty(body_start),
+                    code: Some(rule_diagnostic_code(rd.code)),
                     data: None,
                 })
                 .accumulate(db);

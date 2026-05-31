@@ -365,6 +365,20 @@ impl Backend {
                 // VALUES / CTE alias-column-list diagnostic codes.
                 DbCode::AliasColumnArityMismatch => "alias-column-arity-mismatch",
                 DbCode::EmptyValuesClause => "empty-values-clause",
+                // Planner-rule diagnostic codes (cumulative classifier,
+                // incremental batch-safety) surfaced via the uniform rule →
+                // diagnostics interface.
+                DbCode::CumulativeRequiresGroupBy => "cumulative-requires-group-by",
+                DbCode::CumulativeUnknownAggregator => "cumulative-unknown-aggregator",
+                DbCode::CumulativeGroupByContainsPartitionColumn => {
+                    "cumulative-group-by-contains-partition-column"
+                }
+                DbCode::CumulativeForbidsWindowFunctions => "cumulative-forbids-window-functions",
+                DbCode::CumulativeForbidsNondeterministic => "cumulative-forbids-nondeterministic",
+                DbCode::CumulativeNoDrivingSource => "cumulative-no-driving-source",
+                DbCode::CumulativeMultipleDrivingSources => "cumulative-multiple-driving-sources",
+                DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
+                DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
             };
             NumberOrString::String(code_str.to_string())
         });

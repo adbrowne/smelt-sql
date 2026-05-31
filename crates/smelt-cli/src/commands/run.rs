@@ -177,43 +177,6 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
 
-    // ── Diagnostic-parity gate (analysis ↔ build) ────────────────────────
-    // Refuse the build if the analyzer — the same surface the LSP publishes
-    // (`file_diagnostics` + `check_type_diagnostics`) — reports any
-    // `Error`-severity diagnostic on a model or function-definition file. This
-    // runs *before* dependency validation so a loader / timeseries / scoping
-    // defect is rejected by its real diagnostic code rather than a downstream
-    // "undefined ref" dependency error or a DuckDB binder error. Shared with
-    // the UI run path via `smelt_runtime::gate_diagnostics`. Spec:
-    // `docs/specs/architecture.md` §"Diagnostic parity rule (analysis ↔ build)".
-    //
-    // The gate DB registers the *discovered* files — raw SQL models (including
-    // generator `*.gen.sql` files, so refs to generator-emitted models resolve
-    // through the `emitted_models` query) plus function-definition files —
-    // mirroring the analysis-path gate (`example_diagnostics`). It deliberately
-    // does not pre-substitute the transformed/emitted model list, which would
-    // strip the generator files that emitted-ref resolution depends on.
-    {
-        let mut gate_files: Vec<smelt_cli::ModelFile> = discovery
-            .discover_models()
-            .with_context(|| "Failed to discover models for diagnostic gate")?;
-        gate_files.extend(function_files.iter().cloned());
-        let gate_db = init_db(&project_dir, &gate_files);
-        let gate_ws =
-            smelt_db::Workspace::try_get(&gate_db).expect("workspace not initialized by init_db");
-        let gate_paths: Vec<std::path::PathBuf> =
-            gate_files.iter().map(|m| m.path.clone()).collect();
-        if let Err(errors) = smelt_runtime::gate_diagnostics(&gate_db, gate_ws, &gate_paths) {
-            for e in &errors {
-                eprintln!("error: {e}");
-            }
-            return Err(anyhow::anyhow!(
-                "{}",
-                smelt_runtime::format_gate_errors(&errors)
-            ));
-        }
-    }
-
     // Validate materialization configs (e.g. ephemeral + incremental conflicts)
     {
         let metadata_map: HashMap<String, smelt_cli::ModelMetadata> = models
@@ -246,10 +209,6 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     // 4. Build logical graph (eagerly resolves config per model)
     let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
-
-    graph
-        .validate()
-        .with_context(|| "Dependency validation failed")?;
 
     graph.warn_unused_ephemerals();
 
@@ -341,6 +300,67 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
             .collect::<Vec<_>>()
             .join(" → ")
     );
+
+    // ── Diagnostic-parity gate (analysis ↔ build) ────────────────────────
+    // Refuse the build if the analyzer — the same surface the LSP publishes
+    // (`file_diagnostics` + `check_type_diagnostics`) — reports any
+    // `Error`-severity diagnostic. Shared with the UI run path via
+    // `smelt_runtime::gate_diagnostics`. Spec: `docs/specs/architecture.md`
+    // §"Diagnostic parity rule (analysis ↔ build)" — the gate runs over the
+    // *selected models + in-DAG deps* (the `execution_order` set), so building
+    // one model is not blocked by an unrelated broken model elsewhere in the
+    // project. It runs before any model is compiled/executed.
+    //
+    // The gate DB registers the *discovered* files — raw SQL models (including
+    // generator `*.gen.sql` files, so refs to generator-emitted models resolve
+    // through the `emitted_models` query) plus function-definition files. The
+    // checked set always includes every function-definition and generator file:
+    // their diagnostics (e.g. `CteCycle` on a `smelt.define`, or a malformed
+    // generator-emitted body) are reported against the definition/generator
+    // file, not the selected caller, so a selected model that consumes a broken
+    // one must still be gated.
+    {
+        let mut gate_files: Vec<smelt_cli::ModelFile> = discovery
+            .discover_models()
+            .with_context(|| "Failed to discover models for diagnostic gate")?;
+        gate_files.extend(function_files.iter().cloned());
+        let gate_db = init_db(&project_dir, &gate_files);
+        let gate_ws =
+            smelt_db::Workspace::try_get(&gate_db).expect("workspace not initialized by init_db");
+        let selected_set: std::collections::HashSet<&str> =
+            execution_order.iter().map(|s| s.as_str()).collect();
+        let gate_paths: Vec<std::path::PathBuf> = gate_files
+            .iter()
+            .filter(|m| {
+                let is_function = function_files.iter().any(|f| f.path == m.path);
+                let is_generator = m.path.to_string_lossy().ends_with(".gen.sql");
+                is_function
+                    || is_generator
+                    || selected_set.contains(m.name.as_str())
+                    || selected_set.contains(m.canonical_path().as_str())
+            })
+            .map(|m| m.path.clone())
+            .collect();
+        if let Err(errors) = smelt_runtime::gate_diagnostics(&gate_db, gate_ws, &gate_paths) {
+            for e in &errors {
+                eprintln!("error: {e}");
+            }
+            return Err(anyhow::anyhow!(
+                "{}",
+                smelt_runtime::format_gate_errors(&errors)
+            ));
+        }
+    }
+
+    // Dependency validation runs *after* the diagnostic-parity gate so an
+    // analyzer Error (e.g. a config-loader schema violation, a cyclic-CTE
+    // function) is reported by its real diagnostic code rather than a downstream
+    // "undefined model/source" dependency error (BUG-015/019). Selection above
+    // operates on the unvalidated graph (pure traversal); validation here
+    // guards compilation/execution.
+    graph
+        .validate()
+        .with_context(|| "Dependency validation failed")?;
 
     // (dry-run no longer returns here — it now runs through compilation so
     // it can surface diagnostics and print the planned SQL per model. See
