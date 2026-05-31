@@ -15,13 +15,14 @@
 # `.claude/active-plan`.
 #
 # Currently active:
-#   in-repo plan: docs/plans/20260530-feature-sweep.md
-#   meta-plan:    ~/.claude/plans/we-now-have-a-idempotent-torvalds.md
+#   in-repo plan: docs/plans/20260531-diagnostic-parity.md
+#   meta-plan:    docs/plans/20260531-diagnostic-parity.md (self-contained)
 #
-# NOTE: this drives a bug-hunting sweep, not a feature plan. The default
-# PROMPT below assumes /smelt:plan+/smelt:implement; for the sweep, run with
-# the bug-hunt iteration prompt instead:
-#   PROMPT="$(cat .claude/bug-hunt-prompt.txt)" bash .claude/scripts/autonomy-loop.sh
+# NOTE: this drives a spec-anchored IMPLEMENTATION plan (diagnostic parity +
+# function/meta codegen). Run with the diag-parity iteration prompt:
+#   PROMPT="$(cat .claude/diag-parity-prompt.txt)" bash .claude/scripts/autonomy-loop.sh
+# (The earlier bug-hunt sweep used .claude/bug-hunt-prompt.txt with
+#  docs/plans/20260530-feature-sweep.md — that plan is paused, not deleted.)
 #
 # When swapping plans, update .claude/active-plan, the two comment
 # lines above, and the LOG_DIR below.
@@ -57,7 +58,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-LOG_DIR="${HOME}/.claude/logs/feature-sweep"
+LOG_DIR="${HOME}/.claude/logs/diag-parity"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).

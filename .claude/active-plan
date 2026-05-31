@@ -13,5 +13,5 @@
 # When all phases are `done`: leave this file in place but expect the
 # loop to emit <<ALL_DONE>> on its next iteration and exit cleanly.
 
-in_repo_plan: docs/plans/20260530-feature-sweep.md
-meta_plan: /home/andrew/.claude/plans/we-now-have-a-idempotent-torvalds.md
+in_repo_plan: docs/plans/20260531-diagnostic-parity.md
+meta_plan: docs/plans/20260531-diagnostic-parity.md
