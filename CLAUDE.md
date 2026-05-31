@@ -163,6 +163,106 @@ headless iterations. Summarize it with
 `bash .claude/scripts/usage-summary.sh` to see top tool-result outliers and
 per-iteration cost after an autonomous run.
 
+## Autonomy loop
+
+The autonomy loop drives the active multi-session plan headlessly: each
+iteration spawns a fresh `claude --print`, executes the next `pending` phase
+of the plan named in `.claude/active-plan`, and emits a sentinel
+(`<<PHASE_COMPLETE>>`, `<<ALL_DONE>>`, or `<<PAUSE_FOR_HUMAN>>`) that the
+wrapper greps to decide whether to loop again. `autonomy-loop-forever.sh`
+wraps `autonomy-loop.sh` and restarts it after `MAX_ITERATIONS` or a crash.
+
+### How to run it (correctly)
+
+**Run it from a real terminal or a detached tmux/systemd unit — never from
+inside a Claude session, and never by asking Claude to launch it with Bash.**
+
+**Run it from the checkout whose branch you want it to advance — usually a
+git worktree, not the main repo root.** The loop is worktree-aware *by
+location*: `autonomy-loop.sh` derives `REPO_ROOT` as two levels up from the
+script's own path, and every `git merge origin/main` / commit / push acts on
+whatever working tree the script lives in. It also reads *that* tree's
+`.claude/active-plan`, prompt, and log config. So launch the copy of the
+script inside the checkout you want driven. For the current diagnostic-parity
+work that is the worktree
+`/home/andrew/smelt-sql/.claude/worktrees/test_features` (branch
+`worktree-test_features`) — running the main-repo copy at
+`/home/andrew/smelt-sql` would resolve `REPO_ROOT` to the main checkout (a
+different branch with a different active-plan) and push the wrong branch. The
+commands below use a `WT=` variable so you can point it at whichever checkout
+is correct.
+
+Why this matters: the loop *is* a chain of `claude --print` subprocesses. If
+you ask an interactive Claude session to `setsid nohup bash …` the loop, you
+nest a Claude session inside a Claude session, and the loop lives in the
+parent session's process group / cgroup. When the harness (or the
+auto-retry launcher) restarts or resumes that session, the whole tree is torn
+down — the loop receives SIGTERM and dies mid-iteration. (This is exactly how
+a launch on 2026-05-31 self-terminated: the wrapper logged `Interrupted by
+user` / `Terminated` the moment the parent session was resumed.)
+
+Correct invocations, in order of preference:
+
+```bash
+# Point this at the checkout you want the loop to drive (worktree for the
+# current diag-parity work; the main repo root only if that's where the
+# target branch + active-plan live):
+WT=/home/andrew/smelt-sql/.claude/worktrees/test_features
+
+# 1. Dedicated tmux window (recommended — survives your SSH session,
+#    matches the cgroup the memory sampler is written to watch):
+tmux new-session -d -s autonomy \
+  "cd $WT && bash .claude/scripts/autonomy-loop-forever.sh"
+tmux attach -t autonomy        # watch it; detach with Ctrl-b d
+
+# 2. Single bounded run (no auto-restart), foreground in a terminal:
+cd "$WT" && bash .claude/scripts/autonomy-loop.sh
+
+# 3. Fully detached from any login session via systemd-run:
+systemd-run --user --unit=smelt-autonomy --working-directory="$WT" \
+  bash "$WT/.claude/scripts/autonomy-loop-forever.sh"
+journalctl --user -u smelt-autonomy -f
+```
+
+Tunables (env vars): `MAX_ITERATIONS` (default 25), `PERMISSION_MODE`
+(default `bypassPermissions`), `MODEL` (default `opus`), `CARGO_BUILD_JOBS`
+(default 6 — caps link-time RSS spikes that previously tripped systemd-oomd).
+
+Before launching, check nothing is already running and that the active plan
+is the one you want:
+
+```bash
+ps -eo pid,etime,args | grep -E 'bash .*autonomy-loop' | grep -v grep   # expect no output
+cat "$WT/.claude/active-plan"                                           # confirm in_repo_plan
+git -C "$WT" branch --show-current                                      # confirm the branch the loop will push
+```
+
+Note: a bare `ps … | grep autonomy-loop` will also match an interactive
+Claude session whose launch argument contains the script path (the
+auto-retry launcher runs `claude … start .claude/scripts/autonomy-loop-forever.sh`).
+Match `bash .*autonomy-loop` specifically so you don't false-positive on the
+session and skip a real launch.
+
+Logs land in `~/.claude/logs/diag-parity/iter-*.log` (per-iteration
+stdout+`.memory.log`); the forever-wrapper's own output goes wherever you
+redirect it. Stop it with `tmux kill-session -t autonomy` (or
+`systemctl --user stop smelt-autonomy`, or Ctrl-C in the foreground case).
+
+**Asking Claude to start it:** if you want *me* to kick it off, give me the
+prompt below. I will run it in a detached tmux session (option 1) so it
+survives this conversation, never with a bare backgrounded Bash call.
+
+> Start the autonomy loop in a **detached tmux session** named `autonomy`
+> by running `.claude/scripts/autonomy-loop-forever.sh` from **this
+> worktree** (the checkout you're currently in — `cd` into its root, do not
+> use the main repo path, since the loop pushes the branch of whatever
+> checkout it runs in). First confirm no `bash …autonomy-loop` process is
+> already running (a bare grep will match my own session — ignore that), and
+> echo the active plan and current branch from this checkout. Do **not**
+> launch it with `setsid`/`nohup`/`&` inside this session — it must outlive
+> this conversation. After starting, show me `tmux ls` and the first few
+> lines of the iteration log to confirm it's iterating.
+
 ## Architecture
 
 ### High-Level Design
