@@ -664,3 +664,221 @@ ORDER BY order_id
         "divide-by-zero row should be NULL in cross-target build, got: {zero_row:?}"
     );
 }
+
+// ─── Test 7: nested table-valued function chain in FROM position (BUG-013) ──
+
+/// A two-level `smelt.define` chain where each function is **table-valued**
+/// (takes a `source` table and returns `SELECT * FROM …`), called in FROM
+/// position.  Before the BUG-013 fix the FROM-position branch in the printer
+/// reparsed the expanded body WITHOUT the synthetic `SELECT ` prefix trick used
+/// by `reexpand_call_body`, so the inner `smelt.functions.passthru` node was
+/// emitted verbatim → DuckDB `Catalog "smelt" does not exist`.
+///
+/// Chain: consumer → wrap_tbl(source) → passthru(source) → SELECT * FROM source
+/// Both functions are identity pass-throughs, so the consumer table must
+/// contain exactly the same rows as `raw_t`.
+#[test]
+fn e2e_nested_table_fn_chain_executes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_nested_table_fn_chain
+version: 1
+paths:
+  - models
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // CSV seed so the analyzer has a concrete schema for raw_t (n: Integer).
+    // A VALUES model would not propagate column types through an untyped
+    // TableExpr param, causing UndeclaredColumn errors in the consumer.
+    let raw_t_csv = "n\n1\n2\n3\n";
+
+    // Two untyped-param table functions forming an identity chain:
+    //   passthru(source) → SELECT * FROM source
+    //   wrap_tbl(source) → SELECT * FROM smelt.functions.passthru(source)
+    //
+    // Both are in a single `functions/` file, separated by `---` delimiters,
+    // matching the style used in examples/functions_demo/functions/nested_helpers.sql.
+    // Untyped params are used because `TableExpr`-typed params require typed
+    // call-site args; untyped params work cleanly for this identity-passthrough shape.
+    let chain_fn = "---
+backends: [duckdb]
+---
+smelt.define passthru(source) AS (SELECT * FROM source)
+
+---
+backends: [duckdb]
+---
+smelt.define wrap_tbl(source) AS (SELECT * FROM smelt.functions.passthru(source))
+";
+
+    // Consumer: calls wrap_tbl in FROM position without an explicit alias.
+    // The printer must wrap the expanded body in `(...) AS __smelt_t<N>` for
+    // DuckDB to accept it as a derived table, and must recursively expand the
+    // inner smelt.functions.passthru reference before handing to DuckDB.
+    // SELECT * avoids the UndeclaredColumn check on the untyped-param chain.
+    let consumer_sql = "---
+materialization: table
+---
+SELECT * FROM smelt.functions.wrap_tbl(smelt.raw_t)
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("seeds/raw_t.csv", raw_t_csv),
+            ("functions/chain.sql", chain_fn),
+            ("models/consumer.sql", consumer_sql),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    // Verify the consumer table contains exactly the seed rows — proving the
+    // nested FROM-position chain expanded correctly end-to-end.
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+    let mut stmt = conn
+        .prepare("SELECT n FROM main.consumer ORDER BY n")
+        .expect("prepare consumer query");
+    let rows: Vec<i64> = stmt
+        .query_map([], |row| row.get::<_, i64>(0))
+        .expect("query consumer rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    assert_eq!(
+        rows,
+        vec![1, 2, 3],
+        "nested FROM-position table-fn chain must produce the same rows as the seed: got {rows:?}"
+    );
+}
+
+// ─── Test 6: nested smelt.define 3-level chain executes (BUG-013) ───────────
+
+/// A three-level `smelt.define` chain where each function calls the previous
+/// via `smelt.functions.*`.  Before the BUG-013 fix, the printer's reparse
+/// step did not recognise `SMELT_PATH_CALL` nodes inside a bare fragment, so
+/// the inner `smelt.functions.*` text reached DuckDB verbatim and the build
+/// failed with `Binder Error: Catalog "smelt" does not exist`.
+///
+/// Chain:  outer_call(y) → middle(z) → inner_unary(x) → (x + 1)
+/// So outer_call(10) should produce 10 + 1 = 11.
+#[test]
+fn e2e_nested_define_chain_executes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_nested_chain
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // Three functions in a single file using `---` delimiters, matching the
+    // style of `examples/functions_demo/functions/nested_helpers.sql`.
+    // Parameters are intentionally untyped so they type-check cleanly.
+    let chain_fn = "---
+backends: [duckdb]
+---
+smelt.define inner_unary(x) AS (x + 1)
+
+---
+backends: [duckdb]
+---
+smelt.define middle(z) AS (smelt.functions.inner_unary(z))
+
+---
+backends: [duckdb]
+---
+smelt.define outer_call(y) AS (smelt.functions.middle(y))
+";
+
+    // Seed values model: a single-column table with a known value so we can
+    // assert the arithmetic.
+    let seed_model = "---
+materialization: table
+---
+SELECT * FROM (VALUES
+    (1, 10),
+    (2, 20),
+    (3, 30)
+) AS t(row_id, val)
+";
+
+    // Consumer model: call outer_call on each row.
+    // outer_call(10) → middle(10) → inner_unary(10) → (10 + 1) = 11
+    let consumer_model = "---
+materialization: table
+---
+SELECT row_id, smelt.functions.outer_call(val) AS result
+FROM smelt.seed_data
+ORDER BY row_id
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("functions/chain.sql", chain_fn),
+            ("models/seed_data.sql", seed_model),
+            ("models/consumer.sql", consumer_model),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    // Open the resulting DuckDB file and verify the materialised values.
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+    let mut stmt = conn
+        .prepare("SELECT row_id, result FROM main.consumer ORDER BY row_id")
+        .expect("prepare consumer query");
+    let rows: Vec<(i32, i32)> = stmt
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?)))
+        .expect("query consumer rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    // outer_call(10) = middle(10) = inner_unary(10) = 10 + 1 = 11
+    // outer_call(20) = 21, outer_call(30) = 31
+    assert_eq!(rows.len(), 3, "expected 3 rows, got: {rows:?}");
+    assert_eq!(
+        rows[0],
+        (1, 11),
+        "outer_call(10) should be 11, got: {:?}",
+        rows[0]
+    );
+    assert_eq!(
+        rows[1],
+        (2, 21),
+        "outer_call(20) should be 21, got: {:?}",
+        rows[1]
+    );
+    assert_eq!(
+        rows[2],
+        (3, 31),
+        "outer_call(30) should be 31, got: {:?}",
+        rows[2]
+    );
+}

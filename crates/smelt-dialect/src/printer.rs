@@ -202,16 +202,13 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                         // state — valid across all models in a project because
                         // each model is printed independently.
                         let offset = u32::from(node.text_range().start());
-                        let reparsed = smelt_parser::parse(&expanded);
-                        let mut body_out = String::new();
-                        print_node(&reparsed.syntax(), ctx, &mut body_out);
-                        let body_trimmed = body_out.trim_end();
+                        let body = reexpand_call_body(&expanded, ctx);
+                        let body_trimmed = body.trim_end();
                         out.push('(');
                         out.push_str(body_trimmed);
                         out.push_str(&format!(") AS __smelt_t{offset}"));
                     } else {
-                        let reparsed = smelt_parser::parse(&expanded);
-                        print_node(&reparsed.syntax(), ctx, out);
+                        out.push_str(&reexpand_call_body(&expanded, ctx));
                     }
                     return;
                 }
@@ -258,6 +255,31 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             print_children(node, ctx, out);
         }
     }
+}
+
+/// Reparse an expanded `smelt.define` body so any nested `SMELT_PATH_CALL`
+/// nodes are recognised, then print it through `ctx` to re-expand nested
+/// calls.
+///
+/// The smelt parser only produces `SMELT_PATH_CALL` nodes inside a
+/// statement context (reachable from `SELECT`), never inside a bare or
+/// parenthesised fragment.  Wrapping the body in a synthetic `SELECT `
+/// prefix forces the parser into statement context so nested path-calls
+/// are parsed and subsequently re-expanded by `print_node`.  The synthetic
+/// prefix is stripped from the returned string before returning.
+///
+/// This makes nested/transitive `smelt.functions.*` chains reach a
+/// fixpoint: each `print_node` invocation expands one level; the recursion
+/// terminates because `FunctionCallCycle` rejects all circular definitions
+/// before the build reaches this point.
+fn reexpand_call_body(expanded: &str, ctx: &PrintContext) -> String {
+    let wrapped = format!("SELECT {expanded}");
+    let reparsed = smelt_parser::parse(&wrapped);
+    let mut out = String::new();
+    print_node(&reparsed.syntax(), ctx, &mut out);
+    out.strip_prefix("SELECT ")
+        .expect("synthetic SELECT wrapper prefix is always present (print_node on a FILE starts with the SELECT keyword)")
+        .to_string()
 }
 
 /// Walk children with index-based iteration, allowing look-ahead for DATE literal rewrite.
@@ -1316,6 +1338,57 @@ mod tests {
         assert!(
             result.contains("some_expression"),
             "expected expanded body, got: {result}"
+        );
+    }
+
+    // ===== Nested smelt.define fixpoint tests (BUG-013) =====
+
+    /// Printing a model SQL that calls `smelt.functions.outer(x)` where `outer`
+    /// expands to `(smelt.functions.inner(x))` and `inner` expands to `(x + 1)`
+    /// must produce output containing `(x + 1)` (not `smelt.functions.inner`).
+    ///
+    /// Before the fix, the reparse step did not produce `SMELT_PATH_CALL` nodes
+    /// from a bare/parenthesised fragment, so the inner path-call was passed
+    /// through verbatim to DuckDB → `Catalog "smelt" does not exist`.
+    #[test]
+    fn nested_define_chain_expands_to_fixpoint() {
+        // Two-level chain: wrap_fn → (smelt.functions.increment(x)), increment → (x + 1).
+        // "wrap_fn" and "increment" are plain identifiers with no SQL keyword
+        // collision, so the parser reliably recognises the call as SMELT_PATH_CALL.
+        let sql = "SELECT smelt.functions.wrap_fn(x) FROM t";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+
+        let wrap_body = "(smelt.functions.increment(x))";
+        let increment_body = "(x + 1)";
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: Some(Box::new(move |segs, _pos, _named| {
+                match segs.last().map(|s| s.as_str()) {
+                    Some("wrap_fn") => Some(wrap_body.to_string()),
+                    Some("increment") => Some(increment_body.to_string()),
+                    _ => None,
+                }
+            })),
+        };
+        let result = print(&parsed.syntax(), &ctx);
+
+        // The final output must contain the fully expanded arithmetic, not any
+        // residual smelt.functions.* reference.
+        assert!(
+            !result.contains("smelt.functions"),
+            "nested smelt.functions.* must be fully expanded, got: {result}"
+        );
+        assert!(
+            result.contains("x + 1"),
+            "expected fully expanded body '(x + 1)', got: {result}"
         );
     }
 }
