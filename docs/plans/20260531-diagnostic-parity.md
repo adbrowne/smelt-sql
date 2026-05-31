@@ -28,7 +28,7 @@ Two guarantees, per the spec rule:
 1. **Pre-flight.** `cargo test --quiet 2>&1 | tail -40`. If already red, emit `<<PAUSE_FOR_HUMAN>>`.
 2. **Spec increment** (only the phases that list one): edit the named spec section first; keep it timeless (no phase vocabulary in the spec body).
 3. **Red-green `/smelt:implement`.** Write the phase's failing test(s) first, then the implementation, with the spec as oracle. Implementer pass, then reviewer pass (material findings only).
-4. **Verify.** `cargo fmt --all`; `cargo clippy --all-targets` (zero warnings); `cargo test` green; plus the phase's specific gates: `example_diagnostics`, `example_workspaces`, `example_builds` (once it exists), `smelt-runtime` parity tests.
+4. **Verify.** `cargo fmt --all`; `cargo clippy --all-targets` (zero warnings); `cargo test` green; plus the phase's specific gates: `example_diagnostics`, `example_workspaces`, `smelt-runtime` parity tests. For `example_builds`: run it **scoped to only the workspace(s) this phase touches** — `SMELT_EXAMPLE_BUILDS_ONLY="<ws1>,<ws2>" cargo test -p smelt-cli --test example_builds` — because a clean-copy build + DuckDB execution of the whole example set is the gate's dominant cost. The **full** sweep (var unset) runs only in P8 / CI; do not run it unscoped in P2–P7.
 5. **Record + commit.** Update the status-table row to `done` + date; commit and push tests + impl + spec + table together with the phase's commit message. Emit `<<PHASE_COMPLETE>>` (or `<<ALL_DONE>>` on the last green phase).
 
 ## Pause conditions (`<<PAUSE_FOR_HUMAN>>`)

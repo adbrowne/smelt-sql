@@ -168,20 +168,32 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
         "Error: Dependency validation failed \
          (probe/demo fixture; not a clean standalone build target)",
     ),
-    // ── Config / scale workspaces that cannot build standalone ────────────
+    // NOTE: `huge` and `multi_engine` are NOT here — they are in `NEVER_BUILD`
+    // below (the gate does not even attempt to build them; see that doc).
+];
+
+/// Workspaces the gate does NOT attempt to build at all — running `smelt build`
+/// on them is pure cost with no signal. Unlike `KNOWN_UNBUILDABLE` (which runs
+/// the build and asserts it still fails, so a future fix forces de-listing),
+/// these are logged and skipped *without spawning a build*.
+///
+/// - `huge` is an auto-generated 2000-model stress workspace; compiling and
+///   executing it — even just to a known failure — dominates this gate's
+///   wall-clock and (in the autonomy loop) token cost.
+/// - `multi_engine` has no standalone target; its Spark target needs a Docker
+///   engine the CI/test environment does not provide.
+///
+/// We never intend to make either build, so the "forces de-listing when it
+/// starts building" guarantee that justifies running the build for
+/// `KNOWN_UNBUILDABLE` does not apply to them.
+const NEVER_BUILD: &[(&str, &str)] = &[
     (
-        // No `dev` target — only `spark_docker` / `duckdb_local`, and the Spark
-        // target needs a Docker engine the test env does not provide.
-        "multi_engine",
-        "Error: Target 'dev' not found in smelt.yml. Available targets: \
-         spark_docker, duckdb_local (no standalone-buildable default target)",
+        "huge",
+        "auto-generated 2000-model stress workspace; building it is pure cost",
     ),
     (
-        // Auto-generated 2000-model stress workspace; includes Python models
-        // that fail to parse standalone and is far too large to build in CI.
-        "huge",
-        "Error: Parse errors in py_l2_403 (auto-generated 2000-model stress \
-         workspace; not a clean build target)",
+        "multi_engine",
+        "no standalone target (Spark target needs a Docker engine)",
     ),
 ];
 
@@ -195,6 +207,44 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
 /// completes successfully (exit 0) and the analyzer emits no diagnostic.
 const BROKEN_BUILDS_CLEAN: &[&str] =
     &["per_cohort_union_broken_emission_body_collision_suppression"];
+
+/// Max workspaces whose full failure detail is dumped in the assert message; the
+/// rest are summarized by name + count. Bounds the assert size when a regression
+/// breaks several workspaces at once.
+const MAX_DETAILED_FAILURES: usize = 8;
+
+/// Keep only the last `n` lines of build output. A failing `smelt build` can emit
+/// a large stdout+stderr; the tail carries the actual error without flooding the
+/// assert message (and, in the autonomy loop, the model's context window).
+fn tail_output(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        return s.trim_end().to_string();
+    }
+    let omitted = lines.len() - n;
+    format!(
+        "… ({omitted} earlier line(s) omitted; showing last {n}) …\n{}",
+        lines[lines.len() - n..].join("\n")
+    )
+}
+
+/// Optional per-phase scoping. When `SMELT_EXAMPLE_BUILDS_ONLY` is set to a
+/// comma-separated list of workspace names, the gate runs only those workspaces
+/// — so a single plan phase can build just the workspace(s) it touches instead
+/// of the whole example set (clean copies + DuckDB execution per workspace is
+/// the gate's dominant cost). With the var unset, every workspace runs: that is
+/// the close-out / CI configuration that proves the whole set still builds.
+fn only_filter() -> Option<std::collections::HashSet<String>> {
+    match std::env::var("SMELT_EXAMPLE_BUILDS_ONLY") {
+        Ok(v) if !v.trim().is_empty() => Some(
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
 
 fn examples_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -314,21 +364,44 @@ fn collect_diagnostics(workspace: &Path) -> (Vec<String>, Vec<String>) {
 #[test]
 fn every_example_builds_or_is_accounted_for() {
     let allow: std::collections::HashMap<&str, &str> = KNOWN_UNBUILDABLE.iter().copied().collect();
+    let never: std::collections::HashMap<&str, &str> = NEVER_BUILD.iter().copied().collect();
     let builds_clean: std::collections::HashSet<&str> =
         BROKEN_BUILDS_CLEAN.iter().copied().collect();
+    let only = only_filter();
+    if let Some(only) = &only {
+        eprintln!(
+            "SMELT_EXAMPLE_BUILDS_ONLY set — running {} workspace(s): {:?}",
+            only.len(),
+            only
+        );
+    }
 
     let mut failures: Vec<String> = Vec::new();
 
     for ws in example_workspaces() {
         let name = ws.file_name().unwrap().to_string_lossy().to_string();
 
+        // Per-phase scoping: skip anything not in the requested subset.
+        if only.as_ref().is_some_and(|set| !set.contains(&name)) {
+            continue;
+        }
+
+        // Never-build set: log and skip without spawning a build (pure cost).
+        if let Some(reason) = never.get(name.as_str()) {
+            eprintln!("SKIP (NEVER_BUILD, not attempted) {name}: {reason}");
+            continue;
+        }
+
         if let Some(reason) = allow.get(name.as_str()) {
             // Allow-listed: log the reason, confirm it still fails to build.
             let out = run_build(&ws);
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
+            let combined = tail_output(
+                &format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                30,
             );
             eprintln!(
                 "SKIP (KNOWN_UNBUILDABLE) {name}: {reason}\n  observed exit: {:?}",
@@ -358,10 +431,13 @@ fn every_example_builds_or_is_accounted_for() {
                     out.status.code()
                 );
                 if !out.status.success() {
-                    let combined = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
+                    let combined = tail_output(
+                        &format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        ),
+                        30,
                     );
                     failures.push(format!(
                         "broken fixture '{name}' (BROKEN_BUILDS_CLEAN) was expected to \
@@ -385,10 +461,13 @@ fn every_example_builds_or_is_accounted_for() {
             // No analyzer Error — the rejection must come from the build itself.
             let out = run_build(&ws);
             if out.status.success() {
-                let combined = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
+                let combined = tail_output(
+                    &format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    30,
                 );
                 failures.push(format!(
                     "broken fixture '{name}' produced no Error-severity diagnostic AND \
@@ -410,10 +489,13 @@ fn every_example_builds_or_is_accounted_for() {
         if out.status.success() {
             eprintln!("PASS {name}");
         } else {
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
+            let combined = tail_output(
+                &format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                30,
             );
             failures.push(format!(
                 "clean workspace '{name}' failed `smelt build` (exit {:?}). If this is a \
@@ -424,10 +506,28 @@ fn every_example_builds_or_is_accounted_for() {
         }
     }
 
+    let shown = failures
+        .iter()
+        .take(MAX_DETAILED_FAILURES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let overflow = failures.len().saturating_sub(MAX_DETAILED_FAILURES);
+    let overflow_note = if overflow > 0 {
+        let names: Vec<&str> = failures[MAX_DETAILED_FAILURES..]
+            .iter()
+            .map(|f| f.lines().next().unwrap_or(f).trim())
+            .collect();
+        format!(
+            "\n\n… and {overflow} more failure(s) (detail capped at {MAX_DETAILED_FAILURES}): {}",
+            names.join(" | ")
+        )
+    } else {
+        String::new()
+    };
     assert!(
         failures.is_empty(),
-        "example_builds gate found {} problem(s):\n\n{}",
+        "example_builds gate found {} problem(s):\n\n{shown}{overflow_note}",
         failures.len(),
-        failures.join("\n\n")
     );
 }
