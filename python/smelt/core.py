@@ -23,6 +23,14 @@ class ProjectContext:
         return result
 
 
-def model(func):
-    _registered_models[func.__name__] = func
-    return func
+def model(func=None):
+    # Support both the bare form `@model` and the called form `@model()`.
+    # When used as `@model()`, `func` is None and we return the registrar so
+    # Python applies it to the decorated function on the next call.
+    def register(f):
+        _registered_models[f.__name__] = f
+        return f
+
+    if func is None:
+        return register
+    return register(func)

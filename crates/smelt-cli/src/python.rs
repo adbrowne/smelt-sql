@@ -682,6 +682,70 @@ def model_two(project):
     }
 
     #[test]
+    fn test_model_called_form_recognized() {
+        // Regression for BUG-039: the spec (python_models.md §Surface — `@model`
+        // decorator) states "Both `@model` and `@model()` (called form) are
+        // recognized." The Rust/LSP scanner already accepts `@model()`, but the
+        // Python SDK `model` decorator must also accept the called form rather
+        // than raising `TypeError: model() missing 1 required positional argument`.
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let py_content = r#"from smelt import model
+
+@model()
+def called_form(project):
+    return "SELECT 1 as id"
+"#;
+        std::fs::write(models_dir.join("called.py"), py_content).unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+        assert_eq!(python_files.len(), 1);
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let python_models =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+
+        assert_eq!(python_models.len(), 1);
+        assert_eq!(python_models[0].name, "called_form");
+        assert!(python_models[0].content.contains("SELECT 1"));
+    }
+
+    #[test]
     fn test_find_models_convergence() {
         use tempfile::TempDir;
 
