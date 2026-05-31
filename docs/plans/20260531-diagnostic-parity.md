@@ -40,7 +40,7 @@ Two guarantees, per the spec rule:
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| P1 | `example_builds` harness (build+execute every example; discover & allow-list the currently-unbuildable, each with a logged reason) | pending | — (structural) | | |
+| P1 | `example_builds` harness (build+execute every example; discover & allow-list the currently-unbuildable, each with a logged reason) | done | — (structural) | | 2026-05-31 |
 | P2 | Shared `Error`-severity diagnostic gate, wired into both the CLI run path and `execute_project` | pending | BUG-011, 015, 019, 024, 032 | | |
 | P3 | BUG-013: expand nested `smelt.define` calls to a fixpoint | pending | BUG-013 | | |
 | P4 | BUG-018: thread block `PASSING` fragment bindings through substitution | pending | BUG-018 | | |
