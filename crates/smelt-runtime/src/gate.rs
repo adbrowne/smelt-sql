@@ -18,12 +18,12 @@
 //! 1-based positions.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use line_index::LineIndex;
 use smelt_db::{
-    check_type_diagnostics, file_diagnostics, Database, Diagnostic, DiagnosticAcc, DiagnosticCode,
-    DiagnosticSeverity, Workspace,
+    check_type_diagnostics, file_diagnostics, project_source_diagnostics, Database, Diagnostic,
+    DiagnosticAcc, DiagnosticCode, DiagnosticSeverity, Workspace,
 };
 
 /// A single `Error`-severity diagnostic that blocks the build, with its source
@@ -101,6 +101,34 @@ pub fn gate_diagnostics(
                 col: lc.col + 1,
                 code: d.code,
                 message: d.message,
+            });
+        }
+    }
+
+    // Per-entity source YAML diagnostics are project-scoped: the `.yml` files
+    // are not `SourceFile` inputs, so a malformed source is invisible to the
+    // per-file loop above. Gate the sources of every project that owns at least
+    // one gated file (so `--select`-ing a model still enforces its project's
+    // sources, but an unrelated project in a multi-project workspace is not
+    // dragged in). A malformed source surfaces here as a `MalformedSource` /
+    // `SourceTypeError` Error (BUG-032; `architecture.md` §"Diagnostic parity
+    // rule"). These diagnostics are anchored at the source file head (offset 0),
+    // so `(line, col)` is unconditionally `(1, 1)`.
+    for project in workspace.projects(db).iter().copied() {
+        let root: &Path = project.root(db).as_path();
+        if !files.iter().any(|f| f.starts_with(root)) {
+            continue;
+        }
+        for sd in project_source_diagnostics(db, project).iter() {
+            if sd.diagnostic.severity != DiagnosticSeverity::Error {
+                continue;
+            }
+            errors.push(GateDiagnostic {
+                path: sd.path.clone(),
+                line: 1,
+                col: 1,
+                code: sd.diagnostic.code,
+                message: sd.diagnostic.message.clone(),
             });
         }
     }

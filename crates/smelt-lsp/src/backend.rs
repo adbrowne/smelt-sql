@@ -15,8 +15,8 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
-    functions_in_file, yaml_edits::find_source_column_yaml_rename, Database,
-    Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
+    functions_in_file, project_source_diagnostics, yaml_edits::find_source_column_yaml_rename,
+    Database, Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
     DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile, Workspace,
 };
 use smelt_parser::ast::File as AstFile;
@@ -672,6 +672,41 @@ impl Backend {
                 self.publish_diagnostics(uri).await;
             }
         }
+
+        self.publish_source_diagnostics().await;
+    }
+
+    /// Publish per-entity source YAML diagnostics, project-scoped.
+    ///
+    /// These `.yml` files are not tracked `SourceFile` inputs (they have no SQL
+    /// body the per-file diagnostic path checks), so a malformed source is
+    /// published here to its own file URI — flagging it red in the editor exactly
+    /// as the build gate refuses it (`architecture.md` §"Diagnostic parity
+    /// rule"). Source discovery is keyed on `ProjectInput` and restart-scoped, so
+    /// publishing once at `initialized` (and on `sources.yml` refresh) is the
+    /// source surface's lifecycle.
+    async fn publish_source_diagnostics(&self) {
+        let db = self.snapshot().await;
+        let Some(ws) = Workspace::try_get(&db) else {
+            return;
+        };
+        // Group by file so each `.yml` gets a single publish (overwriting any
+        // prior publish for that URI), even if it ever carries >1 diagnostic.
+        let mut by_path: std::collections::HashMap<PathBuf, Vec<lsp_types::Diagnostic>> =
+            std::collections::HashMap::new();
+        for project in ws.projects(&db).iter().copied() {
+            for sd in project_source_diagnostics(&db, project).iter() {
+                let text = std::fs::read_to_string(&sd.path).unwrap_or_default();
+                let converter = self.boundary_converter(&text).await;
+                let lsp_diag = self.to_lsp_diagnostic(&sd.diagnostic, &converter);
+                by_path.entry(sd.path.clone()).or_default().push(lsp_diag);
+            }
+        }
+        for (path, diags) in by_path {
+            if let Ok(uri) = Url::from_file_path(&path) {
+                self.client.publish_diagnostics(uri, diags, None).await;
+            }
+        }
     }
 
     /// Handle a Python model file change: re-execute and update Salsa.
@@ -1148,6 +1183,13 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "smelt language server initialized")
             .await;
+
+        // Publish per-entity source YAML diagnostics (malformed sources) up
+        // front — before the `register_capability` round-trip below, which
+        // awaits a client response — so the source surface is populated even if
+        // dynamic registration is slow or unsupported. Source discovery is
+        // restart-scoped, so this startup publish is its lifecycle.
+        self.publish_source_diagnostics().await;
 
         // Register file watchers (dynamic registration). We watch:
         //   - `**/models/**/*.py` for Python model changes

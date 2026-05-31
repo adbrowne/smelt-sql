@@ -703,6 +703,52 @@ async fn non_ascii_broken_undeclared_column() {
     );
 }
 
+/// LSP gate (BUG-032 / P2c): a malformed per-entity source YAML surfaces a
+/// `malformed-source` diagnostic via the real LSP backend, published to the
+/// offending `.yml` file's own URI at `initialized`. This is the editor half of
+/// the diagnostic-parity rule — the build gate refuses the same workspace.
+#[tokio::test]
+async fn sources_broken_malformed_surfaces_via_lsp() {
+    let workspace = examples_root().join("sources_broken_malformed");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    // Opening the SQL probe is not required for the source publish (it fires at
+    // `initialized`), but mirrors the other fixtures and exercises the SQL path.
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    // The diagnostic must be published against the source `.yml`, not the SQL.
+    let on_source_yml = diags.iter().any(|(uri, ds)| {
+        uri.ends_with("sources/raw/orders.yml")
+            && ds.iter().any(|d| {
+                d.code.as_ref().is_some_and(
+                |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "malformed-source"),
+            )
+            })
+    });
+    assert!(
+        on_source_yml,
+        "expected a malformed-source diagnostic on orders.yml via LSP, got: {:?}",
+        diags
+            .iter()
+            .flat_map(|(uri, ds)| ds
+                .iter()
+                .map(move |d| format!("{}: {:?}: {}", uri, d.code, d.message)))
+            .collect::<Vec<_>>()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Multi-project workspace case — the project isolation rule.
 // ---------------------------------------------------------------------------

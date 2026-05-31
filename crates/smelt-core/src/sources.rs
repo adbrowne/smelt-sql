@@ -217,16 +217,16 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
     })
 }
 
-/// Walk all `paths` under `project_root`, find standalone `.yml` files (those
-/// without a same-stem `.csv` sibling), parse them as sources, and return the
-/// results. Files that fail to parse are silently skipped (errors surfaced via
-/// diagnostics by the Salsa layer).
+/// Walk all `paths` under `project_root` and return every candidate source
+/// `.yml`/`.yaml` file — a standalone YAML with no same-stem `.csv` sibling —
+/// paired with the scan-root directory it was found under.
 ///
-/// The `address_segments` field is populated with the full scan-root-stripped
-/// path tuple (e.g. `["sources", "raw", "users"]` for
-/// `models/sources/raw/users.yml` under `paths: ["models"]`).
-pub fn discover_source_infos(project_dir: &Path, paths: &[String]) -> Vec<SourceInfo> {
-    let mut sources = Vec::new();
+/// This is the single place the source/sidecar disambiguation lives, shared by
+/// [`discover_source_infos`] (which parses each candidate into a `SourceInfo`)
+/// and [`discover_source_errors`] (which collects the candidates that fail to
+/// parse). Keeping one walk means both surfaces see exactly the same file set.
+fn candidate_source_yaml_files(project_dir: &Path, paths: &[String]) -> Vec<(PathBuf, PathBuf)> {
+    let mut candidates = Vec::new();
 
     for scan_root in paths {
         let root_dir = project_dir.join(scan_root);
@@ -266,34 +266,75 @@ pub fn discover_source_infos(project_dir: &Path, paths: &[String]) -> Vec<Source
                     continue;
                 }
 
-                // Parse the source YAML.
-                let mut info = match parse_source_yaml(file_path) {
-                    Ok(i) => i,
-                    Err(_) => continue, // surface via diagnostics
-                };
-
-                // Recompute address_segments with the full scan-root-stripped path.
-                let rel = file_path
-                    .strip_prefix(&root_dir)
-                    .expect("file is under root_dir");
-                let parent = rel.parent().unwrap_or(Path::new(""));
-                let mut address_segments: Vec<String> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                        _ => None,
-                    })
-                    .collect();
-                address_segments.push(stem.to_string());
-                info.address_segments = address_segments;
-
-                sources.push(info);
+                candidates.push((root_dir.clone(), file_path.clone()));
             }
         }
     }
 
+    candidates
+}
+
+/// Walk all `paths` under `project_root`, find standalone `.yml` files (those
+/// without a same-stem `.csv` sibling), parse them as sources, and return the
+/// results. Files that fail to parse are silently skipped (errors surfaced via
+/// [`discover_source_errors`] / diagnostics by the Salsa layer).
+///
+/// The `address_segments` field is populated with the full scan-root-stripped
+/// path tuple (e.g. `["sources", "raw", "users"]` for
+/// `models/sources/raw/users.yml` under `paths: ["models"]`).
+pub fn discover_source_infos(project_dir: &Path, paths: &[String]) -> Vec<SourceInfo> {
+    let mut sources = Vec::new();
+
+    for (root_dir, file_path) in candidate_source_yaml_files(project_dir, paths) {
+        // Parse the source YAML.
+        let mut info = match parse_source_yaml(&file_path) {
+            Ok(i) => i,
+            Err(_) => continue, // surfaced via discover_source_errors
+        };
+
+        let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+        // Recompute address_segments with the full scan-root-stripped path.
+        let rel = file_path
+            .strip_prefix(&root_dir)
+            .expect("file is under root_dir");
+        let parent = rel.parent().unwrap_or(Path::new(""));
+        let mut address_segments: Vec<String> = parent
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        address_segments.push(stem.to_string());
+        info.address_segments = address_segments;
+
+        sources.push(info);
+    }
+
     sources.sort_by(|a, b| a.address_segments.cmp(&b.address_segments));
     sources
+}
+
+/// Walk the same candidate source `.yml` files as [`discover_source_infos`] but
+/// return only the ones that **fail** to parse, each paired with its
+/// [`SourceError`]. The Salsa source-diagnostics producer maps these into
+/// `MalformedSource` / `SourceTypeError` diagnostics so a malformed per-entity
+/// source is visible to the analyzer (and the build gate) instead of being
+/// silently dropped by discovery.
+///
+/// Results are sorted by path for deterministic diagnostic ordering.
+pub fn discover_source_errors(project_dir: &Path, paths: &[String]) -> Vec<(PathBuf, SourceError)> {
+    let mut errors: Vec<(PathBuf, SourceError)> = Vec::new();
+
+    for (_root_dir, file_path) in candidate_source_yaml_files(project_dir, paths) {
+        if let Err(e) = parse_source_yaml(&file_path) {
+            errors.push((file_path, e));
+        }
+    }
+
+    errors.sort_by(|a, b| a.0.cmp(&b.0));
+    errors
 }
 
 /// Check whether an aggregate `sources.yml` or `sources.yaml` exists at the

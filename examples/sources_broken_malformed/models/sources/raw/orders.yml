@@ -1,0 +1,12 @@
+# Intentionally malformed per-entity source: `materialization:` is forbidden on
+# a source (sources are external — smelt does not materialize them). This makes
+# the file fail `parse_source_yaml`, so discovery drops it and — before P2c —
+# the build proceeded at exit 0 (LSP-clean but unbuildable; BUG-032). It must
+# now surface as a `MalformedSource` Error at the diagnostic-parity gate.
+description: Raw orders feed
+materialization: table
+columns:
+  - name: order_id
+    type: INTEGER
+  - name: amount
+    type: DECIMAL

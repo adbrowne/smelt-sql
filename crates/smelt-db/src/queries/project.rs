@@ -170,6 +170,72 @@ pub fn project_sources(db: &dyn salsa::Database, project: ProjectInput) -> Arc<V
     Arc::new(smelt_core::discover_source_infos(&project_root, &paths))
 }
 
+/// A diagnostic anchored in a per-entity source `.yml` file.
+///
+/// Source YAML files are not registered as `SourceFile` inputs (they have no SQL
+/// body the per-file `file_diagnostics` query checks), so their diagnostics are
+/// produced project-wide here and carry their own file path. The build gate and
+/// the LSP consume these alongside the per-file diagnostic surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnostic {
+    /// Absolute path of the offending source `.yml` file.
+    pub path: PathBuf,
+    /// The diagnostic; its range is anchored at the file head (offset 0) — the
+    /// whole file is malformed, so there is no finer sub-span to point at.
+    pub diagnostic: crate::Diagnostic,
+}
+
+/// Surface malformed per-entity source YAML as diagnostics.
+///
+/// Discovery (`project_sources`) silently drops sources that fail to parse, so a
+/// malformed `.yml` is invisible to both the editor and `smelt build` — the
+/// build then fails downstream with a misleading "schema does not exist". This
+/// project-scoped query re-walks the same candidate files via
+/// `smelt_core::discover_source_errors` and maps each `SourceError` to its
+/// diagnostic code (`SourceTypeError` for an unrecognised column type, else
+/// `MalformedSource`), so the analyzer sees exactly what discovery sees
+/// (`architecture.md` §"Diagnostic parity rule").
+///
+/// Keyed on `ProjectInput` (re-runs when `smelt.yml` changes, e.g. `paths:`),
+/// mirroring `project_sources`; per-source-file edits require a tool restart,
+/// same as the rest of source discovery.
+#[salsa::tracked]
+pub fn project_source_diagnostics(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Arc<Vec<SourceDiagnostic>> {
+    let project_root = project.root(db).clone();
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+
+    let diags = smelt_core::discover_source_errors(&project_root, &paths)
+        .into_iter()
+        .map(|(path, err)| {
+            // The spec (`sources.md` §"Diagnostic codes") splits an unrecognised
+            // column type out as `SourceTypeError`; every other shape violation
+            // (missing `columns:`, `materialization:` present, bad YAML, bad
+            // `name:` override, unreadable file) is `MalformedSource`.
+            let code = match err {
+                smelt_core::SourceError::UnknownType { .. } => DiagnosticCode::SourceTypeError,
+                _ => DiagnosticCode::MalformedSource,
+            };
+            SourceDiagnostic {
+                path,
+                diagnostic: crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: err.to_string(),
+                    range: TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(code),
+                    data: None,
+                },
+            }
+        })
+        .collect();
+
+    Arc::new(diags)
+}
+
 /// Resolve a `smelt.seeds.<address>` or `smelt.sources.<address>` path to
 /// the on-disk file (`.csv` for seeds, `.yml` for sources) so the LSP can
 /// goto-definition into it.
