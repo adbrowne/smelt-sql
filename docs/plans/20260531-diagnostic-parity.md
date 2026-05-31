@@ -23,6 +23,7 @@ Two guarantees, per the spec rule:
 - Backend coverage beyond DuckDB.
 - A post-expansion `analyze_sql_string` diagnostic query (a backstop). Source-level gating + correct codegen cover this plan's scope; revisit only if a gap remains.
 - Demoting/retuning individual diagnostic *codes* beyond what the gate requires (only bump Warning↔Error where a phase's red-green test proves the verdict is wrong).
+- **User-authored planner-rule *registration*** (the extensibility feature: a project shipping its own planner rule). The diagnostic surface, including planner rules, is *in scope* — every built-in rule is surfaced into `file_diagnostics` via the uniform rule → diagnostics interface (P2b) and gated like any other `Error` (§"Diagnostic parity rule (analysis ↔ build)" Scope, §"Planner scope"). What is out of scope is the mechanism for registering *new, non-built-in* rules; when that lands it reuses the same interface and inherits parity for free. BUG-011 is therefore in scope (surface the cumulative classifier into `file_diagnostics`), not deferred.
 
 ## Per-phase routine
 1. **Pre-flight.** `cargo test --quiet 2>&1 | tail -40`. If already red, emit `<<PAUSE_FOR_HUMAN>>`.
@@ -41,7 +42,8 @@ Two guarantees, per the spec rule:
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
 | P1 | `example_builds` harness (build+execute every example; discover & allow-list the currently-unbuildable, each with a logged reason) | done | — (structural) | | 2026-05-31 |
-| P2 | Shared `Error`-severity diagnostic gate, wired into both the CLI run path and `execute_project` | pending | BUG-011, 015, 019, 024, 032 | | |
+| P2 | Shared `Error`-severity diagnostic gate, wired into both the CLI run path and `execute_project` | pending | BUG-015, 019, 024, 032 | | |
+| P2b | Uniform planner rule → diagnostics interface; surface built-in rules (cumulative classifier; incremental batch-safety/bounds) into `file_diagnostics` | pending | BUG-011 | | |
 | P3 | BUG-013: expand nested `smelt.define` calls to a fixpoint | pending | BUG-013 | | |
 | P4 | BUG-018: thread block `PASSING` fragment bindings through substitution | pending | BUG-018 | | |
 | P5 | BUG-006a: in-model list spread executes at build (meta_lists) | pending | BUG-006 (lists) | | |
@@ -60,9 +62,16 @@ Two guarantees, per the spec rule:
 
 ### P2 — Shared `Error`-severity diagnostic gate
 - **Spec**: `architecture.md` §"Diagnostic parity rule" (already added) is the oracle.
-- **Tests (red-green)**: pick `*_broken_*` fixtures whose error is **not** `UnknownSmeltFn` — at least one each for the codes behind BUG-019 (`CteCycle`), BUG-024 (`MalformedTimeseries`), BUG-011 (a cumulative classifier code), BUG-015 (a loader content-validation code), BUG-032 (a malformed per-entity source). Each test asserts `smelt build` exits non-zero **and** names the expected `DiagnosticCode`, where today it exits 0 / mis-builds. Add a positive test: a clean fixture still builds. Confirm every existing example remains buildable (they are analysis-clean).
+- **Tests (red-green)**: pick `*_broken_*` fixtures whose error is **not** `UnknownSmeltFn` — at least one each for the codes behind BUG-019 (`CteCycle`), BUG-024 (`MalformedTimeseries`), BUG-015 (a loader content-validation code), BUG-032 (a malformed per-entity source). Each test asserts `smelt build` exits non-zero **and** names the expected `DiagnosticCode`, where today it exits 0 / mis-builds. Add a positive test: a clean fixture still builds. Confirm every existing example remains buildable (they are analysis-clean). (The cumulative classifier codes behind BUG-011 are added to `file_diagnostics` in P2b, then flow through this same gate.)
 - **Implementation**: a shared helper (e.g. `smelt_runtime::gate_diagnostics(db, workspace, &selected) -> Result<(), Vec<Diagnostic>>`) that collects `file_diagnostics` for each selected model + in-DAG deps, keeps `severity == Error`, returns the aggregated set. Call it at the top of `execute_project` and from the CLI run path, **replacing** the `UnknownSmeltFn`-only block at `crates/smelt-cli/src/commands/run.rs:677-701`. Report all errors with `file:line` + code at the boundary (Diagnostic range encoding rule). If a phase fixture's code is currently `Warning` but the test proves it must block, bump it to `Error` and note it in the commit.
-- **Commit**: `feat(runtime): gate build on all Error-severity diagnostics via one shared CLI/UI helper (closes BUG-011/015/019/024/032)`
+- **Commit**: `feat(runtime): gate build on all Error-severity diagnostics via one shared CLI/UI helper (closes BUG-015/019/024/032)`
+
+### P2b — Uniform planner rule → diagnostics interface
+- **Spec**: `architecture.md` §"Planner scope" (rule → diagnostics interface) + §"Diagnostic parity rule" Scope (both already added) are the oracle.
+- **Context**: the cumulative classifier is `smelt_planner::classify_cumulative` (`crates/smelt-planner/src/rules/cumulative.rs:227`), returning `Result<CumulativeClassification, Vec<CumulativeDiagnostic>>`. `smelt-db` already depends on `smelt-planner` (compile-time edge; the reverse is dev-only), so `file_diagnostics` can call it directly — no new dependency. Today the classifier runs only on the build/dispatch path (`smelt-runtime` via `smelt_planner::classify_cumulative`), so a malformed cumulative model is LSP-clean (BUG-011).
+- **Tests (red-green)**: (1) a `cumulative_*_broken_*` fixture (e.g. missing GROUP BY / forbidden aggregate) now produces its `CumulativeDiagnostic`-mapped code via `smelt_db::file_diagnostics` — assert in an `smelt-db`/`example_diagnostics`-style test where today the model is diagnostic-clean. (2) The same fixture fails `smelt build` at the P2 gate naming that code (parity end-to-end). (3) A valid cumulative example stays clean in both surfaces.
+- **Implementation**: introduce a uniform rule → diagnostics interface in `smelt-planner` (a `detect`-shaped function/trait each built-in rule implements, returning `Vec<Diagnostic>` or rule-native diagnostics mappable to `smelt_db::Diagnostic`). Route the cumulative classifier and the incremental batch-safety/bounds analyzers through it. Have `file_diagnostics` invoke the built-in rules over each model and merge their diagnostics, mapping each to its correct severity (the cumulative classifier's reject codes are `Error`; advisory incremental findings stay `Warning`). Keep the checks in the rule (analysis-pure); `file_diagnostics` only aggregates. The runtime continues to call the same classifier, so the build/dispatch verdict is unchanged — it is now *also* visible to the editor.
+- **Commit**: `feat(planner,db): surface built-in planner-rule diagnostics via a uniform rule→diagnostics interface in file_diagnostics (closes BUG-011)`
 
 ### P3 — BUG-013 nested `smelt.define` fixpoint
 - **Tests (red-green)**: build+execute a nested-composition example (`examples/functions_demo/models/uses_nested_helpers.sql`, or a minimal 3-level chain) and assert correct output, where today DuckDB errors `Catalog "smelt" does not exist`. Remove the relevant entry from `KNOWN_UNBUILDABLE` if `functions_demo`'s only blockers were 013/018.
