@@ -10,30 +10,563 @@
 //! `meta_language.md` §Semantics "Lists and spread" rule 10 ("the Data-World
 //! CST handed to codegen contains no `ARRAY_LITERAL` and no spread node").
 //!
-//! Currently implemented: in-model **list-spread** expansion in SELECT lists
-//! (`SELECT id, ...[a, b] FROM t` → `SELECT id, a, b FROM t`). Higher-order
-//! functions, reflection, and config-driven constructs are evaluated by the
-//! analyzer but not yet lowered here — see `meta_language.md`
-//! §"Known Divergences".
+//! Currently implemented: SELECT-list **list-spread** of inline literals
+//! (`SELECT id, ...[a, b] FROM t` → `SELECT id, a, b FROM t`); the **HOFs**
+//! `map` / `filter` and the `reduce` reducer fold; the **pipe** operator and
+//! **lambdas**; the meta-world **ternary**; and **`smelt.config.var`**. Each is
+//! evaluated at compile time and lowered to plain Data-World SQL. Reflection
+//! (`smelt.columns_of`, `smelt.models.*`, `smelt.sources.*`) and the loader
+//! family are evaluated by the analyzer but not yet lowered here — see
+//! `meta_language.md` §"Known Divergences".
 
-use smelt_parser::ast::ListSpread;
-use smelt_parser::SyntaxKind::{LIST_SPREAD, SELECT_ITEM, SELECT_LIST};
+use std::collections::BTreeMap;
+
+use smelt_parser::ast::{
+    BinaryExpr, Expr, FunctionCall, Lambda, ListSpread, PipeExpr, ReducerCall, SelectList,
+    SmeltPathCall, TernaryExpr,
+};
+use smelt_parser::syntax_kind::SyntaxNode;
+use smelt_parser::SyntaxKind::{IDENT, LIST_SPREAD, SELECT_ITEM, SELECT_LIST, SMELT_PATH_CALL};
+
+/// Compile-time context for the build-path meta evaluator. Holds the workspace
+/// `vars:` (already coerced to `Text`) for `smelt.config.var`. Future reflection
+/// / loader lowering (the remaining meta constructs) will add borrowed fields
+/// here; today it carries only vars.
+pub struct MetaEvalContext<'a> {
+    pub vars: &'a BTreeMap<String, String>,
+}
 
 /// Run every in-model meta-language build-path expansion over `sql`, returning
 /// the rewritten SQL. The single entry point compile sites call before parsing
 /// a user model so codegen never sees a meta construct.
 ///
+/// Passes, in order:
+///   1. `smelt.config.var('x')` → the variable's `Text` literal (resolved first
+///      so a ternary condition / reducer argument that reads a var is concrete);
+///   2. select-item meta evaluation — HOFs (`map`/`filter`), the pipe operator,
+///      lambdas, reducers (`reduce`), and the meta-world ternary, each collapsed
+///      to plain Data-World SQL;
+///   3. SELECT-list spread of inline list literals (`...[a, b]`).
+///
 /// Pure and idempotent: a second pass over already-expanded SQL is a no-op
-/// (there are no spread nodes left to rewrite), so it is safe to call at every
-/// compile entry point even when SQL flows through several of them.
-pub fn expand_in_model_meta(sql: &str) -> String {
-    // Cheap guard: the spread token is the only construct this pass rewrites,
-    // and it always contains `...`. Skip the reparse for the common case of a
-    // model with no spreads at all.
-    if !sql.contains("...") {
+/// (there are no meta nodes left to rewrite), so it is safe to call at every
+/// compile entry point even when SQL flows through several of them. Each pass
+/// is guarded by a cheap substring check so a model with no meta constructs
+/// pays no reparse.
+pub fn expand_in_model_meta(sql: &str, ctx: &MetaEvalContext) -> String {
+    let s = expand_config_vars(sql, ctx);
+    let s = expand_select_item_meta(&s);
+    expand_select_list_spreads(&s)
+}
+
+/// A meta value produced by the build-path evaluator: either a `List<T>`
+/// (a vector of element SQL fragments) or a scalar Data-World SQL fragment.
+enum MetaValue {
+    List(Vec<String>),
+    Scalar(String),
+}
+
+/// Wrap `content` with the leading/trailing whitespace of `node_text`. A CST
+/// node's `text()` can include trailing trivia (the space before a following
+/// `AS` alias, the newline before `FROM`), so a bare splice would glue the
+/// replacement to the next token (`true` + `AS` → `trueAS`). Preserving the
+/// original surrounding whitespace keeps the spliced SQL well-formed.
+fn splice_preserving_ws(node_text: &str, content: &str) -> String {
+    let lead = &node_text[..node_text.len() - node_text.trim_start().len()];
+    let trail = &node_text[node_text.trim_end().len()..];
+    format!("{lead}{content}{trail}")
+}
+
+/// Apply `(start, end, replacement)` edits to `sql`, highest offset first so
+/// earlier offsets stay valid. Shared by every pass in this module.
+fn apply_edits(sql: &str, mut edits: Vec<(usize, usize, String)>) -> String {
+    if edits.is_empty() {
         return sql.to_string();
     }
-    expand_select_list_spreads(sql)
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut out = sql.to_string();
+    for (start, end, repl) in edits {
+        out.replace_range(start..end, &repl);
+    }
+    out
+}
+
+/// Pass 1 — resolve every `smelt.config.var('x')` to its `Text` literal.
+///
+/// Mirrors the analyzer's `check_config_var_call_diagnostics`: a `config.var`
+/// call with a string-literal argument present in `vars` is replaced by the
+/// variable's coerced value rendered as a single-quoted SQL `Text` literal. A
+/// call whose name is absent from `vars` is left verbatim — the analyzer gates
+/// it (`ConfigVarNotFound`), so it never reaches a clean build.
+fn expand_config_vars(sql: &str, ctx: &MetaEvalContext) -> String {
+    if !sql.contains("config.var") {
+        return sql.to_string();
+    }
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for node in root.descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let Some(call) = SmeltPathCall::cast(node.clone()) else {
+            continue;
+        };
+        let segs = call.segments();
+        if segs.len() != 2 || segs[0].to_lowercase() != "config" || segs[1].to_lowercase() != "var"
+        {
+            continue;
+        }
+        let Some(arg) = call
+            .arg_list()
+            .and_then(|a| a.positional_args().into_iter().next())
+        else {
+            continue;
+        };
+        let Some(name) = smelt_db::config_vars::extract_string_literal_value(&arg) else {
+            continue;
+        };
+        let Some(value) = ctx.vars.get(&name) else {
+            continue; // absent → leave verbatim (analyzer gates ConfigVarNotFound)
+        };
+        let literal = format!("'{}'", value.replace('\'', "''"));
+        let replacement = splice_preserving_ws(&node.text().to_string(), &literal);
+        let range = node.text_range();
+        edits.push((range.start().into(), range.end().into(), replacement));
+    }
+    apply_edits(sql, edits)
+}
+
+/// Pass 2 — evaluate meta-valued SELECT items to plain Data-World SQL.
+///
+/// For each top-level SELECT item whose expression is a meta construct that
+/// evaluates to a scalar (a `reduce` fold, a meta-world ternary, or a
+/// config-var literal), splice the evaluated SQL in place of the item
+/// expression. Items that evaluate to a bare `List<T>` are left untouched —
+/// the analyzer rejects them (`MetaListInScalarPosition`), so a clean build
+/// never reaches one.
+fn expand_select_item_meta(sql: &str) -> String {
+    if !sql.contains("reduce")
+        && !sql.contains("map")
+        && !sql.contains("filter")
+        && !sql.contains("|>")
+        && !sql.contains("if ")
+    {
+        return sql.to_string();
+    }
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for node in root.descendants() {
+        if node.kind() != SELECT_LIST {
+            continue;
+        }
+        let Some(select_list) = SelectList::cast(node.clone()) else {
+            continue;
+        };
+        for item in select_list.items() {
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            if let Some(MetaValue::Scalar(s)) = eval_meta(&expr) {
+                let replacement = splice_preserving_ws(&expr.syntax().text().to_string(), &s);
+                let range = expr.syntax().text_range();
+                edits.push((range.start().into(), range.end().into(), replacement));
+            }
+        }
+    }
+    apply_edits(sql, edits)
+}
+
+/// Evaluate a meta expression to a [`MetaValue`], or `None` if `expr` is not a
+/// recognized meta construct (a plain Data-World expression) or cannot be
+/// evaluated at compile time (in which case the caller leaves it verbatim).
+fn eval_meta(expr: &Expr) -> Option<MetaValue> {
+    // List literal `[a, b, c]` → List of element SQL fragments.
+    if let Some(arr) = expr.as_array_literal() {
+        let mut elems = Vec::new();
+        for el in arr.elements() {
+            elems.push(render_scalar(&el)?);
+        }
+        return Some(MetaValue::List(elems));
+    }
+    // Pipe `LHS |> f(args)` → desugar to `f(LHS, args)` and evaluate.
+    if let Some(pipe) = as_pipe(expr) {
+        return eval_pipe(&pipe);
+    }
+    // Meta-world ternary `if cond then a else b`.
+    if let Some(tern) = as_ternary(expr) {
+        return eval_ternary(&tern);
+    }
+    // HOF call `map(xs, f)` / `filter(xs, p)` / `reduce(xs, r)`.
+    if let Some(call) = expr.as_function_call() {
+        if let Some(kind) = hof_kind_of(&call) {
+            let args = call.arguments();
+            let first = eval_meta(args.first()?)?;
+            return apply_hof(kind, first, &args[1..]);
+        }
+    }
+    None
+}
+
+/// Render a meta expression as a scalar SQL fragment. A recognized meta scalar
+/// (ternary, reduce, …) yields its evaluated SQL; a `List<T>` cannot be a
+/// scalar (`None`); a plain Data-World expression yields its source text
+/// (the identity case for list elements and lambda-body leaves).
+fn render_scalar(expr: &Expr) -> Option<String> {
+    match eval_meta(expr) {
+        Some(MetaValue::Scalar(s)) => Some(s),
+        Some(MetaValue::List(_)) => None,
+        None => Some(expr.syntax().text().to_string().trim().to_string()),
+    }
+}
+
+/// Evaluate a pipe `LHS |> f(args)` as `f(LHS, args)`.
+fn eval_pipe(pipe: &PipeExpr) -> Option<MetaValue> {
+    let lhs = pipe.lhs()?;
+    let first = eval_meta(&lhs)?;
+    let rhs = pipe.rhs()?;
+    let call = rhs.as_function_call()?;
+    let kind = hof_kind_of(&call)?;
+    apply_hof(kind, first, &call.arguments())
+}
+
+/// Apply a HOF (`map` / `filter` / `reduce`) to a `first` argument value
+/// (the source list) and the remaining argument expressions (the lambda or
+/// reducer).
+fn apply_hof(kind: &str, first: MetaValue, rest: &[Expr]) -> Option<MetaValue> {
+    let MetaValue::List(list) = first else {
+        return None; // map/filter/reduce require a List operand
+    };
+    match kind {
+        "map" => {
+            let lambda = extract_lambda(rest.first()?)?;
+            let param = lambda.params().into_iter().next()?;
+            let body = lambda.body()?;
+            let out = list
+                .iter()
+                .map(|elem| substitute_ident(body.syntax(), &param, elem))
+                .collect();
+            Some(MetaValue::List(out))
+        }
+        "filter" => {
+            let lambda = extract_lambda(rest.first()?)?;
+            let param = lambda.params().into_iter().next()?;
+            let body = lambda.body()?;
+            let mut out = Vec::new();
+            for elem in &list {
+                let pred = substitute_ident(body.syntax(), &param, elem);
+                match eval_const_bool_from_text(&pred) {
+                    Some(true) => out.push(elem.clone()),
+                    Some(false) => {}
+                    None => return None, // non-constant predicate → bail (leave verbatim)
+                }
+            }
+            Some(MetaValue::List(out))
+        }
+        "reduce" => {
+            let reducer_expr = rest.first()?;
+            let (name, sep) = if let Some(rc) = as_reducer_call(reducer_expr) {
+                let sep = rc
+                    .args()
+                    .and_then(|args| args.children().find_map(Expr::cast))
+                    .map(|e| e.syntax().text().to_string().trim().to_string());
+                (rc.name()?.to_lowercase(), sep)
+            } else {
+                (
+                    reducer_expr
+                        .syntax()
+                        .text()
+                        .to_string()
+                        .trim()
+                        .to_lowercase(),
+                    None,
+                )
+            };
+            fold_reducer(&name, sep.as_deref(), &list).map(MetaValue::Scalar)
+        }
+        _ => None,
+    }
+}
+
+/// Render a reducer's left-fold over `elems` into a single SQL fragment.
+/// Mirrors `meta_language.md` §Semantics "Contextual reducers" rule 1.
+///
+/// Each element is parenthesised for the boolean reducers (`and_all` / `or_any`):
+/// a non-atomic element such as `a OR b` folded under AND must stay grouped
+/// (`(a OR b) AND c`), since bare ` AND ` would re-associate to `a OR (b AND c)`.
+/// Numeric (`plus_chain`) and `Text` (`concat` / `concat_with`) folds are safe
+/// without parens — their operators are left-associative and no element-level
+/// operator binds looser than the fold operator.
+fn fold_reducer(name: &str, sep: Option<&str>, elems: &[String]) -> Option<String> {
+    let empty = elems.is_empty();
+    let parenthesised = || -> Vec<String> { elems.iter().map(|e| format!("({e})")).collect() };
+    let folded = match name {
+        "comma_sep" => elems.join(", "),
+        "and_all" => {
+            if empty {
+                "TRUE".to_string()
+            } else {
+                parenthesised().join(" AND ")
+            }
+        }
+        "or_any" => {
+            if empty {
+                "FALSE".to_string()
+            } else {
+                parenthesised().join(" OR ")
+            }
+        }
+        "plus_chain" => {
+            if empty {
+                "0".to_string()
+            } else {
+                elems.join(" + ")
+            }
+        }
+        "concat" => {
+            if empty {
+                "''".to_string()
+            } else {
+                elems.join(" || ")
+            }
+        }
+        "union_all" => {
+            if empty {
+                return None; // no identity — analyzer gates ReducerEmptyNoIdentity
+            }
+            elems.join(" UNION ALL ")
+        }
+        "intersect_all" => {
+            if empty {
+                return None; // no identity — analyzer gates ReducerEmptyNoIdentity
+            }
+            elems.join(" INTERSECT ")
+        }
+        "concat_with" => {
+            let sep = sep?;
+            if empty {
+                "''".to_string()
+            } else {
+                elems.join(&format!(" || {sep} || "))
+            }
+        }
+        _ => return None,
+    };
+    Some(folded)
+}
+
+/// Evaluate a meta-world ternary `if COND then A else B`: resolve `COND` at
+/// compile time and return the chosen branch's SQL (the other branch is not
+/// evaluated). `meta_language.md` §Semantics "Meta-world ternary" rule 3.
+fn eval_ternary(tern: &TernaryExpr) -> Option<MetaValue> {
+    let cond = tern.condition()?;
+    let chosen = if eval_const_bool_node(&cond)? {
+        tern.then_branch()?
+    } else {
+        tern.else_branch()?
+    };
+    render_scalar(&chosen).map(MetaValue::Scalar)
+}
+
+// ── small AST helpers ────────────────────────────────────────────────────────
+
+/// Cast an expression (looking through its `EXPRESSION` wrapper) to a pipe.
+fn as_pipe(expr: &Expr) -> Option<PipeExpr> {
+    let node = expr.syntax();
+    node.children()
+        .find_map(PipeExpr::cast)
+        .or_else(|| PipeExpr::cast(node.clone()))
+}
+
+/// Cast an expression (looking through its `EXPRESSION` wrapper) to a ternary.
+fn as_ternary(expr: &Expr) -> Option<TernaryExpr> {
+    let node = expr.syntax();
+    node.children()
+        .find_map(TernaryExpr::cast)
+        .or_else(|| TernaryExpr::cast(node.clone()))
+}
+
+/// Find a parameterised `REDUCER_CALL` (`concat_with(' OR ')`) in `expr`.
+fn as_reducer_call(expr: &Expr) -> Option<ReducerCall> {
+    expr.syntax().descendants().find_map(ReducerCall::cast)
+}
+
+/// Find the `LAMBDA` node inside a HOF argument expression.
+fn extract_lambda(expr: &Expr) -> Option<Lambda> {
+    expr.syntax().descendants().find_map(Lambda::cast)
+}
+
+/// The HOF kind (`map` / `filter` / `reduce`) of a call, or `None`. `filter`
+/// lexes as a keyword, so `name()` may be `None`; fall back to the first token.
+fn hof_kind_of(call: &FunctionCall) -> Option<&'static str> {
+    let name = call.name().map(|n| n.to_lowercase()).or_else(|| {
+        call.syntax()
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .map(|t| t.text().to_lowercase())
+            .find(|t| t == "map" || t == "filter" || t == "reduce")
+    });
+    match name.as_deref() {
+        Some("map") => Some("map"),
+        Some("filter") => Some("filter"),
+        Some("reduce") => Some("reduce"),
+        _ => None,
+    }
+}
+
+/// Reconstruct `node`'s text with every `IDENT` token equal to `param` replaced
+/// by `replacement` (lambda-parameter substitution). Token-level so it never
+/// touches a substring inside another identifier.
+fn substitute_ident(node: &SyntaxNode, param: &str, replacement: &str) -> String {
+    let mut out = String::new();
+    for tok in node
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        if tok.kind() == IDENT && tok.text() == param {
+            out.push_str(replacement);
+        } else {
+            out.push_str(tok.text());
+        }
+    }
+    out.trim().to_string()
+}
+
+// ── compile-time constant evaluator (filter predicates, ternary conditions) ──
+
+/// A compile-time constant value.
+#[derive(Debug, Clone)]
+enum ConstVal {
+    Int(i128),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+/// Parse and evaluate the boolean value of `text` (a substituted predicate or a
+/// ternary condition). `None` when it does not reduce to a compile-time boolean.
+fn eval_const_bool_from_text(text: &str) -> Option<bool> {
+    let parse = smelt_parser::parse(&format!("SELECT {text}"));
+    let root = parse.syntax();
+    let expr = root
+        .descendants()
+        .find_map(SelectList::cast)?
+        .items()
+        .next()?
+        .expression()?;
+    eval_const_bool_node(&expr)
+}
+
+/// Evaluate `expr` to a boolean constant.
+fn eval_const_bool_node(expr: &Expr) -> Option<bool> {
+    match eval_const(expr)? {
+        ConstVal::Bool(b) => Some(b),
+        _ => None,
+    }
+}
+
+/// Evaluate `expr` to a compile-time constant value.
+fn eval_const(expr: &Expr) -> Option<ConstVal> {
+    if let Some(bin) = expr.as_binary() {
+        return eval_const_binary(&bin);
+    }
+    parse_const_literal(expr.syntax().text().to_string().trim())
+}
+
+fn eval_const_binary(bin: &BinaryExpr) -> Option<ConstVal> {
+    let left = eval_const(&bin.left()?)?;
+    let right = eval_const(&bin.right()?)?;
+    let op = bin.operator()?.to_uppercase();
+    apply_binop(&op, &left, &right)
+}
+
+fn parse_const_literal(text: &str) -> Option<ConstVal> {
+    let t = text.trim();
+    match t.to_lowercase().as_str() {
+        "true" => return Some(ConstVal::Bool(true)),
+        "false" => return Some(ConstVal::Bool(false)),
+        _ => {}
+    }
+    if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        let inner = &t[1..t.len() - 1];
+        return Some(ConstVal::Str(inner.replace("''", "'")));
+    }
+    if let Ok(i) = t.parse::<i128>() {
+        return Some(ConstVal::Int(i));
+    }
+    if let Ok(f) = t.parse::<f64>() {
+        return Some(ConstVal::Float(f));
+    }
+    None
+}
+
+fn as_f64(v: &ConstVal) -> Option<f64> {
+    match v {
+        ConstVal::Int(i) => Some(*i as f64),
+        ConstVal::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+fn apply_binop(op: &str, l: &ConstVal, r: &ConstVal) -> Option<ConstVal> {
+    use std::cmp::Ordering;
+    // Arithmetic on numerics.
+    if matches!(op, "+" | "-" | "*" | "/") {
+        if let (ConstVal::Int(a), ConstVal::Int(b)) = (l, r) {
+            return match op {
+                "+" => Some(ConstVal::Int(a + b)),
+                "-" => Some(ConstVal::Int(a - b)),
+                "*" => Some(ConstVal::Int(a * b)),
+                "/" if *b != 0 => Some(ConstVal::Int(a / b)),
+                _ => None,
+            };
+        }
+        let (a, b) = (as_f64(l)?, as_f64(r)?);
+        return match op {
+            "+" => Some(ConstVal::Float(a + b)),
+            "-" => Some(ConstVal::Float(a - b)),
+            "*" => Some(ConstVal::Float(a * b)),
+            "/" if b != 0.0 => Some(ConstVal::Float(a / b)),
+            _ => None,
+        };
+    }
+    // Equality (numerics, strings, booleans).
+    if matches!(op, "=" | "==" | "<>" | "!=") {
+        let eq = match (l, r) {
+            (ConstVal::Str(a), ConstVal::Str(b)) => a == b,
+            (ConstVal::Bool(a), ConstVal::Bool(b)) => a == b,
+            _ => (as_f64(l)? - as_f64(r)?).abs() < f64::EPSILON,
+        };
+        return Some(ConstVal::Bool(if matches!(op, "=" | "==") {
+            eq
+        } else {
+            !eq
+        }));
+    }
+    // Ordering (numerics only).
+    if matches!(op, "<" | ">" | "<=" | ">=") {
+        let ord = as_f64(l)?.partial_cmp(&as_f64(r)?)?;
+        let b = match op {
+            "<" => ord == Ordering::Less,
+            ">" => ord == Ordering::Greater,
+            "<=" => ord != Ordering::Greater,
+            ">=" => ord != Ordering::Less,
+            _ => unreachable!(),
+        };
+        return Some(ConstVal::Bool(b));
+    }
+    // Boolean composition.
+    if matches!(op, "AND" | "OR") {
+        if let (ConstVal::Bool(a), ConstVal::Bool(b)) = (l, r) {
+            return Some(ConstVal::Bool(if op == "AND" {
+                *a && *b
+            } else {
+                *a || *b
+            }));
+        }
+    }
+    None
 }
 
 /// Expand inline list-literal spreads in SELECT lists to plain comma-separated
@@ -184,11 +717,20 @@ mod tests {
         assert_eq!(out, "SELECT\n    id, created_at\nFROM t\n");
     }
 
+    /// An empty `vars` map for tests that don't exercise `config.var`.
+    fn no_vars() -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
     #[test]
     fn no_spread_is_unchanged() {
         let sql = "SELECT id, name FROM t\n";
+        let v = no_vars();
         assert_eq!(expand_select_list_spreads(sql), sql);
-        assert_eq!(expand_in_model_meta(sql), sql);
+        assert_eq!(
+            expand_in_model_meta(sql, &MetaEvalContext { vars: &v }),
+            sql
+        );
     }
 
     #[test]
@@ -216,10 +758,133 @@ mod tests {
     }
 
     #[test]
-    fn guard_skips_reparse_without_spread_token() {
-        // expand_in_model_meta short-circuits when there is no `...`.
+    fn guard_skips_reparse_without_meta_token() {
+        // expand_in_model_meta short-circuits when there is no meta construct.
         let sql = "SELECT a, b, c FROM t";
-        assert_eq!(expand_in_model_meta(sql), sql);
+        let v = no_vars();
+        assert_eq!(
+            expand_in_model_meta(sql, &MetaEvalContext { vars: &v }),
+            sql
+        );
+    }
+
+    // ── P6 build-path evaluator tests ────────────────────────────────────────
+
+    fn eval(sql: &str, vars: &BTreeMap<String, String>) -> String {
+        expand_in_model_meta(sql, &MetaEvalContext { vars })
+    }
+
+    #[test]
+    fn reduce_plus_chain_folds_with_plus() {
+        assert_eq!(
+            eval("SELECT reduce([1, 2, 3], plus_chain)", &no_vars()),
+            "SELECT 1 + 2 + 3"
+        );
+    }
+
+    #[test]
+    fn reduce_and_all_folds_with_and() {
+        // Each element is parenthesised so a non-atomic element cannot
+        // re-associate the fold (the AND binds the whole element, not its tail).
+        assert_eq!(
+            eval("SELECT reduce([true, false, true], and_all)", &no_vars()),
+            "SELECT (true) AND (false) AND (true)"
+        );
+    }
+
+    #[test]
+    fn reduce_and_all_parenthesises_non_atomic_elements() {
+        // `[true OR false, false]` folded under AND must stay grouped as
+        // `(true OR false) AND (false)` — bare ` AND ` would mis-parse as
+        // `true OR (false AND false)` and silently flip the result.
+        assert_eq!(
+            eval("SELECT reduce([true OR false, false], and_all)", &no_vars()),
+            "SELECT (true OR false) AND (false)"
+        );
+    }
+
+    #[test]
+    fn reduce_concat_with_uses_separator_literal() {
+        assert_eq!(
+            eval(
+                "SELECT reduce(['alpha', 'beta', 'gamma'], concat_with(' OR '))",
+                &no_vars()
+            ),
+            "SELECT 'alpha' || ' OR ' || 'beta' || ' OR ' || 'gamma'"
+        );
+    }
+
+    #[test]
+    fn pipe_filter_map_then_reduce() {
+        // [1,2,3] |> filter(c>0) |> map(c*2) = [2,4,6]; plus_chain folds to +.
+        assert_eq!(
+            eval(
+                "SELECT reduce([1, 2, 3] |> filter(fn c => c > 0) |> map(fn c => c * 2), plus_chain)",
+                &no_vars()
+            ),
+            "SELECT 1 * 2 + 2 * 2 + 3 * 2"
+        );
+    }
+
+    #[test]
+    fn filter_drops_failing_elements() {
+        // filter keeps only c > 1, then plus_chain folds the survivors.
+        assert_eq!(
+            eval(
+                "SELECT reduce([1, 2, 3] |> filter(fn c => c > 1), plus_chain)",
+                &no_vars()
+            ),
+            "SELECT 2 + 3"
+        );
+    }
+
+    #[test]
+    fn config_var_resolves_to_text_literal() {
+        let mut vars = BTreeMap::new();
+        vars.insert("region".to_string(), "us-west-2".to_string());
+        vars.insert("min_revenue".to_string(), "100".to_string());
+        assert_eq!(
+            eval(
+                "SELECT smelt.config.var('region'), smelt.config.var('min_revenue')",
+                &vars
+            ),
+            "SELECT 'us-west-2', '100'"
+        );
+    }
+
+    #[test]
+    fn config_var_absent_left_verbatim() {
+        // Analyzer gates ConfigVarNotFound; the evaluator leaves it untouched.
+        let sql = "SELECT smelt.config.var('missing')";
+        assert_eq!(eval(sql, &no_vars()), sql);
+    }
+
+    #[test]
+    fn ternary_picks_branch_from_config_var() {
+        let mut vars = BTreeMap::new();
+        vars.insert("env".to_string(), "dev".to_string());
+        assert_eq!(
+            eval(
+                "SELECT if smelt.config.var('env') = 'prod' then 'strict' else 'permissive'",
+                &vars
+            ),
+            "SELECT 'permissive'"
+        );
+        let mut prod = BTreeMap::new();
+        prod.insert("env".to_string(), "prod".to_string());
+        assert_eq!(
+            eval(
+                "SELECT if smelt.config.var('env') = 'prod' then 'strict' else 'permissive'",
+                &prod
+            ),
+            "SELECT 'strict'"
+        );
+    }
+
+    #[test]
+    fn reduce_idempotent_second_pass() {
+        let once = eval("SELECT reduce([1, 2, 3], plus_chain)", &no_vars());
+        assert_eq!(eval(&once, &no_vars()), once);
     }
 
     #[test]

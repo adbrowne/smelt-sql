@@ -1,7 +1,12 @@
--- Happy path: pipe-rewrite of a HOF chain.
+-- Happy path: pipe-rewrite of a HOF chain, consumed by a reducer.
 -- [1, 2, 3] |> filter(fn c => c > 0) |> map(fn c => c * 2)
--- desugars to map(filter([1, 2, 3], fn c => c > 0), fn c => c * 2)
--- Exercises the pure meta-language surface: list literal + pipe + lambdas.
+-- desugars to map(filter([1, 2, 3], fn c => c > 0), fn c => c * 2),
+-- evaluating to the list [2, 4, 6]; reduce(..., plus_chain) folds it with +
+-- into the scalar 2 + 4 + 6.
+-- A list must be consumed before reaching a Data-World position: the enclosing
+-- reduce(..., plus_chain) is the consumer (a bare list result would be
+-- MetaListInScalarPosition). Exercises list literal + pipe + lambdas + reducer.
 -- No source table reference: check_type_diagnostics early-returns so only
 -- the meta-language checks in check_file_diagnostics run.
-SELECT [1, 2, 3] |> filter(fn c => c > 0) |> map(fn c => c * 2)
+-- Aliased so the build-path type-cast wrapper has a stable column name.
+SELECT reduce([1, 2, 3] |> filter(fn c => c > 0) |> map(fn c => c * 2), plus_chain) AS doubled_sum

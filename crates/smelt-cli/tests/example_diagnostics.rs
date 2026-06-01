@@ -233,6 +233,7 @@ const PHASE_A_CODES: &[smelt_db::DiagnosticCode] = &[
     smelt_db::DiagnosticCode::MetaListHeterogeneous,
     smelt_db::DiagnosticCode::MetaSpreadInForbiddenPosition,
     smelt_db::DiagnosticCode::MetaSpreadOnNonList,
+    smelt_db::DiagnosticCode::MetaListInScalarPosition,
 ];
 
 /// Helper: loads `example_dir` as a workspace, then checks diagnostics for the
@@ -389,6 +390,19 @@ fn meta_lists_broken_empty_unknown() {
         "examples/meta_lists_broken_empty_unknown",
         "models/empty_unknown.sql",
         smelt_db::DiagnosticCode::MetaListEmptyTypeUnknown,
+    );
+}
+
+/// P6 TDD: `examples/meta_lists_broken_list_in_scalar_position/` produces
+/// exactly one `MetaListInScalarPosition` diagnostic anchored at
+/// `models/list_in_scalar.sql` — a bare meta `List<T>` in a Data-World scalar
+/// position, in a FROM-less model (the select-shape check must still run).
+#[test]
+fn meta_lists_broken_list_in_scalar_position() {
+    check_workspace_emits_exactly_one_diagnostic(
+        "examples/meta_lists_broken_list_in_scalar_position",
+        "models/list_in_scalar.sql",
+        smelt_db::DiagnosticCode::MetaListInScalarPosition,
     );
 }
 

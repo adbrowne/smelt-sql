@@ -5,4 +5,5 @@
 -- model. The unreached branch is type-checked but not evaluated.
 -- No source table: check_type_diagnostics early-returns, so only the
 -- meta-language checks in check_file_diagnostics run.
-SELECT if smelt.config.var('env') = 'prod' then 'strict' else 'permissive'
+-- Aliased so the build-path type-cast wrapper has a stable column name.
+SELECT if smelt.config.var('env') = 'prod' then 'strict' else 'permissive' AS mode

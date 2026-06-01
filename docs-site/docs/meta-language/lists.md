@@ -233,3 +233,18 @@ The list and spread surface introduces four diagnostic codes. All are anchored a
     ```
 
     **What to fix:** Wrap the value in a list literal if you want to splice a single element: `...[some_integer]`. Or, if the variable is supposed to be a list, check the type of the binding that supplies it.
+
+---
+
+!!! warning "MetaListInScalarPosition"
+    **When it fires:** A `List<T>` reaches a scalar / SELECT-item position without being consumed — by a spread, a higher-order function, a reducer, a record, a map, or a generator. A list cannot become a scalar value on its own, and there is no implicit auto-spread.
+
+    **Message:** `a List<T> cannot be used as a scalar value here; consume it with a spread (...xs), a reducer (reduce(xs, …)), or a HOF before splicing`
+
+    **Example:**
+    ```sql
+    SELECT [1, 2, 3]                       -- ← MetaListInScalarPosition (bare list)
+    SELECT xs |> map(fn c => c * 2)        -- ← MetaListInScalarPosition (map result left bare)
+    ```
+
+    **What to fix:** Consume the list. Spread it into columns (`SELECT ...[1, 2, 3]`), or fold it to a scalar with a reducer (`SELECT reduce([1, 2, 3], plus_chain)`). This check runs in every model, including a model with no `FROM` clause.

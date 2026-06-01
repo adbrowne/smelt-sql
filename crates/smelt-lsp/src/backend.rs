@@ -273,6 +273,7 @@ impl Backend {
                 DbCode::MetaListHeterogeneous => "meta-list-heterogeneous",
                 DbCode::MetaSpreadInForbiddenPosition => "meta-spread-in-forbidden-position",
                 DbCode::MetaSpreadOnNonList => "meta-spread-on-non-list",
+                DbCode::MetaListInScalarPosition => "meta-list-in-scalar-position",
                 // Phase B (meta-language) diagnostic codes.
                 DbCode::LambdaInForbiddenPosition => "lambda-in-forbidden-position",
                 DbCode::LambdaArityMismatch => "lambda-arity-mismatch",

@@ -113,8 +113,11 @@ impl LogicalGraph {
                 .filter_map(|r| {
                     let path = r.smelt_ref.to_path();
                     let first = path.first().map(|s| s.as_str());
-                    // Skip well-known non-model namespaces.
-                    if matches!(first, Some("sources") | Some("functions")) {
+                    // Skip well-known non-model namespaces, including the
+                    // meta-language compile-time calls `smelt.config.*` (e.g.
+                    // `smelt.config.var`), which the build-path meta evaluator
+                    // resolves before codegen and which are not model deps.
+                    if matches!(first, Some("sources") | Some("functions") | Some("config")) {
                         return None;
                     }
                     // Strip the legacy "models" namespace prefix (Phase 2 unified

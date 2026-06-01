@@ -334,6 +334,12 @@ pub struct UpstreamSchemas {
     /// Used by the path-ref resolver to apply `name:` overrides at SQL
     /// generation time. When non-empty, takes precedence over `sources`.
     pub per_entity_sources: Vec<smelt_core::SourceInfo>,
+    /// Compile-time variables (`smelt.yml` `vars:`), each already coerced to its
+    /// `Text` rendering via the analyzer's `coerce_yaml_scalar_to_text` (so the
+    /// build path and the analyzer agree, per `architecture.md` §"Diagnostic
+    /// parity rule"). Consumed at compile time by the meta-language
+    /// `smelt.config.var(name)` evaluator; never reaches the database engine.
+    pub vars: std::collections::BTreeMap<String, String>,
 }
 
 impl UpstreamSchemas {
@@ -412,11 +418,31 @@ impl UpstreamSchemas {
         // `SourcesConfig` when resolving `smelt.sources.*` path refs.
         let per_entity_sources = smelt_core::discover_source_infos(project_dir, &paths);
 
+        // Compile-time `vars:` for `smelt.config.var`. Parse the `vars:` block
+        // and coerce each scalar to its `Text` rendering using the SAME helpers
+        // the analyzer uses (`smelt-db::config_vars`), so a value the editor
+        // resolves and a value the build splices are byte-identical.
+        let vars = std::fs::read_to_string(project_dir.join("smelt.yml"))
+            .ok()
+            .and_then(|text| smelt_db::config_vars::parse_vars_from_yaml(&text))
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            smelt_db::config_vars::coerce_yaml_scalar_to_text(v, k).0,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             models: model_schemas,
             seeds: seed_schemas,
             sources,
             per_entity_sources,
+            vars,
         })
     }
 }
@@ -459,6 +485,14 @@ impl SqlCompiler {
     /// compilers without cloning the underlying allocation.
     fn set_function_bodies_arc(&mut self, bodies: Arc<FnBodyMap>) {
         self.fn_bodies = Some(bodies);
+    }
+
+    /// Build the build-path meta-evaluation context (compile-time `vars:` for
+    /// `smelt.config.var`). Borrows the compiler's `UpstreamSchemas`.
+    fn meta_ctx(&self) -> crate::meta_eval::MetaEvalContext<'_> {
+        crate::meta_eval::MetaEvalContext {
+            vars: &self.upstream_schemas.vars,
+        }
     }
 
     /// Build the `smelt.as_struct` emitter, `smelt.fn.*` expander, and
@@ -669,7 +703,8 @@ impl SqlCompiler {
         // Evaluate in-model meta-language constructs (e.g. list spread) to plain
         // SQL before codegen so the analyzer-accepted surface never reaches the
         // engine (build-path half of the diagnostic-parity rule).
-        let clean_content = crate::meta_eval::expand_in_model_meta(&clean_content);
+        let clean_content =
+            crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
         let parse = smelt_parser::parse(&clean_content);
 
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -777,7 +812,7 @@ impl SqlCompiler {
         schema: &str,
         sql: &str,
     ) -> Result<CompiledModel> {
-        let sql = crate::meta_eval::expand_in_model_meta(sql);
+        let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
@@ -814,7 +849,13 @@ impl SqlCompiler {
         ephemeral_models: &[(String, String)],
         schema: &str,
     ) -> EphemeralResolver {
-        EphemeralResolver::new(ephemeral_models, &self.dialect, &self.capabilities, schema)
+        EphemeralResolver::new(
+            ephemeral_models,
+            &self.dialect,
+            &self.capabilities,
+            schema,
+            &self.upstream_schemas.vars,
+        )
     }
 
     /// Like `compile_with_sql`, but also inlines referenced ephemeral models as CTEs.
@@ -831,7 +872,7 @@ impl SqlCompiler {
             .map(|s| s.as_str())
             .collect();
 
-        let sql = crate::meta_eval::expand_in_model_meta(sql);
+        let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
@@ -943,6 +984,7 @@ impl EphemeralResolver {
         dialect: &SqlDialect,
         capabilities: &BackendCapabilities,
         schema: &str,
+        vars: &std::collections::BTreeMap<String, String>,
     ) -> Self {
         let ephemeral_names: HashSet<String> =
             ephemeral_models.iter().map(|(n, _)| n.clone()).collect();
@@ -959,6 +1001,7 @@ impl EphemeralResolver {
                 dialect,
                 capabilities,
                 schema,
+                vars,
             );
             cte_fragments.insert(model_name.clone(), fragments);
         }
@@ -982,10 +1025,14 @@ impl EphemeralResolver {
         dialect: &SqlDialect,
         capabilities: &BackendCapabilities,
         schema: &str,
+        vars: &std::collections::BTreeMap<String, String>,
     ) -> Vec<(String, String)> {
         let ephemeral_refs: HashSet<&str> = ephemeral_names.iter().map(|s| s.as_str()).collect();
         let clean_sql = smelt_parser::strip_frontmatter(raw_sql);
-        let clean_sql = crate::meta_eval::expand_in_model_meta(&clean_sql);
+        let clean_sql = crate::meta_eval::expand_in_model_meta(
+            &clean_sql,
+            &crate::meta_eval::MetaEvalContext { vars },
+        );
         let parse = smelt_parser::parse(&clean_sql);
 
         // Build a path-ref resolver that maps smelt.<path> to either
@@ -1362,7 +1409,8 @@ impl SqlCompiler {
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
-        let clean_content = crate::meta_eval::expand_in_model_meta(&clean_content);
+        let clean_content =
+            crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
         let parse = smelt_parser::parse(&clean_content);
 
         // Build ephemeral set for the printer
@@ -1837,6 +1885,7 @@ WHERE event_type = 'click'
             &SqlDialect::DuckDB,
             &caps,
             "main",
+            &std::collections::BTreeMap::new(),
         );
 
         let compiled = compiler
@@ -1881,6 +1930,7 @@ WHERE event_type = 'click'
             &SqlDialect::DuckDB,
             &caps,
             "main",
+            &std::collections::BTreeMap::new(),
         );
 
         let compiled = compiler
@@ -1924,6 +1974,7 @@ WHERE event_type = 'click'
             &SqlDialect::DuckDB,
             &caps,
             "main",
+            &std::collections::BTreeMap::new(),
         );
 
         let compiled = compiler
@@ -1963,6 +2014,7 @@ WHERE event_type = 'click'
             &SqlDialect::DuckDB,
             &caps,
             "main",
+            &std::collections::BTreeMap::new(),
         );
 
         let compiled = compiler
@@ -2224,6 +2276,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             &SqlDialect::DuckDB,
             &caps,
             "main",
+            &std::collections::BTreeMap::new(),
         );
 
         let compiled = compiler

@@ -67,10 +67,18 @@ impl DependencyGraph {
                         return None;
                     }
                     // Exclude function call refs (smelt.functions.*), source
-                    // refs (smelt.sources.*), and seed refs (smelt.seeds.*);
+                    // refs (smelt.sources.*), seed refs (smelt.seeds.*), and
+                    // meta-language compile-time calls (smelt.config.* — e.g.
+                    // `smelt.config.var`, `smelt.config.load_yaml`), which the
+                    // build-path meta evaluator resolves before codegen and
+                    // which the analyzer likewise does not treat as model deps;
                     // everything else is a model dep.
                     let first = segs[0].as_str();
-                    if first == "functions" || first == "sources" || first == "seeds" {
+                    if first == "functions"
+                        || first == "sources"
+                        || first == "seeds"
+                        || first == "config"
+                    {
                         return None;
                     }
                     Some(segs.join("."))

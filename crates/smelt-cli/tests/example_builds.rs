@@ -68,20 +68,10 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          the standalone build env; in-model list spread itself now expands at \
          build, see meta_lists_e2e.rs)",
     ),
-    (
-        // HOFs / pipe / config.var are not evaluated at build → dependency
-        // resolution fails. Closed by P6 (BUG-006 hofs).
-        "meta_hofs",
-        "Error: Dependency validation failed \
-         (in-model HOFs/pipe/config.var not evaluated at build; tracked by P6)",
-    ),
-    (
-        // Ternary / reducer polish constructs not evaluated at build. Closed by
-        // P6 (BUG-006 hofs/polish).
-        "meta_polish",
-        "Error: Dependency validation failed \
-         (in-model ternary/reducer not evaluated at build; tracked by P6)",
-    ),
+    // `meta_hofs` and `meta_polish` were here (HOFs / pipe / config.var /
+    // ternary / reducers not evaluated at build). Closed by P6: the build-path
+    // meta evaluator (`smelt-runtime::meta_eval`) lowers them to plain SQL, and
+    // their models reference no sources, so they build + execute clean.
     (
         // `smelt.columns_of` reflection not evaluated at build → `orders` fails
         // to execute. Closed by P7 (BUG-006 reflection).

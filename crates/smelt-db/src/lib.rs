@@ -45,6 +45,59 @@ use salsa::{Accumulator, Setter};
 use smelt_core::metadata::{extract_file_metadata, FileMetadata, MetadataError, MixedKind};
 use smelt_parser::{self, File as AstFile};
 
+/// True if a top-level SELECT-item expression evaluates to a bare, unconsumed
+/// `List<T>` — used to emit `MetaListInScalarPosition` (`meta_language.md`
+/// §Semantics "Lists and spread" rule 10). List-yielding shapes:
+///   - a bare list literal (`[1, 2, 3]`);
+///   - a top-level `map` / `filter` HOF call (each produces a `List<U>`);
+///   - a pipe whose outermost call is `map` / `filter` (`xs |> map(…)`).
+///
+/// `reduce` collapses a list to a scalar, so a `reduce(...)` item is consumed
+/// and not list-yielding. A spread (`...xs`) is a `LIST_SPREAD` node, not a
+/// select-item expression, so it never reaches this check.
+fn select_item_yields_bare_list(expr: &smelt_parser::ast::Expr) -> bool {
+    // Case 1: a bare list literal directly in the select item.
+    if expr.as_array_literal().is_some() {
+        return true;
+    }
+    // Case 2a: a top-level `map` / `filter` HOF call.
+    if let Some(call) = expr.as_function_call() {
+        if hof_call_is_list_yielding(&call) {
+            return true;
+        }
+    }
+    // Case 2b: a pipe whose outermost RHS call is `map` / `filter`.
+    let node = expr.syntax();
+    let pipe = node
+        .children()
+        .find_map(smelt_parser::ast::PipeExpr::cast)
+        .or_else(|| smelt_parser::ast::PipeExpr::cast(node.clone()));
+    if let Some(pipe) = pipe {
+        if let Some(rhs) = pipe.rhs() {
+            if let Some(call) = rhs.as_function_call() {
+                if hof_call_is_list_yielding(&call) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True if a function call is a `map` or `filter` HOF (the list-yielding HOFs).
+/// `filter` lexes as a keyword (`FILTER_KW`), so `name()` may be `None`; fall
+/// back to the call's first token text (mirrors `hof.rs`).
+fn hof_call_is_list_yielding(call: &smelt_parser::ast::FunctionCall) -> bool {
+    let name = call.name().map(|n| n.to_lowercase()).or_else(|| {
+        call.syntax()
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .map(|t| t.text().to_lowercase())
+            .find(|t| t == "map" || t == "filter")
+    });
+    matches!(name.as_deref(), Some("map") | Some("filter"))
+}
+
 pub mod backends;
 pub mod code_actions;
 pub mod config_vars;
@@ -1635,8 +1688,15 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // All three checks use an empty TypeContext (no column schema
             // available at this point) — consistent with the window-function
             // check above.
+            // Ranges of meta diagnostics already emitted for this select
+            // statement. A `List<T>`-in-scalar-position check (below) is
+            // suppressed for any select item that already carries another meta
+            // error (drop-on-error: a single malformed item does not avalanche).
+            let mut flagged_meta_ranges: Vec<rowan::TextRange> = Vec::new();
+
             let spread_result = type_inference::check_select_list_spreads(&select_stmt, &kind_ctx);
             for diag in spread_result.diagnostics {
+                flagged_meta_ranges.push(diag.range);
                 DiagnosticAcc(diag).accumulate(db);
             }
 
@@ -1650,6 +1710,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                             for diag in type_inference::list_literal_sentinels_to_diagnostics(
                                 &elements, &kind_ctx, span,
                             ) {
+                                flagged_meta_ranges.push(diag.range);
                                 DiagnosticAcc(diag).accumulate(db);
                             }
                         }
@@ -1677,6 +1738,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             let hof_diags =
                 type_inference::check_hof_position_diagnostics(&select_stmt, &kind_ctx, text);
             for diag in hof_diags {
+                flagged_meta_ranges.push(diag.range);
                 DiagnosticAcc(diag).accumulate(db);
             }
 
@@ -1690,7 +1752,54 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 let ternary_diags =
                     type_inference::check_ternary_expr_diagnostics(&select_stmt, &kind_ctx);
                 for diag in ternary_diags {
+                    flagged_meta_ranges.push(diag.range);
                     DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
+            // Meta-language (P6) — `MetaListInScalarPosition`.
+            //
+            // A `List<T>`-typed expression that reaches a Data-World scalar /
+            // SELECT-item position without being consumed (by a spread, a HOF,
+            // a reducer, a record, a map, or a generator) cannot materialise as
+            // a scalar value — there is no implicit auto-spread
+            // (`meta_language.md` §Semantics "Lists and spread" rule 10). A bare
+            // list literal (`SELECT [1, 2, 3]`), or a bare `map`/`filter` /
+            // pipe-to-`map`/`filter` result (`SELECT xs |> map(fn c => …)`),
+            // left in a select item is unconsumed. `reduce` collapses a list to
+            // a scalar, so a `reduce(...)` select item is consumed and clean.
+            //
+            // This is a select-shape check that runs for every model, including
+            // a model with no FROM clause — `check_type_diagnostics`
+            // early-returns when a model has no data refs, so the check lives
+            // here (the meta walk runs regardless of FROM). Suppressed for any
+            // item already carrying another meta diagnostic (drop-on-error).
+            if let Some(select_list) = select_stmt.select_list() {
+                for item in select_list.items() {
+                    let Some(expr) = item.expression() else {
+                        continue;
+                    };
+                    if !select_item_yields_bare_list(&expr) {
+                        continue;
+                    }
+                    let span = expr.syntax().text_range();
+                    if flagged_meta_ranges
+                        .iter()
+                        .any(|r| r.intersect(span).is_some())
+                    {
+                        continue;
+                    }
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "a List<T> cannot be used as a scalar value here; consume it \
+                                  with a spread (`...xs`), a reducer (`reduce(xs, …)`), or a HOF \
+                                  before splicing"
+                            .to_string(),
+                        range: span,
+                        code: Some(DiagnosticCode::MetaListInScalarPosition),
+                        data: None,
+                    })
+                    .accumulate(db);
                 }
             }
 

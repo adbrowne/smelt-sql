@@ -3,4 +3,5 @@
 -- effectively expanding to: true AND false AND true.
 -- Uses boolean literals to avoid column-type inference issues and to exercise
 -- the reducer with a known-good List<Boolean> input.
-SELECT reduce([true, false, true], and_all)
+-- Aliased so the build-path type-cast wrapper has a stable column name.
+SELECT reduce([true, false, true], and_all) AS all_true

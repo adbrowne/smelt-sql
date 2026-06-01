@@ -217,6 +217,17 @@ pub enum DiagnosticCode {
     /// surrounding form continues. Anchored at the spread's span.
     /// Introduced in Phase 3 of the meta-language plan (Phase A).
     MetaSpreadOnNonList,
+    /// Emitted when a `List<T>`-typed expression reaches a Data-World scalar /
+    /// SELECT-item position without being consumed by a spread, a HOF, a
+    /// reducer, a record, a map, or a generator (e.g. `SELECT [1, 2, 3]` or
+    /// `SELECT xs |> map(fn c => c * 2)` left bare). A list cannot materialise
+    /// as a scalar value and there is no implicit auto-spread; the explicit
+    /// `...xs` spread is the only path from a list into a comma position.
+    /// Message: "a List<T> cannot be used as a scalar value here; consume it
+    /// with a spread (`...xs`), a reducer (`reduce(xs, …)`), or a HOF before
+    /// splicing". Anchored at the offending select-item / scalar expression.
+    /// This select-shape check runs for every model, including FROM-less ones.
+    MetaListInScalarPosition,
 
     // ── Phase B (meta-language) diagnostic codes ─────────────────────────
     /// Emitted when a `fn x => body` lambda appears outside a HOF positional

@@ -4,7 +4,8 @@
 -- smelt.config.var('flag') resolves to 'true'.
 -- No source table: check_type_diagnostics early-returns, avoiding unrelated
 -- UndeclaredColumn checks. Only meta-language checks in check_file_diagnostics run.
+-- Aliased so the build-path type-cast wrapper has stable column names.
 SELECT
-    smelt.config.var('region'),
-    smelt.config.var('min_revenue'),
-    smelt.config.var('flag')
+    smelt.config.var('region') AS region,
+    smelt.config.var('min_revenue') AS min_revenue,
+    smelt.config.var('flag') AS flag
