@@ -52,6 +52,8 @@ A SQLMesh **environment** is "an isolated namespace that allows you to test and 
 
 The thing that makes environments *cheap* — the whole point — is that **an environment is a collection of references to model snapshots, not a copy of data**. When a model's fingerprint matches an existing snapshot, the new environment's view simply points at the **same underlying physical table**. "Any computation that was done in this environment can be safely reused in other environments." A dev environment over an unchanged DAG costs essentially nothing: it is a set of views over prod's physical tables.
 
+Andrew: Can we note somewhere that SQLMesh as I understand it has limitation around dev and prod sharing a state store (in that you can't really isolate them). I think it would be good to consider having dev's state store being linked to prod such that developer have creds in the dev envrionment that can read from prod state store (and therefore fork) but can't write to it. That allows an infra setup that is even safer. This is not a key change but I would like not to lose this as it as we may want to take it into account when desigining the state store schema/infra. This also might only work once we have OLTP store rather than file/duckdb/sqlite. We might also decide to have prod *not* be able to read the dev tables so we never pollute - all this would be a decision for end users - we just need to support.
+
 Two further cost levers:
 
 - **Time-bounded dev data.** Dev environments carry start/end dates so you can build only a recent slice of history.
@@ -144,6 +146,8 @@ Three observations that drive the proposal:
 
 3. **smelt already owns part of the stateful end.** `smelt-state` exists (`RunManifest`, `IntervalStore`, `FileStore`; `architecture.md` crate table) and the runtime already does interval-store updates. The interval ledger is *most* of what "precise backfill/restatement" needs. VDEs add the *fingerprint + environment→table map* on top. So this is an extension of an existing seam, not a greenfield subsystem.
 
+Andrew: note that the smelt-state was a quick attempt and is not well tested. I'm open to evolving it or throwing it away and rebuilding depending on how much it aligns with our decisions here.
+
 **Design stance:** model state posture as an explicit, three-valued choice with a stateless default.
 
 ```yaml
@@ -229,9 +233,21 @@ Because materialization is a planner decision, a *physical* fingerprint (engine,
 A semantic equivalence prover must be **sound** (never call a real change non-breaking) even at the cost of completeness (sometimes conservatively rebuild). The hard cases, all of which must degrade to "treat as breaking":
 
 - **Opaque calls.** `smelt.extern`, canonical built-ins, and sources are black boxes (`architecture.md` two-axis table). A change inside, or to the declared signature of, an opaque dependency is not analyzable ⇒ conservative rebuild. This mirrors the incremental rule's `NotDerivable` refusal — same philosophy: *no silent unsafe reuse.*
+
+Andrew: not 100% convinced on this - if we declare smelt.externs determistic then there should be no need to rebuild simply because a model contains it - obviously if they change to using one we can't guaratee much.
+
 - **Non-determinism.** `RANDOM()`, `NOW()`, ordering-without-`ORDER BY`: a model that isn't deterministic can't have its output proven equal across versions. smelt already tracks `deterministic` as a function/extern property — feed it in.
+
+Andrew: We may want to give the user some choice here - if the initial build wasn't deterministic maybe they are ok with just leaving the current value. Maybe they make functions safe per model or something?
+
 - **`SELECT *` and row-polymorphism.** smelt resolves `*` through the type system, so star-selects are *better* off than SQLMesh's textual expansion — but a `*` over an opaque source inherits that source's opacity.
+
+Andrew: I don't think smelt supports opaque sources - and I believe * resolves to what the source explicitely declares - not all fields - can you check?
+
 - **Cross-version type-inference drift.** If smelt's own type inference changes between releases, fingerprints can move. SQLMesh hashes its SQLGlot version into state for exactly this reason; smelt must hash an inference/printer version too. (This is a real maintenance tax, named here, not waved away.)
+
+Andrew: Can we explore whether we can produce some other sort of expression that we maintain from version to version. And we could use some golden tests to ensure it remains consistent (or property based tests that go from version to version?). It seems more a risk that we for rebuild by mistake rather than don't force rebuild? Breaking on every release seems bad - also I suspect the potential changes come from more than just those two places?
+
 - **Soundness is a proof obligation, not a vibe.** The equivalence relation needs property tests against the DuckDB oracle in the same spirit as `type_property_tests.rs`: generate two model versions, assert that "smelt says output-equivalent" ⇒ "DuckDB produces identical rows." A false-positive here corrupts data; this test gate is non-negotiable and should exist *before* any reuse is wired to execution.
 
 The honest framing: smelt can *prove* a strictly larger non-breaking set than SQLMesh *guesses*, but only over the transparent, deterministic, typed core — which is exactly the core smelt is built to reason about. Outside it, smelt degrades to the same conservative rebuild SQLMesh defaults to. So the worst case is parity; the typical case is eclipse.
@@ -251,6 +267,8 @@ SQLMesh requires an OLTP database and warns against using the warehouse. smelt s
 - **Default: `embedded`** — a smelt-managed file in `.smelt/state.db` (DuckDB file, or sqlite). Zero new infrastructure; fits the "POC / single developer / CI" cases that are most of the value. This is the on-ramp.
 - **Escalate: `oltp`** — a Postgres (or other OLTP) connection string for teams running shared prod environments, matching SQLMesh's production guidance.
 - **Pluggable** via the existing `smelt-state` crate (`FileStore` already exists). The store is an interface; `embedded` and `oltp` are implementations.
+
+Andrew: I also wonder whether there is some way to support some table stores (like delta) that have transactions. How bad can the perf really be? Particularly as it's on deployments. The worst part might be row per partition - but maybe we could come up with a clever way to batch updates?
 
 This directly satisfies "state store is not required for all smelt projects": stateless projects have no store; opted-in projects get an embedded file unless they ask for more.
 
@@ -284,15 +302,25 @@ These are the decisions this paper deliberately does **not** settle:
 
 1. **Soundness vs. coverage of the prover.** How aggressive should the initial equivalence relation be? Option A: ship only the *unimpeachable* cases (formatting, projection reorder, dead-column removal, physical-only changes) and grow coverage behind property tests. Option B: aim for full column-lineage impact analysis from the start. Recommendation leans A — every increment of coverage is gated by a new oracle test.
 
+Andrew: Agree with building up from some quite safe starting point - I wonder whether we could actually allow user extensions for extra rules?
+
 2. **State store substrate default.** Embedded DuckDB file vs sqlite for `.smelt/state.db`. DuckDB is already a dependency and the analytical engine; sqlite is a better OLTP fit and tiny. SQLMesh explicitly warns OLAP-for-state is a POC-only footgun — but smelt's embedded store is single-writer/local, so the warning may not bite. Open.
+
+Andrew: this one seems fine to me - duckdb should be the default.
 
 3. **Garbage collection of unreferenced physical tables.** Snapshots accumulate; SQLMesh has TTL/`janitor` semantics. smelt needs a retention policy (keep N versions / time-based / explicit `smelt gc`). When is a table safe to drop? (No environment references it *and* it's older than the revert window.)
 
 4. **Forward-only changes.** SQLMesh's `forward-only` (reuse the table, accept no clean revert) is valuable for huge tables where a rebuild is infeasible. Does smelt expose this as an explicit per-plan/per-model escape hatch, or does the provable-equivalence machinery make it rarely needed? Probably still needed for genuinely breaking changes to enormous tables.
 
+Andrew: yes I think we 100% want that - although maybe those are default smelt tables without state - but maybe we want to have a mechanism to allow *unsafe* changes or forward only changes to tables that opt into state.
+
 5. **Cross-version fingerprint stability.** Hash the inference/printer version into the fingerprint (correct but causes a one-time rebuild on smelt upgrades) vs. a compatibility manifest that proves an upgrade is fingerprint-neutral. The latter is more work but avoids upgrade-day full rebuilds.
 
+Andrew: as above I don't want everything to rebuild when smelt version changes.
+
 6. **Multi-backend.** Environments across DuckDB+Spark: does an environment span engines, and does the env→table map key on `(environment, backend)`? Interacts with the deferred `multi_backend.md`.
+
+Andrew: yes environments should span engines.
 
 7. **Data diff.** Cheap environments make "diff dev vs prod outputs" the natural next feature. smelt's type system enables *typed* diffs (schema-aware, column-aligned). Separate paper, but it's the obvious companion and a second place the type system eclipses a textual tool.
 
