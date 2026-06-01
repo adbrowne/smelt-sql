@@ -96,15 +96,19 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          undefined model/source 'with_tag' \
          (workspace reflection not evaluated at build; tracked by P7)",
     ),
-    // ── Function codegen gaps (closed by P3/P4) ───────────────────────────
+    // ── Function codegen gaps ──────────────────────────────────────────────
     (
-        // Nested `smelt.define` calls + block PASSING fragments are not fully
-        // expanded; also a YAML frontmatter `deterministic` field is rejected.
-        // Closed by P3 (nested define) + P4 (PASSING).
+        // Nested `smelt.define` (P3/BUG-013) and block PASSING fragments
+        // (P4/BUG-018) now expand and execute correctly. The remaining blocker
+        // is unrelated to this plan: `uses_generics` lowers to SQL DuckDB
+        // rejects with `Parser Error: NameListToString NOT IMPLEMENTED` (a
+        // generics/registry codegen gap, not a diagnostic-parity defect), plus
+        // unknown `provenance`/`deterministic` frontmatter fields surface as
+        // warnings. De-listing waits on the separate generics-codegen fix.
         "functions_demo",
-        "Error (Warning surfaced as build failure): unknown frontmatter field \
-         `deterministic`; nested smelt.define / block PASSING not fully \
-         expanded (tracked by P3/P4)",
+        "Error: Failed to execute model: uses_generics \
+         (Parser Error: NameListToString NOT IMPLEMENTED — generics codegen gap, \
+         separate from diagnostic-parity; PASSING/nested-define already fixed)",
     ),
     // ── Workspaces whose execution needs external source data not present in
     //    the test environment (a `raw.*` schema / generated tables). These are

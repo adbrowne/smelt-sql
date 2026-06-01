@@ -765,6 +765,110 @@ SELECT * FROM smelt.functions.wrap_tbl(smelt.raw_t)
     );
 }
 
+// ─── Test 8: block PASSING fragment binding executes (BUG-018) ──────────────
+
+/// A `smelt.define` with a `SelectItems<Agg>` fragment parameter, called with
+/// the block `PASSING <name> AS (<body>)` syntax, must bind the PASSING body to
+/// the named fragment parameter and substitute it into the function body before
+/// codegen.
+///
+/// Before the BUG-018 fix the printer collected only the inline `arg_list`
+/// (positional + `param => value`) bindings and ignored the trailing
+/// `PASSING_CLAUSE`s, so the `metrics` parameter fell back to its default `()`
+/// and the body emitted `SELECT group_col, () FROM …` → DuckDB syntax error.
+///
+/// Chain: `category_rollup(smelt.events, group_col => category) PASSING metrics AS (COUNT(*))`
+/// The body `SELECT group_col, metrics FROM source GROUP BY group_col` becomes
+/// `SELECT category, COUNT(*) FROM events GROUP BY category`, so the result is
+/// one row per category with its event count.
+#[test]
+fn e2e_block_passing_fragment_executes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_block_passing
+version: 1
+paths:
+  - models
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // CSV seed so the analyzer has a concrete schema for `events`.
+    let events_csv = "category,amount\na,10\na,20\nb,5\n";
+
+    // A fragment-parameterised rollup. `metrics: SelectItems<Agg>` defaults to
+    // `()`; the caller supplies it via a PASSING block. `group_col: Expr<Text>`
+    // is the grouping key, passed by name at the call site.
+    let category_rollup_fn = "---
+backends: [duckdb]
+---
+smelt.define category_rollup(
+    source: TableExpr,
+    group_col: Expr<Text>,
+    metrics: SelectItems<Agg> = ()
+) -> TableExpr AS (
+    SELECT group_col, metrics
+    FROM source
+    GROUP BY group_col
+)
+";
+
+    // Consumer: block PASSING syntax supplies the `metrics` fragment.
+    let dashboard_sql = "---
+materialization: table
+---
+SELECT *
+FROM smelt.functions.category_rollup(
+    smelt.events,
+    group_col => category
+) PASSING metrics AS (COUNT(*)) AS r
+ORDER BY 1
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("seeds/events.csv", events_csv),
+            ("functions/category_rollup.sql", category_rollup_fn),
+            ("models/category_dashboard.sql", dashboard_sql),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    // Read both output columns by index (the aggregate column is auto-named by
+    // DuckDB, so we don't depend on its name).
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+    let mut stmt = conn
+        .prepare("SELECT * FROM main.category_dashboard ORDER BY 1")
+        .expect("prepare dashboard query");
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .expect("query dashboard rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    // category a → 2 events, category b → 1 event.
+    assert_eq!(
+        rows,
+        vec![("a".to_string(), 2), ("b".to_string(), 1)],
+        "PASSING fragment was not substituted: got {rows:?}"
+    );
+}
+
 // ─── Test 6: nested smelt.define 3-level chain executes (BUG-013) ───────────
 
 /// A three-level `smelt.define` chain where each function calls the previous

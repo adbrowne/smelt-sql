@@ -159,7 +159,7 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                             .collect()
                     })
                     .unwrap_or_default();
-                let named: Vec<(String, String)> = path_call
+                let mut named: Vec<(String, String)> = path_call
                     .arg_list()
                     .map(|al| {
                         al.named_params()
@@ -173,6 +173,27 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                             .collect()
                     })
                     .unwrap_or_default();
+                // Merge block `PASSING <name> AS (<body>)` fragment bindings into
+                // the named-argument set. A PASSING clause binds parameter
+                // `<name>` to `<body>` exactly as a `<name> => <body>` inline
+                // named argument would — the type-checker rejects supplying the
+                // same parameter both ways, so there is no collision to resolve.
+                // The body is printed through `ctx` so any nested smelt
+                // constructs inside the fragment are expanded too.
+                for clause in path_call.passing_clauses() {
+                    if let Some(name) = clause.name() {
+                        let body = if let Some(expr) = clause.body_expr() {
+                            let mut s = String::new();
+                            print_node(expr.syntax(), ctx, &mut s);
+                            s
+                        } else if let Some(text) = clause.body_text() {
+                            text
+                        } else {
+                            continue;
+                        };
+                        named.push((name, body));
+                    }
+                }
                 if let Some(expanded) = expander(&segs, positional, named) {
                     // Detect FROM-position: the SMELT_PATH_CALL node's parent
                     // must be TABLE_REF, and TABLE_REF's parent must be
@@ -1389,6 +1410,52 @@ mod tests {
         assert!(
             result.contains("x + 1"),
             "expected fully expanded body '(x + 1)', got: {result}"
+        );
+    }
+
+    /// BUG-018: a block `PASSING <name> AS (<body>)` clause must arrive at the
+    /// expander as a named binding (`<name>` → `<body>`), so a fragment
+    /// parameter supplied via PASSING is substituted rather than falling back
+    /// to its default.
+    #[test]
+    fn block_passing_binds_fragment_into_named_args() {
+        // `metrics` is supplied via a trailing PASSING block, not inline.
+        let sql = "SELECT * FROM smelt.functions.rollup(t) PASSING metrics AS (COUNT(*))";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
+            smelt_path_ref: None,
+            // The expander mimics body substitution: it reads the `metrics`
+            // binding out of `named` and splices it into the body. If the
+            // PASSING clause were ignored, `metrics` would fall back to `()`.
+            smelt_path_call: Some(Box::new(move |_segs, _pos, named| {
+                let metrics = named
+                    .iter()
+                    .find(|(k, _)| k == "metrics")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| "()".to_string());
+                Some(format!(
+                    "(SELECT group_col, {metrics} FROM t GROUP BY group_col)"
+                ))
+            })),
+        };
+        let result = print(&parsed.syntax(), &ctx);
+
+        assert!(
+            result.contains("COUNT(*)"),
+            "PASSING body must be bound to `metrics`, got: {result}"
+        );
+        assert!(
+            !result.contains("group_col, ()"),
+            "`metrics` must not fall back to its default `()`, got: {result}"
         );
     }
 }
