@@ -666,6 +666,10 @@ impl SqlCompiler {
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
         // Strip frontmatter to avoid parse errors from YAML metadata
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
+        // Evaluate in-model meta-language constructs (e.g. list spread) to plain
+        // SQL before codegen so the analyzer-accepted surface never reaches the
+        // engine (build-path half of the diagnostic-parity rule).
+        let clean_content = crate::meta_eval::expand_in_model_meta(&clean_content);
         let parse = smelt_parser::parse(&clean_content);
 
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -773,7 +777,8 @@ impl SqlCompiler {
         schema: &str,
         sql: &str,
     ) -> Result<CompiledModel> {
-        let parse = smelt_parser::parse(sql);
+        let sql = crate::meta_eval::expand_in_model_meta(sql);
+        let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
@@ -826,7 +831,8 @@ impl SqlCompiler {
             .map(|s| s.as_str())
             .collect();
 
-        let parse = smelt_parser::parse(sql);
+        let sql = crate::meta_eval::expand_in_model_meta(sql);
+        let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
@@ -979,6 +985,7 @@ impl EphemeralResolver {
     ) -> Vec<(String, String)> {
         let ephemeral_refs: HashSet<&str> = ephemeral_names.iter().map(|s| s.as_str()).collect();
         let clean_sql = smelt_parser::strip_frontmatter(raw_sql);
+        let clean_sql = crate::meta_eval::expand_in_model_meta(&clean_sql);
         let parse = smelt_parser::parse(&clean_sql);
 
         // Build a path-ref resolver that maps smelt.<path> to either
@@ -1355,6 +1362,7 @@ impl SqlCompiler {
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
+        let clean_content = crate::meta_eval::expand_in_model_meta(&clean_content);
         let parse = smelt_parser::parse(&clean_content);
 
         // Build ephemeral set for the printer

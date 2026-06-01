@@ -21,6 +21,7 @@ pub mod cumulative;
 pub mod execute;
 pub mod fn_bodies;
 pub mod gate;
+pub mod meta_eval;
 pub mod reporter;
 pub mod select;
 pub mod transformer;

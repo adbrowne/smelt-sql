@@ -53,11 +53,20 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
     // is emitted verbatim and either fails dependency resolution or compiles to
     // SQL referencing a relation that was never produced.
     (
-        // List spread is not expanded at build → `list_literal` fails to
-        // execute. Closed by P5 (BUG-006 lists).
+        // In-model list spread now expands at build (P5/BUG-006a, verified by
+        // `crates/smelt-cli/tests/meta_lists_e2e.rs`): the emitted SQL is
+        // `SELECT id, 1, 2, 3 FROM raw.users`. The remaining blocker is no
+        // longer a codegen gap — `raw.users` is an unseeded source in the
+        // standalone build env (same category as timeseries/web_analytics).
+        // (Latent, separate from spread: the `list_literal` model's bare
+        // integer-literal columns would also hit the `apply_type_casts`
+        // unaliased-literal defect were the source seeded; reproducible with no
+        // spread at all, so tracked apart from diagnostic parity.)
         "meta_lists",
         "Error: Failed to execute model: list_literal \
-         (in-model list spread not evaluated at build; tracked by P5)",
+         (Catalog Error: Table \"raw.users\" does not exist — unseeded source in \
+         the standalone build env; in-model list spread itself now expands at \
+         build, see meta_lists_e2e.rs)",
     ),
     (
         // HOFs / pipe / config.var are not evaluated at build → dependency
