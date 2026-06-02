@@ -17,10 +17,15 @@
 //! **`smelt.columns_of`** reflection (its `List<ColumnRef>` is materialised from
 //! the resolved schema and its `map` / `filter` / spread lowered to plain select
 //! items, including when the `columns_of` call lives inside a `smelt.define`
-//! body the model expands). Each is evaluated at compile time and lowered to
-//! plain Data-World SQL. The remaining reflection (`smelt.models.*`,
-//! `smelt.sources.*`) and the loader family are evaluated by the analyzer but
-//! not yet lowered here — see `meta_language.md` §"Known Divergences".
+//! body the model expands); and **wide reflection** (`smelt.models.with_tag` /
+//! `.all`, `smelt.sources.with_tag` / `.all`), whose `List<ModelRef>` /
+//! `List<SourceRef>` is materialised from the workspace's model / source
+//! listings and its `map` / `filter` / spread lowered to plain select items
+//! (the `m.name` / `m.path` projections rendered as `Text` string literals).
+//! Each is evaluated at compile time and lowered to plain Data-World SQL. The
+//! loader family (`smelt.config.load_yaml` / `load_json`) is evaluated by the
+//! analyzer but not yet lowered here — see `meta_language.md` §"Known
+//! Divergences".
 
 use std::collections::BTreeMap;
 
@@ -48,6 +53,22 @@ pub struct ColumnRefMeta {
     pub is_numeric: bool,
 }
 
+/// One `ModelRef` / `SourceRef` reflected from the workspace's model / source
+/// listings, used by the build-path evaluator to materialise
+/// `smelt.models.with_tag(t)` / `.all` and `smelt.sources.with_tag(t)` / `.all`.
+/// The fields mirror the closed `ModelRef` / `SourceRef` records
+/// (`meta_language.md` §"Reflection: `smelt.models`, …"): `path` is the
+/// workspace-relative source path (`/`-normalised), `name` is the entity's leaf
+/// identifier, and `tags` is its merged tag set (used to filter `with_tag`).
+/// `path` and `name` are `Text` *data values* — they lower to SQL string
+/// literals, not column references.
+#[derive(Clone, Debug)]
+pub struct EntityRefMeta {
+    pub path: String,
+    pub name: String,
+    pub tags: Vec<String>,
+}
+
 /// Compile-time context for the build-path meta evaluator.
 ///
 /// - `vars`: the workspace `vars:` (already coerced to `Text`) for `smelt.config.var`.
@@ -57,21 +78,28 @@ pub struct ColumnRefMeta {
 ///   function call whose body is a reflection chain (`columns_of`), the
 ///   evaluator substitutes the call's arguments into the body and evaluates it
 ///   directly; `None` disables that (the call is left to the printer).
+/// - `models` / `sources`: the workspace's model / source listings (with merged
+///   tags), for `smelt.models.*` / `smelt.sources.*` wide reflection.
 pub struct MetaEvalContext<'a> {
     pub vars: &'a BTreeMap<String, String>,
     pub columns: BTreeMap<String, Vec<ColumnRefMeta>>,
     pub fn_bodies: Option<&'a FnBodyMap>,
+    pub models: &'a [EntityRefMeta],
+    pub sources: &'a [EntityRefMeta],
 }
 
 impl<'a> MetaEvalContext<'a> {
-    /// A context carrying only `vars:` — no reflection column metadata and no
-    /// function bodies. Used by call sites (e.g. the ephemeral-CTE compiler)
-    /// that do not have upstream schemas or a function-body map.
+    /// A context carrying only `vars:` — no reflection column metadata, no
+    /// function bodies, and no model / source listings. Used by call sites
+    /// (e.g. the ephemeral-CTE compiler) that do not have upstream schemas, a
+    /// function-body map, or a workspace listing.
     pub fn vars_only(vars: &'a BTreeMap<String, String>) -> Self {
         Self {
             vars,
             columns: BTreeMap::new(),
             fn_bodies: None,
+            models: &[],
+            sources: &[],
         }
     }
 }
@@ -258,6 +286,10 @@ fn eval_meta(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
     if let Some(list) = eval_columns_of(expr, ctx) {
         return Some(list);
     }
+    // Wide reflection `smelt.models.*` / `smelt.sources.*` → List<ModelRef|SourceRef>.
+    if let Some(list) = eval_wide_reflection(expr, ctx) {
+        return Some(list);
+    }
     // A `smelt.define` call whose body is a reflection chain → substitute the
     // call's arguments into the body and evaluate it (no printer reprint).
     if let Some(call) = expr.as_smelt_path_call() {
@@ -330,6 +362,86 @@ fn columns_of_target_leaf(arg: &Expr) -> Option<String> {
         return call.segments().last().cloned();
     }
     None
+}
+
+/// Evaluate wide reflection — `smelt.models.with_tag(t)` / `smelt.models.all`
+/// and `smelt.sources.with_tag(t)` / `smelt.sources.all` — to a
+/// `List<ModelRef>` / `List<SourceRef>` of record elements, using the workspace
+/// model / source listings in `ctx`. `with_tag` filters the listing by tag
+/// membership (the analyzer's `Config::get_tags`-merged set); `all` returns the
+/// whole listing (already path-sorted by the producer). Returns `None` when
+/// `expr` is not a `smelt.models.*` / `smelt.sources.*` accessor, when the
+/// accessor is outside the closed `{with_tag, all}` set, or when a `with_tag`
+/// argument is not a resolvable `Text` literal — all of which the analyzer
+/// gates, so a clean build never reaches one (drop-on-error: leave verbatim).
+fn eval_wide_reflection(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
+    let (namespace, accessor, tag) = wide_reflection_parts(expr)?;
+    let listing = match namespace.as_str() {
+        "models" => &ctx.models,
+        "sources" => &ctx.sources,
+        _ => return None,
+    };
+    let elems: Vec<MetaElem> = match accessor.as_str() {
+        "all" => listing.iter().map(entity_ref_record).collect(),
+        "with_tag" => {
+            let tag = tag?;
+            listing
+                .iter()
+                .filter(|e| e.tags.contains(&tag))
+                .map(entity_ref_record)
+                .collect()
+        }
+        _ => return None,
+    };
+    Some(MetaValue::List(elems))
+}
+
+/// Decompose a wide-reflection accessor **call** into `(namespace, accessor,
+/// tag)`. Only the call form is recognised — `smelt.models.with_tag('x')`,
+/// `smelt.models.all()`, and the `smelt.sources` equivalents — because that is
+/// the surface the analyzer accepts: the analyzer recognises wide reflection
+/// only at a `SmeltPathCall` (`infer_smelt_path_call_type`), and a *bare*
+/// `smelt.models.all` path ref (no parens) is resolved as an ordinary model ref
+/// and rejected as `UndefinedModelRef`. Restricting the build to the call form
+/// keeps the build-accepted surface equal to the analyzer-accepted surface
+/// (`architecture.md` §"Diagnostic parity rule"). `namespace` is `"models"` /
+/// `"sources"`; `tag` is the `with_tag` argument's string-literal value (or
+/// `None` for `all` / an unresolvable argument — `smelt.config.var` arguments
+/// are already resolved to literals by the earlier `expand_config_vars` pass).
+/// Returns `None` unless the call's path is exactly `<namespace>.<accessor>`.
+fn wide_reflection_parts(expr: &Expr) -> Option<(String, String, Option<String>)> {
+    let call = expr.as_smelt_path_call()?;
+    let segs = call.segments();
+    if segs.len() != 2 {
+        return None;
+    }
+    let namespace = segs[0].to_lowercase();
+    if namespace != "models" && namespace != "sources" {
+        return None;
+    }
+    let tag = call
+        .arg_list()
+        .and_then(|a| a.positional_args().into_iter().next())
+        .and_then(|arg| smelt_db::config_vars::extract_string_literal_value(&arg));
+    Some((namespace, segs[1].to_lowercase(), tag))
+}
+
+/// Build a `ModelRef` / `SourceRef` record element from an [`EntityRefMeta`].
+/// `name` and `path` are rendered as SQL `Text` string literals (a model name
+/// is a data value, not a column reference). `tags` (a `List<Text>`) is not
+/// projected here — a `m.tags` projection has no scalar form and is left to the
+/// conservative drop-on-error path (`meta_language.md` §"Known Divergences").
+fn entity_ref_record(e: &EntityRefMeta) -> MetaElem {
+    let mut fields = BTreeMap::new();
+    fields.insert("name".to_string(), sql_text_literal(&e.name));
+    fields.insert("path".to_string(), sql_text_literal(&e.path));
+    MetaElem::Record(fields)
+}
+
+/// Render a `Text` value as a single-quoted SQL string literal (doubling any
+/// embedded single quote).
+fn sql_text_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Evaluate a `smelt.define` call (`smelt.functions.foo(args)` / `smelt.fn.foo`
@@ -1214,6 +1326,8 @@ mod tests {
             vars: &vars,
             columns,
             fn_bodies: Some(fn_bodies),
+            models: &[],
+            sources: &[],
         };
         expand_in_model_meta(sql, &ctx)
     }
@@ -1266,5 +1380,166 @@ mod tests {
         // context), so the function-call spread operand does not evaluate to a
         // scalar list and the whole spread is left verbatim (analyzer drop-on-error).
         assert_eq!(out, sql, "unresolvable reflection spread is left verbatim");
+    }
+
+    // ── P7b build-path wide reflection (`smelt.models.*` / `smelt.sources.*`) ──
+
+    /// Three cohort models (path-sorted), two tagged `cohort`.
+    fn cohort_models() -> Vec<EntityRefMeta> {
+        vec![
+            EntityRefMeta {
+                path: "models/cohort_a.sql".to_string(),
+                name: "cohort_a".to_string(),
+                tags: vec!["cohort".to_string(), "core".to_string()],
+            },
+            EntityRefMeta {
+                path: "models/cohort_b.sql".to_string(),
+                name: "cohort_b".to_string(),
+                tags: vec!["cohort".to_string()],
+            },
+            EntityRefMeta {
+                path: "models/other.sql".to_string(),
+                name: "other".to_string(),
+                tags: vec!["misc".to_string()],
+            },
+        ]
+    }
+
+    /// Two sources, one tagged `audit`.
+    fn audit_sources() -> Vec<EntityRefMeta> {
+        vec![
+            EntityRefMeta {
+                path: "models/sources/raw/events.yml".to_string(),
+                name: "events".to_string(),
+                tags: vec!["audit".to_string(), "raw".to_string()],
+            },
+            EntityRefMeta {
+                path: "models/sources/raw/clicks.yml".to_string(),
+                name: "clicks".to_string(),
+                tags: vec!["raw".to_string()],
+            },
+        ]
+    }
+
+    /// Evaluate with workspace model / source listings.
+    fn eval_wide(sql: &str, models: Vec<EntityRefMeta>, sources: Vec<EntityRefMeta>) -> String {
+        let vars = no_vars();
+        let ctx = MetaEvalContext {
+            vars: &vars,
+            columns: BTreeMap::new(),
+            fn_bodies: None,
+            models: &models,
+            sources: &sources,
+        };
+        expand_in_model_meta(sql, &ctx)
+    }
+
+    #[test]
+    fn models_with_tag_map_name_spread_to_literals() {
+        // `...map(smelt.models.with_tag('cohort'), fn m => m.name)` lowers to
+        // one string-literal select item per matching model (cohort_a, cohort_b),
+        // path-sorted; `other` (tag misc) is excluded.
+        let out = eval_wide(
+            "SELECT ...map(smelt.models.with_tag('cohort'), fn m => m.name)",
+            cohort_models(),
+            Vec::new(),
+        );
+        assert_eq!(out, "SELECT 'cohort_a', 'cohort_b'");
+    }
+
+    #[test]
+    fn sources_with_tag_map_name_spread_to_literals() {
+        // The plan's worked example: list audit source names.
+        let out = eval_wide(
+            "SELECT ...map(smelt.sources.with_tag('audit'), fn s => s.name)",
+            Vec::new(),
+            audit_sources(),
+        );
+        assert_eq!(out, "SELECT 'events'");
+    }
+
+    #[test]
+    fn models_with_tag_map_path_spread_to_literals() {
+        // The `m.path` projection renders the workspace-relative path literal.
+        let out = eval_wide(
+            "SELECT ...map(smelt.models.with_tag('cohort'), fn m => m.path)",
+            cohort_models(),
+            Vec::new(),
+        );
+        assert_eq!(out, "SELECT 'models/cohort_a.sql', 'models/cohort_b.sql'");
+    }
+
+    #[test]
+    fn models_all_call_form_spread() {
+        // `smelt.models.all()` (call form) returns the whole listing.
+        let out = eval_wide(
+            "SELECT ...map(smelt.models.all(), fn m => m.name)",
+            cohort_models(),
+            Vec::new(),
+        );
+        assert_eq!(out, "SELECT 'cohort_a', 'cohort_b', 'other'");
+    }
+
+    #[test]
+    fn models_all_bare_ref_left_verbatim() {
+        // A *bare* `smelt.models.all` (no parens) is not wide reflection to the
+        // analyzer — it resolves as an ordinary model ref and is rejected as
+        // `UndefinedModelRef`. The build only lowers the call form, so the bare
+        // form is left verbatim and the analyzer gate refuses the build (build-
+        // accepted surface == analyzer-accepted surface, per the parity rule).
+        let sql = "SELECT ...map(smelt.models.all, fn m => m.name)";
+        assert_eq!(eval_wide(sql, cohort_models(), Vec::new()), sql);
+    }
+
+    #[test]
+    fn with_tag_config_var_argument_resolved() {
+        // The analyzer accepts `smelt.config.var(...)` as a compile-time-Text
+        // `with_tag` argument. The earlier `expand_config_vars` pass resolves it
+        // to a literal before wide reflection runs, so `with_tag(config.var(x))`
+        // sees a plain string literal and filters as expected.
+        let mut vars = BTreeMap::new();
+        vars.insert("seg".to_string(), "cohort".to_string());
+        let models = cohort_models();
+        let ctx = MetaEvalContext {
+            vars: &vars,
+            columns: BTreeMap::new(),
+            fn_bodies: None,
+            models: &models,
+            sources: &[],
+        };
+        let out = expand_in_model_meta(
+            "SELECT reduce(map(smelt.models.with_tag(smelt.config.var('seg')), fn m => m.name), concat_with(', '))",
+            &ctx,
+        );
+        assert_eq!(out, "SELECT 'cohort_a' || ', ' || 'cohort_b'");
+    }
+
+    #[test]
+    fn all_then_filter_then_map_keeps_only_matches() {
+        // A `filter` over the reflected list composes with `all()`.
+        let out = eval_wide(
+            "SELECT ...map(smelt.models.all() |> filter(fn m => m.name = 'cohort_a'), fn m => m.name)",
+            cohort_models(),
+            Vec::new(),
+        );
+        assert_eq!(out, "SELECT 'cohort_a'");
+    }
+
+    #[test]
+    fn empty_match_left_verbatim() {
+        // No model matches `nonexistent` → the spread would rebuild to an empty
+        // SELECT list, so it is left verbatim (analyzer gates the empty result).
+        let sql = "SELECT ...map(smelt.models.with_tag('nonexistent'), fn m => m.name)";
+        assert_eq!(eval_wide(sql, cohort_models(), Vec::new()), sql);
+    }
+
+    #[test]
+    fn wide_reflection_idempotent_second_pass() {
+        let once = eval_wide(
+            "SELECT ...map(smelt.sources.with_tag('audit'), fn s => s.name)",
+            Vec::new(),
+            audit_sources(),
+        );
+        assert_eq!(eval_wide(&once, Vec::new(), audit_sources()), once);
     }
 }

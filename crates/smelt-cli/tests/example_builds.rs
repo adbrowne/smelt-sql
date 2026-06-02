@@ -95,12 +95,18 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          (config.loader not evaluated at build; tracked by P7)",
     ),
     (
-        // Workspace reflection (`smelt.models.with_tag`) not evaluated at build
-        // → the ref resolves to an undefined model/source. Closed by P7.
+        // Wide reflection (`smelt.models.with_tag` / `smelt.sources.with_tag`)
+        // now lowers and executes at build (P7b). The remaining blocker is
+        // unrelated to diagnostic parity: the cohort models read the unseeded
+        // `raw.events` source (the standalone build env has no datagen), so the
+        // build fails on the first cohort model. De-listing is a seeding
+        // decision for P8, not a codegen gap. The BUG-006 wide-reflection
+        // regression target is the hermetic `meta_workspace_e2e.rs`.
         "meta_workspace",
-        "Error: Dependency validation failed: Model 'all_cohorts' references \
-         undefined model/source 'with_tag' \
-         (workspace reflection not evaluated at build; tracked by P7)",
+        "Error: Execution failed for 'main.cohort_c': Catalog Error: Table with \
+         name \"raw.events\" does not exist because schema \"raw\" does not exist \
+         (unseeded source in standalone build env; wide reflection itself lowers \
+         correctly — covered by meta_workspace_e2e.rs)",
     ),
     // ── Function codegen gaps ──────────────────────────────────────────────
     (

@@ -81,6 +81,18 @@ impl DependencyGraph {
                     {
                         return None;
                     }
+                    // `smelt.models.with_tag(...)` / `smelt.models.all` are
+                    // wide-reflection accessors (compile-time meta resolved by
+                    // the build-path evaluator), not model deps — distinct from
+                    // a legacy `smelt.models.<leaf>` model reference.
+                    if first == "models"
+                        && matches!(
+                            segs.get(1).map(String::as_str),
+                            Some("with_tag") | Some("all")
+                        )
+                    {
+                        return None;
+                    }
                     Some(segs.join("."))
                 })
                 .collect();

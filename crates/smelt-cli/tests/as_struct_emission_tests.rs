@@ -82,6 +82,7 @@ fn upstream_with_model(model_name: &str, cols: Vec<(String, DataType)>) -> Arc<U
         sources: Default::default(),
         per_entity_sources: Vec::new(),
         vars: Default::default(),
+        ..Default::default()
     })
 }
 

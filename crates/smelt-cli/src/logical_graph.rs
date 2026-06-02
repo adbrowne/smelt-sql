@@ -120,6 +120,18 @@ impl LogicalGraph {
                     if matches!(first, Some("sources") | Some("functions") | Some("config")) {
                         return None;
                     }
+                    // `smelt.models.with_tag(...)` / `smelt.models.all` are
+                    // wide-reflection accessors — compile-time meta the
+                    // build-path evaluator resolves before codegen, not model
+                    // deps — distinct from a legacy `smelt.models.<leaf>` ref.
+                    if first == Some("models")
+                        && matches!(
+                            path.get(1).map(String::as_str),
+                            Some("with_tag") | Some("all")
+                        )
+                    {
+                        return None;
+                    }
                     // Strip the legacy "models" namespace prefix (Phase 2 unified
                     // paths eliminated it, but test helpers and some older workspaces
                     // still use `smelt.models.<leaf>` form).

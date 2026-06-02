@@ -340,6 +340,13 @@ pub struct UpstreamSchemas {
     /// parity rule"). Consumed at compile time by the meta-language
     /// `smelt.config.var(name)` evaluator; never reaches the database engine.
     pub vars: std::collections::BTreeMap<String, String>,
+    /// Workspace model / source listings (with merged tags), built from the
+    /// analyzer's own `models_all` / `sources_all` Salsa queries so the build
+    /// and the editor resolve `smelt.models.*` / `smelt.sources.*` identically
+    /// (`architecture.md` §"Diagnostic parity rule"). Consumed at compile time
+    /// by the build-path wide-reflection evaluator; never reaches the engine.
+    pub model_refs: Vec<crate::meta_eval::EntityRefMeta>,
+    pub source_refs: Vec<crate::meta_eval::EntityRefMeta>,
 }
 
 impl UpstreamSchemas {
@@ -437,12 +444,49 @@ impl UpstreamSchemas {
             })
             .unwrap_or_default();
 
+        // Workspace model / source listings for wide reflection
+        // (`smelt.models.*` / `smelt.sources.*`). Reuse the analyzer's own
+        // `models_all` / `sources_all` queries so the build resolves the same
+        // listing, tag merge, path normalisation, and sort order the editor
+        // sees (per `architecture.md` §"Diagnostic parity rule"). Models are
+        // workspace-wide; sources are per-project, so union over every project.
+        let model_refs: Vec<crate::meta_eval::EntityRefMeta> = smelt_db::models_all(db, workspace)
+            .iter()
+            .map(|m| crate::meta_eval::EntityRefMeta {
+                path: m.path.clone(),
+                name: m.name.clone(),
+                tags: m.tags.clone(),
+            })
+            .collect();
+        let mut source_refs: Vec<crate::meta_eval::EntityRefMeta> = workspace
+            .projects(db)
+            .iter()
+            .copied()
+            .flat_map(|project| {
+                smelt_db::sources_all(db, project)
+                    .iter()
+                    .map(|s| crate::meta_eval::EntityRefMeta {
+                        path: s.path.clone(),
+                        name: s.name.clone(),
+                        tags: s.tags.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // Each project's `sources_all` is path-sorted internally; re-sort the
+        // cross-project union so the workspace-wide listing is globally
+        // path-sorted (`meta_language.md` §"smelt.sources accessors": sorted
+        // ascending by `path`). `models_all` is already workspace-wide sorted.
+        source_refs.sort_by(|a, b| a.path.cmp(&b.path));
+
         Ok(Self {
             models: model_schemas,
             seeds: seed_schemas,
             sources,
             per_entity_sources,
             vars,
+            model_refs,
+            source_refs,
         })
     }
 }
@@ -489,14 +533,17 @@ impl SqlCompiler {
 
     /// Build the build-path meta-evaluation context: compile-time `vars:` for
     /// `smelt.config.var`, the upstream model/seed column lists for
-    /// `smelt.columns_of` reflection, and the project's `smelt.define` bodies
-    /// (so a `columns_of` inside a function body is reachable). Borrows the
-    /// compiler's `UpstreamSchemas` / `fn_bodies`.
+    /// `smelt.columns_of` reflection, the project's `smelt.define` bodies
+    /// (so a `columns_of` inside a function body is reachable), and the
+    /// workspace model/source listings for `smelt.models.*` / `smelt.sources.*`
+    /// wide reflection. Borrows the compiler's `UpstreamSchemas` / `fn_bodies`.
     fn meta_ctx(&self) -> crate::meta_eval::MetaEvalContext<'_> {
         crate::meta_eval::MetaEvalContext {
             vars: &self.upstream_schemas.vars,
             columns: self.reflection_columns(),
             fn_bodies: self.fn_bodies.as_deref(),
+            models: &self.upstream_schemas.model_refs,
+            sources: &self.upstream_schemas.source_refs,
         }
     }
 
