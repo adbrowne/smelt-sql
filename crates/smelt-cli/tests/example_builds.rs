@@ -73,11 +73,18 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
     // meta evaluator (`smelt-runtime::meta_eval`) lowers them to plain SQL, and
     // their models reference no sources, so they build + execute clean.
     (
-        // `smelt.columns_of` reflection not evaluated at build → `orders` fails
-        // to execute. Closed by P7 (BUG-006 reflection).
+        // `smelt.columns_of` reflection now lowers at build (P7a/BUG-006
+        // columns_of, verified by `crates/smelt-cli/tests/meta_columns_e2e.rs`):
+        // `orders_safe` materialises its numeric columns into plain select items.
+        // The remaining blocker is no longer a codegen gap — the `orders` model
+        // reads the unseeded `raw.orders` source in the standalone build env
+        // (same category as timeseries/web_analytics), and fails before
+        // `orders_safe` is reached.
         "meta_columns",
         "Error: Failed to execute model: orders \
-         (smelt.columns_of reflection not evaluated at build; tracked by P7)",
+         (Catalog Error: Table \"raw.orders\" does not exist — unseeded source in \
+         the standalone build env; smelt.columns_of reflection itself now lowers \
+         at build, see meta_columns_e2e.rs)",
     ),
     (
         // `smelt.config.load_yaml` loader not evaluated at build → the ref

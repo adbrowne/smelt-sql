@@ -487,12 +487,44 @@ impl SqlCompiler {
         self.fn_bodies = Some(bodies);
     }
 
-    /// Build the build-path meta-evaluation context (compile-time `vars:` for
-    /// `smelt.config.var`). Borrows the compiler's `UpstreamSchemas`.
+    /// Build the build-path meta-evaluation context: compile-time `vars:` for
+    /// `smelt.config.var`, the upstream model/seed column lists for
+    /// `smelt.columns_of` reflection, and the project's `smelt.define` bodies
+    /// (so a `columns_of` inside a function body is reachable). Borrows the
+    /// compiler's `UpstreamSchemas` / `fn_bodies`.
     fn meta_ctx(&self) -> crate::meta_eval::MetaEvalContext<'_> {
         crate::meta_eval::MetaEvalContext {
             vars: &self.upstream_schemas.vars,
+            columns: self.reflection_columns(),
+            fn_bodies: self.fn_bodies.as_deref(),
         }
+    }
+
+    /// Build the `smelt.columns_of` reflection map (entity leaf name → column
+    /// list) from the upstream model and seed schemas. Each column is reduced to
+    /// the `ColumnRef` fields the build-path evaluator splices (`name`,
+    /// `is_numeric` via the analyzer's `DataType::is_numeric`, and the `type`
+    /// display string). Models take precedence over seeds on a name clash.
+    fn reflection_columns(
+        &self,
+    ) -> std::collections::BTreeMap<String, Vec<crate::meta_eval::ColumnRefMeta>> {
+        let to_metas = |cols: &Vec<(String, TypedColumn)>| {
+            cols.iter()
+                .map(|(name, tc)| crate::meta_eval::ColumnRefMeta {
+                    name: name.clone(),
+                    type_name: tc.data_type.to_string(),
+                    is_numeric: tc.data_type.is_numeric(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut out = std::collections::BTreeMap::new();
+        for (name, cols) in &self.upstream_schemas.seeds {
+            out.insert(name.clone(), to_metas(cols));
+        }
+        for (name, cols) in &self.upstream_schemas.models {
+            out.insert(name.clone(), to_metas(cols));
+        }
+        out
     }
 
     /// Build the `smelt.as_struct` emitter, `smelt.fn.*` expander, and
@@ -1031,7 +1063,7 @@ impl EphemeralResolver {
         let clean_sql = smelt_parser::strip_frontmatter(raw_sql);
         let clean_sql = crate::meta_eval::expand_in_model_meta(
             &clean_sql,
-            &crate::meta_eval::MetaEvalContext { vars },
+            &crate::meta_eval::MetaEvalContext::vars_only(vars),
         );
         let parse = smelt_parser::parse(&clean_sql);
 

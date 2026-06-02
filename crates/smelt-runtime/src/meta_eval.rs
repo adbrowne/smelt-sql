@@ -13,27 +13,67 @@
 //! Currently implemented: SELECT-list **list-spread** of inline literals
 //! (`SELECT id, ...[a, b] FROM t` → `SELECT id, a, b FROM t`); the **HOFs**
 //! `map` / `filter` and the `reduce` reducer fold; the **pipe** operator and
-//! **lambdas**; the meta-world **ternary**; and **`smelt.config.var`**. Each is
-//! evaluated at compile time and lowered to plain Data-World SQL. Reflection
-//! (`smelt.columns_of`, `smelt.models.*`, `smelt.sources.*`) and the loader
-//! family are evaluated by the analyzer but not yet lowered here — see
-//! `meta_language.md` §"Known Divergences".
+//! **lambdas**; the meta-world **ternary**; **`smelt.config.var`**; and
+//! **`smelt.columns_of`** reflection (its `List<ColumnRef>` is materialised from
+//! the resolved schema and its `map` / `filter` / spread lowered to plain select
+//! items, including when the `columns_of` call lives inside a `smelt.define`
+//! body the model expands). Each is evaluated at compile time and lowered to
+//! plain Data-World SQL. The remaining reflection (`smelt.models.*`,
+//! `smelt.sources.*`) and the loader family are evaluated by the analyzer but
+//! not yet lowered here — see `meta_language.md` §"Known Divergences".
 
 use std::collections::BTreeMap;
 
 use smelt_parser::ast::{
     BinaryExpr, Expr, FunctionCall, Lambda, ListSpread, PipeExpr, ReducerCall, SelectList,
-    SmeltPathCall, TernaryExpr,
+    SmeltPathCall, SmeltPathRef, TernaryExpr,
 };
 use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::SyntaxKind::{IDENT, LIST_SPREAD, SELECT_ITEM, SELECT_LIST, SMELT_PATH_CALL};
+use smelt_parser::SyntaxKind::{
+    DOT, IDENT, LIST_SPREAD, SELECT_ITEM, SELECT_LIST, SMELT_PATH_CALL,
+};
 
-/// Compile-time context for the build-path meta evaluator. Holds the workspace
-/// `vars:` (already coerced to `Text`) for `smelt.config.var`. Future reflection
-/// / loader lowering (the remaining meta constructs) will add borrowed fields
-/// here; today it carries only vars.
+use crate::fn_bodies::FnBodyMap;
+
+/// One `ColumnRef` reflected from an upstream model/source/seed schema, used by
+/// the build-path evaluator to materialise `smelt.columns_of(t)`. The fields
+/// mirror the closed `ColumnRef` record (`meta_language.md` §"Reflection") and
+/// are pre-rendered to the Data-World text the meta evaluator splices: `name`
+/// is the column identifier, `is_numeric` is the analyzer's numeric test, and
+/// `type_name` is the column's `DataType` display string.
+#[derive(Clone, Debug)]
+pub struct ColumnRefMeta {
+    pub name: String,
+    pub type_name: String,
+    pub is_numeric: bool,
+}
+
+/// Compile-time context for the build-path meta evaluator.
+///
+/// - `vars`: the workspace `vars:` (already coerced to `Text`) for `smelt.config.var`.
+/// - `columns`: upstream model/source/seed column lists keyed by the entity's
+///   leaf name, for `smelt.columns_of(smelt.<path>)` reflection.
+/// - `fn_bodies`: the project's `smelt.define` bodies. When a model spreads a
+///   function call whose body is a reflection chain (`columns_of`), the
+///   evaluator substitutes the call's arguments into the body and evaluates it
+///   directly; `None` disables that (the call is left to the printer).
 pub struct MetaEvalContext<'a> {
     pub vars: &'a BTreeMap<String, String>,
+    pub columns: BTreeMap<String, Vec<ColumnRefMeta>>,
+    pub fn_bodies: Option<&'a FnBodyMap>,
+}
+
+impl<'a> MetaEvalContext<'a> {
+    /// A context carrying only `vars:` — no reflection column metadata and no
+    /// function bodies. Used by call sites (e.g. the ephemeral-CTE compiler)
+    /// that do not have upstream schemas or a function-body map.
+    pub fn vars_only(vars: &'a BTreeMap<String, String>) -> Self {
+        Self {
+            vars,
+            columns: BTreeMap::new(),
+            fn_bodies: None,
+        }
+    }
 }
 
 /// Run every in-model meta-language build-path expansion over `sql`, returning
@@ -55,15 +95,36 @@ pub struct MetaEvalContext<'a> {
 /// pays no reparse.
 pub fn expand_in_model_meta(sql: &str, ctx: &MetaEvalContext) -> String {
     let s = expand_config_vars(sql, ctx);
-    let s = expand_select_item_meta(&s);
-    expand_select_list_spreads(&s)
+    let s = expand_select_item_meta(&s, ctx);
+    expand_select_list_spreads(&s, ctx)
 }
 
 /// A meta value produced by the build-path evaluator: either a `List<T>`
-/// (a vector of element SQL fragments) or a scalar Data-World SQL fragment.
+/// (a vector of element values) or a scalar Data-World SQL fragment.
 enum MetaValue {
-    List(Vec<String>),
+    List(Vec<MetaElem>),
     Scalar(String),
+}
+
+/// One element of a build-path meta `List<T>`: either a plain Data-World SQL
+/// scalar fragment (a list-literal element, a mapped value) or a record (a
+/// `ColumnRef` from `smelt.columns_of`) whose fields are projected by name
+/// inside a lambda body.
+#[derive(Clone)]
+enum MetaElem {
+    Scalar(String),
+    Record(BTreeMap<String, String>),
+}
+
+impl MetaElem {
+    /// The scalar SQL text of this element, or `None` if it is an unprojected
+    /// record (a record cannot itself be spliced as a select item / fold input).
+    fn as_scalar(&self) -> Option<&str> {
+        match self {
+            MetaElem::Scalar(s) => Some(s),
+            MetaElem::Record(_) => None,
+        }
+    }
 }
 
 /// Wrap `content` with the leading/trailing whitespace of `node_text`. A CST
@@ -145,7 +206,7 @@ fn expand_config_vars(sql: &str, ctx: &MetaEvalContext) -> String {
 /// expression. Items that evaluate to a bare `List<T>` are left untouched —
 /// the analyzer rejects them (`MetaListInScalarPosition`), so a clean build
 /// never reaches one.
-fn expand_select_item_meta(sql: &str) -> String {
+fn expand_select_item_meta(sql: &str, ctx: &MetaEvalContext) -> String {
     if !sql.contains("reduce")
         && !sql.contains("map")
         && !sql.contains("filter")
@@ -168,7 +229,7 @@ fn expand_select_item_meta(sql: &str) -> String {
             let Some(expr) = item.expression() else {
                 continue;
             };
-            if let Some(MetaValue::Scalar(s)) = eval_meta(&expr) {
+            if let Some(MetaValue::Scalar(s)) = eval_meta(&expr, ctx) {
                 let replacement = splice_preserving_ws(&expr.syntax().text().to_string(), &s);
                 let range = expr.syntax().text_range();
                 edits.push((range.start().into(), range.end().into(), replacement));
@@ -181,40 +242,161 @@ fn expand_select_item_meta(sql: &str) -> String {
 /// Evaluate a meta expression to a [`MetaValue`], or `None` if `expr` is not a
 /// recognized meta construct (a plain Data-World expression) or cannot be
 /// evaluated at compile time (in which case the caller leaves it verbatim).
-fn eval_meta(expr: &Expr) -> Option<MetaValue> {
+fn eval_meta(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
+    // Pipe `LHS |> f(args)` → evaluate as `f(LHS, args)`. Checked FIRST: a pipe's
+    // LHS may itself be a `columns_of` / function call, and `as_smelt_path_call`
+    // digs into a pipe's subtree — so a columns_of/fn check here would wrongly
+    // match the LHS and drop the trailing pipe stages.
+    if let Some(pipe) = as_pipe(expr) {
+        return eval_pipe(&pipe, ctx);
+    }
+    // Meta-world ternary `if cond then a else b`.
+    if let Some(tern) = as_ternary(expr) {
+        return eval_ternary(&tern, ctx);
+    }
+    // Reflection `smelt.columns_of(smelt.<path>)` → List<ColumnRef>.
+    if let Some(list) = eval_columns_of(expr, ctx) {
+        return Some(list);
+    }
+    // A `smelt.define` call whose body is a reflection chain → substitute the
+    // call's arguments into the body and evaluate it (no printer reprint).
+    if let Some(call) = expr.as_smelt_path_call() {
+        if let Some(v) = eval_smelt_fn_call(&call, ctx) {
+            return Some(v);
+        }
+    }
     // List literal `[a, b, c]` → List of element SQL fragments.
     if let Some(arr) = expr.as_array_literal() {
         let mut elems = Vec::new();
         for el in arr.elements() {
-            elems.push(render_scalar(&el)?);
+            elems.push(MetaElem::Scalar(render_scalar(&el, ctx)?));
         }
         return Some(MetaValue::List(elems));
-    }
-    // Pipe `LHS |> f(args)` → desugar to `f(LHS, args)` and evaluate.
-    if let Some(pipe) = as_pipe(expr) {
-        return eval_pipe(&pipe);
-    }
-    // Meta-world ternary `if cond then a else b`.
-    if let Some(tern) = as_ternary(expr) {
-        return eval_ternary(&tern);
     }
     // HOF call `map(xs, f)` / `filter(xs, p)` / `reduce(xs, r)`.
     if let Some(call) = expr.as_function_call() {
         if let Some(kind) = hof_kind_of(&call) {
             let args = call.arguments();
-            let first = eval_meta(args.first()?)?;
+            let first = eval_meta(args.first()?, ctx)?;
             return apply_hof(kind, first, &args[1..]);
         }
     }
     None
 }
 
+/// Evaluate `smelt.columns_of(smelt.<path>)` to a `List<ColumnRef>` using the
+/// reflected column metadata in `ctx`. Returns `None` when `expr` is not a
+/// `columns_of` call, the argument is not a resolvable `smelt.<path>` ref, or
+/// the entity's columns are not in the context (the analyzer's drop-on-error
+/// policy: leave the construct verbatim — a clean build never reaches this).
+fn eval_columns_of(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
+    let call = expr.as_smelt_path_call()?;
+    let segs = call.segments();
+    if segs.len() != 1 || !segs[0].eq_ignore_ascii_case("columns_of") {
+        return None;
+    }
+    let arg = call
+        .arg_list()
+        .and_then(|a| a.positional_args().into_iter().next())?;
+    let leaf = columns_of_target_leaf(&arg)?;
+    let cols = ctx.columns.get(&leaf)?;
+    let elems = cols
+        .iter()
+        .map(|c| {
+            let mut fields = BTreeMap::new();
+            fields.insert("name".to_string(), c.name.clone());
+            fields.insert(
+                "is_numeric".to_string(),
+                if c.is_numeric { "true" } else { "false" }.to_string(),
+            );
+            fields.insert("type".to_string(), c.type_name.clone());
+            MetaElem::Record(fields)
+        })
+        .collect();
+    Some(MetaValue::List(elems))
+}
+
+/// Extract the leaf entity name of a `smelt.columns_of` argument — the last
+/// segment of a `smelt.<path>` reference (`smelt.orders` → `"orders"`,
+/// `smelt.sources.raw.orders` → `"orders"`). Mirrors how the analyzer's
+/// reflection resolution keys on the leaf segment.
+fn columns_of_target_leaf(arg: &Expr) -> Option<String> {
+    if let Some(path_ref) = SmeltPathRef::cast(arg.syntax().clone())
+        .or_else(|| arg.syntax().children().find_map(SmeltPathRef::cast))
+    {
+        return path_ref.segments().last().cloned();
+    }
+    if let Some(call) = arg.as_smelt_path_call() {
+        return call.segments().last().cloned();
+    }
+    None
+}
+
+/// Evaluate a `smelt.define` call (`smelt.functions.foo(args)` / `smelt.fn.foo`
+/// / `smelt.foo`) whose body is a reflection chain (contains `columns_of`):
+/// substitute the call's printed arguments into the function body, parse the
+/// substituted body, and evaluate it as a meta expression. This lets a
+/// `columns_of` that lives inside a function body (the `meta_columns`
+/// `coalesce_numeric` shape) lower at compile time without inlining through the
+/// printer (which would reprint and disturb the spread's surrounding SQL).
+///
+/// Returns `None` for a non-function call, an unknown function, or a non-reflection
+/// body — those are left to the printer's normal function expansion.
+fn eval_smelt_fn_call(call: &SmeltPathCall, ctx: &MetaEvalContext) -> Option<MetaValue> {
+    let bodies = ctx.fn_bodies?;
+    let leaf = call.segments().last()?.clone();
+    let (params, body) = bodies.get(&leaf)?;
+    if !body.contains("columns_of") {
+        return None;
+    }
+    let arg_list = call.arg_list();
+    let positional: Vec<String> = arg_list
+        .as_ref()
+        .map(|al| {
+            al.positional_args()
+                .into_iter()
+                .map(|a| a.syntax().text().to_string().trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let named: Vec<(String, String)> = arg_list
+        .as_ref()
+        .map(|al| {
+            al.named_params()
+                .filter_map(|np| {
+                    Some((
+                        np.name()?,
+                        np.value_expr()?
+                            .syntax()
+                            .text()
+                            .to_string()
+                            .trim()
+                            .to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let substituted =
+        crate::compile::substitute_params_with_named(body, params, &positional, &named);
+    let wrapped = format!("SELECT {substituted}");
+    let parse = smelt_parser::parse(&wrapped);
+    let expr = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectList::cast)?
+        .items()
+        .next()?
+        .expression()?;
+    eval_meta(&expr, ctx)
+}
+
 /// Render a meta expression as a scalar SQL fragment. A recognized meta scalar
 /// (ternary, reduce, …) yields its evaluated SQL; a `List<T>` cannot be a
 /// scalar (`None`); a plain Data-World expression yields its source text
 /// (the identity case for list elements and lambda-body leaves).
-fn render_scalar(expr: &Expr) -> Option<String> {
-    match eval_meta(expr) {
+fn render_scalar(expr: &Expr, ctx: &MetaEvalContext) -> Option<String> {
+    match eval_meta(expr, ctx) {
         Some(MetaValue::Scalar(s)) => Some(s),
         Some(MetaValue::List(_)) => None,
         None => Some(expr.syntax().text().to_string().trim().to_string()),
@@ -222,9 +404,9 @@ fn render_scalar(expr: &Expr) -> Option<String> {
 }
 
 /// Evaluate a pipe `LHS |> f(args)` as `f(LHS, args)`.
-fn eval_pipe(pipe: &PipeExpr) -> Option<MetaValue> {
+fn eval_pipe(pipe: &PipeExpr, ctx: &MetaEvalContext) -> Option<MetaValue> {
     let lhs = pipe.lhs()?;
-    let first = eval_meta(&lhs)?;
+    let first = eval_meta(&lhs, ctx)?;
     let rhs = pipe.rhs()?;
     let call = rhs.as_function_call()?;
     let kind = hof_kind_of(&call)?;
@@ -243,10 +425,14 @@ fn apply_hof(kind: &str, first: MetaValue, rest: &[Expr]) -> Option<MetaValue> {
             let lambda = extract_lambda(rest.first()?)?;
             let param = lambda.params().into_iter().next()?;
             let body = lambda.body()?;
-            let out = list
-                .iter()
-                .map(|elem| substitute_ident(body.syntax(), &param, elem))
-                .collect();
+            let mut out = Vec::new();
+            for elem in &list {
+                out.push(MetaElem::Scalar(substitute_lambda(
+                    body.syntax(),
+                    &param,
+                    elem,
+                )?));
+            }
             Some(MetaValue::List(out))
         }
         "filter" => {
@@ -255,7 +441,7 @@ fn apply_hof(kind: &str, first: MetaValue, rest: &[Expr]) -> Option<MetaValue> {
             let body = lambda.body()?;
             let mut out = Vec::new();
             for elem in &list {
-                let pred = substitute_ident(body.syntax(), &param, elem);
+                let pred = substitute_lambda(body.syntax(), &param, elem)?;
                 match eval_const_bool_from_text(&pred) {
                     Some(true) => out.push(elem.clone()),
                     Some(false) => {}
@@ -283,10 +469,74 @@ fn apply_hof(kind: &str, first: MetaValue, rest: &[Expr]) -> Option<MetaValue> {
                     None,
                 )
             };
-            fold_reducer(&name, sep.as_deref(), &list).map(MetaValue::Scalar)
+            // A reducer folds scalar fragments; an unprojected record element
+            // (a bare `ColumnRef`) has no scalar form → bail (leave verbatim).
+            let scalars: Option<Vec<String>> = list
+                .iter()
+                .map(|e| e.as_scalar().map(str::to_string))
+                .collect();
+            fold_reducer(&name, sep.as_deref(), &scalars?).map(MetaValue::Scalar)
         }
         _ => None,
     }
+}
+
+/// Substitute a lambda parameter in `body` for one list element.
+///
+/// For a scalar element this is plain identifier substitution. For a record
+/// element (a `ColumnRef`) the body projects fields by name (`c.name`,
+/// `c.is_numeric`, `c.type`); each `<param>.<field>` is replaced by the field's
+/// pre-rendered value. A bare `<param>` (no field projection) on a record, or a
+/// projection of a field the record lacks, returns `None` so the caller leaves
+/// the construct verbatim.
+fn substitute_lambda(body: &SyntaxNode, param: &str, elem: &MetaElem) -> Option<String> {
+    match elem {
+        MetaElem::Scalar(s) => Some(substitute_ident(body, param, s)),
+        MetaElem::Record(fields) => substitute_record_fields(body, param, fields),
+    }
+}
+
+/// Reconstruct `body`'s text, replacing each `<param>.<field>` projection with
+/// the record's value for `<field>`. Token-level with trivia-skipping lookahead
+/// so `c.name` (and the rarer `c . name`) both match without touching a
+/// substring inside another identifier.
+fn substitute_record_fields(
+    body: &SyntaxNode,
+    param: &str,
+    fields: &BTreeMap<String, String>,
+) -> Option<String> {
+    let toks: Vec<(smelt_parser::SyntaxKind, String)> = body
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .map(|t| (t.kind(), t.text().to_string()))
+        .collect();
+    let next_significant = |from: usize| (from..toks.len()).find(|&i| !toks[i].1.trim().is_empty());
+
+    let mut out = String::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let (kind, text) = &toks[i];
+        if *kind == IDENT && text == param {
+            // Expect `. <field>` immediately following (skipping trivia).
+            if let Some(j) = next_significant(i + 1) {
+                if toks[j].0 == DOT {
+                    if let Some(k) = next_significant(j + 1) {
+                        if toks[k].0 == IDENT {
+                            let value = fields.get(&toks[k].1)?;
+                            out.push_str(value);
+                            i = k + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Bare `param` on a record cannot be rendered as a scalar.
+            return None;
+        }
+        out.push_str(text);
+        i += 1;
+    }
+    Some(out.trim().to_string())
 }
 
 /// Render a reducer's left-fold over `elems` into a single SQL fragment.
@@ -359,14 +609,14 @@ fn fold_reducer(name: &str, sep: Option<&str>, elems: &[String]) -> Option<Strin
 /// Evaluate a meta-world ternary `if COND then A else B`: resolve `COND` at
 /// compile time and return the chosen branch's SQL (the other branch is not
 /// evaluated). `meta_language.md` §Semantics "Meta-world ternary" rule 3.
-fn eval_ternary(tern: &TernaryExpr) -> Option<MetaValue> {
+fn eval_ternary(tern: &TernaryExpr, ctx: &MetaEvalContext) -> Option<MetaValue> {
     let cond = tern.condition()?;
     let chosen = if eval_const_bool_node(&cond)? {
         tern.then_branch()?
     } else {
         tern.else_branch()?
     };
-    render_scalar(&chosen).map(MetaValue::Scalar)
+    render_scalar(&chosen, ctx).map(MetaValue::Scalar)
 }
 
 // ── small AST helpers ────────────────────────────────────────────────────────
@@ -578,13 +828,16 @@ fn apply_binop(op: &str, l: &ConstVal, r: &ConstVal) -> Option<ConstVal> {
 /// order. An empty-list spread `...[]` contributes nothing — eliding itself and
 /// its adjacent commas (`meta_language.md` §Semantics rule 7).
 ///
-/// A spread whose operand is not an inline list literal (e.g. a `List<T>`
-/// variable produced by a HOF) is left untouched: that lowering is not yet
-/// implemented, so the whole containing SELECT list is passed through verbatim
-/// rather than partially rewritten. The same conservative pass-through applies
-/// to a list literal carrying a nested spread, and to any SELECT list whose
-/// children are not exclusively items and spreads.
-pub fn expand_select_list_spreads(sql: &str) -> String {
+/// A spread whose operand is a reflection / HOF chain that evaluates to a
+/// `List` of scalar fragments (e.g. `...smelt.columns_of(t) |> map(fn c => c.name)`)
+/// is lowered to those fragments as select items. A spread whose operand does
+/// not evaluate to a scalar list — an unresolvable reflection, or a list whose
+/// elements are unprojected records — is left untouched: the whole containing
+/// SELECT list is passed through verbatim rather than partially rewritten. The
+/// same conservative pass-through applies to a list literal carrying a nested
+/// spread, and to any SELECT list whose children are not exclusively items and
+/// spreads.
+pub fn expand_select_list_spreads(sql: &str, ctx: &MetaEvalContext) -> String {
     let parse = smelt_parser::parse(sql);
     let root = parse.syntax();
 
@@ -621,18 +874,40 @@ pub fn expand_select_list_spreads(sql: &str) -> String {
                 rewritable = false;
                 break;
             };
-            match spread.operand().and_then(|op| op.as_array_literal()) {
-                Some(arr) if !has_nested_spread(&child) => {
-                    for el in arr.elements() {
-                        items.push(el.syntax().text().to_string().trim().to_string());
-                    }
-                }
-                // Non-literal operand, or a literal carrying a nested spread:
-                // not yet lowered here. Leave the whole list verbatim.
-                _ => {
+            let Some(operand) = spread.operand() else {
+                rewritable = false;
+                break;
+            };
+            if let Some(arr) = operand.as_array_literal() {
+                if has_nested_spread(&child) {
+                    // Literal carrying a nested spread: not yet lowered here.
                     rewritable = false;
                     break;
                 }
+                for el in arr.elements() {
+                    items.push(el.syntax().text().to_string().trim().to_string());
+                }
+            } else if let Some(MetaValue::List(elems)) = eval_meta(&operand, ctx) {
+                // Reflection / HOF chain → splice its scalar elements. An
+                // unprojected record element has no select-item form: bail.
+                let mut scalars = Vec::with_capacity(elems.len());
+                for e in &elems {
+                    match e.as_scalar() {
+                        Some(s) => scalars.push(s.to_string()),
+                        None => {
+                            rewritable = false;
+                            break;
+                        }
+                    }
+                }
+                if !rewritable {
+                    break;
+                }
+                items.extend(scalars);
+            } else {
+                // Operand does not evaluate to a scalar list — leave verbatim.
+                rewritable = false;
+                break;
             }
         }
         if !rewritable {
@@ -686,10 +961,21 @@ fn has_nested_spread(spread_node: &smelt_parser::syntax_kind::SyntaxNode) -> boo
 mod tests {
     use super::*;
 
+    /// An empty `vars` map for tests that don't exercise `config.var`.
+    fn no_vars() -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
+    /// Run only the spread pass with an empty (vars-only) context.
+    fn spreads(sql: &str) -> String {
+        let v = no_vars();
+        expand_select_list_spreads(sql, &MetaEvalContext::vars_only(&v))
+    }
+
     #[test]
     fn literal_spread_expands_to_items() {
         let sql = "SELECT\n    id,\n    ...[1, 2, 3]\nFROM smelt.sources.raw.users\n";
-        let out = expand_select_list_spreads(sql);
+        let out = spreads(sql);
         assert_eq!(
             out,
             "SELECT\n    id, 1, 2, 3\nFROM smelt.sources.raw.users\n"
@@ -699,36 +985,31 @@ mod tests {
     #[test]
     fn column_ref_spread_expands_to_items() {
         let sql = "SELECT\n    id,\n    ...[name, email]\nFROM t\n";
-        let out = expand_select_list_spreads(sql);
+        let out = spreads(sql);
         assert_eq!(out, "SELECT\n    id, name, email\nFROM t\n");
     }
 
     #[test]
     fn multi_spread_with_surrounding_items() {
         let sql = "SELECT\n    id,\n    ...[name, email],\n    created_at\nFROM t\n";
-        let out = expand_select_list_spreads(sql);
+        let out = spreads(sql);
         assert_eq!(out, "SELECT\n    id, name, email, created_at\nFROM t\n");
     }
 
     #[test]
     fn empty_spread_elides_with_adjacent_commas() {
         let sql = "SELECT\n    id,\n    ...[],\n    created_at\nFROM t\n";
-        let out = expand_select_list_spreads(sql);
+        let out = spreads(sql);
         assert_eq!(out, "SELECT\n    id, created_at\nFROM t\n");
-    }
-
-    /// An empty `vars` map for tests that don't exercise `config.var`.
-    fn no_vars() -> BTreeMap<String, String> {
-        BTreeMap::new()
     }
 
     #[test]
     fn no_spread_is_unchanged() {
         let sql = "SELECT id, name FROM t\n";
         let v = no_vars();
-        assert_eq!(expand_select_list_spreads(sql), sql);
+        assert_eq!(spreads(sql), sql);
         assert_eq!(
-            expand_in_model_meta(sql, &MetaEvalContext { vars: &v }),
+            expand_in_model_meta(sql, &MetaEvalContext::vars_only(&v)),
             sql
         );
     }
@@ -736,9 +1017,9 @@ mod tests {
     #[test]
     fn idempotent_second_pass_is_noop() {
         let sql = "SELECT id, ...[a, b] FROM t";
-        let once = expand_select_list_spreads(sql);
+        let once = spreads(sql);
         assert_eq!(once, "SELECT id, a, b FROM t");
-        assert_eq!(expand_select_list_spreads(&once), once);
+        assert_eq!(spreads(&once), once);
     }
 
     #[test]
@@ -746,7 +1027,7 @@ mod tests {
         // A SELECT whose only items are empty spreads would rebuild to an
         // empty list (`SELECT  FROM t`); leave it verbatim instead.
         let sql = "SELECT ...[] FROM t";
-        assert_eq!(expand_select_list_spreads(sql), sql);
+        assert_eq!(spreads(sql), sql);
     }
 
     #[test]
@@ -754,7 +1035,7 @@ mod tests {
         // A `List<T>` variable spread is not yet lowered here; the list is
         // passed through unchanged rather than partially rewritten.
         let sql = "SELECT id, ...xs FROM t";
-        assert_eq!(expand_select_list_spreads(sql), sql);
+        assert_eq!(spreads(sql), sql);
     }
 
     #[test]
@@ -763,7 +1044,7 @@ mod tests {
         let sql = "SELECT a, b, c FROM t";
         let v = no_vars();
         assert_eq!(
-            expand_in_model_meta(sql, &MetaEvalContext { vars: &v }),
+            expand_in_model_meta(sql, &MetaEvalContext::vars_only(&v)),
             sql
         );
     }
@@ -771,7 +1052,7 @@ mod tests {
     // ── P6 build-path evaluator tests ────────────────────────────────────────
 
     fn eval(sql: &str, vars: &BTreeMap<String, String>) -> String {
-        expand_in_model_meta(sql, &MetaEvalContext { vars })
+        expand_in_model_meta(sql, &MetaEvalContext::vars_only(vars))
     }
 
     #[test]
@@ -890,7 +1171,100 @@ mod tests {
     #[test]
     fn multiple_select_lists_each_expanded() {
         let sql = "SELECT ...[a, b] FROM (SELECT ...[c, d] FROM t) s";
-        let out = expand_select_list_spreads(sql);
+        let out = spreads(sql);
         assert_eq!(out, "SELECT a, b FROM (SELECT c, d FROM t) s");
+    }
+
+    // ── P7a build-path reflection (`smelt.columns_of`) tests ──────────────────
+
+    /// A `base` model with id (numeric), label (non-numeric), amount (numeric).
+    fn base_columns() -> BTreeMap<String, Vec<ColumnRefMeta>> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "base".to_string(),
+            vec![
+                ColumnRefMeta {
+                    name: "id".to_string(),
+                    type_name: "INTEGER".to_string(),
+                    is_numeric: true,
+                },
+                ColumnRefMeta {
+                    name: "label".to_string(),
+                    type_name: "VARCHAR".to_string(),
+                    is_numeric: false,
+                },
+                ColumnRefMeta {
+                    name: "amount".to_string(),
+                    type_name: "DOUBLE".to_string(),
+                    is_numeric: true,
+                },
+            ],
+        );
+        m
+    }
+
+    /// Evaluate with a column-metadata + function-body context.
+    fn eval_reflect(
+        sql: &str,
+        columns: BTreeMap<String, Vec<ColumnRefMeta>>,
+        fn_bodies: &FnBodyMap,
+    ) -> String {
+        let vars = no_vars();
+        let ctx = MetaEvalContext {
+            vars: &vars,
+            columns,
+            fn_bodies: Some(fn_bodies),
+        };
+        expand_in_model_meta(sql, &ctx)
+    }
+
+    /// The `numeric_names` function body: columns_of → filter(numeric) → map(name).
+    fn numeric_names_bodies() -> FnBodyMap {
+        let mut m = FnBodyMap::new();
+        m.insert(
+            "numeric_names".to_string(),
+            (
+                vec![("t".to_string(), None)],
+                "smelt.columns_of(t)\n      |> filter(fn c => c.is_numeric)\n      |> map(fn c => c.name)"
+                    .to_string(),
+            ),
+        );
+        m
+    }
+
+    #[test]
+    fn columns_of_via_function_filter_map_spread() {
+        // `...smelt.functions.numeric_names(smelt.base)` lowers to the numeric
+        // column names of `base` (id, amount) spread into the SELECT list.
+        let out = eval_reflect(
+            "SELECT ...smelt.functions.numeric_names(smelt.base) FROM smelt.base",
+            base_columns(),
+            &numeric_names_bodies(),
+        );
+        assert_eq!(out, "SELECT id, amount FROM smelt.base");
+    }
+
+    #[test]
+    fn columns_of_filter_keeps_only_numeric() {
+        // A surrounding non-spread item is preserved; the spread contributes the
+        // numeric columns only (label is dropped).
+        let out = eval_reflect(
+            "SELECT label, ...smelt.functions.numeric_names(smelt.base) FROM smelt.base",
+            base_columns(),
+            &numeric_names_bodies(),
+        );
+        assert_eq!(out, "SELECT label, id, amount FROM smelt.base");
+    }
+
+    #[test]
+    fn columns_of_unresolvable_left_verbatim() {
+        // `columns_of` on an entity absent from the context resolves to nothing —
+        // the spread (and function call) are left untouched (analyzer drop-on-error).
+        let sql = "SELECT ...smelt.functions.numeric_names(smelt.unknown) FROM smelt.unknown";
+        let out = eval_reflect(sql, BTreeMap::new(), &numeric_names_bodies());
+        // `columns_of(smelt.unknown)` does not resolve (entity absent from the
+        // context), so the function-call spread operand does not evaluate to a
+        // scalar list and the whole spread is left verbatim (analyzer drop-on-error).
+        assert_eq!(out, sql, "unresolvable reflection spread is left verbatim");
     }
 }
