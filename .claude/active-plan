@@ -28,10 +28,12 @@
 # backlog is fully remediated.
 
 master_plan: docs/plans/20260530-feature-sweep.md
-active_subplan: docs/plans/20260531-diagnostic-parity.md
+active_subplan: docs/plans/20260604-frontmatter-parity.md
 
 # Back-compat aliases (older fresh-context flows read these names). They mirror
-# active_subplan: the diag-parity sub-plan is self-contained (it carries its own
-# per-phase routine + sentinel contract), so in_repo_plan == meta_plan == it.
-in_repo_plan: docs/plans/20260531-diagnostic-parity.md
-meta_plan: docs/plans/20260531-diagnostic-parity.md
+# active_subplan: each sub-plan is self-contained (it carries its own per-phase
+# routine + sentinel contract), so in_repo_plan == meta_plan == active_subplan.
+in_repo_plan: docs/plans/20260604-frontmatter-parity.md
+meta_plan: docs/plans/20260604-frontmatter-parity.md
+
+# Completed sub-plans (rolled up): docs/plans/20260531-diagnostic-parity.md (done 2026-06-03).

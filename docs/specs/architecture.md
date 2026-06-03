@@ -157,6 +157,8 @@ The frontmatter parser is shared across all four declaration kinds; the parsing 
 
 This spec does not duplicate those catalogues; it only fixes the attachment rule and the parser-sharing invariant.
 
+**Error-handling is part of the shared parsing contract.** A frontmatter block that fails to parse — malformed YAML, an unknown key, a key whose value violates its catalogue (e.g. a `granularity` outside the closed enum) — **surfaces a diagnostic** (severity `Error`) anchored at the offending declaration, through the same `file_diagnostics` surface the analysis layer and the build share (per §"Diagnostic parity rule (analysis ↔ build)"). It is **never silently discarded.** Silently dropping a block — falling back to default materialization so a declared `materialization: table` is built as a `view`, or ignoring a typo'd key — is forbidden: it is a silent correctness loss of exactly the kind the parity rule exists to prevent. Because the parser is shared, a key valid on *any* declaration kind (e.g. the function/extern keys `deterministic`, `idempotent`, `append_only`, `backends`, `joins`, `provenance`) parses without error on every kind; a declaration carrying a key that is merely inapplicable to its kind retains the rest of its block rather than having the whole block rejected.
+
 ### Models as functions
 
 A smelt **model** is a bare `SELECT` (in a `.sql` file) consuming `TableExpr` inputs (via `smelt.<path>` references) and producing a `TableExpr` output. A smelt **function** is a `smelt.define` declaration consuming typed fragment inputs and producing a typed fragment output. **They are the same concept with different parameter-binding defaults.**
