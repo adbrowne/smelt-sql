@@ -233,6 +233,13 @@ fn try_inline(
     missed: &mut Vec<MissedReuse>,
 ) -> Option<(Option<String>, String)> {
     let from = select.syntax().children().find_map(FromClause::cast)?;
+    // A join's tables live in `JOIN_CLAUSE` nodes, not as direct `table_refs()`
+    // of the FROM, so a join leaves `table_refs().len() == 1`. Bail explicitly:
+    // inlining the single derived table here would represent the query by that
+    // subquery alone and silently drop the join — a false equivalence.
+    if from.joins().next().is_some() {
+        return None;
+    }
     let trefs: Vec<TableRef> = from.table_refs().collect();
     if trefs.len() != 1 {
         return None;

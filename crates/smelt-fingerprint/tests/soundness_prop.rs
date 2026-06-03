@@ -170,6 +170,233 @@ fn transform_strategy() -> impl Strategy<Value = Transform> {
     ]
 }
 
+// ===========================================================================
+// Join soundness — the same invariant over two-table (derived-table) joins.
+//
+// This exercises the canonicaliser's FROM/join path, which the single-table
+// generator above never reaches. The base is a derived-table-on-the-left join
+// (the shape where an inlining bug previously dropped the JOIN entirely); the
+// transforms mix output-preserving rewrites with join-semantics changes, and
+// DuckDB is the judge of any equal-fingerprint pair.
+// ===========================================================================
+
+/// Two-table body. `a` values {1,4,5} and `b` values {2,0,5} give join columns
+/// with varied match cardinalities (a=a: 3, a=b: 1, b=a: 1), so INNER vs LEFT
+/// and on-column changes all produce observable row differences.
+const JBODY: &str = "SELECT 1 AS a, 2 AS b UNION ALL SELECT 4, 0 UNION ALL SELECT 5, 5";
+const JCOLS: [&str; 2] = ["a", "b"];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Side {
+    L,
+    R,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JoinKind {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone)]
+struct JoinQuery {
+    kind: JoinKind,
+    on_left: usize,
+    on_right: usize,
+    extra: Option<(usize, i64)>, // AND l.<col> > k
+    proj: Vec<(Side, usize)>,    // unique (side, col); non-empty
+    lower: bool,
+    comment: bool,
+    swap: bool, // render right-table <join> left-table (textual order)
+    l_alias: String,
+    r_alias: String,
+}
+
+#[derive(Debug, Clone)]
+enum JoinTransform {
+    // Output-preserving
+    ReorderProj,
+    Lowercase,
+    AddComment,
+    RenameAliases,
+    // Semantics-changing
+    FlipKind,
+    ChangeOnRight,
+    AddExtraPred,
+    SwapBranches,
+}
+
+impl JoinQuery {
+    fn alias(&self, s: Side) -> &str {
+        match s {
+            Side::L => &self.l_alias,
+            Side::R => &self.r_alias,
+        }
+    }
+    fn out_name(s: Side, col: usize) -> String {
+        // Stable output name keyed on side+column (not the alias), so an alias
+        // rename does not change the relation's column names.
+        format!("{}{}", if s == Side::L { "l" } else { "r" }, JCOLS[col])
+    }
+
+    fn to_sql(&self) -> String {
+        let kw = |s: &str| {
+            if self.lower {
+                s.to_lowercase()
+            } else {
+                s.to_string()
+            }
+        };
+        let mut cols: Vec<String> = self
+            .proj
+            .iter()
+            .map(|&(s, c)| {
+                format!(
+                    "{}.{} {} {}",
+                    self.alias(s),
+                    JCOLS[c],
+                    kw("AS"),
+                    Self::out_name(s, c)
+                )
+            })
+            .collect();
+        if self.comment {
+            if let Some(last) = cols.last_mut() {
+                last.push_str(" /* note */");
+            }
+        }
+        let join_kw = match self.kind {
+            JoinKind::Inner => kw("INNER JOIN"),
+            JoinKind::Left => kw("LEFT JOIN"),
+        };
+        // Textual table order may swap; ON always references l_alias/r_alias.
+        let (a1, a2) = if self.swap {
+            (&self.r_alias, &self.l_alias)
+        } else {
+            (&self.l_alias, &self.r_alias)
+        };
+        let extra = match self.extra {
+            Some((c, k)) => format!(" {} {}.{} > {}", kw("AND"), self.l_alias, JCOLS[c], k),
+            None => String::new(),
+        };
+        format!(
+            "{select} {cols} {from} ({JBODY}) {as_} {a1} {join_kw} ({JBODY}) {as_} {a2} {on} {l}.{lc} = {r}.{rc}{extra}",
+            select = kw("SELECT"),
+            cols = cols.join(", "),
+            from = kw("FROM"),
+            as_ = kw("AS"),
+            on = kw("ON"),
+            l = self.l_alias,
+            lc = JCOLS[self.on_left],
+            r = self.r_alias,
+            rc = JCOLS[self.on_right],
+        )
+    }
+}
+
+fn apply_join(base: &JoinQuery, t: &JoinTransform) -> JoinQuery {
+    let mut q = base.clone();
+    match t {
+        JoinTransform::ReorderProj => {
+            if q.proj.len() > 1 {
+                q.proj.rotate_left(1);
+            }
+        }
+        JoinTransform::Lowercase => q.lower = true,
+        JoinTransform::AddComment => q.comment = true,
+        JoinTransform::RenameAliases => {
+            q.l_alias = format!("{}_x", q.l_alias);
+            q.r_alias = format!("{}_y", q.r_alias);
+        }
+        JoinTransform::FlipKind => {
+            q.kind = match q.kind {
+                JoinKind::Inner => JoinKind::Left,
+                JoinKind::Left => JoinKind::Inner,
+            }
+        }
+        JoinTransform::ChangeOnRight => q.on_right = (q.on_right + 1) % JCOLS.len(),
+        JoinTransform::AddExtraPred => q.extra = Some((0, 1)),
+        JoinTransform::SwapBranches => q.swap = !q.swap,
+    }
+    q
+}
+
+fn join_proj_strategy() -> impl Strategy<Value = Vec<(Side, usize)>> {
+    // Non-empty, deduplicated subset of {l.a, l.b, r.a, r.b}.
+    let all = [(Side::L, 0), (Side::L, 1), (Side::R, 0), (Side::R, 1)];
+    prop::collection::vec(0usize..4, 1..=4).prop_map(move |idxs| {
+        let mut seen: Vec<(Side, usize)> = Vec::new();
+        for i in idxs {
+            if !seen.contains(&all[i]) {
+                seen.push(all[i]);
+            }
+        }
+        seen
+    })
+}
+
+fn join_transform_strategy() -> impl Strategy<Value = JoinTransform> {
+    prop_oneof![
+        Just(JoinTransform::ReorderProj),
+        Just(JoinTransform::Lowercase),
+        Just(JoinTransform::AddComment),
+        Just(JoinTransform::RenameAliases),
+        Just(JoinTransform::FlipKind),
+        Just(JoinTransform::ChangeOnRight),
+        Just(JoinTransform::AddExtraPred),
+        Just(JoinTransform::SwapBranches),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn fingerprint_soundness_joins(
+        on_left in 0usize..2,
+        on_right in 0usize..2,
+        proj in join_proj_strategy(),
+        transform in join_transform_strategy(),
+    ) {
+        let base = JoinQuery {
+            kind: JoinKind::Inner,
+            on_left,
+            on_right,
+            extra: None,
+            proj,
+            lower: false,
+            comment: false,
+            swap: false,
+            l_alias: "l".to_string(),
+            r_alias: "r".to_string(),
+        };
+        let transformed = apply_join(&base, &transform);
+
+        let base_sql = base.to_sql();
+        let trans_sql = transformed.to_sql();
+
+        let fb = output_fingerprint_from_sql(&base_sql, &[])
+            .unwrap_or_else(|| panic!("base did not parse: {base_sql}"));
+        let ft = output_fingerprint_from_sql(&trans_sql, &[])
+            .unwrap_or_else(|| panic!("transformed did not parse: {trans_sql}"));
+
+        if fb.fingerprint == ft.fingerprint {
+            let o = DuckDbRelationOracle::new();
+            let rb = o.run(&base_sql)
+                .unwrap_or_else(|e| panic!("base failed to run ({e}): {base_sql}"));
+            let rt = o.run(&trans_sql)
+                .unwrap_or_else(|e| panic!("transformed failed to run ({e}): {trans_sql}"));
+            prop_assert!(
+                relations_equal(&rb, &rt).is_ok(),
+                "UNSOUND: equal fingerprints but DuckDB relations differ\n  base: {}\n  transformed: {}\n  diff: {:?}",
+                base_sql,
+                trans_sql,
+                relations_equal(&rb, &rt),
+            );
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 

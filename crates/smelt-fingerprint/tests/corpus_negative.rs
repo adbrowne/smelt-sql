@@ -80,6 +80,44 @@ fn changed_group_by_differs() {
     assert_distinct(&a, &b);
 }
 
+// ---- Soundness guards: a join must not be dropped by derived-table inlining ----
+
+/// A two-row derived-table body, used as both sides of a join. `a` values
+/// {1, 4} and `b` values {2, 0} are disjoint, so a join on `a = b` matches
+/// nothing — a row-filtering change that must move the fingerprint.
+const JOIN_BODY: &str = "SELECT 1 AS a, 2 AS b UNION ALL SELECT 4, 0";
+
+#[test]
+fn added_join_to_derived_table_differs() {
+    // The left side is a derived table; the inliner must not represent the query
+    // by the left subquery alone and silently drop the JOIN. The join filters
+    // every row (0 rows vs 2), so the fingerprint must differ.
+    let a = format!("SELECT l.a FROM ({JOIN_BODY}) AS l");
+    let b =
+        format!("SELECT l.a FROM ({JOIN_BODY}) AS l INNER JOIN ({JOIN_BODY}) AS r ON l.a = r.b");
+    assert_distinct(&a, &b);
+}
+
+#[test]
+fn inner_vs_left_join_on_derived_table_differs() {
+    // Same shape, INNER vs LEFT: with disjoint keys, INNER yields 0 rows and
+    // LEFT yields 2 (with NULLs). The join kind must be in the fingerprint.
+    let a =
+        format!("SELECT l.a FROM ({JOIN_BODY}) AS l INNER JOIN ({JOIN_BODY}) AS r ON l.a = r.b");
+    let b = format!("SELECT l.a FROM ({JOIN_BODY}) AS l LEFT JOIN ({JOIN_BODY}) AS r ON l.a = r.b");
+    assert_distinct(&a, &b);
+}
+
+#[test]
+fn changed_join_condition_on_derived_table_differs() {
+    // ON l.a = r.a (every row matches itself, 2 rows) vs ON l.a = r.b (0 rows).
+    let a =
+        format!("SELECT l.a FROM ({JOIN_BODY}) AS l INNER JOIN ({JOIN_BODY}) AS r ON l.a = r.a");
+    let b =
+        format!("SELECT l.a FROM ({JOIN_BODY}) AS l INNER JOIN ({JOIN_BODY}) AS r ON l.a = r.b");
+    assert_distinct(&a, &b);
+}
+
 // ---- Soundness guards: reorder must NOT collapse where position is observable ----
 
 #[test]
