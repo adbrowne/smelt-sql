@@ -33,13 +33,12 @@ fn assert_equivalent(a: &str, b: &str) {
         .unwrap_or_else(|e| panic!("DuckDB says relations differ ({e}):\n  A: {a}\n  B: {b}"));
 }
 
-// Column names come from explicit SELECT aliases rather than a `t(id, total)`
-// column-alias list: smelt's parser does not yet support the column-alias-list
-// syntax, though DuckDB does, so we keep the seed inside the parseable subset.
+// Column names come from a `(VALUES …) AS t(id, total)` column-alias list —
+// the real DuckDB syntax, now that smelt's parser captures it (see
+// `docs/specs/types.md` §"VALUES-derived tables").
 const SEED: &str = "WITH data AS (\
-    SELECT 1 AS id, 10.0 AS total UNION ALL \
-    SELECT 2, 0.0 UNION ALL \
-    SELECT 3, 5.5)";
+    SELECT id, total \
+    FROM (VALUES (1, 10.0), (2, 0.0), (3, 5.5)) AS t(id, total))";
 
 #[test]
 fn whitespace_reformatting_is_equivalent() {
