@@ -165,11 +165,33 @@ per-iteration cost after an autonomous run.
 
 ## Autonomy loop
 
-The autonomy loop drives the active multi-session plan headlessly: each
-iteration spawns a fresh `claude --print`, executes the next `pending` phase
-of the plan named in `.claude/active-plan`, and emits a sentinel
-(`<<PHASE_COMPLETE>>`, `<<ALL_DONE>>`, or `<<PAUSE_FOR_HUMAN>>`) that the
-wrapper greps to decide whether to loop again. `autonomy-loop-forever.sh`
+The autonomy loop drives the work headlessly. The work is **two-level**:
+`.claude/active-plan` names a `master_plan` (the top-level feature backlog —
+the feature sweep, whose bug ledger is the master to-do list) and an
+`active_subplan` (the focused remediation plan the loop is currently working).
+Each iteration spawns a fresh `claude --print`, finds the next `pending` phase
+of the active sub-plan (skipping `done`/`blocked` rows), executes it, and emits
+a sentinel the wrapper greps to decide what to do next:
+
+- `<<PHASE_COMPLETE>>` — phase committed; loop again.
+- `<<PHASE_BLOCKED>>` — **record and continue (no hard-stop)**. On a design
+  decision, an unrelated red baseline, or an implementation it can't land green,
+  the agent marks the phase row `blocked`, appends a dated entry to the
+  sub-plan's "## Blocked phases" section, commits, and the loop moves to the
+  next `pending` phase. Blocks are reviewed by a human later, not stop-the-line.
+- `<<SUBPLAN_ADVANCED>>` — the sub-plan is exhausted; the loop rolled up to the
+  master and advanced `active_subplan` to an existing sibling sub-plan with
+  pending work (conservative roll-up — it **never** scaffolds a new sub-plan or
+  authors specs autonomously).
+- `<<MASTER_EXHAUSTED>>` — sub-plan exhausted and no sibling sub-plan has pending
+  work; the loop stops and surfaces a master-level summary for a human to
+  scaffold the next sub-plan. (Exit code 2.)
+- `<<ALL_DONE>>` — master backlog fully remediated. (Exit code 0.)
+
+Legacy `<<PAUSE_FOR_HUMAN>>` is treated as `<<PHASE_BLOCKED>>` (record +
+continue). Only wrapper-level infra failures (merge conflict, dirty tree, claude
+crash, missing sentinel) halt the loop. The control loop runs on **Sonnet** by
+default (`MODEL=sonnet`; override with `MODEL=`). `autonomy-loop-forever.sh`
 wraps `autonomy-loop.sh` and restarts it after `MAX_ITERATIONS` or a crash.
 
 ### How to run it (correctly)
@@ -225,7 +247,7 @@ journalctl --user -u smelt-autonomy -f
 ```
 
 Tunables (env vars): `MAX_ITERATIONS` (default 25), `PERMISSION_MODE`
-(default `bypassPermissions`), `MODEL` (default `opus`), `CARGO_BUILD_JOBS`
+(default `bypassPermissions`), `MODEL` (default `sonnet`), `CARGO_BUILD_JOBS`
 (default 6 — caps link-time RSS spikes that previously tripped systemd-oomd).
 
 Before launching, check nothing is already running and that the active plan

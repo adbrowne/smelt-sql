@@ -14,9 +14,9 @@
 # plan is selected by the fresh-context discovery rules in
 # `.claude/active-plan`.
 #
-# Currently active:
-#   in-repo plan: docs/plans/20260531-diagnostic-parity.md
-#   meta-plan:    docs/plans/20260531-diagnostic-parity.md (self-contained)
+# Currently active (two-level — see .claude/active-plan):
+#   master plan:    docs/plans/20260530-feature-sweep.md (top-level backlog)
+#   active sub-plan: docs/plans/20260531-diagnostic-parity.md (self-contained)
 #
 # NOTE: this drives a spec-anchored IMPLEMENTATION plan (diagnostic parity +
 # function/meta codegen). Run with the diag-parity iteration prompt:
@@ -31,11 +31,32 @@
 #
 #   <<PHASE_COMPLETE>>     — phase committed and pushed cleanly. Loop
 #                            again with fresh context for the next phase.
-#   <<ALL_DONE>>           — all phases done, verification green.
-#                            Exit the loop with success.
-#   <<PAUSE_FOR_HUMAN>>    — any stop-the-line condition fired
-#                            (see meta-plan stop-the-line section).
-#                            Exit the loop and surface to the user.
+#   <<PHASE_BLOCKED>>      — the phase hit a design decision, or a red
+#                            pre-flight that is NOT the phase's own target.
+#                            The agent records it (marks the row `blocked`
+#                            + a one-line reason, appends a dated entry to
+#                            the active plan's "## Blocked phases" section,
+#                            commits + pushes) and the loop CONTINUES to the
+#                            next pending phase. NEVER halts — blocks are
+#                            recorded for later human review, not stop-the-line.
+#   <<SUBPLAN_ADVANCED>>   — the active sub-plan has no `pending` phases left
+#                            (all done or blocked). The agent rolled up to the
+#                            master plan, advanced .claude/active-plan to an
+#                            EXISTING sibling sub-plan that has pending work,
+#                            and committed. The loop continues on the new
+#                            active sub-plan.
+#   <<MASTER_EXHAUSTED>>   — the active sub-plan is exhausted and there is no
+#                            existing sibling sub-plan with pending work to
+#                            advance to (the next cluster would need a NEW
+#                            sub-plan scaffolded — a human gate, per the
+#                            conservative roll-up rule). Exit and surface the
+#                            master-level summary to the user.
+#   <<ALL_DONE>>           — master backlog fully remediated, verification
+#                            green. Exit the loop with success.
+#
+# Legacy: <<PAUSE_FOR_HUMAN>> is treated as <<PHASE_BLOCKED>> (record +
+# continue) — there is no agent-level hard-stop. Only wrapper-level infra
+# failures (merge conflict, dirty tree, claude crash, missing sentinel) halt.
 #
 # Usage:
 #   bash .claude/scripts/autonomy-loop.sh                # default: 25 iterations max
@@ -64,7 +85,7 @@ mkdir -p "${LOG_DIR}"
 # Tunables (env vars override).
 MAX_ITERATIONS="${MAX_ITERATIONS:-25}"
 PERMISSION_MODE="${PERMISSION_MODE:-bypassPermissions}"
-MODEL="${MODEL:-opus}"
+MODEL="${MODEL:-sonnet}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-10}"
 
 # Cap cargo build parallelism. The host has 32 cores, so an unbounded
@@ -78,19 +99,28 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 
 SENTINEL_PHASE="<<PHASE_COMPLETE>>"
 SENTINEL_DONE="<<ALL_DONE>>"
+SENTINEL_BLOCKED="<<PHASE_BLOCKED>>"
+SENTINEL_ADVANCED="<<SUBPLAN_ADVANCED>>"
+SENTINEL_MASTER_EXHAUSTED="<<MASTER_EXHAUSTED>>"
+# Legacy sentinel — treated as SENTINEL_BLOCKED (record + continue, no halt).
 SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 
 # Prompt sent to each iteration. Anchors the agent on the plan files and the
 # sentinel emission contract — the wrapper greps the final .result for exactly
-# one sentinel and pauses without one. Override with $PROMPT.
+# one sentinel. Override with $PROMPT.
 PROMPT="${PROMPT:-Resume the active autonomy loop with fresh context.
 
-1. Read .claude/active-plan to find the in-repo plan and meta-plan paths for the currently active multi-session plan.
-2. Read the meta-plan (across-session source of truth: sentinel emission contract, expert dispatch, stop-the-line conditions).
-3. Read the in-repo plan (committed phase status table).
-4. Find the next \`pending\` row in the status table. Execute that phase end-to-end: generate the per-phase plan via /smelt:plan if it does not exist yet, then /smelt:implement, expert review loop, verification gate, update the status table row, commit, push.
+STRUCTURE. The work is two-level. \`.claude/active-plan\` names a \`master_plan\` (the top-level feature backlog) and an \`active_subplan\` (the focused remediation plan the loop is currently working). You work the ACTIVE SUB-PLAN phase by phase; you only touch the master when the sub-plan is exhausted (see ROLL-UP).
 
-CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_DONE}, or ${SENTINEL_PAUSE}, per meta-plan §\"Sentinel emission contract\". The wrapper script greps the final .result field for these; without one the loop pauses and you stall progress. If you emit ${SENTINEL_PAUSE}, put a one-line reason on the line above.}"
+1. Read \`.claude/active-plan\` for the \`master_plan\` and \`active_subplan\` paths.
+2. Read the active sub-plan (committed phase status table + its per-phase routine, sentinel contract, and \"## Blocked phases\" section).
+3. Find the next \`pending\` row in the status table (skip \`done\` and \`blocked\` rows). Execute that phase end-to-end per the per-phase routine in the sub-plan: spec increment if listed, /smelt:implement (red-green, implementer + reviewer), verification gates, update the row to \`done\`, commit, push. Emit ${SENTINEL_PHASE}.
+
+RECORD-AND-CONTINUE (no hard-stop). If the phase hits a design decision not answered by the plan or spec, OR pre-flight \`cargo test\` is red on something that is NOT the acceptance target of this phase: do NOT halt. Instead (a) set the status-table row of this phase to \`blocked\` with a one-line reason, (b) append a dated entry to the \"## Blocked phases\" section of the sub-plan (phase id, the decision/reason, and the candidate options), (c) restore the tree to a clean committed state, (d) commit + push the table + blocked-log update, (e) emit ${SENTINEL_BLOCKED}. The next iteration will skip the blocked row and pick the next pending phase. NOTE: a red pre-flight that IS the acceptance target of this phase (the example/test the phase exists to make green) is EXPECTED — proceed, do not block on it.
+
+ROLL-UP (only when the active sub-plan has NO \`pending\` rows left — all \`done\` or \`blocked\`). Consult the master plan and its ledger for the next un-remediated cluster. CONSERVATIVE RULE: you may only advance to an EXISTING sibling sub-plan that already has \`pending\` phases — if so, update \`active_subplan\` in \`.claude/active-plan\`, commit + push, and emit ${SENTINEL_ADVANCED}. You must NOT scaffold a brand-new sub-plan or author new specs/plans autonomously; if the next cluster has no existing sub-plan with pending work, emit ${SENTINEL_MASTER_EXHAUSTED} with a one-line summary of what remains (which clusters still need a human to scaffold a sub-plan, and how many phases are blocked). Emit ${SENTINEL_DONE} only if the master backlog is fully remediated and verification is green.
+
+CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_BLOCKED}, ${SENTINEL_ADVANCED}, ${SENTINEL_MASTER_EXHAUSTED}, or ${SENTINEL_DONE}. The wrapper greps the final .result for these; without one the loop halts. Put any one-line reason on the line ABOVE the sentinel.}"
 
 cd "${REPO_ROOT}"
 
@@ -141,13 +171,16 @@ echo "Max iterations:  ${MAX_ITERATIONS}"
 echo "Permission mode: ${PERMISSION_MODE}"
 echo "Model:           ${MODEL}"
 echo "Sample interval: ${SAMPLE_INTERVAL}s"
-echo "Sentinels:       ${SENTINEL_PHASE} | ${SENTINEL_DONE} | ${SENTINEL_PAUSE}"
+echo "Continue:        ${SENTINEL_PHASE} | ${SENTINEL_BLOCKED} | ${SENTINEL_ADVANCED}"
+echo "Halt:            ${SENTINEL_DONE} | ${SENTINEL_MASTER_EXHAUSTED} (+ infra failures)"
 echo "Cgroup watched:  ${SELF_CGROUP:-<unknown — sampler will skip cgroup stats>}"
 echo
 
 iteration=0
 exit_reason="unknown"
 sampler_pid=""
+blocked_count=0     # phases the agent recorded as `blocked` and continued past
+advanced_count=0    # times the loop rolled up to a sibling sub-plan
 
 trap 'echo; echo "===== Interrupted by user ====="; [ -n "${sampler_pid}" ] && kill "${sampler_pid}" 2>/dev/null; exit 130' INT TERM
 
@@ -203,7 +236,7 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # --print:                         headless, single response, exit
   # --permission-mode:               unattended; bypass by default (autonomy loop)
   # --no-session-persistence:        each iteration is genuinely fresh
-  # --model:                         orchestrator on opus per meta-plan
+  # --model:                         control loop on ${MODEL} (default sonnet; override via MODEL=)
   # --output-format json:            single-envelope result with .usage + .total_cost_usd,
   #                                  so we can record per-iteration spend below.
   #                                  Sentinel grepped from .result via jq below.
@@ -267,19 +300,33 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     break
   fi
 
+  # Dispatch on the sentinel. Halting sentinels (DONE / MASTER_EXHAUSTED) break;
+  # record-and-continue sentinels (BLOCKED / legacy PAUSE / ADVANCED / PHASE)
+  # loop again. There is no agent-level hard-stop — a design block is recorded
+  # by the agent (row → `blocked`, "## Blocked phases" entry, committed) and the
+  # loop moves to the next pending phase. Only infra failures below halt.
   if printf '%s' "${final_result}" | grep -qF "${SENTINEL_DONE}"; then
-    echo "===== ${SENTINEL_DONE} detected in final result — loop complete ====="
+    echo "===== ${SENTINEL_DONE} detected — master backlog remediated, loop complete ====="
     exit_reason="all_done"
     break
-  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_PAUSE}"; then
-    echo "===== ${SENTINEL_PAUSE} detected in final result — surface to user ====="
-    exit_reason="paused"
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_MASTER_EXHAUSTED}"; then
+    echo "===== ${SENTINEL_MASTER_EXHAUSTED} detected — no sibling sub-plan with pending work; surface to user ====="
+    exit_reason="master_exhausted"
     break
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_ADVANCED}"; then
+    advanced_count=$((advanced_count + 1))
+    echo "===== ${SENTINEL_ADVANCED} detected — advanced active sub-plan, continuing ====="
+    continue
+  elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_BLOCKED}" \
+       || printf '%s' "${final_result}" | grep -qF "${SENTINEL_PAUSE}"; then
+    blocked_count=$((blocked_count + 1))
+    echo "===== ${SENTINEL_BLOCKED} detected — block recorded in plan; continuing to next pending phase ====="
+    continue
   elif printf '%s' "${final_result}" | grep -qF "${SENTINEL_PHASE}"; then
     echo "===== ${SENTINEL_PHASE} detected in final result — starting next iteration ====="
     continue
   else
-    echo "===== No sentinel in final result — pausing loop ====="
+    echo "===== No sentinel in final result — pausing loop (infra: agent did not follow contract) ====="
     echo "(The agent's final message did not contain a sentinel. Check the log: ${log})"
     exit_reason="no_sentinel"
     break
@@ -293,10 +340,14 @@ fi
 
 echo
 echo "===== Loop exited: ${exit_reason} after ${iteration} iteration(s) ====="
+echo "Blocked phases recorded this run: ${blocked_count} (see the active plan's \"## Blocked phases\" section)"
+echo "Sub-plan roll-ups this run:        ${advanced_count}"
 echo "Logs in: ${LOG_DIR}"
 
+# Exit codes: 0 = master backlog done; 2 = needs a human (master exhausted —
+# next cluster needs a sub-plan scaffolded); 1 = infra failure / max-iter.
 case "${exit_reason}" in
   all_done) exit 0 ;;
-  paused) exit 2 ;;
+  master_exhausted) exit 2 ;;
   *) exit 1 ;;
 esac

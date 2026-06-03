@@ -25,6 +25,16 @@ A lot of functionality has landed across 26 specs in `docs/specs/`. This plan dr
 - Backend coverage beyond DuckDB.
 - Resolving `needs-review` entries (done in the post-sweep human review).
 
+## Spawned sub-plans (remediation)
+
+This sweep is the **master plan**: its probe phases (S0–C9) are complete and the bug ledger `docs/bug-hunt/2026-05-30-findings.md` is the master to-do list. Remediating a *cluster* of ledger findings is done in a focused **sub-plan**, driven by the autonomy loop one at a time; the loop rolls back up here when a sub-plan is exhausted (conservatively — it advances only to an existing sibling sub-plan with pending work, never scaffolds a new one autonomously).
+
+| Sub-plan | Cluster it remediates | Status |
+|----------|-----------------------|--------|
+| `docs/plans/20260531-diagnostic-parity.md` | "LSP-clean but unbuildable" bug class — BUG-006, 011, 013, 015, 018, 019, 024, 032 | in progress |
+
+Remaining ledger clusters without a sub-plan yet (each a candidate for a future human-scaffolded sub-plan) live in `docs/bug-hunt/2026-05-30-findings.md` under their `needs-review` entries.
+
 ## Progress tracking
 
 | Phase | Feature / seam | Status | Findings | Commit | Date |

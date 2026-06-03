@@ -1,5 +1,7 @@
 # Plan: Diagnostic Parity (analysis ↔ build) + function/meta codegen correctness
 
+**Parent (master plan)**: `docs/plans/20260530-feature-sweep.md` — this is a **sub-plan** spawned from the feature sweep to remediate one cluster of its ledger findings: the "LSP-clean but unbuildable" bug class (BUG-006/011/013/015/018/019/024/032). The autonomy loop works this sub-plan phase by phase and rolls up to the master only when it is exhausted.
+
 **Date**: 2026-05-31
 **Spec**: `docs/specs/architecture.md` §"Diagnostic parity rule (analysis ↔ build)" (+ §"Run pipeline parity rule (CLI ↔ UI)"); `docs/specs/meta_language.md` (Surface: build-path execution, added in Wave C phases)
 **Spec diff**: added §"Diagnostic parity rule (analysis ↔ build)"; sharpened the pre-execution gate reference in §"Run pipeline parity rule"; Known Divergences entry recording the current drift this plan closes.
@@ -8,7 +10,7 @@
 
 ## Execution prompt (for a fresh session / autonomy iteration)
 
-Read this file. Run the next `pending` phase in the Progress-tracking table using the per-phase routine below (pre-flight green → spec increment if listed → red-green `/smelt:implement` on the phase's tests, spec as oracle, implementer + reviewer → verification gates → update the table row → commit + push with the phase's commit message). Emit exactly one sentinel: `<<PHASE_COMPLETE>>`, `<<ALL_DONE>>`, or `<<PAUSE_FOR_HUMAN>>`.
+Read this file. Run the next `pending` phase in the Progress-tracking table (skip `done` and `blocked` rows) using the per-phase routine below (pre-flight → spec increment if listed → red-green `/smelt:implement` on the phase's tests, spec as oracle, implementer + reviewer → verification gates → update the table row → commit + push with the phase's commit message). Emit exactly one sentinel: `<<PHASE_COMPLETE>>` (phase done), `<<PHASE_BLOCKED>>` (decision/off-target-red recorded; see §"Block conditions"), `<<SUBPLAN_ADVANCED>>` / `<<MASTER_EXHAUSTED>>` (sub-plan exhausted; see the loop's roll-up rule), or `<<ALL_DONE>>`. There is no hard-stop: a block is recorded and the loop continues to the next pending phase.
 
 ## Goal
 
@@ -26,16 +28,19 @@ Two guarantees, per the spec rule:
 - **User-authored planner-rule *registration*** (the extensibility feature: a project shipping its own planner rule). The diagnostic surface, including planner rules, is *in scope* — every built-in rule is surfaced into `file_diagnostics` via the uniform rule → diagnostics interface (P2b) and gated like any other `Error` (§"Diagnostic parity rule (analysis ↔ build)" Scope, §"Planner scope"). What is out of scope is the mechanism for registering *new, non-built-in* rules; when that lands it reuses the same interface and inherits parity for free. BUG-011 is therefore in scope (surface the cumulative classifier into `file_diagnostics`), not deferred.
 
 ## Per-phase routine
-1. **Pre-flight.** `cargo test --quiet 2>&1 | tail -40`. If already red, emit `<<PAUSE_FOR_HUMAN>>`.
+1. **Pre-flight.** `cargo test --quiet 2>&1 | tail -40`. If red, check **what** is red: if the failure is this phase's own acceptance target (the example/test this phase exists to make green — e.g. P7d and the `meta_config` build), that is expected — **proceed**. If the red is unrelated breakage, treat it as a block (record + continue, per §"Block conditions"); do not build on a broken baseline.
 2. **Spec increment** (only the phases that list one): edit the named spec section first; keep it timeless (no phase vocabulary in the spec body).
 3. **Red-green `/smelt:implement`.** Write the phase's failing test(s) first, then the implementation, with the spec as oracle. Implementer pass, then reviewer pass (material findings only).
 4. **Verify.** `cargo fmt --all`; `cargo clippy --all-targets` (zero warnings); `cargo test` green; plus the phase's specific gates: `example_diagnostics`, `example_workspaces`, `smelt-runtime` parity tests. For `example_builds`: run it **scoped to only the workspace(s) this phase touches** — `SMELT_EXAMPLE_BUILDS_ONLY="<ws1>,<ws2>" cargo test -p smelt-cli --test example_builds` — because a clean-copy build + DuckDB execution of the whole example set is the gate's dominant cost. The **full** sweep (var unset) runs only in P8 / CI; do not run it unscoped in P2–P7.
 5. **Record + commit.** Update the status-table row to `done` + date; commit and push tests + impl + spec + table together with the phase's commit message. Emit `<<PHASE_COMPLETE>>` (or `<<ALL_DONE>>` on the last green phase).
 
-## Pause conditions (`<<PAUSE_FOR_HUMAN>>`)
-- Pre-flight already red (no clean baseline).
-- The tree can't be returned to green after the phase.
-- The phase needs a design decision not answered by this plan or the spec (do not guess on architecture-invariant-touching choices; pause with a one-line reason).
+## Block conditions (`<<PHASE_BLOCKED>>` — record and continue, no hard-stop)
+When a phase hits one of the conditions below, **do not halt the loop**. Instead: (1) set the phase's status-table row to `blocked` with a one-line reason; (2) append a dated entry to §"Blocked phases" (phase id, the decision/reason, and the candidate options for the human); (3) restore the tree to a clean committed state; (4) commit + push the table + blocked-log update; (5) emit `<<PHASE_BLOCKED>>`. The next iteration skips the `blocked` row and picks the next `pending` phase; you review the blocked entries later and we resume them.
+
+Conditions:
+- The phase needs a design decision not answered by this plan or the spec (do not guess on architecture-invariant-touching choices).
+- Pre-flight is red on **unrelated** breakage (not this phase's own acceptance target — see routine step 1).
+- The tree can't be returned to green after the phase (the implementation is incomplete/unsound and would leave a broken baseline).
 
 ## Progress tracking
 
@@ -59,7 +64,11 @@ Two guarantees, per the spec rule:
 
 **P7c split (2026-06-03).** P7c's original step (4) — "rewrite the `meta_config` example models to a consuming form" — assumed both the `List` and `Map` loaders had an in-model consumer. The `List` loader does (`reduce(map(load_yaml(...), …), …)`), and that path plus the bare-loader detector landed in `58c2fcd4` (proven by the `List` case in `crates/smelt-cli/tests/meta_config_e2e.rs`). The `Map` loader did **not**: a `Map<K, V>` value's consumer is the closed Map API (`m.entries()` / `m.keys()` / …) already specified in `meta_language.md` §"Maps" and partly implemented (the `MAP_METHOD_CALL` parser node, `type_inference/record.rs`), but (i) the parser emits `MAP_METHOD_CALL` only for a bare-identifier receiver, so `load_yaml(...).entries()` does not parse, and (ii) the loader family is not lowered at build. The surface is therefore **already designed — the work is implementation, not a new free-function surface** (an early free-function design was discarded; see `docs/research/2026-06-03-map-consumption-surface.md`). So P7c is marked `done` for the detector + List-loader build path, and the Map-loader half — method-receiver parsing, build-path lowering, `file_diagnostics` wiring, and the example greening that makes pre-flight green — is split into **P7d**. P7c and P7d together close BUG-006 (loader); `meta_config` comes off `KNOWN_UNBUILDABLE` at the end of P7d.
 
-**Status values**: `pending` → `done`. A phase is `done` only when its tests are red-green confirmed and all gates (incl. `example_builds`) are green.
+**Status values**: `pending`, `done`, `blocked`. A phase is `done` only when its tests are red-green confirmed and all gates (incl. `example_builds`) are green. A phase is `blocked` when it hit a §"Block conditions" trigger and was recorded for human review (the loop skips `blocked` rows and continues); a blocked phase has a dated entry in §"Blocked phases" and returns to `pending` once the human resolves the decision.
+
+## Blocked phases
+
+Append-only log of phases the autonomy loop recorded as `blocked` (a design decision, unrelated red baseline, or an implementation it could not land green) and continued past. Each entry: date, phase id, the reason/decision, and the candidate options for the human. Resolve an entry by making the decision, setting the phase row back to `pending`, and striking the entry. *(None yet.)*
 
 ## Phase detail
 
