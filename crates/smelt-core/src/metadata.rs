@@ -24,6 +24,7 @@
 //!    ```
 
 use crate::config::{DataLatency, IncrementalConfig, Materialization, TimeseriesConfig};
+use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -114,7 +115,6 @@ pub struct ColumnMetadata {
 
 /// Metadata for a single model extracted from frontmatter
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct ModelMetadata {
     /// Model name (optional in single-model files, required in multi-model)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -434,6 +434,26 @@ pub fn extract_file_metadata(source: &str) -> Result<FileMetadata, MetadataError
     }
 }
 
+/// Extract the raw YAML text between the opening and closing `---` delimiters of
+/// a single-model file's frontmatter, without parsing it.
+///
+/// Returns `None` if the file has no frontmatter. Used by `smelt-db` to call
+/// `parse_frontmatter` for diagnostic purposes independently of
+/// `extract_file_metadata`.
+pub fn frontmatter_yaml_text(source: &str) -> Option<String> {
+    let trimmed = source.trim_start();
+    if !trimmed.starts_with("---\n") && !trimmed.starts_with("---\r\n") {
+        return None;
+    }
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let closing = lines
+        .iter()
+        .skip(1)
+        .position(|&line| line.trim() == "---")?
+        + 1;
+    Some(lines[1..closing].join("\n"))
+}
+
 /// Compute a 1-based `SourceSpan` for the YAML `generates:` value token given
 /// the raw frontmatter YAML content (the text between the two `---` delimiters).
 ///
@@ -573,8 +593,28 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
     let yaml_lines = &lines[1..closing_line];
     let yaml_content = yaml_lines.join("\n");
 
-    // Parse YAML
-    let metadata: ModelMetadata = serde_yaml::from_str(&yaml_content)?;
+    // Route through the unified catalogue to filter unknown/inapplicable keys.
+    // fm_diags are discarded here; smelt-db re-runs parse_frontmatter for the
+    // diagnostic path so errors surface through file_diagnostics.
+    let (validated_map, _fm_diags) = parse_frontmatter(&yaml_content, DeclarationKind::Model);
+
+    // Deserialize ModelMetadata from the validated (catalogue-filtered) map.
+    // If a nested field (e.g. timeseries.granularity) fails to deserialize,
+    // recover by stripping it so the model is still discovered. smelt-db emits
+    // the MalformedTimeseries diagnostic via its own parse_frontmatter call.
+    let metadata: ModelMetadata = if validated_map.is_empty() {
+        ModelMetadata::default()
+    } else {
+        match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map.clone())) {
+            Ok(m) => m,
+            Err(_) => {
+                let mut fallback = validated_map;
+                fallback.remove(&serde_yaml::Value::String("timeseries".to_string()));
+                fallback.remove(&serde_yaml::Value::String("incremental".to_string()));
+                serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
+            }
+        }
+    };
 
     // Route generator files to `extract_generator`.
     if metadata.generates.is_some() {
@@ -636,11 +676,21 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
         let yaml_lines = &lines[yaml_start_line..closing_line];
         let yaml_content = yaml_lines.join("\n");
 
-        // Parse YAML
+        // Route through the unified catalogue to filter unknown/inapplicable keys.
         let mut metadata: ModelMetadata = if yaml_content.trim().is_empty() {
             ModelMetadata::default()
         } else {
-            serde_yaml::from_str(&yaml_content)?
+            let (validated_map, _fm_diags) =
+                parse_frontmatter(&yaml_content, DeclarationKind::Model);
+            match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map.clone())) {
+                Ok(m) => m,
+                Err(_) => {
+                    let mut fallback = validated_map;
+                    fallback.remove(&serde_yaml::Value::String("timeseries".to_string()));
+                    fallback.remove(&serde_yaml::Value::String("incremental".to_string()));
+                    serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
+                }
+            }
         };
 
         // Set model name from delimiter
@@ -806,6 +856,11 @@ SELECT * FROM source2"#;
 
     #[test]
     fn test_invalid_yaml() {
+        // `materialization: invalid_value` is a bad enum value — the catalogue
+        // passes `materialization` (valid model key) but serde fails on the
+        // value. The recovery path strips unknown nested failures and returns
+        // Ok with partial metadata. Discovery stays resilient; smelt-db emits
+        // the MalformedTimeseries diagnostic.
         let source = r#"---
 name: test
 materialization: invalid_value
@@ -813,7 +868,11 @@ materialization: invalid_value
 SELECT * FROM users"#;
 
         let result = extract_file_metadata(source);
-        assert!(result.is_err());
+        assert!(
+            result.is_ok(),
+            "discovery must be resilient to bad field values; got: {:?}",
+            result.unwrap_err()
+        );
     }
 
     #[test]
@@ -898,22 +957,34 @@ SELECT * FROM users"#;
 
     #[test]
     fn test_unknown_field_rejected() {
+        // `materialized` is a typo for `materialization` — it's unknown to the
+        // catalogue, which filters it out and produces an Error diagnostic.
+        // Discovery succeeds with partial metadata; smelt-db surfaces the error
+        // as a FrontmatterParseError. The known field `name` is retained.
         let source = "---\nname: test\nmaterialized: table\n---\nSELECT 1";
         let result = extract_file_metadata(source);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("unknown field"),
-            "Expected 'unknown field' in error: {}",
-            err_msg
+            result.is_ok(),
+            "discovery must be resilient to unknown fields; got: {:?}",
+            result.unwrap_err()
         );
+        if let Ok(FileMetadata::Single { metadata, .. }) = result {
+            assert_eq!(metadata.name, Some("test".to_string()));
+            assert_eq!(metadata.materialization, None, "unknown key must be dropped");
+        }
     }
 
     #[test]
     fn test_unknown_field_incremental_key_rejected() {
+        // `incremental_key` is unknown to the catalogue — filtered out.
+        // Discovery succeeds; smelt-db emits FrontmatterParseError.
         let source = "---\nname: test\nincremental_key: user_id\n---\nSELECT 1";
         let result = extract_file_metadata(source);
-        assert!(result.is_err());
+        assert!(
+            result.is_ok(),
+            "discovery must be resilient to unknown fields; got: {:?}",
+            result.unwrap_err()
+        );
     }
 
     #[test]
@@ -1294,10 +1365,10 @@ FROM smelt.orders_raw"#;
         );
     }
 
-    /// A `.sql` file declaring `event_time_column` inside `incremental:` is
-    /// rejected at YAML parse time (unknown field) because `IncrementalConfig`
-    /// no longer declares those fields.  This is the effective `MalformedTimeseries`
-    /// for the legacy nested form — the error message points at the unknown key.
+    /// A `.sql` file declaring `event_time_column` inside `incremental:` has a
+    /// bad nested value (IncrementalConfig has deny_unknown_fields). The recovery
+    /// path strips `incremental:` and returns Ok with partial metadata.
+    /// Discovery is resilient; smelt-db surfaces a MalformedTimeseries diagnostic.
     #[test]
     fn test_legacy_nested_form_errors() {
         let source = r#"---
@@ -1310,14 +1381,22 @@ incremental:
 ---
 SELECT dt FROM foo"#;
         let result = extract_file_metadata(source);
-        assert!(result.is_err(), "Legacy nested form must be rejected");
-        // The error should mention the unknown field
-        let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("event_time_column") || err_msg.contains("unknown field"),
-            "Error should mention the unknown field, got: {}",
-            err_msg
+            result.is_ok(),
+            "discovery must be resilient to bad nested fields; got: {:?}",
+            result.unwrap_err()
         );
+        // The incremental block is stripped in recovery; materialization is kept.
+        if let Ok(FileMetadata::Single { metadata, .. }) = result {
+            assert_eq!(
+                metadata.materialization,
+                Some(crate::config::Materialization::Table)
+            );
+            assert!(
+                metadata.incremental.is_none(),
+                "malformed incremental block must be stripped in recovery"
+            );
+        }
     }
 
     /// `materialization: ephemeral` + `timeseries:` is `MalformedTimeseries`.

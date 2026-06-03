@@ -31,8 +31,8 @@ pub use frontmatter::{
 };
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{
-    extract_file_metadata, ColumnMetadata, ColumnTest, FileMetadata, MetadataError, ModelMetadata,
-    ModelSection, TestConfig,
+    extract_file_metadata, frontmatter_yaml_text, ColumnMetadata, ColumnTest, FileMetadata,
+    MetadataError, ModelMetadata, ModelSection, TestConfig,
 };
 pub use model_id::ModelId;
 pub use origin::ModelOriginKind;

@@ -1164,6 +1164,63 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // Model frontmatter diagnostics via the unified catalogue (U3).
+    // Skips smelt.define / smelt.extern function files — their frontmatter is
+    // handled (with the correct DeclarationKind) by
+    // frontmatter_parse_diagnostics_for_file. Only pure SQL model files reach
+    // this block. Calls parse_frontmatter(text, Model) to surface unknown-key
+    // errors and inapplicable-key warnings. Also tries to deserialize
+    // ModelMetadata from the validated map to catch nested sub-field failures
+    // (e.g. a bad timeseries.granularity value) that would previously be swallowed.
+    let is_function_file = {
+        let p = parse_file(db, file);
+        AstFile::cast(p.syntax())
+            .map(|ast| ast.defines().next().is_some() || ast.externs().next().is_some())
+            .unwrap_or(false)
+    };
+    if !is_function_file {
+        if let Some(yaml_text) = smelt_core::frontmatter_yaml_text(text) {
+            use smelt_core::{FrontmatterSeverity, ModelMetadata};
+            let (validated_map, fm_diags) =
+                smelt_core::parse_frontmatter(&yaml_text, smelt_core::DeclarationKind::Model);
+
+            // Emit catalogue diagnostics (unknown key → Error, inapplicable → Warning).
+            for fm_diag in &fm_diags {
+                let severity = match fm_diag.severity {
+                    FrontmatterSeverity::Error => DiagnosticSeverity::Error,
+                    FrontmatterSeverity::Warning => DiagnosticSeverity::Warning,
+                };
+                DiagnosticAcc(Diagnostic {
+                    severity,
+                    message: fm_diag.message.clone(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::FrontmatterParseError),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+
+            // Try to deserialize ModelMetadata from the validated map to catch
+            // nested sub-field failures (e.g. timeseries.granularity: fortnight).
+            // A failure here means a nested field is malformed — surface as
+            // MalformedTimeseries.
+            if !validated_map.is_empty() {
+                if let Err(serde_err) = serde_yaml::from_value::<ModelMetadata>(
+                    serde_yaml::Value::Mapping(validated_map),
+                ) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("MalformedTimeseries: {serde_err}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::MalformedTimeseries),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+        }
+    }
+
     // Timeseries / incremental frontmatter validation.
     // Runs on every non-CSV, non-generator file that has Single frontmatter.
     // Calls the pure `validate_timeseries` function from smelt-core and maps
