@@ -107,6 +107,43 @@ fn single_row_concrete_values() {
     );
 }
 
+/// Implicit alias (no `AS` keyword): `(VALUES …) t(i, s, d)` must bind the
+/// alias column list and type the columns identically to the explicit
+/// `AS t(i, s, d)` form. Before the parser captured the implicit-alias column
+/// list, the `(i, s, d)` list leaked into the enclosing projection and every
+/// column fell through to `Unknown`.
+#[test]
+fn single_row_concrete_values_implicit_alias() {
+    let sql = "SELECT i, s, d FROM (\
+        VALUES (CAST(1 AS INTEGER), CAST('a' AS TEXT), CAST(NULL AS DATE))) t(i, s, d)\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let types = column_types(&db, ws, sf);
+
+    assert_eq!(
+        types.get("i"),
+        Some(&DataType::Integer),
+        "expected i=Integer, got {:?}; full map: {:?}",
+        types.get("i"),
+        types
+    );
+    assert!(
+        matches!(
+            types.get("s"),
+            Some(DataType::Text) | Some(DataType::Varchar { .. })
+        ),
+        "expected s=Text or Varchar, got {:?}; full map: {:?}",
+        types.get("s"),
+        types
+    );
+    assert_eq!(
+        types.get("d"),
+        Some(&DataType::Date),
+        "expected d=Date, got {:?}; full map: {:?}",
+        types.get("d"),
+        types
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test 2: multi-row numeric promotion
 // ---------------------------------------------------------------------------
