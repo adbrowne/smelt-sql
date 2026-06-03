@@ -31,7 +31,7 @@ This sweep is the **master plan**: its probe phases (S0–C9) are complete and t
 
 | Sub-plan | Cluster it remediates | Status |
 |----------|-----------------------|--------|
-| `docs/plans/20260531-diagnostic-parity.md` | "LSP-clean but unbuildable" bug class — BUG-006, 011, 013, 015, 018, 019, 024, 032 | in progress |
+| `docs/plans/20260531-diagnostic-parity.md` | "LSP-clean but unbuildable" bug class — BUG-006, 011, 013, 015, 018, 019, 024, 032 | done (2026-06-03) |
 
 Remaining ledger clusters without a sub-plan yet (each a candidate for a future human-scaffolded sub-plan) live in `docs/bug-hunt/2026-05-30-findings.md` under their `needs-review` entries.
 
