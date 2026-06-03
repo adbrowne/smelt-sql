@@ -48,7 +48,7 @@ Conditions:
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| U1 | `deny_unknown_fields` on `TimeseriesConfig` (unknown `timeseries:` sub-keys become a serde error) | pending | BUG-025 | | |
+| U1 | `deny_unknown_fields` on `TimeseriesConfig` (unknown `timeseries:` sub-keys become a serde error) | done | BUG-025 | fix(core): deny unknown keys in TimeseriesConfig frontmatter (closes BUG-025) | 2026-06-04 |
 | U2 | `FrontmatterCatalogue` + single `parse_frontmatter(text, kind)` in smelt-core (move `FrontmatterDiagnostic` down); unknown→`Error`, inapplicable-kind→`Warning`. Unit-tested in isolation; not yet wired to callers | pending | — (foundation) | | |
 | U3 | Route the **model** path through `parse_frontmatter`: `ModelMetadata` deserializes from the validated map; surface errors via `file_diagnostics` (stop swallowing at the discovery + smelt-db sites); a model with a function key keeps `materialization: table` + emits a `Warning` | pending | BUG-016, BUG-023 | | |
 | U4 | Route the **function/extern** path through `parse_frontmatter`: `FunctionProperties` from a lenient `RawFunctionProperties` serde derive; **delete** `parse_function_properties` (one parser remains) | pending | — (unification) | | |

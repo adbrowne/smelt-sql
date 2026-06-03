@@ -351,6 +351,7 @@ fn default_enabled() -> bool {
 /// incremental execution. `incremental:` consumes this block; any model
 /// declaring `incremental:` must also declare `timeseries:`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeseriesConfig {
     /// Source-of-truth time column (timestamp or date).
     pub event_time_column: String,
@@ -884,6 +885,23 @@ targets:
         "#;
         let config: TimeseriesConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.granularity, Granularity::Year);
+    }
+
+    #[test]
+    fn test_timeseries_config_rejects_unknown_key() {
+        // BUG-025: previously unknown sub-keys were silently accepted/dropped;
+        // with deny_unknown_fields they must return a serde Err.
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+            partion_column: dt
+        "#;
+        let result: Result<TimeseriesConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "typo'd sub-key should be rejected, not silently dropped"
+        );
     }
 
     #[test]
