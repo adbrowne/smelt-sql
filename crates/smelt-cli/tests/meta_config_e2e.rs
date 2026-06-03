@@ -131,3 +131,45 @@ fn e2e_config_loader_list_executes_against_duckdb() {
         .expect("query threshold_total");
     assert_eq!(total, 350);
 }
+
+/// P7d: A model that loads a `Map<Text, {plan, threshold}>` from a YAML file
+/// and consumes it via `.keys()` → `map` → `reduce`, materialising the sorted
+/// keys as a comma-separated string.  Validates that:
+///   1. The parser emits `MAP_METHOD_CALL` for the `.keys()` postfix on a
+///      `SMELT_PATH_CALL` receiver.
+///   2. The build-path evaluator lowers `Map<…>` loaders to `MetaValue::Map`
+///      and `eval_map_method_call` converts `.keys()` to a `MetaValue::List`.
+///   3. The HOF pipeline collapses to a concrete SQL scalar and DuckDB executes
+///      it without seeing the `smelt.config.load_yaml` call verbatim.
+#[test]
+fn e2e_config_loader_map_keys_executes_against_duckdb() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml(&db_path).as_str()),
+            (
+                // Map-schema YAML: top-level keys are tenant IDs; values are records.
+                "configs/tenants.yaml",
+                "tenant_a:\n  plan: pro\n  threshold: 100\ntenant_b:\n  plan: free\n  threshold: 10\n",
+            ),
+            (
+                // Consumer: load the tenant map, extract its keys, fold them.
+                "models/tenant_keys.sql",
+                "SELECT reduce(\n  map(\n    smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>).keys(),\n    fn k => k\n  ),\n  concat_with(', ')\n) AS tenant_keys\n",
+            ),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+
+    let keys: String = conn
+        .query_row("SELECT tenant_keys FROM main.tenant_keys", [], |r| r.get(0))
+        .expect("query tenant_keys");
+    // BTreeMap returns keys in lexicographic order: tenant_a < tenant_b
+    assert_eq!(keys, "tenant_a, tenant_b");
+}

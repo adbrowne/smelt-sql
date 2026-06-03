@@ -272,6 +272,15 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         SyntaxKind::CAST_EXPR if !ctx.capabilities.supports_double_colon_cast => {
             print_cast_rewrite(node, ctx, out);
         }
+        // Top-level smelt DSL declarations that are not SQL: suppress them so
+        // they never reach the backend engine.  `SMELT_DEFINE` and
+        // `SMELT_EXTERN` carry function bodies / extern signatures that the
+        // compiler inlines via the function-expander closure above; they must
+        // not be emitted verbatim.  `SMELT_RECORD_DECL` carries type
+        // declarations used by the analyzer but invisible to the engine.
+        SyntaxKind::SMELT_DEFINE | SyntaxKind::SMELT_EXTERN | SyntaxKind::SMELT_RECORD_DECL => {
+            // Emit nothing — drop the declaration from the compiled SQL.
+        }
         _ => {
             print_children(node, ctx, out);
         }

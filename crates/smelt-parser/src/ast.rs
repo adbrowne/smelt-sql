@@ -1570,7 +1570,10 @@ impl Expr {
             // must be castable to Expr so that `positional_args()` in ArgList
             // returns it and the schema-text extraction in `check_loader_call_diagnostics`
             // can read it via `schema_expr.syntax().text()`.
-            | TYPE_REF | RECORD_TYPE_INLINE => Some(Self(node)),
+            | TYPE_REF | RECORD_TYPE_INLINE
+            // P7d: Map API method calls with complex receivers
+            // (e.g. `smelt.config.load_yaml(...).keys()`).
+            | MAP_METHOD_CALL => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1694,6 +1697,14 @@ impl Expr {
     pub fn as_smelt_as_struct_call(&self) -> Option<SmeltAsStructCall> {
         SmeltAsStructCall::cast(self.0.clone())
             .or_else(|| self.0.children().find_map(SmeltAsStructCall::cast))
+    }
+
+    /// Check if this expression is a `MAP_METHOD_CALL` node (P7d).
+    /// Matches when this `Expr` node IS the `MAP_METHOD_CALL` or wraps one as
+    /// a direct child.
+    pub fn as_map_method_call(&self) -> Option<MapMethodCall> {
+        MapMethodCall::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(MapMethodCall::cast))
     }
 
     /// Check if this is a CASE expression
@@ -3869,16 +3880,40 @@ impl MapMethodCall {
 
     /// The name of the method (e.g. `"entries"`, `"get"`).
     ///
-    /// Extracted from the second `IDENT` token in the `IDENT DOT IDENT (` shape.
+    /// Works for both receiver shapes:
+    ///   - `IDENT(receiver) DOT IDENT(method) ARG_LIST`  — bare-identifier receiver
+    ///   - `SMELT_PATH_CALL(receiver) DOT IDENT(method) ARG_LIST` — call receiver
+    ///
+    /// Finds the first `IDENT` token that appears after a `DOT` token.
     pub fn method_name(&self) -> Option<String> {
-        // Shape: [ IDENT(lhs), DOT, IDENT(method), ... ]
-        let idents: Vec<_> = self
-            .0
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == IDENT)
-            .collect();
-        idents.get(1).map(|t| t.text().to_string())
+        let mut after_dot = false;
+        for child in self.0.children_with_tokens() {
+            match child {
+                rowan::NodeOrToken::Token(tok) if tok.kind() == DOT => {
+                    after_dot = true;
+                }
+                rowan::NodeOrToken::Token(tok) if after_dot && tok.kind() == IDENT => {
+                    return Some(tok.text().to_string());
+                }
+                rowan::NodeOrToken::Token(tok)
+                    if after_dot && !tok.kind().is_trivia() && tok.kind() != DOT =>
+                {
+                    break; // unexpected non-trivia non-DOT token after DOT
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The receiver expression (the expression before the dot).
+    ///
+    /// For bare-identifier receivers (`m.keys()`) this is the `IDENT`-wrapped
+    /// `EXPRESSION` node.  For call-expression receivers
+    /// (`smelt.config.load_yaml(...).keys()`) this is the `SMELT_PATH_CALL` node.
+    pub fn receiver_expr(&self) -> Option<Expr> {
+        // The receiver is the first child *node* of MAP_METHOD_CALL (before the DOT).
+        self.0.children().next().and_then(Expr::cast)
     }
 
     /// The argument list, if present.

@@ -421,6 +421,14 @@ impl<'a> super::Parser<'a> {
     pub(super) fn parse_primary_expr(&mut self) {
         self.skip_trivia();
 
+        // Take a checkpoint BEFORE the if-else chain so that the postfix
+        // MAP_METHOD_CALL loop below can retroactively wrap the entire primary
+        // (SMELT_PATH_CALL, FUNCTION_CALL, etc.) inside a MAP_METHOD_CALL node
+        // when the primary is followed by `.method()` with a known Map API name.
+        // This is safe for NULL_KW (which returns early) because NULL cannot be
+        // a Map receiver.
+        let primary_checkpoint = self.builder.checkpoint();
+
         if self.at(NULL_KW) {
             // NULL literal — wrap in EXPRESSION so Expr::cast() works
             self.start_node(EXPRESSION);
@@ -708,6 +716,40 @@ impl<'a> super::Parser<'a> {
         while self.at(LBRACKET) {
             self.parse_array_subscript();
             self.skip_trivia();
+        }
+
+        // Postfix: Map method call — `expr.method(args)` where `method` is a
+        // known Map API name (entries, keys, values, get, has).
+        //
+        // This fires for any primary expression — most importantly
+        // SMELT_PATH_CALL receivers like
+        //   `smelt.config.load_yaml('p', Map<Text, S>).keys()`.
+        //
+        // The IDENT-receiver case (`m.entries()`) is handled inside the IDENT
+        // branch above, which already consumed the DOT before reaching this
+        // loop, so `self.at(DOT)` is false there — no double-parsing.
+        loop {
+            self.skip_trivia();
+            if !self.at(DOT) {
+                break;
+            }
+            // Peek: DOT must be followed (past trivia) by a map-method IDENT
+            // and then LPAREN.  Only commit to MAP_METHOD_CALL if all three are
+            // present; otherwise leave the DOT for the caller (e.g. a qualified
+            // table.column reference in a larger expression context).
+            if !self.peek_dot_map_method_call() {
+                break;
+            }
+            // Commit: retroactively wrap the entire parsed primary expression
+            // (from primary_checkpoint) together with the DOT + IDENT + args
+            // into a MAP_METHOD_CALL node.
+            self.start_node_at(primary_checkpoint, MAP_METHOD_CALL);
+            self.advance(); // consume DOT
+            self.skip_trivia();
+            self.advance(); // consume method-name IDENT
+            self.skip_trivia();
+            self.parse_arg_list();
+            self.finish_node(); // MAP_METHOD_CALL
         }
     }
 

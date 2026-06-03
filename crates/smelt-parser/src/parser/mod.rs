@@ -284,6 +284,61 @@ impl<'a> Parser<'a> {
         matches!(name, "entries" | "get" | "has" | "keys" | "values")
     }
 
+    /// Peek ahead from the current position (which must be at a `DOT` token)
+    /// to check whether the token stream looks like `.map_method(`.
+    ///
+    /// Returns `true` iff:
+    ///   1. The current token is `DOT`.
+    ///   2. The next non-trivia token after the DOT is an `IDENT` whose text
+    ///      is a recognised Map API method name (entries, keys, values, get, has).
+    ///   3. The non-trivia token after that IDENT is `LPAREN`.
+    ///
+    /// Used by the postfix MAP_METHOD_CALL loop in `parse_primary_expr` to
+    /// decide whether to commit before consuming the DOT.
+    pub(super) fn peek_dot_map_method_call(&self) -> bool {
+        // Current token must be DOT.
+        if !self.at(DOT) {
+            return false;
+        }
+        // Skip trivia after DOT to find the method-name IDENT.
+        let mut la = 1usize;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(ident_tok) = self.tokens.get(self.pos + la) else {
+            return false;
+        };
+        if ident_tok.kind != IDENT {
+            return false;
+        }
+        // Compute the byte offset of the IDENT so we can read its text.
+        let mut ident_offset = self.offset;
+        for i in 0..la {
+            ident_offset += self.tokens[self.pos + i].len;
+        }
+        let name = &self.input[ident_offset..ident_offset + ident_tok.len];
+        if !Self::is_map_method_name(name) {
+            return false;
+        }
+        // Skip trivia after the IDENT to find the LPAREN.
+        let mut la2 = la + 1;
+        while let Some(t) = self.tokens.get(self.pos + la2) {
+            if t.kind.is_trivia() {
+                la2 += 1;
+            } else {
+                break;
+            }
+        }
+        matches!(
+            self.tokens.get(self.pos + la2).map(|t| t.kind),
+            Some(LPAREN)
+        )
+    }
+
     // Domain-specific parsing methods live in submodules:
     //   - parser::smelt_ext (smelt.* extensions)
     //   - parser::types     (type refs, records, struct types)

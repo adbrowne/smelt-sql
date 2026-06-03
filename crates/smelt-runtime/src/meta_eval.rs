@@ -152,10 +152,14 @@ pub fn expand_in_model_meta(sql: &str, ctx: &MetaEvalContext) -> String {
 }
 
 /// A meta value produced by the build-path evaluator: either a `List<T>`
-/// (a vector of element values) or a scalar Data-World SQL fragment.
+/// (a vector of element values), a `Map<K, V>` (a BTreeMap of key→element),
+/// or a scalar Data-World SQL fragment.
 enum MetaValue {
     List(Vec<MetaElem>),
     Scalar(String),
+    /// A `Map<K, V>` loader value. Entries are sorted ascending by key
+    /// (BTreeMap guarantees this). Each value is a `MetaElem` (scalar or record).
+    Map(BTreeMap<String, MetaElem>),
 }
 
 /// One element of a build-path meta `List<T>`: either a plain Data-World SQL
@@ -264,6 +268,9 @@ fn expand_select_item_meta(sql: &str, ctx: &MetaEvalContext) -> String {
         && !sql.contains("filter")
         && !sql.contains("|>")
         && !sql.contains("if ")
+        && !sql.contains(".keys(")
+        && !sql.contains(".values(")
+        && !sql.contains(".entries(")
     {
         return sql.to_string();
     }
@@ -314,9 +321,18 @@ fn eval_meta(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
     if let Some(list) = eval_wide_reflection(expr, ctx) {
         return Some(list);
     }
-    // Config loader `smelt.config.load_yaml/load_json('path', List<…>)` → List<record>.
-    if let Some(list) = eval_loader(expr, ctx) {
-        return Some(list);
+    // Config loader `smelt.config.load_yaml/load_json('path', List<…>|Map<…>)` → List/Map.
+    if let Some(value) = eval_loader(expr, ctx) {
+        return Some(value);
+    }
+    // MAP_METHOD_CALL: `expr.method()` where method is a Map API name.
+    // E.g. `smelt.config.load_yaml('p', Map<Text, S>).keys()` → List<Text>.
+    // Must be checked AFTER eval_loader so that the receiver (a loader call)
+    // is already recognized and can be evaluated recursively.
+    if expr.as_map_method_call().is_some() {
+        if let Some(v) = eval_map_method_call(expr, ctx) {
+            return Some(v);
+        }
     }
     // A `smelt.define` call whose body is a reflection chain → substitute the
     // call's arguments into the body and evaluate it (no printer reprint).
@@ -510,11 +526,11 @@ fn eval_loader(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
         return None;
     }
 
-    // Only `List<…>` loaders are lowered at build today; a `Map<…>` or
-    // record-root schema is left verbatim (analyzer-validated, not yet lowered).
+    // `List<…>` and `Map<…>` loaders are both lowered at build; a record-root
+    // schema is left verbatim (analyzer-validated, not yet lowered).
     let schema_text = schema_arg.syntax().text().to_string();
     let schema_text = schema_text.trim();
-    if !schema_text.starts_with("List<") {
+    if !schema_text.starts_with("List<") && !schema_text.starts_with("Map<") {
         return None;
     }
     let schema_ty =
@@ -542,34 +558,63 @@ fn eval_loader(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
     loader_value_to_meta(&result.value)
 }
 
-/// Convert a validated loader `List` value into a build-path [`MetaValue::List`].
-/// Each list element becomes a [`MetaElem`]: a record element keeps only its
-/// scalar fields (each pre-rendered to a Data-World SQL literal), and a scalar
-/// element is rendered directly. Returns `None` when the value is not a `List`.
+/// Convert a validated loader value into a build-path [`MetaValue`].
+///
+/// - A `List` becomes `MetaValue::List`: each element is a `MetaElem` (record
+///   with scalar fields, or a scalar rendered to a Data-World SQL literal).
+/// - A `Map` becomes `MetaValue::Map`: each entry maps a key string to a
+///   `MetaElem` (same element rules as List). The BTreeMap preserves
+///   lexicographic key order, which the Map API methods (`keys`, `values`,
+///   `entries`) expose in ascending order.
+/// - Any other variant returns `None` (drop-on-error).
 fn loader_value_to_meta(value: &smelt_db::loader::MetaValue) -> Option<MetaValue> {
     use smelt_db::loader::MetaValue as LV;
-    let LV::List(elems) = value else {
-        return None;
-    };
-    let mut out = Vec::with_capacity(elems.len());
-    for elem in elems {
-        match elem {
-            LV::Record(fields) => {
-                let mut rec = BTreeMap::new();
-                for (k, v) in fields {
-                    if let Some(s) = render_loader_scalar(v) {
-                        rec.insert(k.clone(), s);
+    match value {
+        LV::List(elems) => {
+            let mut out = Vec::with_capacity(elems.len());
+            for elem in elems {
+                match elem {
+                    LV::Record(fields) => {
+                        let mut rec = BTreeMap::new();
+                        for (k, v) in fields {
+                            if let Some(s) = render_loader_scalar(v) {
+                                rec.insert(k.clone(), s);
+                            }
+                        }
+                        out.push(MetaElem::Record(rec));
                     }
+                    scalar => match render_loader_scalar(scalar) {
+                        Some(s) => out.push(MetaElem::Scalar(s)),
+                        None => return None, // a non-scalar, non-record element is unrenderable
+                    },
                 }
-                out.push(MetaElem::Record(rec));
             }
-            scalar => match render_loader_scalar(scalar) {
-                Some(s) => out.push(MetaElem::Scalar(s)),
-                None => return None, // a non-scalar, non-record element is unrenderable
-            },
+            Some(MetaValue::List(out))
         }
+        LV::Map(entries) => {
+            let mut out = BTreeMap::new();
+            for (k, v) in entries {
+                let elem = match v {
+                    LV::Record(fields) => {
+                        let mut rec = BTreeMap::new();
+                        for (fk, fv) in fields {
+                            if let Some(s) = render_loader_scalar(fv) {
+                                rec.insert(fk.clone(), s);
+                            }
+                        }
+                        MetaElem::Record(rec)
+                    }
+                    scalar => match render_loader_scalar(scalar) {
+                        Some(s) => MetaElem::Scalar(s),
+                        None => return None,
+                    },
+                };
+                out.insert(k.clone(), elem);
+            }
+            Some(MetaValue::Map(out))
+        }
+        _ => None,
     }
-    Some(MetaValue::List(out))
 }
 
 /// Render a scalar loader value to its Data-World SQL literal. `Text` →
@@ -584,6 +629,78 @@ fn render_loader_scalar(value: &smelt_db::loader::MetaValue) -> Option<String> {
         LV::Float(f) => Some(f.to_string()),
         LV::Boolean(b) => Some(if *b { "TRUE" } else { "FALSE" }.to_string()),
         LV::Record(_) | LV::List(_) | LV::Map(_) | LV::Error => None,
+    }
+}
+
+/// Evaluate a `MAP_METHOD_CALL` expression — `expr.method(args)` where
+/// `method` is one of the known Map API names (entries, keys, values, get, has).
+///
+/// The receiver is evaluated to a `MetaValue::Map`; the method is then applied
+/// to produce a new `MetaValue`:
+///
+/// - `keys()` → `MetaValue::List` of `MetaElem::Scalar` (each key rendered as
+///   a SQL `Text` literal, sorted ascending by the BTreeMap's natural order).
+/// - `values()` → `MetaValue::List` of the map's values (MetaElem, same order).
+/// - `entries()` → `MetaValue::List` of `MetaElem::Record` with a `key` field
+///   (the SQL `Text` literal) plus the value's fields (scalar: `value` field;
+///   record: each field promoted to the top-level record, so a lambda body can
+///   use `e.key` and `e.plan` rather than `e.value.plan`).
+/// - `get` / `has` — data-world ops; not lowered at build time (return `None`
+///   to leave verbatim). The analyzer gates receiver-type errors so a clean
+///   build never calls this for a non-Map receiver.
+///
+/// Returns `None` on any drop-on-error condition (non-Map receiver, unknown
+/// receiver, unsupported method at compile time).
+fn eval_map_method_call(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
+    let call = expr.as_map_method_call()?;
+    let method = call.method_name()?.to_lowercase();
+    let receiver_expr = call.receiver_expr()?;
+    let receiver = eval_meta(&receiver_expr, ctx)?;
+    let MetaValue::Map(map) = receiver else {
+        return None; // receiver did not evaluate to a Map — drop-on-error
+    };
+    match method.as_str() {
+        "keys" => {
+            // BTreeMap is already sorted ascending by key.
+            let elems: Vec<MetaElem> = map
+                .keys()
+                .map(|k| MetaElem::Scalar(sql_text_literal(k)))
+                .collect();
+            Some(MetaValue::List(elems))
+        }
+        "values" => {
+            let elems: Vec<MetaElem> = map.into_values().collect();
+            Some(MetaValue::List(elems))
+        }
+        "entries" => {
+            // Each entry becomes a record with a `key` field (SQL `Text` literal)
+            // plus the value's fields.  For scalar values a `value` field carries
+            // the SQL literal; for record values the record's own fields are
+            // promoted to the top-level so a lambda body uses `e.key` and `e.plan`
+            // rather than `e.value.plan` (pragmatic flat-record implementation).
+            let elems: Vec<MetaElem> = map
+                .into_iter()
+                .map(|(k, v)| {
+                    let mut rec = BTreeMap::new();
+                    rec.insert("key".to_string(), sql_text_literal(&k));
+                    match v {
+                        MetaElem::Scalar(s) => {
+                            rec.insert("value".to_string(), s);
+                        }
+                        MetaElem::Record(fields) => {
+                            // Promote each record field to the top-level entry record.
+                            for (fk, fv) in fields {
+                                rec.insert(fk, fv);
+                            }
+                        }
+                    }
+                    MetaElem::Record(rec)
+                })
+                .collect();
+            Some(MetaValue::List(elems))
+        }
+        // `get` / `has` are data-world ops; leave verbatim at build time.
+        _ => None,
     }
 }
 
@@ -653,7 +770,7 @@ fn eval_smelt_fn_call(call: &SmeltPathCall, ctx: &MetaEvalContext) -> Option<Met
 fn render_scalar(expr: &Expr, ctx: &MetaEvalContext) -> Option<String> {
     match eval_meta(expr, ctx) {
         Some(MetaValue::Scalar(s)) => Some(s),
-        Some(MetaValue::List(_)) => None,
+        Some(MetaValue::List(_)) | Some(MetaValue::Map(_)) => None,
         None => Some(expr.syntax().text().to_string().trim().to_string()),
     }
 }

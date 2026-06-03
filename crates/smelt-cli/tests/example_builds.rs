@@ -87,14 +87,6 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          at build, see meta_columns_e2e.rs)",
     ),
     (
-        // `smelt.config.load_yaml` loader not evaluated at build → the ref
-        // resolves to an undefined model/source. Closed by P7.
-        "meta_config",
-        "Error: Dependency validation failed: Model 'tenants' references \
-         undefined model/source 'config.load_yaml' \
-         (config.loader not evaluated at build; tracked by P7)",
-    ),
-    (
         // Wide reflection (`smelt.models.with_tag` / `smelt.sources.with_tag`)
         // now lowers and executes at build (P7b). The remaining blocker is
         // unrelated to diagnostic parity: the cohort models read the unseeded

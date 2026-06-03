@@ -4951,6 +4951,41 @@ fn parse_map_method_call_has_with_arg() {
 }
 
 #[test]
+fn parse_map_method_call_on_loader_receiver() {
+    // P7d: MAP_METHOD_CALL must parse when the receiver is a SMELT_PATH_CALL
+    // (i.e. a config loader), not just a bare IDENT.
+    // Input: `smelt.config.load_yaml('tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>).keys()`
+    let src = "SELECT smelt.config.load_yaml('tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>).keys() AS tenant_keys";
+    let parse = parse(src);
+    assert!(
+        parse.errors.is_empty(),
+        "parse_map_method_call_on_loader_receiver: unexpected errors: {:?}",
+        parse.errors
+    );
+    // A MAP_METHOD_CALL node must appear.
+    let map_call_node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == MAP_METHOD_CALL)
+        .expect("must contain a MAP_METHOD_CALL node for loader.keys()");
+    // The receiver must be a SMELT_PATH_CALL (not just an IDENT).
+    let has_call_receiver = map_call_node
+        .children()
+        .any(|n| n.kind() == SMELT_PATH_CALL);
+    assert!(
+        has_call_receiver,
+        "MAP_METHOD_CALL receiver must be SMELT_PATH_CALL for a loader expression"
+    );
+    // method_name() must return "keys".
+    let call = crate::ast::MapMethodCall::cast(map_call_node).expect("must cast to MapMethodCall");
+    assert_eq!(
+        call.method_name().as_deref(),
+        Some("keys"),
+        "method_name() must return 'keys'"
+    );
+}
+
+#[test]
 fn record_literal_vs_inline_record_type_disambiguation() {
     // Value position → RECORD_LITERAL
     let value_input = "SELECT smelt.foo({a: 1}) FROM t";
