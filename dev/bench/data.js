@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780185272209,
+  "lastUpdate": 1780477262717,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18141,6 +18141,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.453696,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4adc6eb5d556f7a82043820274813fcd4050bed0",
+          "message": "fix(parser): capture alias column lists on implicit (AS-less) table aliases\n\nThe explicit `AS t(c1, c2)` form already produced an ALIAS_COLUMN_LIST\nnode, but the implicit-alias path (`FROM (…) t(c1, c2)`, no AS keyword)\nconsumed the alias identifier and then returned, leaking the `(c1, c2)`\nlist into the enclosing SELECT's projection. DuckDB accepts the implicit\nform; smelt mis-parsed it, silently mangling the outer projection.\n\nExtract the column-list parsing into a shared `parse_alias_column_list`\nhelper and call it from both alias paths. The implicit form now binds the\ncolumn list identically to the explicit form, and VALUES/SELECT\nderived-table columns type correctly through the existing accessor.\n\nSpec: types.md §\"VALUES-derived tables\" notes the AS keyword is optional.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-03T18:58:12+10:00",
+          "tree_id": "319bdc4300c516f668307a8eae97353ee2be0e51",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4adc6eb5d556f7a82043820274813fcd4050bed0"
+        },
+        "date": 1780477261727,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 43.520064999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 41.358315,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.8949239999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.595387,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.361803,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 2397.633994,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 5.071148999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 4.433244,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 4.2027849999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.844541,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2602.965757,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.72841,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.830589999999997,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.04659,
             "unit": "ms"
           }
         ]
