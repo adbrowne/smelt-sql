@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780477262717,
+  "lastUpdate": 1780477265003,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23834,6 +23834,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.954183593861494,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4adc6eb5d556f7a82043820274813fcd4050bed0",
+          "message": "fix(parser): capture alias column lists on implicit (AS-less) table aliases\n\nThe explicit `AS t(c1, c2)` form already produced an ALIAS_COLUMN_LIST\nnode, but the implicit-alias path (`FROM (…) t(c1, c2)`, no AS keyword)\nconsumed the alias identifier and then returned, leaking the `(c1, c2)`\nlist into the enclosing SELECT's projection. DuckDB accepts the implicit\nform; smelt mis-parsed it, silently mangling the outer projection.\n\nExtract the column-list parsing into a shared `parse_alias_column_list`\nhelper and call it from both alias paths. The implicit form now binds the\ncolumn list identically to the explicit form, and VALUES/SELECT\nderived-table columns type correctly through the existing accessor.\n\nSpec: types.md §\"VALUES-derived tables\" notes the AS keyword is optional.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-03T18:58:12+10:00",
+          "tree_id": "319bdc4300c516f668307a8eae97353ee2be0e51",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4adc6eb5d556f7a82043820274813fcd4050bed0"
+        },
+        "date": 1780477264477,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.732854332051517,
             "unit": "MB/s"
           }
         ]
