@@ -5748,6 +5748,82 @@ fn alias_column_list_absent_on_cte_without_column_list() {
 }
 
 #[test]
+fn alias_column_list_on_implicit_alias_values_subquery() {
+    // `SELECT * FROM (VALUES (1, 2)) t(a, b)` — implicit alias (no AS keyword).
+    // The column list must be captured as an ALIAS_COLUMN_LIST inside the
+    // FROM clause, exactly as for the explicit `AS t(a, b)` form — not leaked
+    // into the enclosing SELECT's projection.
+    let parse = crate::parse("SELECT * FROM (VALUES (1, 2)) t(a, b)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let from_clause = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == FROM_CLAUSE)
+        .expect("must have a FROM_CLAUSE node");
+    let alias_col_list = from_clause
+        .descendants()
+        .find(|n| n.kind() == ALIAS_COLUMN_LIST)
+        .expect("ALIAS_COLUMN_LIST must live inside the FROM clause, not leak out");
+    let idents: Vec<_> = alias_col_list
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(
+        idents,
+        vec!["a", "b"],
+        "expected IDENTs a, b in ALIAS_COLUMN_LIST"
+    );
+}
+
+#[test]
+fn alias_column_list_on_implicit_alias_select_subquery() {
+    // `SELECT * FROM (SELECT 1) t(a)` — implicit alias on a SELECT subquery.
+    let parse = crate::parse("SELECT * FROM (SELECT 1) t(a)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let acl = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == ALIAS_COLUMN_LIST)
+        .expect("implicit alias must produce an ALIAS_COLUMN_LIST node");
+    let idents: Vec<_> = acl
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(idents, vec!["a"]);
+}
+
+#[test]
+fn alias_column_list_absent_on_bare_implicit_alias() {
+    // `SELECT * FROM (VALUES (1)) t` — implicit alias with no column list:
+    // no ALIAS_COLUMN_LIST node, no parse errors (regression guard).
+    let parse = crate::parse("SELECT * FROM (VALUES (1)) t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    assert!(
+        !parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == ALIAS_COLUMN_LIST),
+        "bare implicit alias must NOT produce an ALIAS_COLUMN_LIST node"
+    );
+}
+
+#[test]
 fn subquery_values_clause_returns_some_for_values_subquery() {
     // `(VALUES (1, 2))` inside a FROM clause — Subquery::values_clause() returns Some.
     let parse = crate::parse("SELECT * FROM (VALUES (1, 2)) AS t");
