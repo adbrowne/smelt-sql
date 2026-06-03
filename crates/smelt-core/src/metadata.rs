@@ -609,8 +609,8 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
             Ok(m) => m,
             Err(_) => {
                 let mut fallback = validated_map;
-                fallback.remove(&serde_yaml::Value::String("timeseries".to_string()));
-                fallback.remove(&serde_yaml::Value::String("incremental".to_string()));
+                fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
+                fallback.remove(serde_yaml::Value::String("incremental".to_string()));
                 serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
             }
         }
@@ -686,8 +686,8 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 Ok(m) => m,
                 Err(_) => {
                     let mut fallback = validated_map;
-                    fallback.remove(&serde_yaml::Value::String("timeseries".to_string()));
-                    fallback.remove(&serde_yaml::Value::String("incremental".to_string()));
+                    fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
+                    fallback.remove(serde_yaml::Value::String("incremental".to_string()));
                     serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
                 }
             }

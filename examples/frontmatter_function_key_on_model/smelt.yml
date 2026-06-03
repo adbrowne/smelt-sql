@@ -1,0 +1,13 @@
+name: frontmatter_function_key_on_model
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

@@ -2961,3 +2961,140 @@ fn non_ascii_broken_undeclared_column() {
         smelt_db::DiagnosticCode::UndeclaredColumn,
     );
 }
+
+// ===== U5 Frontmatter-parity end-to-end TDD tests =====
+//
+// Four fixtures cover the three BUGs end-to-end:
+//   - `examples/frontmatter_function_key_on_model/`        — positive: warns but builds as TABLE
+//   - `examples/timeseries_broken_invalid_granularity/`    — MalformedTimeseries (BUG-023 e2e)
+//   - `examples/timeseries_broken_unknown_key/`            — MalformedTimeseries (BUG-025 e2e)
+//   - `examples/frontmatter_broken_unknown_key/`           — FrontmatterParseError (BUG-016 e2e)
+
+/// U5 TDD: `examples/frontmatter_function_key_on_model/` emits exactly one
+/// Warning-severity `FrontmatterParseError` (inapplicable `deterministic` key)
+/// and zero Error-severity diagnostics.  The model's `materialization: table`
+/// must be retained — the block is not dropped.
+#[test]
+fn frontmatter_function_key_on_model_emits_warning_not_error() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, DiagnosticSeverity, Workspace};
+    use std::path::Path;
+
+    let example_dir = "examples/frontmatter_function_key_on_model";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut all_errors: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut fm_warnings: Vec<smelt_db::Diagnostic> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            match d.severity {
+                DiagnosticSeverity::Error => all_errors.push(d.clone()),
+                DiagnosticSeverity::Warning
+                    if d.code == Some(smelt_db::DiagnosticCode::FrontmatterParseError) =>
+                {
+                    fm_warnings.push(d.clone())
+                }
+                _ => {}
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            match d.0.severity {
+                DiagnosticSeverity::Error => all_errors.push(d.0.clone()),
+                DiagnosticSeverity::Warning
+                    if d.0.code == Some(smelt_db::DiagnosticCode::FrontmatterParseError) =>
+                {
+                    fm_warnings.push(d.0.clone())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        all_errors.is_empty(),
+        "expected zero Error-severity diagnostics in {}, got {}:\n  {}",
+        example_dir,
+        all_errors.len(),
+        all_errors
+            .iter()
+            .map(|d| format!("[{:?}] {:?}: {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        fm_warnings.len(),
+        1,
+        "expected exactly 1 FrontmatterParseError Warning in {}, got {}:\n  {}",
+        example_dir,
+        fm_warnings.len(),
+        fm_warnings
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert!(
+        fm_warnings[0].message.contains("deterministic"),
+        "warning message must name the inapplicable key 'deterministic'; got: {}",
+        fm_warnings[0].message
+    );
+}
+
+/// U5 TDD: `examples/timeseries_broken_invalid_granularity/` emits exactly one
+/// `MalformedTimeseries` Error — `granularity: fortnight` is not a valid value.
+/// BUG-023 end-to-end regression.
+#[test]
+fn timeseries_broken_invalid_granularity_emits_malformed_timeseries() {
+    check_workspace_emits_timeseries_diagnostic(
+        "examples/timeseries_broken_invalid_granularity",
+        "models/invalid_granularity.sql",
+        smelt_db::DiagnosticCode::MalformedTimeseries,
+    );
+}
+
+/// U5 TDD: `examples/timeseries_broken_unknown_key/` emits exactly one
+/// `MalformedTimeseries` Error — unknown sub-key `partition_columm` (typo).
+/// BUG-025 end-to-end regression.
+#[test]
+fn timeseries_broken_unknown_key_emits_malformed_timeseries() {
+    check_workspace_emits_timeseries_diagnostic(
+        "examples/timeseries_broken_unknown_key",
+        "models/unknown_subkey.sql",
+        smelt_db::DiagnosticCode::MalformedTimeseries,
+    );
+}
+
+/// U5 TDD: `examples/frontmatter_broken_unknown_key/` emits exactly one
+/// `FrontmatterParseError` Error — `mateializaton` is an unknown top-level key.
+/// BUG-016 end-to-end regression.
+#[test]
+fn frontmatter_broken_unknown_key_emits_frontmatter_parse_error() {
+    check_workspace_emits_exactly_one_emission_body_diagnostic(
+        "examples/frontmatter_broken_unknown_key",
+        "models/unknown_key.sql",
+        smelt_db::DiagnosticCode::FrontmatterParseError,
+    );
+}

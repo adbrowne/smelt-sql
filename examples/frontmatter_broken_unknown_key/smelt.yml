@@ -1,0 +1,13 @@
+name: frontmatter_broken_unknown_key
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
