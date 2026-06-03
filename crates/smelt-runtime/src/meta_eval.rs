@@ -69,6 +69,17 @@ pub struct EntityRefMeta {
     pub tags: Vec<String>,
 }
 
+/// One registered loader file's raw content, threaded into the build-path
+/// evaluator so a `smelt.config.load_yaml` / `load_json` call can be materialised
+/// to its concrete `List<record>` value at compile time. Mirrors the analyzer's
+/// `LoaderFileInput` (raw text + existence bit); keyed by the workspace-relative
+/// loader path the call's first argument names.
+#[derive(Clone, Debug)]
+pub struct LoaderFileMeta {
+    pub text: String,
+    pub exists: bool,
+}
+
 /// Compile-time context for the build-path meta evaluator.
 ///
 /// - `vars`: the workspace `vars:` (already coerced to `Text`) for `smelt.config.var`.
@@ -80,19 +91,22 @@ pub struct EntityRefMeta {
 ///   directly; `None` disables that (the call is left to the printer).
 /// - `models` / `sources`: the workspace's model / source listings (with merged
 ///   tags), for `smelt.models.*` / `smelt.sources.*` wide reflection.
+/// - `loaders`: registered loader files (raw text + existence) keyed by their
+///   workspace-relative path, for `smelt.config.load_yaml` / `load_json`.
 pub struct MetaEvalContext<'a> {
     pub vars: &'a BTreeMap<String, String>,
     pub columns: BTreeMap<String, Vec<ColumnRefMeta>>,
     pub fn_bodies: Option<&'a FnBodyMap>,
     pub models: &'a [EntityRefMeta],
     pub sources: &'a [EntityRefMeta],
+    pub loaders: &'a BTreeMap<String, LoaderFileMeta>,
 }
 
 impl<'a> MetaEvalContext<'a> {
     /// A context carrying only `vars:` — no reflection column metadata, no
-    /// function bodies, and no model / source listings. Used by call sites
-    /// (e.g. the ephemeral-CTE compiler) that do not have upstream schemas, a
-    /// function-body map, or a workspace listing.
+    /// function bodies, no model / source listings, and no loader files. Used by
+    /// call sites (e.g. the ephemeral-CTE compiler) that do not have upstream
+    /// schemas, a function-body map, a workspace listing, or loader content.
     pub fn vars_only(vars: &'a BTreeMap<String, String>) -> Self {
         Self {
             vars,
@@ -100,8 +114,18 @@ impl<'a> MetaEvalContext<'a> {
             fn_bodies: None,
             models: &[],
             sources: &[],
+            loaders: empty_loaders(),
         }
     }
+}
+
+/// A shared empty loader map for contexts that carry no loader files, so
+/// `vars_only` and the test constructors can borrow a `'static` empty map
+/// without each allocating one.
+fn empty_loaders() -> &'static BTreeMap<String, LoaderFileMeta> {
+    use std::sync::OnceLock;
+    static EMPTY: OnceLock<BTreeMap<String, LoaderFileMeta>> = OnceLock::new();
+    EMPTY.get_or_init(BTreeMap::new)
 }
 
 /// Run every in-model meta-language build-path expansion over `sql`, returning
@@ -290,6 +314,10 @@ fn eval_meta(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
     if let Some(list) = eval_wide_reflection(expr, ctx) {
         return Some(list);
     }
+    // Config loader `smelt.config.load_yaml/load_json('path', List<…>)` → List<record>.
+    if let Some(list) = eval_loader(expr, ctx) {
+        return Some(list);
+    }
     // A `smelt.define` call whose body is a reflection chain → substitute the
     // call's arguments into the body and evaluate it (no printer reprint).
     if let Some(call) = expr.as_smelt_path_call() {
@@ -442,6 +470,121 @@ fn entity_ref_record(e: &EntityRefMeta) -> MetaElem {
 /// embedded single quote).
 fn sql_text_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Evaluate a config loader call `smelt.config.load_yaml('path', List<…>)` /
+/// `load_json` to a `List<record>` of record elements, using the registered
+/// loader file content in `ctx`. The file is parsed with the analyzer's own
+/// `parse_yaml` / `parse_json` and validated against the call's schema via
+/// `validate_against_schema`, so the build materialises exactly the value the
+/// analyzer validated (`architecture.md` §"Diagnostic parity rule"). Each loaded
+/// record's scalar fields are pre-rendered to Data-World SQL literals (`Text` →
+/// `'…'`, `Integer` → bare number, `Boolean` → `TRUE`/`FALSE`); a record's
+/// non-scalar field (a nested record/list) is omitted (it has no scalar
+/// projection form).
+///
+/// Returns `None` — leaving the call verbatim — when `expr` is not a loader
+/// call, the schema is not `List<…>` (a record-root or `Map<…>` loader is not
+/// yet lowered here — see `meta_config_loading.md` §"Known Divergences"), the
+/// path is not a resolvable registered loader file, the file fails to parse, or
+/// validation produced any `Error` (all of which the analyzer gates, so a clean
+/// build never reaches one — drop-on-error).
+fn eval_loader(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
+    let call = expr.as_smelt_path_call()?;
+    let segs = call.segments();
+    if segs.len() != 2 || segs[0].to_lowercase() != "config" {
+        return None;
+    }
+    let loader = segs[1].to_lowercase();
+    if loader != "load_yaml" && loader != "load_json" {
+        return None;
+    }
+    let arg_list = call.arg_list()?;
+    let positional = arg_list.positional_args();
+    let path_arg = positional.first()?;
+    let schema_arg = positional.get(1)?;
+
+    let path = smelt_db::config_vars::extract_string_literal_value(path_arg)?;
+    let file = ctx.loaders.get(&path)?;
+    if !file.exists {
+        return None;
+    }
+
+    // Only `List<…>` loaders are lowered at build today; a `Map<…>` or
+    // record-root schema is left verbatim (analyzer-validated, not yet lowered).
+    let schema_text = schema_arg.syntax().text().to_string();
+    let schema_text = schema_text.trim();
+    if !schema_text.starts_with("List<") {
+        return None;
+    }
+    let schema_ty =
+        smelt_db::queries::loader::parse_smelt_type_from_field_annotation(schema_text, "");
+    if !smelt_db::loader::is_admissible_loader_schema(&schema_ty) {
+        return None;
+    }
+
+    let parsed = if path.ends_with(".json") {
+        smelt_db::loader::parse_json(&file.text, &path)
+    } else {
+        smelt_db::loader::parse_yaml(&file.text, &path)
+    }
+    .ok()?;
+
+    let range = smelt_parser::TextRange::new(0.into(), 0.into());
+    let result = smelt_db::loader::validate_against_schema(&parsed, &schema_ty, range);
+    if result
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == smelt_db::loader::LoaderDiagnosticSeverity::Error)
+    {
+        return None; // analyzer gates content errors; leave verbatim defensively
+    }
+    loader_value_to_meta(&result.value)
+}
+
+/// Convert a validated loader `List` value into a build-path [`MetaValue::List`].
+/// Each list element becomes a [`MetaElem`]: a record element keeps only its
+/// scalar fields (each pre-rendered to a Data-World SQL literal), and a scalar
+/// element is rendered directly. Returns `None` when the value is not a `List`.
+fn loader_value_to_meta(value: &smelt_db::loader::MetaValue) -> Option<MetaValue> {
+    use smelt_db::loader::MetaValue as LV;
+    let LV::List(elems) = value else {
+        return None;
+    };
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        match elem {
+            LV::Record(fields) => {
+                let mut rec = BTreeMap::new();
+                for (k, v) in fields {
+                    if let Some(s) = render_loader_scalar(v) {
+                        rec.insert(k.clone(), s);
+                    }
+                }
+                out.push(MetaElem::Record(rec));
+            }
+            scalar => match render_loader_scalar(scalar) {
+                Some(s) => out.push(MetaElem::Scalar(s)),
+                None => return None, // a non-scalar, non-record element is unrenderable
+            },
+        }
+    }
+    Some(MetaValue::List(out))
+}
+
+/// Render a scalar loader value to its Data-World SQL literal. `Text` →
+/// single-quoted (quotes doubled); `Integer` / `Float` → the numeric literal;
+/// `Boolean` → `TRUE` / `FALSE`. A composite value (record / list / map) or an
+/// error node has no scalar form → `None`.
+fn render_loader_scalar(value: &smelt_db::loader::MetaValue) -> Option<String> {
+    use smelt_db::loader::MetaValue as LV;
+    match value {
+        LV::Text(s) => Some(sql_text_literal(s)),
+        LV::Integer(i) => Some(i.to_string()),
+        LV::Float(f) => Some(f.to_string()),
+        LV::Boolean(b) => Some(if *b { "TRUE" } else { "FALSE" }.to_string()),
+        LV::Record(_) | LV::List(_) | LV::Map(_) | LV::Error => None,
+    }
 }
 
 /// Evaluate a `smelt.define` call (`smelt.functions.foo(args)` / `smelt.fn.foo`
@@ -1328,6 +1471,7 @@ mod tests {
             fn_bodies: Some(fn_bodies),
             models: &[],
             sources: &[],
+            loaders: empty_loaders(),
         };
         expand_in_model_meta(sql, &ctx)
     }
@@ -1430,6 +1574,7 @@ mod tests {
             fn_bodies: None,
             models: &models,
             sources: &sources,
+            loaders: empty_loaders(),
         };
         expand_in_model_meta(sql, &ctx)
     }
@@ -1506,6 +1651,7 @@ mod tests {
             fn_bodies: None,
             models: &models,
             sources: &[],
+            loaders: empty_loaders(),
         };
         let out = expand_in_model_meta(
             "SELECT reduce(map(smelt.models.with_tag(smelt.config.var('seg')), fn m => m.name), concat_with(', '))",
@@ -1541,5 +1687,105 @@ mod tests {
             audit_sources(),
         );
         assert_eq!(eval_wide(&once, Vec::new(), audit_sources()), once);
+    }
+
+    // ── P7c build-path config-loader (`smelt.config.load_yaml`) tests ─────────
+
+    /// A `cohorts.yaml` with three records (mixed Text / Integer fields).
+    fn cohorts_loaders() -> BTreeMap<String, LoaderFileMeta> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "configs/cohorts.yaml".to_string(),
+            LoaderFileMeta {
+                text: "- name: us_west\n  region: us-west-2\n  threshold: 100\n\
+                       - name: us_east\n  region: us-east-1\n  threshold: 100\n\
+                       - name: eu\n  region: eu-west-1\n  threshold: 50\n"
+                    .to_string(),
+                exists: true,
+            },
+        );
+        m
+    }
+
+    /// Evaluate with a loader-file context.
+    fn eval_load(sql: &str, loaders: &BTreeMap<String, LoaderFileMeta>) -> String {
+        let vars = no_vars();
+        let ctx = MetaEvalContext {
+            vars: &vars,
+            columns: BTreeMap::new(),
+            fn_bodies: None,
+            models: &[],
+            sources: &[],
+            loaders,
+        };
+        expand_in_model_meta(sql, &ctx)
+    }
+
+    #[test]
+    fn loader_list_map_field_spread_to_literals() {
+        // `...load_yaml(...) |> map(fn c => c.region)` lowers to one string
+        // literal per loaded record's `region` field.
+        let out = eval_load(
+            "SELECT ...smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, region: Text, threshold: Integer}>) |> map(fn c => c.region)",
+            &cohorts_loaders(),
+        );
+        assert_eq!(out, "SELECT 'us-west-2', 'us-east-1', 'eu-west-1'");
+    }
+
+    #[test]
+    fn loader_list_map_integer_field_spread() {
+        // An Integer field projects to a bare numeric literal.
+        let out = eval_load(
+            "SELECT ...smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, region: Text, threshold: Integer}>) |> map(fn c => c.threshold)",
+            &cohorts_loaders(),
+        );
+        assert_eq!(out, "SELECT 100, 100, 50");
+    }
+
+    #[test]
+    fn loader_list_reduce_concat_folds_to_scalar() {
+        // `reduce(map(load_yaml(...), fn c => c.region), concat_with(', '))`
+        // folds the loaded regions into a single scalar — the executable form.
+        let out = eval_load(
+            "SELECT reduce(map(smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, region: Text, threshold: Integer}>), fn c => c.region), concat_with(', ')) AS regions",
+            &cohorts_loaders(),
+        );
+        assert_eq!(
+            out,
+            "SELECT 'us-west-2' || ', ' || 'us-east-1' || ', ' || 'eu-west-1' AS regions"
+        );
+    }
+
+    #[test]
+    fn loader_missing_file_left_verbatim() {
+        // A loader path absent from the context resolves to nothing — the
+        // spread is left verbatim (analyzer drop-on-error).
+        let sql = "SELECT ...smelt.config.load_yaml('configs/missing.yaml', List<{name: Text}>) |> map(fn c => c.name)";
+        assert_eq!(eval_load(sql, &BTreeMap::new()), sql);
+    }
+
+    #[test]
+    fn loader_map_schema_left_verbatim() {
+        // A `Map<…>`-schema loader is not yet lowered at build (Known
+        // Divergence) — the call is left verbatim.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "configs/tenants.yaml".to_string(),
+            LoaderFileMeta {
+                text: "tenant_a:\n  plan: pro\n".to_string(),
+                exists: true,
+            },
+        );
+        let sql = "SELECT reduce(smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text}>) |> m => m.keys(), concat_with(', ')) AS names";
+        assert_eq!(eval_load(sql, &m), sql);
+    }
+
+    #[test]
+    fn loader_idempotent_second_pass() {
+        let once = eval_load(
+            "SELECT reduce(map(smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, region: Text, threshold: Integer}>), fn c => c.region), concat_with(', ')) AS regions",
+            &cohorts_loaders(),
+        );
+        assert_eq!(eval_load(&once, &cohorts_loaders()), once);
     }
 }

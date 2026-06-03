@@ -78,6 +78,46 @@ fn spread_does_not_emit_scalar_position() {
 }
 
 #[test]
+fn bare_list_loader_in_select_emits_scalar_position() {
+    // A `smelt.config.load_yaml(path, List<…>)` whose value is left bare in a
+    // select item is an unconsumed `List<record>` — the same
+    // `MetaListInScalarPosition` as a bare list literal (P7c design decision:
+    // loaders must be consumed).
+    assert_eq!(
+        scalar_position_count(
+            "SELECT smelt.config.load_yaml('configs/c.yaml', List<{name: Text}>)\n"
+        ),
+        1,
+        "a bare List-loader select item must emit MetaListInScalarPosition"
+    );
+}
+
+#[test]
+fn bare_map_loader_in_select_emits_scalar_position() {
+    // A `Map<Text, …>`-schema loader value is likewise a collection that must be
+    // consumed before reaching a Data-World scalar position.
+    assert_eq!(
+        scalar_position_count(
+            "SELECT smelt.config.load_yaml('configs/c.yaml', Map<Text, {plan: Text}>)\n"
+        ),
+        1,
+        "a bare Map-loader select item must emit MetaListInScalarPosition"
+    );
+}
+
+#[test]
+fn spread_consumed_list_loader_no_scalar_position() {
+    // A loader consumed by a spread + HOF is not a bare scalar-position list.
+    assert_eq!(
+        scalar_position_count(
+            "SELECT ...smelt.config.load_yaml('configs/c.yaml', List<{name: Text}>) |> map(fn c => c.name)\n"
+        ),
+        0,
+        "a spread-consumed loader list must not emit MetaListInScalarPosition"
+    );
+}
+
+#[test]
 fn heterogeneous_list_suppresses_scalar_position() {
     // A malformed (heterogeneous) bare list emits its own list diagnostic;
     // drop-on-error suppresses the scalar-position diagnostic (no double-emit).

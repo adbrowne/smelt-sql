@@ -55,9 +55,21 @@ use smelt_parser::{self, File as AstFile};
 /// `reduce` collapses a list to a scalar, so a `reduce(...)` item is consumed
 /// and not list-yielding. A spread (`...xs`) is a `LIST_SPREAD` node, not a
 /// select-item expression, so it never reaches this check.
+///
+/// A `smelt.config.load_yaml` / `load_json` call whose schema is `List<…>` or
+/// `Map<Text, …>` yields a collection value (`List<record>` / `Map<Text,
+/// record>`); left bare in a select item it is likewise unconsumed
+/// (`meta_config_loading.md` — the loader is governed by the same
+/// lists-must-be-consumed rule). A record-schema loader returns a single record,
+/// not a collection, and is not flagged here.
 fn select_item_yields_bare_list(expr: &smelt_parser::ast::Expr) -> bool {
     // Case 1: a bare list literal directly in the select item.
     if expr.as_array_literal().is_some() {
+        return true;
+    }
+    // Case 1b: a bare collection-valued loader call (`load_yaml` / `load_json`
+    // with a `List<…>` / `Map<…>` schema argument).
+    if loader_call_yields_collection(expr) {
         return true;
     }
     // Case 2a: a top-level `map` / `filter` HOF call.
@@ -82,6 +94,34 @@ fn select_item_yields_bare_list(expr: &smelt_parser::ast::Expr) -> bool {
         }
     }
     false
+}
+
+/// True if `expr` is a `smelt.config.load_yaml` / `load_json` call whose schema
+/// argument (the second positional argument) is a `List<…>` or `Map<…>` type —
+/// i.e. the loader's value is a collection that must be consumed before it
+/// reaches a Data-World scalar position. A record-schema loader (`{…}` or a
+/// named record) returns a single record and is excluded.
+fn loader_call_yields_collection(expr: &smelt_parser::ast::Expr) -> bool {
+    let Some(call) = expr.as_smelt_path_call() else {
+        return false;
+    };
+    let segs = call.segments();
+    if segs.len() != 2 || segs[0].to_lowercase() != "config" {
+        return false;
+    }
+    let loader = segs[1].to_lowercase();
+    if loader != "load_yaml" && loader != "load_json" {
+        return false;
+    }
+    let Some(schema_arg) = call
+        .arg_list()
+        .and_then(|a| a.positional_args().into_iter().nth(1))
+    else {
+        return false;
+    };
+    let schema_text = schema_arg.syntax().text().to_string();
+    let trimmed = schema_text.trim();
+    trimmed.starts_with("List<") || trimmed.starts_with("Map<")
 }
 
 /// True if a function call is a `map` or `filter` HOF (the list-yielding HOFs).

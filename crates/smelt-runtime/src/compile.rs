@@ -347,6 +347,13 @@ pub struct UpstreamSchemas {
     /// by the build-path wide-reflection evaluator; never reaches the engine.
     pub model_refs: Vec<crate::meta_eval::EntityRefMeta>,
     pub source_refs: Vec<crate::meta_eval::EntityRefMeta>,
+    /// Registered loader files (raw text + existence) keyed by their
+    /// workspace-relative path, built from the analyzer's own `LoaderFileInput`
+    /// registry so the build resolves `smelt.config.load_yaml` / `load_json`
+    /// against the same content the editor validated (`architecture.md`
+    /// §"Diagnostic parity rule"). Consumed at compile time by the build-path
+    /// loader evaluator; never reaches the engine.
+    pub loaders: std::collections::BTreeMap<String, crate::meta_eval::LoaderFileMeta>,
 }
 
 impl UpstreamSchemas {
@@ -479,6 +486,26 @@ impl UpstreamSchemas {
         // ascending by `path`). `models_all` is already workspace-wide sorted.
         source_refs.sort_by(|a, b| a.path.cmp(&b.path));
 
+        // Registered loader files for `smelt.config.load_yaml` / `load_json`.
+        // Reuse the analyzer's own `LoaderFileInput` registry (populated by
+        // `init_db` via `register_loader_files_from_disk`) so the build reads the
+        // same loader content the editor validated (per `architecture.md`
+        // §"Diagnostic parity rule").
+        let loaders: std::collections::BTreeMap<String, crate::meta_eval::LoaderFileMeta> =
+            workspace
+                .loader_files(db)
+                .iter()
+                .map(|input| {
+                    (
+                        input.path(db).to_string(),
+                        crate::meta_eval::LoaderFileMeta {
+                            text: input.text(db).to_string(),
+                            exists: input.exists(db),
+                        },
+                    )
+                })
+                .collect();
+
         Ok(Self {
             models: model_schemas,
             seeds: seed_schemas,
@@ -487,6 +514,7 @@ impl UpstreamSchemas {
             vars,
             model_refs,
             source_refs,
+            loaders,
         })
     }
 }
@@ -544,6 +572,7 @@ impl SqlCompiler {
             fn_bodies: self.fn_bodies.as_deref(),
             models: &self.upstream_schemas.model_refs,
             sources: &self.upstream_schemas.source_refs,
+            loaders: &self.upstream_schemas.loaders,
         }
     }
 
