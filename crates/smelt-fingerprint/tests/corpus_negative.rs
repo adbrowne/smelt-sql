@@ -118,6 +118,49 @@ fn changed_join_condition_on_derived_table_differs() {
     assert_distinct(&a, &b);
 }
 
+// ---- Soundness guards: row-affecting tail clauses must move the fingerprint ----
+
+/// A three-row body so LIMIT/OFFSET have material effect.
+const TAIL_BODY: &str = "SELECT 1 AS a UNION ALL SELECT 2 UNION ALL SELECT 3";
+
+#[test]
+fn added_limit_differs() {
+    // LIMIT changes the row set (3 rows vs 1); it must be in the fingerprint.
+    let a = format!("SELECT a FROM ({TAIL_BODY}) AS t");
+    let b = format!("SELECT a FROM ({TAIL_BODY}) AS t LIMIT 1");
+    assert_distinct(&a, &b);
+}
+
+#[test]
+fn changed_limit_count_differs() {
+    let a = format!("SELECT a FROM ({TAIL_BODY}) AS t LIMIT 1");
+    let b = format!("SELECT a FROM ({TAIL_BODY}) AS t LIMIT 2");
+    assert_distinct(&a, &b);
+}
+
+#[test]
+fn added_offset_differs() {
+    let a = format!("SELECT a FROM ({TAIL_BODY}) AS t LIMIT 1");
+    let b = format!("SELECT a FROM ({TAIL_BODY}) AS t LIMIT 1 OFFSET 1");
+    assert_distinct(&a, &b);
+}
+
+#[test]
+fn order_by_direction_under_limit_differs() {
+    // ORDER BY decides which row survives LIMIT 1; ASC vs DESC pick different rows.
+    let a = format!("SELECT a FROM ({TAIL_BODY}) AS t ORDER BY a ASC LIMIT 1");
+    let b = format!("SELECT a FROM ({TAIL_BODY}) AS t ORDER BY a DESC LIMIT 1");
+    assert_distinct(&a, &b);
+}
+
+#[test]
+fn qualify_filter_differs() {
+    // QUALIFY filters rows by a window condition — a real row-set change.
+    let a = format!("SELECT a FROM ({TAIL_BODY}) AS t");
+    let b = format!("SELECT a FROM ({TAIL_BODY}) AS t QUALIFY row_number() OVER (ORDER BY a) = 1");
+    assert_distinct(&a, &b);
+}
+
 // ---- Soundness guards: reorder must NOT collapse where position is observable ----
 
 #[test]

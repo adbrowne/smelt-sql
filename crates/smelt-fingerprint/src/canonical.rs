@@ -304,6 +304,28 @@ pub(crate) fn build(select: &SelectStmt, schema: &[(String, String)]) -> Built {
         };
     }
 
+    // Row-set-affecting tail clauses are not represented in the structured form:
+    // LIMIT/OFFSET/FETCH select *which* rows survive (and an ORDER BY decides
+    // which, under a limit), and QUALIFY filters by a window condition. Dropping
+    // them would make a top-N / paginated / window-filtered change a false
+    // equivalence. Conservative: verbatim. A bare ORDER BY with no limit only
+    // reorders an order-insensitive (multiset-by-name) relation, so it is left
+    // ignored and does not force a fallback.
+    if node.children().any(|c| {
+        matches!(
+            c.kind(),
+            SyntaxKind::LIMIT_CLAUSE | SyntaxKind::FETCH_CLAUSE | SyntaxKind::QUALIFY_CLAUSE
+        )
+    }) {
+        missed.push(MissedReuse {
+            reason: "LIMIT/OFFSET/FETCH/QUALIFY — verbatim fallback".into(),
+        });
+        return Built {
+            canon: Canon::Verbatim(norm(node)),
+            missed,
+        };
+    }
+
     let (alias_map, safe) = collect_alias_map(select);
     if !safe {
         missed.push(MissedReuse {

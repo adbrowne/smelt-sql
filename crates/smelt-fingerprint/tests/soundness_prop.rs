@@ -445,3 +445,172 @@ proptest! {
         }
     }
 }
+
+// ===========================================================================
+// §5.5 axes — "same printed type does not imply same rows".
+//
+// Generates queries that exercise the value-affecting dimensions §5.5 flags:
+//   - row-affecting tail clauses: LIMIT / OFFSET,
+//   - decimal scale (CAST AS DECIMAL(p, s)),
+//   - nullability (NULLIF) and DISTINCT.
+// The invariant is the same: equal fingerprint ⇒ equal relation.
+//
+// Determinism is a precondition for DuckDB being a stable oracle, so a sliced
+// query (LIMIT/OFFSET) is always given a total ORDER BY over its projected
+// columns. A bare LIMIT/OFFSET *without* a total ORDER BY is itself
+// non-deterministic — DuckDB returns an arbitrary row, and two runs of the
+// identical query can disagree (this generator demonstrated it). That is the
+// §5.5 "unbounded-without-total-order" hazard, on plain pagination rather than
+// `random()`/`now()`. Inline non-determinism in general (`now()`, `random()`,
+// unordered slices) is therefore NOT asserted here: such a query cannot satisfy
+// "fp-equal ⇒ rows-equal" at all, so the sound answer is a determinism model
+// that marks the model non-reusable (accept-current / assert-deterministic),
+// not a canonicaliser change. That gap is tracked in the research doc.
+// ===========================================================================
+
+#[derive(Debug, Clone, Copy)]
+enum Wrap {
+    Plain,
+    /// `CAST(col AS DECIMAL(18, scale))`.
+    DecimalScale(u8),
+    /// `NULLIF(col, k)`.
+    NullIf(i64),
+}
+
+#[derive(Debug, Clone)]
+struct S5Query {
+    proj: Vec<(usize, Wrap)>, // (column index, expression wrapper)
+    distinct: bool,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+enum S5Transform {
+    ReorderProj,
+    SetWrap(usize, Wrap),
+    ToggleDistinct,
+    SetLimit(u32),
+    ClearLimit,
+    SetOffset(u32),
+}
+
+impl S5Query {
+    fn render_col((col, wrap): (usize, Wrap)) -> String {
+        let c = COLS[col];
+        let expr = match wrap {
+            Wrap::Plain => c.to_string(),
+            Wrap::DecimalScale(s) => format!("CAST({c} AS DECIMAL(18, {s}))"),
+            Wrap::NullIf(k) => format!("NULLIF({c}, {k})"),
+        };
+        format!("{expr} AS {c}")
+    }
+
+    fn to_sql(&self) -> String {
+        let cols: Vec<String> = self.proj.iter().copied().map(Self::render_col).collect();
+        let distinct = if self.distinct { "DISTINCT " } else { "" };
+        let limit = match self.limit {
+            Some(n) => format!(" LIMIT {n}"),
+            None => String::new(),
+        };
+        let offset = match self.offset {
+            Some(n) => format!(" OFFSET {n}"),
+            None => String::new(),
+        };
+        // A sliced query needs a total order to be deterministic; order over the
+        // projected output names (always valid, incl. under DISTINCT).
+        let order = if self.limit.is_some() || self.offset.is_some() {
+            let names: Vec<&str> = self.proj.iter().map(|&(c, _)| COLS[c]).collect();
+            format!(" ORDER BY {}", names.join(", "))
+        } else {
+            String::new()
+        };
+        format!(
+            "SELECT {distinct}{cols} FROM ({SEED_BODY}) AS t{order}{limit}{offset}",
+            cols = cols.join(", "),
+        )
+    }
+}
+
+fn apply_s5(base: &S5Query, t: &S5Transform) -> S5Query {
+    let mut q = base.clone();
+    match t {
+        S5Transform::ReorderProj => {
+            if q.proj.len() > 1 {
+                q.proj.rotate_left(1);
+            }
+        }
+        S5Transform::SetWrap(i, w) => {
+            let idx = i % q.proj.len();
+            q.proj[idx].1 = *w;
+        }
+        S5Transform::ToggleDistinct => q.distinct = !q.distinct,
+        S5Transform::SetLimit(n) => q.limit = Some(*n),
+        S5Transform::ClearLimit => q.limit = None,
+        S5Transform::SetOffset(n) => q.offset = Some(*n),
+    }
+    q
+}
+
+fn wrap_strategy() -> impl Strategy<Value = Wrap> {
+    prop_oneof![
+        Just(Wrap::Plain),
+        (0u8..4).prop_map(Wrap::DecimalScale),
+        (0i64..4).prop_map(Wrap::NullIf),
+    ]
+}
+
+fn s5_transform_strategy() -> impl Strategy<Value = S5Transform> {
+    prop_oneof![
+        Just(S5Transform::ReorderProj),
+        (0usize..3, wrap_strategy()).prop_map(|(i, w)| S5Transform::SetWrap(i, w)),
+        Just(S5Transform::ToggleDistinct),
+        (0u32..3).prop_map(S5Transform::SetLimit),
+        Just(S5Transform::ClearLimit),
+        (0u32..3).prop_map(S5Transform::SetOffset),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn fingerprint_soundness_s5_axes(
+        cols in proj_strategy(),
+        distinct in any::<bool>(),
+        limit in proptest::option::of(0u32..3),
+        offset in proptest::option::of(0u32..3),
+        transform in s5_transform_strategy(),
+    ) {
+        let base = S5Query {
+            proj: cols.iter().map(|&i| (i, Wrap::Plain)).collect(),
+            distinct,
+            limit,
+            offset,
+        };
+        let transformed = apply_s5(&base, &transform);
+
+        let base_sql = base.to_sql();
+        let trans_sql = transformed.to_sql();
+
+        let fb = output_fingerprint_from_sql(&base_sql, &[])
+            .unwrap_or_else(|| panic!("base did not parse: {base_sql}"));
+        let ft = output_fingerprint_from_sql(&trans_sql, &[])
+            .unwrap_or_else(|| panic!("transformed did not parse: {trans_sql}"));
+
+        if fb.fingerprint == ft.fingerprint {
+            let o = DuckDbRelationOracle::new();
+            let rb = o.run(&base_sql)
+                .unwrap_or_else(|e| panic!("base failed to run ({e}): {base_sql}"));
+            let rt = o.run(&trans_sql)
+                .unwrap_or_else(|e| panic!("transformed failed to run ({e}): {trans_sql}"));
+            prop_assert!(
+                relations_equal(&rb, &rt).is_ok(),
+                "UNSOUND: equal fingerprints but DuckDB relations differ\n  base: {}\n  transformed: {}\n  diff: {:?}",
+                base_sql,
+                trans_sql,
+                relations_equal(&rb, &rt),
+            );
+        }
+    }
+}
