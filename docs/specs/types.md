@@ -47,7 +47,7 @@ sources:
 A `(VALUES (e₁, e₂, …), …) AS alias(c₁, c₂, …)` derived table produces a typed schema using the following rules:
 
 - **Column-wise LUB.** Each column's type is the least upper bound of the corresponding element across all rows, computed by the numeric promotion chain (§"Numeric promotion chain") and the string/temporal family rules (§"String unification", §5).
-- **Alias column list.** When `AS alias(c₁, c₂, …)` provides an explicit column list, the inferred types are bound to those names positionally. When the list is omitted, the columns are named `col1`, `col2`, … (1-indexed).
+- **Alias column list.** When `alias(c₁, c₂, …)` provides an explicit column list, the inferred types are bound to those names positionally. When the list is omitted, the columns are named `col1`, `col2`, … (1-indexed). The `AS` keyword is optional: `(VALUES …) t(c₁, …)` binds the column list identically to `(VALUES …) AS t(c₁, …)`.
 - **Empty VALUES (zero rows).** A `VALUES` clause with no rows produces no columns. The compiler emits `EmptyValuesClause` (§"Diagnostic codes") anchored at the VALUES clause span.
 
 ### `smelt.define` type annotations

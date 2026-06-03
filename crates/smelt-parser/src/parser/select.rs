@@ -420,41 +420,52 @@ impl<'a> super::Parser<'a> {
             self.parse_unpivot_clause();
         }
 
-        // Optional AS alias (explicit with AS keyword or implicit)
+        // Optional alias, with an optional column list. The alias may be
+        // explicit (`AS t`) or implicit (`t`); the `(c1, c2, …)` column list
+        // attaches to either form identically.
         self.skip_trivia();
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
             self.expect(IDENT);
-            // Optional column list: AS t(c1, c2, …)
-            self.skip_trivia();
-            if self.at(LPAREN) {
-                self.start_node(ALIAS_COLUMN_LIST);
-                self.advance(); // consume LPAREN
-                self.skip_trivia();
-                loop {
-                    if !self.at(IDENT) {
-                        break;
-                    }
-                    self.advance();
-                    self.skip_trivia();
-                    if self.at(COMMA) {
-                        self.advance();
-                        self.skip_trivia();
-                    } else {
-                        break;
-                    }
-                }
-                self.expect(RPAREN);
-                self.finish_node(); // ALIAS_COLUMN_LIST
-            }
+            self.parse_alias_column_list();
         } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
-            // Implicit alias (no AS keyword)
-            // Only consume if it's not a keyword that would end the table ref
+            // Implicit alias (no AS keyword). Only consume if it's not a
+            // keyword that would end the table ref.
             self.advance();
+            self.parse_alias_column_list();
         }
 
         self.finish_node();
+    }
+
+    /// Parse an optional alias column list `(c1, c2, …)` immediately following
+    /// a table alias, emitting an `ALIAS_COLUMN_LIST` node. No-op when the next
+    /// non-trivia token is not `LPAREN`. Shared by the explicit (`AS t(…)`) and
+    /// implicit (`t(…)`) alias paths.
+    fn parse_alias_column_list(&mut self) {
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            return;
+        }
+        self.start_node(ALIAS_COLUMN_LIST);
+        self.advance(); // consume LPAREN
+        self.skip_trivia();
+        loop {
+            if !self.at(IDENT) {
+                break;
+            }
+            self.advance();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+            } else {
+                break;
+            }
+        }
+        self.expect(RPAREN);
+        self.finish_node(); // ALIAS_COLUMN_LIST
     }
 
     pub(super) fn parse_pivot_clause(&mut self) {
