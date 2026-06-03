@@ -249,7 +249,10 @@ pub fn provenance_validator_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let (props, _) = smelt_planner::logical::parse_function_properties(&fm);
+        let (props, _) = smelt_planner::logical::parse_function_properties(
+            &fm,
+            smelt_core::DeclarationKind::Define,
+        );
 
         // Skip if no declared provenance or joins
         let has_provenance = matches!(props.provenance, Provenance::Declared(_));

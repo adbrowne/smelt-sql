@@ -703,7 +703,10 @@ pub fn provenance_unstable_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(
+            &fm,
+            smelt_core::DeclarationKind::Define,
+        );
         let name = define.name().unwrap_or_default();
         let range = sigs
             .iter()
@@ -730,7 +733,10 @@ pub fn provenance_unstable_diagnostics_for_file(
         let Some(fm) = ext.frontmatter(raw_text) else {
             continue;
         };
-        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(
+            &fm,
+            smelt_core::DeclarationKind::Extern,
+        );
         let name = ext.name().unwrap_or_default();
         let range = sigs
             .iter()
@@ -758,15 +764,16 @@ pub fn provenance_unstable_diagnostics_for_file(
 /// Per-file diagnostics for malformed / unknown-key frontmatter on
 /// `smelt.define` and `smelt.extern` declarations.
 ///
-/// For each declaration's frontmatter (if any), runs the pure
-/// [`smelt_planner::logical::parse_function_properties`] parser and converts
-/// every [`smelt_planner::logical::FrontmatterDiagnostic`] it returns into a
-/// full [`Diagnostic`] anchored at the declaration's name range.
+/// For each declaration's frontmatter (if any), runs the shared
+/// [`smelt_planner::logical::parse_function_properties`] parser (which now
+/// routes through the unified catalogue) and converts every
+/// [`smelt_planner::logical::FrontmatterDiagnostic`] it returns into a full
+/// [`Diagnostic`] anchored at the declaration's name range.
 ///
 /// Unlike [`provenance_unstable_diagnostics_for_file`], this helper does
 /// **not** consult the `unstable_schema` flag — frontmatter parse errors and
-/// unknown-key warnings fire unconditionally so they remain visible on
-/// workspaces that opt into `unstable_schema: true`. (Phase 43.)
+/// unknown-key errors fire unconditionally so they remain visible on
+/// workspaces that opt into `unstable_schema: true`.
 pub fn frontmatter_parse_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
@@ -788,7 +795,10 @@ pub fn frontmatter_parse_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(
+            &fm,
+            smelt_core::DeclarationKind::Define,
+        );
         if fm_diags.is_empty() {
             continue;
         }
@@ -808,7 +818,10 @@ pub fn frontmatter_parse_diagnostics_for_file(
         let Some(fm) = ext.frontmatter(raw_text) else {
             continue;
         };
-        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(
+            &fm,
+            smelt_core::DeclarationKind::Extern,
+        );
         if fm_diags.is_empty() {
             continue;
         }
@@ -996,7 +1009,10 @@ pub fn missing_provenance_advisory_for_file(
                         .defines()
                         .find(|d| d.name().as_deref() == Some(fn_name.as_str()))
                         .and_then(|d| d.frontmatter(&decl_raw))?;
-                    let (props, _) = smelt_planner::logical::parse_function_properties(&fm);
+                    let (props, _) = smelt_planner::logical::parse_function_properties(
+                        &fm,
+                        smelt_core::DeclarationKind::Define,
+                    );
                     Some(matches!(props.provenance, Provenance::Declared(_)))
                 })
                 .unwrap_or(false);

@@ -99,12 +99,10 @@ smelt.define fn_malformed(source: TableExpr<{revenue: Numeric, cost: Numeric}>) 
 }
 
 #[test]
-fn unknown_frontmatter_key_under_unstable_schema_emits_warning() {
-    // Mirrors `examples/broken/models/fn_frontmatter_unknown_key.sql` — the
-    // YAML parses cleanly but contains an `unknown_property:` key that's not
-    // in the allow-list. The parser surfaces a Warning-severity diagnostic
-    // and the rest of the frontmatter is honoured. This must still fire on
-    // `unstable_schema: true` workspaces.
+fn unknown_frontmatter_key_on_function_emits_error() {
+    // U4 behaviour: unknown keys in function frontmatter are now Errors (via
+    // the unified catalogue), not Warnings. The rest of the frontmatter
+    // (e.g. `deterministic: true`) is honoured.
     let root = PathBuf::from("/fake/phase43_unknown_key");
     let fn_path = root.join("models").join("fn_unknown_key.sql");
     let fn_src = "\
@@ -124,8 +122,8 @@ smelt.define fn_unknown_key(source: TableExpr<{revenue: Numeric, cost: Numeric}>
     assert!(
         parse_diags
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Warning),
-        "expected at least one Warning-severity FrontmatterParseError; got {:#?}",
+            .any(|d| d.severity == DiagnosticSeverity::Error),
+        "expected at least one Error-severity FrontmatterParseError; got {:#?}",
         file_diagnostics(&db, ws, file)
     );
 }

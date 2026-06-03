@@ -970,7 +970,10 @@ SELECT * FROM users"#;
         );
         if let Ok(FileMetadata::Single { metadata, .. }) = result {
             assert_eq!(metadata.name, Some("test".to_string()));
-            assert_eq!(metadata.materialization, None, "unknown key must be dropped");
+            assert_eq!(
+                metadata.materialization, None,
+                "unknown key must be dropped"
+            );
         }
     }
 

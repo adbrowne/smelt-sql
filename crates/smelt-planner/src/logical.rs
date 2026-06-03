@@ -21,7 +21,7 @@ use smelt_types::DataType;
 
 // The canonical types now live in smelt-core; re-export so existing callers
 // of smelt-planner that import these names continue to work unchanged.
-pub use smelt_core::{FrontmatterDiagnostic, FrontmatterSeverity};
+pub use smelt_core::{DeclarationKind, FrontmatterDiagnostic, FrontmatterSeverity};
 
 /// Fully-qualified function identifier, e.g. `"some_fn"` or `"core.math.safe_divide"`.
 pub type FnId = String;
@@ -296,30 +296,6 @@ pub enum LogicalNode {
 /// The root of a logical plan tree. A thin alias over `Arc<LogicalNode>`.
 pub type Plan = Arc<LogicalNode>;
 
-/// Known top-level frontmatter keys honoured by the parser. Any other key
-/// produces a [`FrontmatterSeverity::Warning`] diagnostic. Keys consumed by
-/// other passes (e.g. `backends:`) live alongside the function-properties
-/// keys and are not currently surfaced as warnings here — see
-/// [`is_known_top_level_key`].
-const KNOWN_KEYS: &[&str] = &[
-    "deterministic",
-    "idempotent",
-    "append_only",
-    "needs_cast",
-    "provenance",
-    "joins",
-    // Other frontmatter keys consumed elsewhere (backends-narrowing check,
-    // future planner extensions). Listed here so we do not warn about them.
-    "backends",
-    "incremental",
-    "materialization",
-    "tags",
-];
-
-fn is_known_top_level_key(key: &str) -> bool {
-    KNOWN_KEYS.contains(&key)
-}
-
 /// Raw deserialisation target for a single `joins:` entry. Each field is
 /// optional so a partially-shaped entry can be reported as a warning rather
 /// than a hard error.
@@ -333,169 +309,87 @@ struct RawJoinSpec {
     cardinality: Option<serde_yaml::Value>,
 }
 
-/// Parse the frontmatter YAML block into [`FunctionProperties`] plus a list
-/// of [`FrontmatterDiagnostic`]s describing parse failures and unknown keys.
+/// Lenient serde target for the validated map returned by
+/// [`smelt_core::frontmatter::parse_frontmatter`].
 ///
-/// Accepted shapes (any indentation style serde_yaml accepts):
+/// Only the keys applicable to function/extern declarations are present in the
+/// validated map; the catalogue already rejected or warned about everything
+/// else. Using `#[serde(default)]` means absent keys produce the default value
+/// rather than a parse error.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RawFunctionProperties {
+    deterministic: bool,
+    idempotent: bool,
+    append_only: bool,
+    needs_cast: bool,
+    provenance: Option<serde_yaml::Value>,
+    joins: Option<serde_yaml::Value>,
+}
+
+/// Parse the frontmatter YAML block into [`FunctionProperties`] plus a list
+/// of [`FrontmatterDiagnostic`]s describing parse failures and unknown/
+/// inapplicable keys.
+///
+/// Routes through the shared [`smelt_core::frontmatter::parse_frontmatter`]
+/// catalogue so that key validation is consistent across all declaration kinds:
+/// - Unknown key → `Error`
+/// - Catalogue-known key inapplicable to `kind` → `Warning`
+/// - Applicable key with a bad value shape → `Warning` (value skipped)
+///
+/// Accepted shapes for function-applicable keys:
 ///   * `deterministic: true | false` (also `idempotent`, `append_only`,
 ///     `needs_cast`)
 ///   * `provenance: { col: [src.a, src.b] }` (inline map)
 ///   * Multi-line `provenance:` with nested mappings of sequence values
 ///   * `joins:` as a sequence of `{ table, on, cardinality }` entries
 ///
-/// On a top-level YAML parse failure the returned `FunctionProperties` is the
-/// default and a single [`FrontmatterSeverity::Error`] diagnostic carries the
-/// underlying serde_yaml error message. Unknown keys become individual
-/// [`FrontmatterSeverity::Warning`] diagnostics; the rest of the YAML still
-/// parses.
-///
-/// Note: `provenance:` is an **unstable** key. The Salsa layer in `smelt-db`
-/// is responsible for enforcing the `unstable_schema: true` workspace flag and
-/// resetting the provenance to `Unknown` when the flag is absent.
+/// Note: `provenance:` is **unstable**. The Salsa layer in `smelt-db` enforces
+/// the `unstable_schema: true` workspace flag and resets provenance to
+/// `Unknown` when the flag is absent.
 pub fn parse_function_properties(
     yaml_text: &str,
+    kind: DeclarationKind,
 ) -> (FunctionProperties, Vec<FrontmatterDiagnostic>) {
-    let mut diags: Vec<FrontmatterDiagnostic> = Vec::new();
-    let mut props = FunctionProperties::default();
+    let (validated_map, mut diags) = smelt_core::frontmatter::parse_frontmatter(yaml_text, kind);
 
-    let trimmed = yaml_text.trim();
-    if trimmed.is_empty() {
-        return (props, diags);
+    if validated_map.is_empty() && yaml_text.trim().is_empty() {
+        // Fast path: nothing to parse.
+        return (FunctionProperties::default(), diags);
     }
 
-    let value: serde_yaml::Value = match serde_yaml::from_str(yaml_text) {
-        Ok(v) => v,
-        Err(err) => {
-            diags.push(FrontmatterDiagnostic {
-                severity: FrontmatterSeverity::Error,
-                message: format!("frontmatter: failed to parse YAML: {err}"),
-            });
-            return (props, diags);
-        }
-    };
-
-    let mapping = match value {
-        serde_yaml::Value::Mapping(m) => m,
-        // Empty document (`null`) is fine — same as empty input.
-        serde_yaml::Value::Null => return (props, diags),
-        other => {
-            diags.push(FrontmatterDiagnostic {
-                severity: FrontmatterSeverity::Error,
-                message: format!(
-                    "frontmatter: expected a top-level mapping, found {}",
-                    yaml_value_kind(&other)
-                ),
-            });
-            return (props, diags);
-        }
-    };
-
-    for (k, v) in mapping {
-        let key = match k.as_str() {
-            Some(s) => s.to_string(),
-            None => {
+    let raw: RawFunctionProperties =
+        match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map)) {
+            Ok(r) => r,
+            Err(err) => {
                 diags.push(FrontmatterDiagnostic {
-                    severity: FrontmatterSeverity::Warning,
-                    message: format!("frontmatter: ignoring non-string key {k:?}"),
+                    severity: FrontmatterSeverity::Error,
+                    message: format!("frontmatter: failed to deserialize validated map: {err}"),
                 });
-                continue;
+                return (FunctionProperties::default(), diags);
             }
         };
-        match key.as_str() {
-            "deterministic" => {
-                if let Some(b) = parse_bool_value(&v) {
-                    props.deterministic = b;
-                } else {
-                    diags.push(FrontmatterDiagnostic {
-                        severity: FrontmatterSeverity::Warning,
-                        message: format!(
-                            "frontmatter: ignoring `deterministic`: expected a boolean, got {}",
-                            yaml_value_kind(&v)
-                        ),
-                    });
-                }
-            }
-            "idempotent" => {
-                if let Some(b) = parse_bool_value(&v) {
-                    props.idempotent = b;
-                } else {
-                    diags.push(FrontmatterDiagnostic {
-                        severity: FrontmatterSeverity::Warning,
-                        message: format!(
-                            "frontmatter: ignoring `idempotent`: expected a boolean, got {}",
-                            yaml_value_kind(&v)
-                        ),
-                    });
-                }
-            }
-            "append_only" => {
-                if let Some(b) = parse_bool_value(&v) {
-                    props.append_only = b;
-                } else {
-                    diags.push(FrontmatterDiagnostic {
-                        severity: FrontmatterSeverity::Warning,
-                        message: format!(
-                            "frontmatter: ignoring `append_only`: expected a boolean, got {}",
-                            yaml_value_kind(&v)
-                        ),
-                    });
-                }
-            }
-            "needs_cast" => {
-                if let Some(b) = parse_bool_value(&v) {
-                    props.needs_cast = b;
-                } else {
-                    diags.push(FrontmatterDiagnostic {
-                        severity: FrontmatterSeverity::Warning,
-                        message: format!(
-                            "frontmatter: ignoring `needs_cast`: expected a boolean, got {}",
-                            yaml_value_kind(&v)
-                        ),
-                    });
-                }
-            }
-            "provenance" => {
-                if let Some(prov) = parse_provenance_value(&v, &mut diags) {
-                    props.provenance = prov;
-                }
-            }
-            "joins" => {
-                props.joins = parse_joins_value(&v, &mut diags);
-            }
-            other => {
-                if !is_known_top_level_key(other) {
-                    diags.push(FrontmatterDiagnostic {
-                        severity: FrontmatterSeverity::Warning,
-                        message: format!("frontmatter: ignoring unknown key `{other}`"),
-                    });
-                }
-                // Known-but-not-here keys (e.g. `backends`) are silently
-                // skipped — they belong to other passes.
-            }
-        }
-    }
+
+    let provenance = raw
+        .provenance
+        .and_then(|v| parse_provenance_value(&v, &mut diags))
+        .unwrap_or(Provenance::Unknown);
+
+    let joins = raw
+        .joins
+        .map(|v| parse_joins_value(&v, &mut diags))
+        .unwrap_or_default();
+
+    let props = FunctionProperties {
+        deterministic: raw.deterministic,
+        idempotent: raw.idempotent,
+        append_only: raw.append_only,
+        needs_cast: raw.needs_cast,
+        provenance,
+        joins,
+    };
 
     (props, diags)
-}
-
-/// Decode a YAML value as a boolean, accepting both native booleans and the
-/// string forms `"true"`, `"false"`, `"yes"`, `"no"`, `"1"`, `"0"` for
-/// backward compatibility with the previous line-walker behaviour.
-fn parse_bool_value(v: &serde_yaml::Value) -> Option<bool> {
-    match v {
-        serde_yaml::Value::Bool(b) => Some(*b),
-        serde_yaml::Value::String(s) => match s.as_str() {
-            "true" | "yes" | "1" => Some(true),
-            "false" | "no" | "0" => Some(false),
-            _ => None,
-        },
-        serde_yaml::Value::Number(n) => n.as_i64().and_then(|i| match i {
-            1 => Some(true),
-            0 => Some(false),
-            _ => None,
-        }),
-        _ => None,
-    }
 }
 
 /// Parse the `provenance:` value into [`Provenance::Declared`]. Returns
@@ -675,20 +569,17 @@ fn yaml_value_kind(v: &serde_yaml::Value) -> &'static str {
 mod tests {
     use super::*;
 
-    /// Phase 43 test 1 — boolean keys parse via the serde_yaml-backed path,
-    /// including the new `needs_cast` key. Subsumes the historical
-    /// `parse_properties_defaults_to_false`, `parse_properties_deterministic_true`,
-    /// and `parse_properties_all_keys` tests.
+    /// U4 test 1 — boolean keys parse via the unified catalogue path.
     #[test]
     fn parses_simple_boolean_properties() {
         // Empty input: defaults, no diagnostics.
-        let (props, diags) = parse_function_properties("");
+        let (props, diags) = parse_function_properties("", DeclarationKind::Define);
         assert_eq!(props, FunctionProperties::default());
         assert!(diags.is_empty());
 
         // All four bools: true.
         let yaml = "deterministic: true\nidempotent: true\nappend_only: true\nneeds_cast: true\n";
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         assert!(props.deterministic);
         assert!(props.idempotent);
         assert!(props.append_only);
@@ -698,12 +589,11 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Phase 43 test 2 — single-line inline-map provenance still parses.
-    /// Direct port of the legacy `parse_provenance_single_output_column` test.
+    /// U4 test 2 — single-line inline-map provenance still parses.
     #[test]
     fn parses_inline_provenance_map() {
         let yaml = "provenance: { margin: [source.revenue, source.cost] }\n";
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         assert_eq!(
             props.provenance,
             Provenance::Declared(vec![(
@@ -714,8 +604,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Phase 43 test 3 — multi-line block-style provenance, which the old
-    /// line-walker could not handle.
+    /// U4 test 3 — multi-line block-style provenance.
     #[test]
     fn parses_multi_line_provenance_map() {
         let yaml = r#"provenance:
@@ -726,12 +615,10 @@ mod tests {
     - source.numerator
     - source.denominator
 "#;
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         let Provenance::Declared(entries) = props.provenance else {
             panic!("expected Declared, got {:?}", props.provenance);
         };
-        // serde_yaml's Mapping preserves insertion order, so we expect both
-        // entries in declaration order.
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, "margin");
         assert_eq!(
@@ -749,8 +636,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Phase 43 test 4 — `joins:` block parses into [`JoinSpec`]s with the
-    /// raw cardinality string preserved.
+    /// U4 test 4 — `joins:` block parses into [`JoinSpec`]s.
     #[test]
     fn parses_joins_block_with_nested_map() {
         let yaml = r#"joins:
@@ -758,7 +644,7 @@ mod tests {
     on: orders.customer_id = dim_customer.customer_id
     cardinality: "1:1"
 "#;
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         assert_eq!(
             props.joins,
             vec![JoinSpec {
@@ -770,12 +656,11 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Phase 43 test 5 — malformed YAML must yield a default
-    /// `FunctionProperties` plus a single Error diagnostic, never panic.
+    /// U4 test 5 — malformed YAML yields a default plus a single Error.
     #[test]
     fn malformed_yaml_emits_diagnostic_not_panic() {
         let yaml = "provenance: {unterminated\n";
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         assert_eq!(props, FunctionProperties::default());
         assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
         assert_eq!(diags[0].severity, FrontmatterSeverity::Error);
@@ -786,15 +671,32 @@ mod tests {
         );
     }
 
-    /// Phase 43 test 6 — unknown top-level keys produce a Warning, but the
-    /// rest of the frontmatter still parses cleanly. Subsumes the historical
-    /// `parse_properties_ignores_unknown_keys` test's "deterministic still
-    /// parses" assertion.
+    /// U4 test 6 — unknown top-level keys are Errors (via catalogue policy),
+    /// not Warnings. The rest of the known keys still parse.
     #[test]
-    fn unknown_keys_warned_not_errored() {
+    fn unknown_keys_produce_errors() {
         let yaml = "deterministic: true\nunknown_property: foo\n";
-        let (props, diags) = parse_function_properties(yaml);
-        assert!(props.deterministic);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
+        assert!(props.deterministic, "known key must still be parsed");
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == FrontmatterSeverity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "expected exactly one error, got {diags:?}");
+        assert!(
+            errors[0].message.contains("unknown_property"),
+            "error should name the unknown key: {}",
+            errors[0].message
+        );
+    }
+
+    /// U4 test 7 — a model-only key on a Define declaration is a Warning
+    /// (inapplicable-kind), not an Error; block is retained minus that key.
+    #[test]
+    fn model_key_on_define_is_warning() {
+        let yaml = "deterministic: true\nmaterialization: table\n";
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
+        assert!(props.deterministic, "function key must still parse");
         let warnings: Vec<_> = diags
             .iter()
             .filter(|d| d.severity == FrontmatterSeverity::Warning)
@@ -802,30 +704,24 @@ mod tests {
         assert_eq!(
             warnings.len(),
             1,
-            "expected exactly one warning, got {diags:?}"
+            "expected one warning for the model-only key, got {diags:?}"
         );
-        assert!(
-            warnings[0].message.contains("unknown_property"),
-            "warning should name the unknown key: {}",
-            warnings[0].message
-        );
+        assert!(warnings[0].message.contains("materialization"));
     }
 
-    /// Phase 43 test 7 — `joins:` absent yields an empty vec (regression
-    /// guard for the new field's default).
+    /// U4 test 8 — `joins:` absent yields an empty vec.
     #[test]
     fn joins_absent_yields_empty_vec() {
-        let (props, diags) = parse_function_properties("");
+        let (props, diags) = parse_function_properties("", DeclarationKind::Define);
         assert!(props.joins.is_empty());
         assert!(diags.is_empty());
     }
 
-    /// Phase 43 test 8 — multiple-output-columns inline provenance. Direct
-    /// port of the legacy `parse_provenance_multiple_output_columns` test.
+    /// U4 test 9 — multiple-output-columns inline provenance.
     #[test]
     fn parses_provenance_multiple_output_columns_inline() {
         let yaml = "provenance: { a: [x.col1], b: [x.col2, x.col3] }\n";
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         assert_eq!(
             props.provenance,
             Provenance::Declared(vec![
@@ -839,14 +735,23 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Phase 43 test 9 — provenance absent stays Unknown. Direct port of
-    /// the legacy `parse_provenance_absent_is_unknown` test.
+    /// U4 test 10 — provenance absent stays Unknown.
     #[test]
     fn parses_provenance_absent_is_unknown() {
         let yaml = "deterministic: true\n";
-        let (props, diags) = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Define);
         assert_eq!(props.provenance, Provenance::Unknown);
         assert!(props.deterministic);
+        assert!(diags.is_empty());
+    }
+
+    /// U4 test 11 — Extern kind parses the same function keys cleanly.
+    #[test]
+    fn extern_kind_parses_function_keys() {
+        let yaml = "deterministic: true\nidempotent: false\n";
+        let (props, diags) = parse_function_properties(yaml, DeclarationKind::Extern);
+        assert!(props.deterministic);
+        assert!(!props.idempotent);
         assert!(diags.is_empty());
     }
 }

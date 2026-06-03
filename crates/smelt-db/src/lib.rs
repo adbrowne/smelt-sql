@@ -2261,23 +2261,28 @@ pub fn logical_plan(
                             let decl_syntax = decl_parse.syntax();
                             let decl_ast = AstFile::cast(decl_syntax)?;
                             let decl_raw = decl_file.text(db).clone();
-                            let fm = decl_ast
+                            let fm_with_kind = decl_ast
                                 .defines()
                                 .find(|d| d.name().as_deref() == Some(fn_id.as_str()))
-                                .and_then(|d| d.frontmatter(&decl_raw))
+                                .and_then(|d| {
+                                    d.frontmatter(&decl_raw)
+                                        .map(|fm| (fm, smelt_core::DeclarationKind::Define))
+                                })
                                 .or_else(|| {
                                     decl_ast
                                         .externs()
                                         .find(|e| e.name().as_deref() == Some(fn_id.as_str()))
-                                        .and_then(|e| e.frontmatter(&decl_raw))
+                                        .and_then(|e| {
+                                            e.frontmatter(&decl_raw)
+                                                .map(|fm| (fm, smelt_core::DeclarationKind::Extern))
+                                        })
                                 });
-                            // Phase 43: ignore the frontmatter diagnostics here — they are
-                            // surfaced via `provenance_unstable_diagnostics_for_file` (called
-                            // from `check_file_diagnostics`), which has access to the
-                            // declaration's name range for proper anchoring. The logical-plan
-                            // path only needs the parsed properties.
-                            fm.map(|text| {
-                                smelt_planner::logical::parse_function_properties(&text).0
+                            // Ignore frontmatter diagnostics here — they are surfaced via
+                            // `provenance_unstable_diagnostics_for_file` (called from
+                            // `check_file_diagnostics`), which has the declaration's name range
+                            // for proper anchoring. The logical-plan path only needs the props.
+                            fm_with_kind.map(|(text, kind)| {
+                                smelt_planner::logical::parse_function_properties(&text, kind).0
                             })
                         })
                 })
