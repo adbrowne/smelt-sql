@@ -19,6 +19,10 @@ use std::sync::Arc;
 use serde::Deserialize;
 use smelt_types::DataType;
 
+// The canonical types now live in smelt-core; re-export so existing callers
+// of smelt-planner that import these names continue to work unchanged.
+pub use smelt_core::{FrontmatterDiagnostic, FrontmatterSeverity};
+
 /// Fully-qualified function identifier, e.g. `"some_fn"` or `"core.math.safe_divide"`.
 pub type FnId = String;
 
@@ -104,33 +108,6 @@ pub struct JoinSpec {
     pub on: String,
     /// Declared cardinality, kept as a raw string for v1.
     pub cardinality: String,
-}
-
-/// A diagnostic produced by the frontmatter YAML parser.
-///
-/// Kept minimal (no spans) so the planner crate stays free of `smelt-db`
-/// types. The Salsa wrapper in `smelt-db` is responsible for turning these
-/// into full [`smelt_db::Diagnostic`]s anchored at the declaring node's name
-/// range.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrontmatterDiagnostic {
-    /// Severity (Error for fatal YAML parse failures, Warning for unknown
-    /// keys or malformed sub-structures the parser was able to skip past).
-    pub severity: FrontmatterSeverity,
-    /// Human-readable message. The Salsa wrapper passes this through to the
-    /// final `Diagnostic.message`.
-    pub message: String,
-}
-
-/// Severity level for a [`FrontmatterDiagnostic`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrontmatterSeverity {
-    /// The frontmatter could not be parsed at all (or a mandatory shape
-    /// failed); the returned `FunctionProperties` is the default.
-    Error,
-    /// A specific key or entry was malformed/unknown; the rest of the
-    /// frontmatter parsed normally.
-    Warning,
 }
 
 /// Column-level data provenance information attached to a [`LogicalNode`].

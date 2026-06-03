@@ -1,5 +1,6 @@
 pub mod config;
 pub mod discovery;
+pub mod frontmatter;
 pub mod graph;
 pub mod metadata;
 pub mod model_id;
@@ -24,6 +25,9 @@ pub use config::{
 pub use discovery::{
     discover_function_file_paths, parse_sql_file, ModelDiscovery, ModelFile, ModelKind,
     PythonModelQuery,
+};
+pub use frontmatter::{
+    parse_frontmatter, DeclarationKind, FrontmatterDiagnostic, FrontmatterSeverity,
 };
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{
