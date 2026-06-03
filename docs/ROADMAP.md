@@ -91,6 +91,17 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 ## Recently Completed
 
+### ~~Frontmatter Parity — unified catalogue, no silent drops~~ ✅ (June 4, 2026)
+
+Collapsed two divergent frontmatter parsers into one over a key catalogue ([plan](plans/20260604-frontmatter-parity.md), [spec](specs/architecture.md) §"Unified frontmatter rule"):
+
+- **`deny_unknown_fields` on `TimeseriesConfig`** (U1) — unknown `timeseries:` sub-keys now produce a serde error instead of being silently ignored. Closed BUG-025.
+- **`FrontmatterCatalogue` + `parse_frontmatter`** (U2) — single entry point in `smelt-core::frontmatter`; catalogue maps each key to its applicable declaration kinds; unknown key → `Error`, inapplicable key → `Warning`, valid key → kept.
+- **Model path wired** (U3) — `ModelMetadata` deserialized from the validated map; errors surfaced as `FrontmatterParseError`/`MalformedTimeseries` diagnostics in `file_diagnostics`. Closed BUG-016, BUG-023.
+- **Function/extern path wired; second parser deleted** (U4) — `FunctionProperties` built via `parse_frontmatter`; hand-rolled `parse_function_properties` deleted. One parser remains.
+- **E2E example fixtures + gates** (U5) — four regression examples: `frontmatter_function_key_on_model` (positive, builds as TABLE with Warning), `timeseries_broken_invalid_granularity`, `timeseries_broken_unknown_key`, `frontmatter_broken_unknown_key` (all build-refused with Error).
+- **Deferred**: dynamic schema-registration API for non-built-in planner rules (tracked in [planner_rule_api_design.md](planner_rule_api_design.md)).
+
 ### ~~Diagnostic Parity (analysis ↔ build) + Meta-Language Codegen~~ ✅ (June 2026)
 
 Closed the "LSP-clean but unbuildable" bug class surfaced by the feature sweep ([plan](plans/20260531-diagnostic-parity.md), [spec](specs/architecture.md) §"Diagnostic parity rule"):
