@@ -91,6 +91,18 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 ## Recently Completed
 
+### ~~Diagnostic Parity (analysis ↔ build) + Meta-Language Codegen~~ ✅ (June 2026)
+
+Closed the "LSP-clean but unbuildable" bug class surfaced by the feature sweep ([plan](plans/20260531-diagnostic-parity.md), [spec](specs/architecture.md) §"Diagnostic parity rule"):
+
+- **Shared Error-severity build gate** (P2, June 1) — `smelt_runtime::gate_diagnostics` runs the full `file_diagnostics` surface (not just `UnknownSmeltFn`) before any model compiles; wired into both the CLI run path and `execute_project`. Closed BUG-015, 019, 024.
+- **Uniform planner rule → diagnostics interface** (P2b, June 1) — cumulative classifier and incremental batch-safety/bounds checks now surface via `file_diagnostics` and are visible to both the editor and the build. Closed BUG-011.
+- **Per-entity source diagnostics** (P2c, June 1) — new `project_source_diagnostics` Salsa query maps `SourceError` variants to `MalformedSource`/`SourceTypeError` diagnostics and publishes them to the LSP at init time. Closed BUG-032.
+- **Nested `smelt.define` fixpoint** (P3, June 1) — printer's body-reparse now re-expands nested `SMELT_PATH_CALL` nodes to a fixpoint via a synthetic `SELECT`-prefix reparse; `functions_demo` nested-compose models execute correctly. Closed BUG-013.
+- **Block `PASSING` fragment binding** (P4, June 2) — printer merges `PASSING <name> AS (<body>)` clauses into the existing named-arg vector before substitution; `rollup_with_passing` executes correctly. Closed BUG-018.
+- **In-model meta-language at build** (P5–P7d, June 2–3) — a pure-text build-path meta evaluator in `smelt-runtime::meta_eval` lowers all analyzer-accepted constructs before codegen: list spread (P5), HOF/pipe/lambda/ternary/config.var (P6), `smelt.columns_of` reflection (P7a), wide reflection `smelt.models.*`/`smelt.sources.*` (P7b), bare List/Map loader detector + List-loader lowering (P7c), Map-loader via `MAP_METHOD_CALL` postfix parsing + `.keys()`/`.values()`/`.entries()` lowering (P7d). Closed BUG-006 (all sub-issues).
+- **`example_builds` CI gate** (P1) — builds + executes every example workspace on DuckDB; `meta_config` removed from `KNOWN_UNBUILDABLE` after P7d; remaining entries are unseeded-source workspaces (structural, not codegen gaps).
+
 ### ~~Typed Meta-Language — Phase E2: Multi-Model Production~~ ✅ (May 16, 2026)
 
 Completed Phase E2 of the typed meta-language plan ([plan](plans/20260509-meta-language-E2.md), [spec](specs/meta_language.md)):
