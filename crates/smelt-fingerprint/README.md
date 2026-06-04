@@ -48,9 +48,12 @@ The detector is conservative by design: over-flagging is sound (the model is reb
 case parity), so e.g. a `LIMIT` with an `ORDER BY` is still flagged because totality of the
 sort key cannot yet be proven. The load-bearing invariant is the converse, gated by
 `tests/determinism_prop.rs`: anything flagged `deterministic` yields the **same relation
-when built twice in independent DuckDB instances**. Known un-covered non-determinism source:
-order-sensitive aggregates/windows (`array_agg`/`string_agg`/`first`/`last` without an inner
-`ORDER BY`) — to be added to the deny-list, gated by the same property test.
+when built twice in independent DuckDB instances**. The deny-list covers the inline
+built-ins and the order-sensitive aggregates (`array_agg`/`list`/`string_agg`/`group_concat`/
+`listagg`/`any_value`/`arbitrary`); order-insensitive aggregates (`sum`/`count`/`min`/`max`/
+`avg`) stay deterministic. Known un-covered source: order-sensitive **window** functions
+(`row_number`/`rank`/`lag`/`first_value`/… over a non-total `ORDER BY`), which need
+`OVER`-clause analysis rather than a name match — same property gate when added.
 
 ## Equivalences recognised (the eclipse over SQLMesh)
 

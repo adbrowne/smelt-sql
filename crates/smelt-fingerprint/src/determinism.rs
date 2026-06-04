@@ -53,6 +53,27 @@ const NON_DET_FUNCTIONS: &[&str] = &[
     "current_setting",
 ];
 
+/// Aggregates whose result depends on the order in which input rows are folded.
+/// A relation is an unordered multiset, so that order is not fixed; and smelt has
+/// no aggregate-`ORDER BY` (or `WITHIN GROUP`) syntax to pin it, so every
+/// occurrence is non-deterministic. Order-*insensitive* aggregates (`sum`,
+/// `count`, `min`, `max`, `avg`, `bool_and`, …) are pure functions of the input
+/// multiset and are deliberately absent.
+///
+/// `first`/`last` are order-sensitive too, but they are smelt *keywords* (for
+/// `NULLS FIRST`/`LAST`), so `first(a)` does not lex as an `IDENT` and cannot be
+/// written as an aggregate call today — there is nothing to match. Add them here
+/// if smelt ever grants them call syntax.
+const ORDER_SENSITIVE_AGGREGATES: &[&str] = &[
+    "array_agg",
+    "list", // DuckDB alias for array_agg
+    "string_agg",
+    "group_concat",
+    "listagg",
+    "any_value",
+    "arbitrary", // DuckDB alias for any_value
+];
+
 /// Temporal specials that DuckDB also accepts **without** parentheses, so they
 /// surface as a bare identifier with no `FUNCTION_CALL` node. Kept to spellings
 /// that are unambiguous built-ins (rarely legitimate column names); a false
@@ -87,6 +108,12 @@ pub(crate) fn analyze(select: &SelectStmt) -> Vec<NonDeterminism> {
                     push(
                         &mut reasons,
                         format!("non-deterministic built-in `{lname}`"),
+                    );
+                }
+                if ORDER_SENSITIVE_AGGREGATES.contains(&lname.as_str()) {
+                    push(
+                        &mut reasons,
+                        format!("order-sensitive aggregate `{lname}` without a total inner order"),
                     );
                 }
             }

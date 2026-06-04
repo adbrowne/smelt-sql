@@ -106,6 +106,77 @@ impl Query {
     }
 }
 
+/// An aggregate over a single column. Order-*insensitive* ones are pure
+/// functions of the input multiset; order-*sensitive* ones depend on a row order
+/// a relation does not fix (and smelt has no aggregate-`ORDER BY` to pin it).
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)] // variants mirror real SQL function names
+enum Agg {
+    // order-insensitive
+    Sum,
+    Count,
+    Min,
+    Max,
+    Avg,
+    // order-sensitive
+    ArrayAgg,
+    List,
+    StringAgg,
+    GroupConcat,
+    ListAgg,
+    AnyValue,
+    Arbitrary,
+}
+
+impl Agg {
+    fn is_order_sensitive(self) -> bool {
+        matches!(
+            self,
+            Agg::ArrayAgg
+                | Agg::List
+                | Agg::StringAgg
+                | Agg::GroupConcat
+                | Agg::ListAgg
+                | Agg::AnyValue
+                | Agg::Arbitrary
+        )
+    }
+
+    fn expr(self, col: &str) -> String {
+        match self {
+            Agg::Sum => format!("sum({col})"),
+            Agg::Count => format!("count({col})"),
+            Agg::Min => format!("min({col})"),
+            Agg::Max => format!("max({col})"),
+            Agg::Avg => format!("avg({col})"),
+            Agg::ArrayAgg => format!("array_agg({col})"),
+            Agg::List => format!("list({col})"),
+            Agg::StringAgg => format!("string_agg(CAST({col} AS VARCHAR), ',')"),
+            Agg::GroupConcat => format!("group_concat({col})"),
+            Agg::ListAgg => format!("listagg(CAST({col} AS VARCHAR), ',')"),
+            Agg::AnyValue => format!("any_value({col})"),
+            Agg::Arbitrary => format!("arbitrary({col})"),
+        }
+    }
+}
+
+fn agg_strategy() -> impl Strategy<Value = Agg> {
+    prop_oneof![
+        Just(Agg::Sum),
+        Just(Agg::Count),
+        Just(Agg::Min),
+        Just(Agg::Max),
+        Just(Agg::Avg),
+        Just(Agg::ArrayAgg),
+        Just(Agg::List),
+        Just(Agg::StringAgg),
+        Just(Agg::GroupConcat),
+        Just(Agg::ListAgg),
+        Just(Agg::AnyValue),
+        Just(Agg::Arbitrary),
+    ]
+}
+
 fn atom_strategy() -> impl Strategy<Value = Atom> {
     prop_oneof![
         (0usize..3).prop_map(Atom::Col),
@@ -154,6 +225,50 @@ proptest! {
         // relations. (Only deterministic queries reach here; non-deterministic
         // ones legitimately differ run-to-run and are never reuse-matched.)
         if r.deterministic {
+            let r1 = DuckDbRelationOracle::new().run(&sql)
+                .unwrap_or_else(|e| panic!("run 1 failed ({e}): {sql}"));
+            let r2 = DuckDbRelationOracle::new().run(&sql)
+                .unwrap_or_else(|e| panic!("run 2 failed ({e}): {sql}"));
+            prop_assert!(
+                relations_equal(&r1, &r2).is_ok(),
+                "UNSOUND: flagged deterministic but two builds differ\n  sql: {}\n  diff: {:?}",
+                sql,
+                relations_equal(&r1, &r2),
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Aggregate determinism: an order-sensitive aggregate must flag, and an
+    /// order-insensitive one must both pass the flag and reproduce across two
+    /// independent DuckDB builds. (Aggregates need their own generator because a
+    /// projection cannot mix an aggregate with a bare column without a GROUP BY.)
+    #[test]
+    fn aggregate_determinism_is_sound(
+        agg in agg_strategy(),
+        col in 0usize..3,
+    ) {
+        let sql = format!("SELECT {} AS s FROM ({SEED_BODY}) AS t", agg.expr(COLS[col]));
+        let r = output_fingerprint_from_sql(&sql, &[])
+            .unwrap_or_else(|| panic!("did not parse: {sql}"));
+
+        if agg.is_order_sensitive() {
+            prop_assert!(
+                !r.deterministic,
+                "DETECTION GAP: order-sensitive aggregate flagged deterministic\n  sql: {}\n  reasons: {:?}",
+                sql,
+                r.non_determinism,
+            );
+        } else {
+            prop_assert!(
+                r.deterministic,
+                "FALSE POSITIVE: order-insensitive aggregate flagged non-deterministic\n  sql: {}\n  reasons: {:?}",
+                sql,
+                r.non_determinism,
+            );
             let r1 = DuckDbRelationOracle::new().run(&sql)
                 .unwrap_or_else(|e| panic!("run 1 failed ({e}): {sql}"));
             let r2 = DuckDbRelationOracle::new().run(&sql)

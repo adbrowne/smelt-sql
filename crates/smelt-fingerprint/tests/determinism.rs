@@ -37,10 +37,16 @@ fn arithmetic_and_pure_functions_are_deterministic() {
 }
 
 #[test]
-fn pure_aggregate_is_deterministic() {
-    assert!(deterministic(
-        "SELECT sum(a) AS s FROM (SELECT 1 AS a UNION ALL SELECT 2) AS t"
-    ));
+fn order_insensitive_aggregates_are_deterministic() {
+    // sum/count/min/max/avg do not depend on input row order, so they are pure
+    // functions of the input multiset and must not be flagged.
+    let body = "(SELECT 1 AS a UNION ALL SELECT 2 UNION ALL SELECT 3) AS t";
+    for agg in ["sum(a)", "count(a)", "min(a)", "max(a)", "avg(a)"] {
+        assert!(
+            deterministic(&format!("SELECT {agg} AS s FROM {body}")),
+            "{agg} should be deterministic"
+        );
+    }
 }
 
 #[test]
@@ -110,6 +116,32 @@ fn order_by_under_limit_is_non_deterministic_conservatively() {
     assert!(!deterministic(
         "SELECT a FROM (SELECT 1 AS a UNION ALL SELECT 2) AS t ORDER BY a LIMIT 1"
     ));
+}
+
+// ---- Order-sensitive aggregates without a (total) inner ORDER BY ----
+
+#[test]
+fn order_sensitive_aggregates_are_non_deterministic() {
+    // These aggregates' results depend on input row order, which a relation (an
+    // unordered multiset) does not fix. smelt has no aggregate-`ORDER BY` syntax
+    // to pin the order, so every occurrence is non-deterministic. (`first`/`last`
+    // are order-sensitive too but are keywords, so they cannot be written as
+    // aggregate calls today — see the detector's deny-list note.)
+    let body = "(SELECT 1 AS a UNION ALL SELECT 2 UNION ALL SELECT 3) AS t";
+    for agg in [
+        "array_agg(a)",
+        "list(a)",
+        "string_agg(a, ',')",
+        "group_concat(a)",
+        "listagg(a, ',')",
+        "any_value(a)",
+        "arbitrary(a)",
+    ] {
+        assert!(
+            !deterministic(&format!("SELECT {agg} AS s FROM {body}")),
+            "{agg} should be non-deterministic"
+        );
+    }
 }
 
 // ---- Recursion: non-determinism anywhere in the expansion taints the model ----
