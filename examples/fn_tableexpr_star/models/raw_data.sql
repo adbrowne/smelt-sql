@@ -1,0 +1,12 @@
+---
+materialization: table
+---
+SELECT
+  CAST(1 AS INTEGER) AS id,
+  CAST(100 AS INTEGER) AS revenue,
+  CAST(30 AS INTEGER) AS cost
+UNION ALL
+SELECT
+  CAST(2 AS INTEGER),
+  CAST(200 AS INTEGER),
+  CAST(80 AS INTEGER)

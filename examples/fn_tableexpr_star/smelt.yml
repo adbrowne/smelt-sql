@@ -1,0 +1,10 @@
+name: fn_tableexpr_star
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: .smelt/fn_tableexpr_star.duckdb
+    schema: main
+default_materialization: view

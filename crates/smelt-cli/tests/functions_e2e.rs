@@ -986,3 +986,209 @@ ORDER BY row_id
         rows[2]
     );
 }
+
+// ─── Test 10: TableExpr source.* with smelt.<path> arg (BUG-009) ────────────
+
+/// A `TableExpr` function body that projects `source.*` must produce valid SQL
+/// when called with a `smelt.<path>` argument that resolves to a qualified
+/// table name (e.g. `main.raw_data`).
+///
+/// Before the BUG-009 fix the parameter `source` was text-replaced everywhere,
+/// turning `source.*` into `main.raw_data.*` — a multi-part wildcard that
+/// DuckDB rejects ("syntax error at or near *").
+///
+/// After the fix the substitution aliases the argument at the FROM clause
+/// (`FROM main.raw_data AS source`) and leaves all other `source.*` and
+/// `source.col` references unchanged so they resolve through the alias.
+#[test]
+fn e2e_tableexpr_source_star_path_ref_executes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_tableexpr_star
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    // Function with `source.*` in body — the problematic pattern.
+    let add_margin_fn = "---
+backends: [duckdb]
+---
+smelt.define add_margin(source: TableExpr<{revenue: Numeric, cost: Numeric}>) -> TableExpr AS (
+  SELECT source.*, revenue - cost AS margin FROM source
+)
+";
+
+    // Seed model: two rows with integer revenue and cost (INTEGER is Numeric,
+    // satisfying the add_margin row-requirement check).
+    let raw_data_sql = "---
+materialization: table
+---
+SELECT
+  CAST(1 AS INTEGER) AS id,
+  CAST(100 AS INTEGER) AS revenue,
+  CAST(30 AS INTEGER) AS cost
+UNION ALL
+SELECT
+  CAST(2 AS INTEGER),
+  CAST(200 AS INTEGER),
+  CAST(80 AS INTEGER)
+";
+
+    // Consumer: calls add_margin with a smelt-path ref that resolves to
+    // `main.raw_data` — a qualified name that previously produced `main.raw_data.*`.
+    let with_margin_sql = "---
+materialization: table
+---
+SELECT * FROM smelt.functions.add_margin(smelt.raw_data)
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("functions/add_margin.sql", add_margin_fn),
+            ("models/raw_data.sql", raw_data_sql),
+            ("models/with_margin.sql", with_margin_sql),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    // Verify the materialised rows: source.* (id, revenue, cost) plus the
+    // computed margin column.
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, revenue, cost, margin \
+             FROM main.with_margin ORDER BY id",
+        )
+        .expect("prepare with_margin query");
+    let rows: Vec<(i64, f64, f64, f64)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .expect("query with_margin rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    assert_eq!(rows.len(), 2, "expected 2 rows, got: {rows:?}");
+    // row 1: id=1, revenue=100, cost=30, margin=70
+    assert_eq!(rows[0].0, 1, "row 1 id: {:?}", rows[0]);
+    assert!(
+        (rows[0].1 - 100.0).abs() < 1e-6,
+        "row 1 revenue: {:?}",
+        rows[0]
+    );
+    assert!((rows[0].2 - 30.0).abs() < 1e-6, "row 1 cost: {:?}", rows[0]);
+    assert!(
+        (rows[0].3 - 70.0).abs() < 1e-6,
+        "row 1 margin (100-30=70): {:?}",
+        rows[0]
+    );
+    // row 2: id=2, revenue=200, cost=80, margin=120
+    assert_eq!(rows[1].0, 2, "row 2 id: {:?}", rows[1]);
+    assert!(
+        (rows[1].1 - 200.0).abs() < 1e-6,
+        "row 2 revenue: {:?}",
+        rows[1]
+    );
+    assert!((rows[1].2 - 80.0).abs() < 1e-6, "row 2 cost: {:?}", rows[1]);
+    assert!(
+        (rows[1].3 - 120.0).abs() < 1e-6,
+        "row 2 margin (200-80=120): {:?}",
+        rows[1]
+    );
+}
+
+/// Regression: a `TableExpr` function called with a **CTE-name** argument
+/// (no dot in the arg) must still produce valid SQL — the text-replacement
+/// path (`replace_identifier`) must be used, not the FROM-aliasing path.
+///
+/// Before BUG-009 the CTE form already worked; this test guards that the fix
+/// does not regress it.
+#[test]
+fn e2e_tableexpr_cte_arg_regression() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let smelt_yml = format!(
+        "name: e2e_tableexpr_cte_regression
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: view
+",
+        db_path.display()
+    );
+
+    let add_margin_fn = "---
+backends: [duckdb]
+---
+smelt.define add_margin(source: TableExpr<{revenue: Numeric, cost: Numeric}>) -> TableExpr AS (
+  SELECT source.*, revenue - cost AS margin FROM source
+)
+";
+
+    // Consumer: passes a CTE (no dot in arg name) to the TableExpr function.
+    let margin_via_cte_sql = "---
+materialization: table
+---
+WITH x AS (
+  SELECT
+    CAST(100 AS DECIMAL(18,2)) AS revenue,
+    CAST(30 AS DECIMAL(18,2)) AS cost
+)
+SELECT margin FROM smelt.functions.add_margin(x)
+";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml.as_str()),
+            ("functions/add_margin.sql", add_margin_fn),
+            ("models/margin_via_cte.sql", margin_via_cte_sql),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+    let mut stmt = conn
+        .prepare("SELECT margin FROM main.margin_via_cte")
+        .expect("prepare margin_via_cte query");
+    let rows: Vec<f64> = stmt
+        .query_map([], |row| row.get::<_, f64>(0))
+        .expect("query margin rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows");
+
+    assert_eq!(rows.len(), 1, "expected 1 row, got: {rows:?}");
+    assert!(
+        (rows[0] - 70.0).abs() < 1e-6,
+        "margin should be 100-30=70, got: {:?}",
+        rows[0]
+    );
+}

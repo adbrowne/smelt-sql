@@ -120,6 +120,11 @@ fn web_analytics_no_diagnostics() {
     check_workspace_no_diagnostics("examples/web_analytics");
 }
 
+#[test]
+fn fn_tableexpr_star_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/fn_tableexpr_star");
+}
+
 /// Test 4 (TDD): All example SQL files must use the unified `smelt.<path>`
 /// syntax.  This test FAILS until the migration tool has been run on all
 /// example workspaces.

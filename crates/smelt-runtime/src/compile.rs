@@ -140,9 +140,147 @@ pub fn substitute_params_with_named(
     let resolved = bind_named_args(params, positional, named);
     let mut result = body.to_string();
     for ((param_name, _default), arg) in params.iter().zip(resolved.iter()) {
-        result = replace_identifier(&result, param_name, arg);
+        // When the arg is a qualified name (contains a dot, e.g. `main.orders`)
+        // and the param appears as a FROM/JOIN table reference in the body, naively
+        // text-replacing the param would produce `main.orders.*` — a multi-part
+        // wildcard rejected by DuckDB. Instead, alias the argument at the FROM/JOIN
+        // position (`FROM main.orders AS source`) and leave all other occurrences of
+        // the param unchanged so `source.*` and `source.col` resolve through the alias.
+        result = if arg.contains('.') && has_from_table_reference(&result, param_name) {
+            replace_from_with_alias(&result, param_name, arg)
+        } else {
+            replace_identifier(&result, param_name, arg)
+        };
     }
     result
+}
+
+/// Returns `true` if `param` appears as a whole-word identifier immediately
+/// after a `FROM` or `*JOIN` keyword in `body` (case-insensitive for keywords,
+/// case-sensitive for `param`). Used to detect `TableExpr` parameters — they
+/// always appear as FROM-clause table references; `Expr<T>` params never do.
+fn has_from_table_reference(body: &str, param: &str) -> bool {
+    if param.is_empty() || !body.contains(param) {
+        return false;
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let param_chars: Vec<char> = param.chars().collect();
+    let n = chars.len();
+    let m = param_chars.len();
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < n {
+        if chars[i] == '\'' {
+            if in_string {
+                if i + 1 < n && chars[i + 1] == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            } else {
+                in_string = true;
+            }
+            i += 1;
+            continue;
+        }
+        if in_string {
+            i += 1;
+            continue;
+        }
+
+        let before_ok = i == 0 || !is_ident_char(chars[i - 1]);
+        let slice_matches = i + m <= n
+            && chars[i..i + m]
+                .iter()
+                .zip(param_chars.iter())
+                .all(|(a, b)| *a == *b);
+        let after_ok = i + m >= n || !is_ident_char(chars[i + m]);
+
+        if before_ok && slice_matches && after_ok {
+            // Check if the preceding non-whitespace keyword is FROM or *JOIN.
+            let prefix: String = chars[..i].iter().collect();
+            let prefix_upper = prefix.trim_end().to_uppercase();
+            if prefix_upper.ends_with("FROM") || prefix_upper.ends_with("JOIN") {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Replace `FROM <param>` and `*JOIN <param>` occurrences in `body` with
+/// `FROM <arg> AS <param>` / `*JOIN <arg> AS <param>`. All other occurrences
+/// of `<param>` are emitted verbatim so they resolve through the alias.
+///
+/// Used when `arg` is a qualified name (contains `.`) to keep `param.*` and
+/// `param.col` references valid — the alias makes them single-part identifiers.
+fn replace_from_with_alias(body: &str, param: &str, arg: &str) -> String {
+    if param.is_empty() {
+        return body.to_string();
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let param_chars: Vec<char> = param.chars().collect();
+    let n = chars.len();
+    let m = param_chars.len();
+    let mut out = String::with_capacity(body.len() + arg.len() + param.len() + 4);
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < n {
+        if chars[i] == '\'' {
+            if in_string {
+                if i + 1 < n && chars[i + 1] == '\'' {
+                    out.push('\'');
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            } else {
+                in_string = true;
+            }
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if in_string {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        let before_ok = i == 0 || !is_ident_char(chars[i - 1]);
+        let slice_matches = i + m <= n
+            && chars[i..i + m]
+                .iter()
+                .zip(param_chars.iter())
+                .all(|(a, b)| *a == *b);
+        let after_ok = i + m >= n || !is_ident_char(chars[i + m]);
+
+        if before_ok && slice_matches && after_ok {
+            // Check if this occurrence is in a FROM/JOIN position.
+            let prefix_upper = out.trim_end().to_uppercase();
+            if prefix_upper.ends_with("FROM") || prefix_upper.ends_with("JOIN") {
+                // Emit: arg AS param  (the keyword and preceding whitespace are
+                // already in `out`; we replace only the param token itself)
+                out.push_str(arg);
+                out.push_str(" AS ");
+                out.push_str(param);
+                i += m;
+                continue;
+            }
+            // Not a FROM/JOIN position — leave param verbatim; it resolves
+            // through the alias established above.
+            out.push_str(param);
+            i += m;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Replace whole-word occurrences of `ident` with `replacement` in `text`,
@@ -2556,6 +2694,63 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
         assert!(
             !result.contains(" gap"),
             "gap param name must be replaced by its default, got: {result}"
+        );
+    }
+
+    /// BUG-009: when the arg is a qualified name (contains `.`) and the param
+    /// appears as a FROM-table reference in the body, the fix must alias the arg
+    /// at the FROM position rather than text-replacing all occurrences.
+    ///
+    /// Without the fix: `SELECT main.orders.*, … FROM main.orders` — DuckDB
+    /// rejects `main.orders.*` as "syntax error at or near *".
+    /// With the fix:   `SELECT source.*, … FROM main.orders AS source` — valid.
+    #[test]
+    fn substitute_tableexpr_qualified_arg_uses_from_alias() {
+        let body = "(SELECT source.*, revenue - cost AS margin FROM source)";
+        let params = params_no_defaults(&["source"]);
+        let positional = vec!["main.orders".to_string()];
+
+        let result = substitute_params_with_named(body, &params, &positional, &[]);
+
+        // FROM clause must alias the qualified arg to the param name.
+        assert!(
+            result.contains("FROM main.orders AS source"),
+            "expected `FROM main.orders AS source` in result, got: {result}"
+        );
+        // source.* must stay verbatim so it resolves through the alias.
+        assert!(
+            result.contains("source.*"),
+            "expected `source.*` to remain unchanged (resolves through alias), got: {result}"
+        );
+        // The qualified name must NOT appear in a star wildcard position.
+        assert!(
+            !result.contains("main.orders.*"),
+            "must not produce `main.orders.*` (invalid DuckDB syntax), got: {result}"
+        );
+    }
+
+    /// BUG-009 regression: a CTE-name arg (no dot) must still use the
+    /// original text-replacement path — aliasing should NOT be applied.
+    #[test]
+    fn substitute_tableexpr_cte_arg_uses_text_replacement() {
+        let body = "(SELECT source.*, revenue - cost AS margin FROM source)";
+        let params = params_no_defaults(&["source"]);
+        let positional = vec!["my_cte".to_string()]; // no dot — CTE name
+
+        let result = substitute_params_with_named(body, &params, &positional, &[]);
+
+        // Normal replacement: source → my_cte everywhere.
+        assert!(
+            result.contains("my_cte.*"),
+            "expected `my_cte.*` (normal replacement for CTE arg), got: {result}"
+        );
+        assert!(
+            result.contains("FROM my_cte"),
+            "expected `FROM my_cte` (normal replacement), got: {result}"
+        );
+        assert!(
+            !result.contains("source"),
+            "param name must be fully replaced for CTE arg, got: {result}"
         );
     }
 }
