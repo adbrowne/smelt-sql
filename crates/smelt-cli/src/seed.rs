@@ -394,6 +394,119 @@ mod tests {
         );
     }
 
+    /// BUG-030: a sidecar with an unknown `materialization:` value must abort
+    /// `discover_seeds` with a hard error rather than silently coercing to
+    /// `table`.  Previously `parse_sidecar_from_str`'s `other =>` arm fell back
+    /// to `SeedMaterialization::Table`; now it returns
+    /// `SidecarError::UnknownMaterialization`, and `read_sidecar_from_path`
+    /// propagates every `parse_sidecar` error via `?`.
+    #[test]
+    fn test_sidecar_unknown_materialization_is_hard_error() {
+        let tmp = TempDir::new().unwrap();
+        let seeds_dir = tmp.path().join("seeds");
+        fs::create_dir_all(&seeds_dir).unwrap();
+        fs::write(seeds_dir.join("my_table.csv"), "id,name\n1,a\n").unwrap();
+        fs::write(seeds_dir.join("my_table.yml"), "materialization: bogus\n").unwrap();
+
+        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main");
+        let err = result.expect_err(
+            "a sidecar with `materialization: bogus` must abort discovery, not be coerced to table",
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bogus"),
+            "error message should mention the unknown value 'bogus', got: {msg}"
+        );
+    }
+
+    /// BUG-028: selecting a source via `--select` must be a hard error, not a
+    /// silent no-op that exits 0. Verify that `smelt_db::resolve_ref_path`
+    /// returns `RefKind::Source` (not `RefKind::Seed`) for a source-YAML entity
+    /// so that the kind-check added to `commands/seed.rs` fires correctly.
+    ///
+    /// This test does NOT call `run_seed` (that is an async binary command), but
+    /// it exercises the exact DB query that the fix depends on: after
+    /// `resolve_selector_args` resolves a selector to a canonical path, the
+    /// command calls `resolve_ref_path` and rejects non-`Seed` kinds.
+    #[test]
+    fn test_select_source_resolves_as_source_not_seed() {
+        use smelt_db::{resolve_ref_path, RefKind};
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Create a minimal hermetic project: smelt.yml + a source YAML file.
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path();
+        let models_dir = proj.join("models").join("sources").join("raw");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // A minimal per-entity source YAML (no CSV sibling → not a seed).
+        fs::write(
+            models_dir.join("customers.yml"),
+            "table: customers\nschema: raw\ndatabase: main\ncolumns:\n  - name: id\n    type: Integer\n",
+        )
+        .unwrap();
+
+        // smelt.yml needed so set_project_input finds paths.
+        fs::write(
+            proj.join("smelt.yml"),
+            "name: test_proj\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: dev.duckdb\n    schema: main\n",
+        )
+        .unwrap();
+
+        // Build the same lightweight DB that `commands/seed.rs` uses.
+        let mut db = smelt_db::Database::default();
+        let project = db.set_project_input(proj.to_path_buf(), String::new());
+        db.set_workspace(vec![], vec![project]);
+        let ws = db.workspace();
+
+        // The source entity's canonical address segments = ["sources", "raw", "customers"].
+        let source_path = vec![
+            "sources".to_string(),
+            "raw".to_string(),
+            "customers".to_string(),
+        ];
+
+        let resolved = resolve_ref_path(&db, ws, source_path.clone()).expect(
+            "sources.raw.customers must resolve in the lightweight DB (project_sources reads disk)",
+        );
+
+        // Assert it is a Source, not a Seed — the kind-check in commands/seed.rs
+        // must fire and reject this selector with a hard error.
+        assert_eq!(
+            resolved.kind,
+            RefKind::Source,
+            "sources.raw.customers must resolve as Source, not {:?}",
+            resolved.kind
+        );
+
+        // Confirm a seed path resolves as Seed (sanity-check the positive case).
+        let seeds_dir = proj.join("seeds");
+        fs::create_dir_all(&seeds_dir).unwrap();
+        fs::write(seeds_dir.join("products.csv"), "id,name\n1,Widget\n").unwrap();
+        // Re-set project to pick up the new smelt.yml with seeds path.
+        fs::write(
+            proj.join("smelt.yml"),
+            "name: test_proj\nversion: 1\npaths:\n  - models\n  - seeds\ntargets:\n  dev:\n    type: duckdb\n    database: dev.duckdb\n    schema: main\n",
+        )
+        .unwrap();
+        // Rebuild DB so Salsa picks up the updated smelt.yml.
+        let mut db2 = smelt_db::Database::default();
+        let project2 = db2.set_project_input(proj.to_path_buf(), String::new());
+        db2.set_workspace(vec![], vec![project2]);
+        let ws2 = db2.workspace();
+
+        let seed_path = vec!["products".to_string()];
+        let seed_resolved = resolve_ref_path(&db2, ws2, seed_path.clone())
+            .expect("products must resolve in DB after smelt.yml update");
+        assert_eq!(
+            seed_resolved.kind,
+            RefKind::Seed,
+            "products must resolve as Seed, not {:?}",
+            seed_resolved.kind
+        );
+    }
+
     #[test]
     fn test_filter_seeds_by_name() {
         let seeds = vec![

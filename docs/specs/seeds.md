@@ -126,7 +126,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 
 4. **Idempotence.** Re-running `smelt seed` brings the database to the same state for the same `(CSV, YAML)` inputs. Re-loading replaces the table; existing rows are not appended.
 
-5. **Compile-time and runtime inference agree on every recognised type.** Where they differ, runtime is the wider view (it sees every row, not just the first 100). When the two disagree on a recognised type, smelt emits a diagnostic at compile time so the user can pin the schema to the runtime-correct type.
+5. **Compile-time and runtime inference use the same rules on different sample sizes.** Both phases apply identical type-precedence logic; the only difference is that compile time samples the first 100 rows while runtime reads the whole file, so runtime may infer a wider type when early rows happen to fit a narrower one. No compile-time diagnostic is emitted today when the two views diverge — see Known Divergences.
 
 6. **Empty cell is always NULL.** This rule is uniform across all column types, including `VARCHAR`. Users who need a literal empty string materialise it via `COALESCE(col, '')` in a downstream model.
 
@@ -168,6 +168,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 ## Known Divergences / Open Questions
 
 - **Implementation lags spec (partial).** The CSV parser, type inferencer, Arrow batch builder, `Backend::load_table` wiring (Phase 4), sidecar YAML parsing/validation, ephemeral seed CTE expansion, and materialization dispatch (Phase 5) are implemented. The LSP affordances — missing-sidecar diagnostic and "Pin schema" code action (Phase 7) — are implemented. Per-entity source YAMLs (Phase 6) are implemented; the aggregate `sources.yml` format is removed.
+- **No compile/runtime type-divergence diagnostic.** When the first 100 rows fit a narrower type than the full file (e.g. rows 1–100 are integers but row 101 contains `1.5`), compile time infers the narrower type while runtime loads the wider one. No diagnostic is emitted today to flag this divergence; the user must pin the schema in a sidecar YAML (`columns:`) to prevent it. Emitting a warning when the compile-time sample and the full-file inference disagree is deferred.
 - **Drift diagnostic between CSV and pinned YAML.** The "Re-pin schema from CSV" LSP code action is in scope here, but the diagnostic that surfaces drift (column added/removed, inferred type drift) is implementation-deferred to the LSP plan.
 - **Ephemeral seed size limits.** A 100k-row CSV declared `materialization: ephemeral` would generate a `VALUES` literal of dangerous size. A future row-count threshold (warn, then error) is open; today's spec leaves the choice to the user.
 - **Tests on seed columns.** The shared YAML does not yet support `tests:`. Column-level tests on seed/source/model columns will land together when `testing.md` grows that surface (it currently covers only `materialization: test` model files).

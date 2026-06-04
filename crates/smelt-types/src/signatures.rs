@@ -2213,7 +2213,15 @@ fn struct_expr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
 }
 
 fn compute_tier(params: &[ParamSpec], return_type_text: Option<&str>) -> Tier {
-    let all_params_typed = params.iter().all(|p| p.type_ref_text.is_some());
+    // A parameter counts as "annotated" only when its type_ref parsed
+    // successfully (Some(Ok(_))).  A malformed annotation — one that
+    // produces Some(Err(_)) — is treated as unannotated, demoting the
+    // function to Tier 1 (spec: gradual_typing.md §"Tier dispatch is
+    // implicit": "a malformed annotation (one that fails
+    // InvalidFunctionTypeRef) is treated as unannotated").
+    // Note: unannotated params (type_ref == None) also fall through to
+    // Tier 1 via the `_ => false` arm below.
+    let all_params_typed = params.iter().all(|p| matches!(&p.type_ref, Some(Ok(_))));
     if !all_params_typed {
         return Tier::One;
     }

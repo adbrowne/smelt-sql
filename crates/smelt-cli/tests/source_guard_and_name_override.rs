@@ -1,4 +1,4 @@
-//! Integration tests for Phase 6 source-related fixes.
+//! Integration tests for source name resolution.
 //!
 //! Test 1 (`aggregate_sources_yml_stops_build`): Verifies that
 //! `UpstreamSchemas::from_database` returns a hard error when a legacy
@@ -6,8 +6,14 @@
 //!
 //! Test 2 (`name_override_appears_in_compiled_sql`): Verifies that a per-entity
 //! source YAML with `name: warehouse.users_v2` causes the compiler to emit
-//! `warehouse.users_v2` (not the default schema-qualified name) in the FROM
-//! clause of a model that references `smelt.sources.raw.users`.
+//! `warehouse.users_v2` in the FROM clause of a model that references
+//! `smelt.sources.raw.users`.
+//!
+//! Test 3 (`no_name_override_uses_unified_default_mapping`): BUG-033 regression
+//! test. Verifies that a per-entity source with NO `name:` override follows the
+//! same unified default mapping as models — `<target_schema>.<path-joined-by-_>`
+//! — rather than the old special-cased `<source_name>.<table_name>` legacy mapping.
+//! For `smelt.sources.raw.users` this means `main.sources_raw_users`, not `raw.users`.
 
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::ModelDiscovery;
@@ -187,6 +193,83 @@ name: warehouse.users_v2
     assert!(
         !compiled.sql.contains("main.sources_raw_users"),
         "default mapping `main.sources_raw_users` should NOT appear when name: override is set, got:\n{}",
+        compiled.sql
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: no name: override → unified default mapping (BUG-033)
+// ---------------------------------------------------------------------------
+
+/// BUG-033 regression test: a per-entity source with NO `name:` override must
+/// resolve via the same unified default mapping as models:
+///   `<target_schema>.<address-path-joined-by-_>`
+///
+/// For `smelt.sources.raw.users` with `schema: main` → `main.sources_raw_users`
+/// NOT the old legacy `raw.users`.
+///
+/// workspace:
+///   models/sources/raw/users.yml  → source WITHOUT name: override
+///   models/use_source.sql         → SELECT * FROM smelt.sources.raw.users
+///
+/// After compilation the emitted SQL must contain `main.sources_raw_users`,
+/// not `raw.users`.
+#[test]
+fn no_name_override_uses_unified_default_mapping() {
+    let source_yaml = r#"
+columns:
+  - name: id
+    type: INTEGER
+  - name: email
+    type: TEXT
+"#;
+
+    let model_sql = "SELECT id, email FROM smelt.sources.raw.users\n";
+
+    let tmp = stage_workspace(&[
+        ("models/sources/raw/users.yml", source_yaml),
+        ("models/use_source.sql", model_sql),
+    ]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().unwrap();
+
+    let use_source = models
+        .iter()
+        .find(|m| m.name == "use_source")
+        .expect("use_source model not found");
+
+    let db = init_db(&project_dir, &models);
+
+    let mut targets = HashMap::new();
+    targets.insert("default".to_string(), duckdb_target("main"));
+    let config = config_with_targets(targets.clone());
+    let mut compilers = CompilerRegistry::new(&config, &targets);
+
+    let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
+        .expect("from_database should succeed — no aggregate sources.yml present");
+    compilers.set_upstream_schemas_all(std::sync::Arc::new(upstream_schemas));
+
+    let compiled = compilers
+        .get("default")
+        .compile(use_source, "main")
+        .expect("compile should succeed");
+
+    assert!(
+        compiled.sql.contains("main.sources_raw_users"),
+        "compiled SQL must use unified default mapping `main.sources_raw_users` \
+         (not legacy `raw.users`) when no name: override is set, got:\n{}",
+        compiled.sql
+    );
+    assert!(
+        !compiled.sql.contains("raw.users"),
+        "legacy mapping `raw.users` must NOT appear when no name: override is set, got:\n{}",
+        compiled.sql
+    );
+    assert!(
+        !compiled.sql.contains("smelt.sources.raw.users"),
+        "smelt.sources.raw.users should be resolved, got:\n{}",
         compiled.sql
     );
 }

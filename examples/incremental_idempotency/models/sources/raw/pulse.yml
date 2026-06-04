@@ -1,4 +1,5 @@
 description: Raw pulse event stream; pre-loaded by the integration test
+name: raw.pulse
 columns:
 - name: event_ts
   type: TIMESTAMP

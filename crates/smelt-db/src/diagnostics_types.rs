@@ -629,6 +629,18 @@ pub enum DiagnosticCode {
     /// Message: "VALUES clause has no rows; cannot infer column types"
     EmptyValuesClause,
 
+    /// Emitted when a Python `@model` function returns a SQL string whose
+    /// frontmatter declares a `name:` field that differs from the function name.
+    /// The model name is always the function name; the `name:` field in the
+    /// returned frontmatter must either be absent or exactly equal the function
+    /// name. A mismatch means the frontmatter would silently apply to a model
+    /// the author did not intend (or be silently dropped). Anchored at the
+    /// beginning of the file (range zero). Severity: Error.
+    /// Message: "python model name mismatch: frontmatter declares name '{fm_name}'
+    /// but function name is '{fn_name}'; remove the name field or set it to
+    /// '{fn_name}'"
+    PythonModelNameMismatch,
+
     // ── Planner-rule diagnostic codes (surfaced via the uniform rule →
     //    diagnostics interface; see `smelt_planner::rule_diagnostics`) ──────────
     /// `cumulative_aggregate` SELECT has no GROUP BY (the key columns).

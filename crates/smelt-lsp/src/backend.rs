@@ -262,6 +262,7 @@ impl Backend {
                 DbCode::AsStructUnsupportedBackend => "as-struct-unsupported-backend",
                 DbCode::FunctionCallCycle => "function-call-cycle",
                 DbCode::FrontmatterParseError => "frontmatter-parse-error",
+                DbCode::PythonModelNameMismatch => "python-model-name-mismatch",
                 DbCode::ProvenanceMismatch => "provenance-mismatch",
                 DbCode::JoinsMismatch => "joins-mismatch",
                 DbCode::DeclaredCardinalityUnverifiable => "declared-cardinality-unverifiable",

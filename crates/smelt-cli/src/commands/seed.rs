@@ -3,6 +3,7 @@ use smelt_cli::{
     argument_resolution::{compute_scope, resolve_selector_args},
     find_project_root, seed, Config,
 };
+use smelt_db::{resolve_ref_path, RefKind};
 
 use tracing::info;
 
@@ -63,6 +64,28 @@ pub async fn run_seed(args: SeedArgs, scope: Option<&str>) -> Result<()> {
         let resolved_select =
             resolve_selector_args(&db, ws, project, active_scope.as_ref(), &args.select)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // BUG-028: for every resolved selector, verify the entity is a Seed.
+        // Selecting a source or model is a hard error — not a silent no-op.
+        for sel in &resolved_select {
+            let path_segs: Vec<String> = sel.split('.').map(|s| s.to_string()).collect();
+            if let Some(resolved) = resolve_ref_path(&db, ws, path_segs) {
+                if resolved.kind != RefKind::Seed {
+                    let kind_str = match resolved.kind {
+                        RefKind::Source => "source",
+                        RefKind::Model => "model",
+                        RefKind::Function => "function",
+                        RefKind::Test => "test",
+                        RefKind::Seed => unreachable!(),
+                    };
+                    anyhow::bail!(
+                        "'{}' is not a seed (it is a {kind_str}); \
+                         `smelt seed --select` only accepts seed paths",
+                        sel
+                    );
+                }
+            }
+        }
 
         // Keep only seeds whose canonical path matches a resolved selector.
         seeds.retain(|s| {

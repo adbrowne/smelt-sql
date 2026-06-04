@@ -188,6 +188,41 @@ fn is_tier2_function_returns_false_for_unannotated() {
     );
 }
 
+// BUG-012: malformed annotation must be treated as unannotated → Tier 1.
+#[test]
+fn malformed_annotation_demotes_function_to_tier1() {
+    // `x: Bogus` is not a recognised type — it fails `parse_smelt_type` and
+    // produces `type_ref = Some(Err(...))`.  The spec (gradual_typing.md
+    // §Surface §Tier dispatch) says "a malformed annotation (one that fails
+    // `InvalidFunctionTypeRef`) is treated as unannotated, demoting the
+    // function to Tier 1."  Before the BUG-012 fix, `compute_tier` keyed on
+    // `type_ref_text.is_some()` which was `true` even for `Bogus`, so the
+    // function landed at Tier 2 instead of Tier 1.
+    use smelt_parser::{parse, strip_frontmatter, File as AstFile};
+    use smelt_types::signatures::{extract_function_signatures, Tier};
+
+    let src = "smelt.define f(x: Bogus) AS (x)\n";
+    let clean = strip_frontmatter(src).to_string();
+    let p = parse(&clean);
+    let ast = AstFile::cast(p.syntax()).expect("FILE");
+    let sigs = extract_function_signatures(&ast, &clean);
+    assert_eq!(sigs.len(), 1, "expected one signature, got {sigs:?}");
+    assert_eq!(
+        sigs[0].tier,
+        Tier::One,
+        "function with malformed annotation `x: Bogus` must be Tier 1 (treated as unannotated), \
+         got tier {:?}",
+        sigs[0].tier
+    );
+    // Also check via the `is_tier2_function` helper (it already uses
+    // `type_ref`, so it should have been correct all along — this confirms
+    // both helpers agree after the fix).
+    assert!(
+        !is_tier2_function(&sigs[0]),
+        "is_tier2_function must return false for a function with only malformed annotations"
+    );
+}
+
 // ============================================================================
 // Phase 24 — Tier 3 return type verification
 // ============================================================================

@@ -230,28 +230,87 @@ pub fn discover_python_models(
                     Vec::new()
                 };
 
-                // Extract metadata from generated SQL frontmatter
-                let model_metadata = match extract_file_metadata(&output.sql) {
-                    Ok(fm) => Some(fm),
-                    Err(e) => {
-                        tracing::warn!("Python model {}: {}", output.name, e);
-                        None
+                // Extract metadata from generated SQL frontmatter, checking for
+                // name mismatches between the frontmatter `name:` field and the
+                // Python function name (BUG-038).
+                let mut name_mismatch_error: Option<smelt_parser::ParseError> = None;
+                let model_metadata = {
+                    let fm_opt = match extract_file_metadata(&output.sql) {
+                        Ok(fm) => Some(fm),
+                        Err(e) => {
+                            tracing::warn!("Python model {}: {}", output.name, e);
+                            None
+                        }
+                    };
+                    match fm_opt {
+                        Some(FileMetadata::Single { metadata, .. }) => {
+                            // If the frontmatter declares a `name:` that differs from
+                            // the function name, emit PythonModelNameMismatch and drop
+                            // the frontmatter so defaults apply.
+                            if let Some(ref fm_name) = metadata.name {
+                                if fm_name != &output.name {
+                                    name_mismatch_error = Some(smelt_parser::ParseError {
+                                        message: format!(
+                                            "PythonModelNameMismatch: frontmatter declares \
+                                             name '{}' but function name is '{}'; remove \
+                                             the name field or set it to '{}'",
+                                            fm_name, output.name, output.name
+                                        ),
+                                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                                    });
+                                    None
+                                } else {
+                                    Some(metadata)
+                                }
+                            } else {
+                                Some(metadata)
+                            }
+                        }
+                        Some(FileMetadata::Multi { models }) => {
+                            // In multi-section output, each section is identified by
+                            // its `name:` field.  Collect the section names first so
+                            // we can report them on a mismatch, then find the match.
+                            let section_names: Vec<String> = models
+                                .iter()
+                                .filter_map(|s| s.metadata.name.clone())
+                                .collect();
+                            let matched = models
+                                .into_iter()
+                                .find(|s| s.metadata.name.as_deref() == Some(&output.name));
+                            if matched.is_none() {
+                                // No section matched the function name — mismatch.
+                                let declared = if section_names.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    section_names
+                                        .iter()
+                                        .map(|n| format!("'{n}'"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                };
+                                name_mismatch_error = Some(smelt_parser::ParseError {
+                                    message: format!(
+                                        "PythonModelNameMismatch: frontmatter section \
+                                         name(s) {declared} do not match function name \
+                                         '{}'; the frontmatter name must match the \
+                                         function name",
+                                        output.name
+                                    ),
+                                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                                });
+                            }
+                            matched.map(|section| Box::new(section.metadata))
+                        }
+                        Some(FileMetadata::Empty) | None => None,
+                        // Generator files produce models via meta-language evaluation;
+                        // Python model output is not a generator file.
+                        Some(FileMetadata::Generator { .. }) => None,
                     }
-                }
-                .and_then(|fm| match fm {
-                    FileMetadata::Single { metadata, .. } => Some(metadata),
-                    FileMetadata::Multi { models } => models
-                        .into_iter()
-                        .find(|section| section.metadata.name.as_deref() == Some(&output.name))
-                        .map(|section| Box::new(section.metadata)),
-                    FileMetadata::Empty => None,
-                    // Generator files produce models via meta-language evaluation;
-                    // Python model output is not a generator file.
-                    FileMetadata::Generator { .. } => None,
-                });
+                };
 
-                // Convert parse errors, attributing them to the Python file
-                let parse_errors: Vec<smelt_parser::ParseError> = parse
+                // Convert parse errors, attributing them to the Python file.
+                // Also include the name-mismatch sentinel if one was detected.
+                let mut parse_errors: Vec<smelt_parser::ParseError> = parse
                     .errors
                     .iter()
                     .map(|e| smelt_parser::ParseError {
@@ -264,6 +323,9 @@ pub fn discover_python_models(
                         range: e.range,
                     })
                     .collect();
+                if let Some(mismatch_err) = name_mismatch_error {
+                    parse_errors.push(mismatch_err);
+                }
 
                 let model_id = ModelId::from_path(file_path.clone());
                 new_models.push(ModelFile {
@@ -1331,5 +1393,119 @@ def colliding(project):
         );
         let python_files = discovery.discover_python_files().unwrap();
         assert!(python_files.is_empty());
+    }
+
+    /// BUG-038: a Python `@model` whose returned SQL starts with
+    /// `--- name: X ---` frontmatter where X ≠ function name must produce a
+    /// `PythonModelNameMismatch` error rather than silently dropping the
+    /// frontmatter (materialization etc.) and registering under the function name
+    /// with view defaults.
+    ///
+    /// Before the fix the model would be produced with `metadata = None`
+    /// (view default) and `parse_errors.is_empty()`.
+    /// After the fix the model is produced (not a hard error) but
+    /// `parse_errors` contains exactly one entry whose message starts with
+    /// `"PythonModelNameMismatch"`.
+    #[test]
+    fn test_python_model_frontmatter_name_mismatch_emits_diagnostic() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        // Set up SDK
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // Python model that returns SQL with a frontmatter `name:` that
+        // differs from the function name.  Before BUG-038 fix this silently
+        // dropped the `materialization: table` and registered the model as a
+        // view with no diagnostic.
+        let py_content = r#"from smelt import model
+
+@model
+def my_func(project):
+    return """--- name: other_name ---
+materialization: table
+---
+SELECT 1 AS id
+"""
+"#;
+        std::fs::write(models_dir.join("mismatch.py"), py_content).unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+        assert_eq!(python_files.len(), 1);
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        // discover_python_models must succeed (not return Err) — the mismatch
+        // is a per-model diagnostic, not a hard stop.
+        let python_models =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+
+        assert_eq!(python_models.len(), 1, "model must still be produced");
+        let model = &python_models[0];
+
+        // Model name is always the function name.
+        assert_eq!(model.name, "my_func");
+
+        // A PythonModelNameMismatch diagnostic must be present.
+        let mismatch_errs: Vec<_> = model
+            .parse_errors
+            .iter()
+            .filter(|e| e.message.starts_with("PythonModelNameMismatch"))
+            .collect();
+        assert_eq!(
+            mismatch_errs.len(),
+            1,
+            "expected exactly one PythonModelNameMismatch parse error; got: {:#?}",
+            model.parse_errors
+        );
+        // The message must mention both the frontmatter name and the function name.
+        let msg = &mismatch_errs[0].message;
+        assert!(
+            msg.contains("other_name"),
+            "error message must mention frontmatter name 'other_name'; got: {msg}"
+        );
+        assert!(
+            msg.contains("my_func"),
+            "error message must mention function name 'my_func'; got: {msg}"
+        );
+
+        // The frontmatter metadata must be dropped (mismatch → no metadata
+        // applied; materialisation falls back to project default).
+        assert!(
+            model.metadata.is_none(),
+            "metadata must be None when there is a name mismatch; got: {:#?}",
+            model.metadata
+        );
     }
 }

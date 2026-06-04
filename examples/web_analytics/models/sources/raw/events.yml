@@ -1,4 +1,5 @@
 description: Raw web analytics events with a JSON-encoded payload.
+name: raw.events
 columns:
   - name: event_id
     type: BIGINT

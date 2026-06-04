@@ -14,7 +14,7 @@ owners: [andrew]
 ### `smelt diff` output
 
 ```
-smelt diff [--select <selector>] [--format text|json]
+smelt diff [--select <selector>] [--json]
 ```
 
 `smelt diff` compares the inferred schema (derived from current model SQL) against the deployed schema (stored in `.smelt/schemas/`). It prints a per-model report and exits `0` if no changes are found, `1` if any change is detected.
@@ -32,7 +32,7 @@ model_name: UNCHANGED
 model_name: REMOVED
 ```
 
-`--format json` produces a machine-readable object:
+`--json` produces a machine-readable object. All enum values use snake_case:
 
 ```json
 {
@@ -41,20 +41,25 @@ model_name: REMOVED
       "status": "new" | "unchanged" | "changed" | "removed",
       "changes": [
         {
-          "type": "AddColumn" | "RemoveColumn" | "ChangeType" | "ChangeNullability"
-               | "StructFieldAdded" | "StructFieldRemoved" | "NestedTypeChange"
-               | "ArrayElementTypeChange" | "MapKeyTypeChange" | "MapValueTypeChange"
-               | "IncompatibleTypeChange",
+          "type": "add_column" | "remove_column" | "change_type" | "change_nullability"
+               | "struct_field_added" | "struct_field_removed" | "nested_type_change"
+               | "array_element_type_change" | "map_key_type_change" | "map_value_type_change"
+               | "incompatible_type_change",
           "column": "<col_name>",
-          "detail": "<string>"
+          "data_type": "<type string>",
+          "nullable": true | false,
+          "from": "<previous type or value>",
+          "to": "<new type or value>",
+          "path": "<nested field path, if applicable>",
+          "reason": "<explanation string>"
         }
       ],
       "warnings": ["<string>"],
       "risk": {
         "requires_full_refresh": true | false,
         "has_column_removals": true | false,
-        "migration_action": "NoChange" | "AlterTable" | "FullRefresh" | "FullRefreshBlocked"
-                          | "RequiresColumnRemovalFlag" | "TableRewrite",
+        "migration_action": "no_change" | "alter_table" | "full_refresh" | "full_refresh_blocked"
+                          | "requires_column_removal_flag" | "table_rewrite",
         "statements": ["<DDL string>"]
       }
     }
@@ -220,7 +225,6 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **`model_hash` not used for change detection.** The stored model SQL hash is recorded but not used by `smelt diff` to decide whether a model needs re-running — only schema column differences trigger migration actions. The principled successor is the *semantic* output-fingerprint (`output_fingerprint.md`): a raw SQL hash over-reports change (any formatting edit re-runs), whereas the fingerprint re-runs only on a genuine output change. Wiring fingerprint-based change detection into reuse is owned by `virtual_environments.md`.
 - **Schema migration and fingerprint reuse are complementary, not alternatives.** A fingerprint match proves *row* equivalence for the same inputs; it does not by itself guarantee the deployed *physical* schema matches. Under `state.mode: environments`, reuse of a table additionally requires that no physical migration is needed, or that one is applied via the `MigrationAction` path here (`virtual_environments.md` §"Reuse decision" condition 4). The two systems compose: this spec classifies the physical change, the fingerprint classifies the logical-output change.
 - **`backfill:` and `default:` undocumented in user guide.** The column evolution annotations are implemented but absent from the schema evolution user guide page.
-- **`smelt diff --format json` schema not published.** The JSON output format is not documented as a stable contract. Orchestrators consuming it could break on version changes.
 - **Struct field reordering detection.** Whether changing struct field order is detected as `IncompatibleTypeChange` or silently ignored depends on the comparison implementation. Current behavior undocumented in user guide.
 - **Exit code for blocked migrations.** When a run is blocked by `RequiresColumnRemovalFlag` or `FullRefreshBlocked`, the exit code is non-zero but the specific code (1 vs. other) is not specified.
 - **`.smelt/schemas/` format settling.** The on-disk JSON format of stored schemas and update timing on partial runs are still implementation-defined; the `.smelt/` layout and manifest (run IDs, parallelism, recovery) are owned by `run_state.md`. Stale-schema cleanup semantics are specified above.

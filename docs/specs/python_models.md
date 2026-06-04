@@ -35,7 +35,7 @@ materialization: table
 - Each decorated function produces one model.
 - The function name is the model name.
 - The function must accept one argument (`project`) and return a SQL string.
-- The returned SQL string may include YAML frontmatter using the `--- name: ... ---` / `---` delimiter format.
+- The returned SQL string may include YAML frontmatter using the `--- name: ... ---` / `---` delimiter format. If a `name:` field appears, it must equal the function name; a mismatch is a `PythonModelNameMismatch` error.
 - Multiple `@model`-decorated functions in one file each produce an independent model.
 - Non-decorated functions are helper utilities and are ignored.
 
@@ -101,9 +101,9 @@ Python model functions are evaluated at **compile time** — during `smelt build
 
 ### Model name derivation
 
-The model name is the Python function name, exactly. A function named `daily_revenue` produces a model named `daily_revenue`, addressable as `smelt.daily_revenue` (universal `smelt.<path>` form per `architecture.md` §"Resolution") in other models.
+The model name is always the Python function name, exactly. A function named `daily_revenue` produces a model named `daily_revenue`, addressable as `smelt.daily_revenue` (universal `smelt.<path>` form per `architecture.md` §"Resolution") in other models.
 
-If a returned SQL string includes a `--- name: X ---` frontmatter header, that name is used instead of the function name. This allows a single Python function to return SQL with an explicit model name.
+If a returned SQL string includes a `--- name: X ---` frontmatter header, the `name:` field must either be absent or exactly equal the function name. A `name:` value that differs from the function name is a `PythonModelNameMismatch` diagnostic (Error severity); the frontmatter is dropped and model defaults apply. This rule exists because the function name is the stable identity — allowing the frontmatter to override it would silently produce a model under a different name than what the author wrote at the call site.
 
 ### Iterative evaluation
 
@@ -140,6 +140,8 @@ The return value of a `@model` function must be a string containing valid SQL. T
 
 All standard model frontmatter keys (`materialization`, `tags`, `owner`, etc.) are valid in the returned string. If frontmatter is absent, defaults apply as they would for any SQL model file.
 
+When a `name:` field appears in the frontmatter, it must equal the function name. A mismatch emits `PythonModelNameMismatch` (Error) and the frontmatter is dropped.
+
 ## Design
 
 **Compile-time Python, not Jinja.** Python model generation runs once at compile time and produces plain SQL. This avoids the template-execution-per-run overhead of Jinja, enables proper error messages (Python exceptions with tracebacks rather than template expansion failures), and keeps the query engine free of Python dependencies. The trade-off is that Python cannot access live query results — it can only operate on the project's structural metadata. Jinja was rejected because Jinja templates mix control flow with SQL syntax (no IDE, no type-checker, no LSP understands them), have opaque failure modes at render time, and force the executor to interpret template logic — coupling execution to a Python runtime. Runtime-access Python (calling a function each time the query runs) was rejected for the same reason: it couples execution to a Python runtime and prevents static analysis.
@@ -148,7 +150,7 @@ All standard model frontmatter keys (`materialization`, `tags`, `owner`, etc.) a
 
 **Iterative evaluation for self-referential generation.** A Python model may generate models that in turn are used by other Python models (e.g., a "tag all staging models" generator that a marts generator queries). The iterative fixed-point approach handles these cases without requiring explicit ordering.
 
-**Function name = model name.** Using the function name as the model name follows the same "identity falls out of structure" principle as file-stem naming for SQL models. The `--- name: X ---` override exists for cases where the function name is constrained (e.g., a helper wrapper that produces a differently-named model).
+**Function name = model name.** Using the function name as the model name follows the same "identity falls out of structure" principle as file-stem naming for SQL models. The `--- name: X ---` field is tolerated in the returned SQL only when it repeats the function name exactly; mismatching it is an error so authors get a diagnostic rather than a silently-misrouted model.
 
 ## Constraints & Invariants
 

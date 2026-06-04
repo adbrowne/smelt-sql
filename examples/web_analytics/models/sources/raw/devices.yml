@@ -1,4 +1,5 @@
 description: Web analytics devices dimension (synthetic).
+name: raw.devices
 columns:
   - name: device_id
     type: INTEGER

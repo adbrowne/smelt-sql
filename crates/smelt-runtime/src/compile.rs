@@ -858,10 +858,10 @@ impl SqlCompiler {
 
     /// Build a `SmeltPathRefResolver` for a specific `schema` string.
     ///
-    /// Per architecture.md §"Default materialization name mapping" (Phase 2):
+    /// Per architecture.md §"Default materialization name mapping":
     /// - All persisted paths → `{schema}.{segs.join("_")}`
-    /// - `["sources", src_name, table_name]` → `src_name.table_name`
-    ///   (sources.yml still active until Phase 6)
+    /// - `smelt.sources.<path>` with `name:` override → the override verbatim.
+    /// - `smelt.sources.<path>` without override → same unified default mapping.
     ///
     /// Paths not matching any known namespace return `None`, leaving the
     /// node verbatim — forward-compatible with new namespaces.
@@ -880,16 +880,19 @@ impl SqlCompiler {
     ) -> SmeltPathRefResolver<'static> {
         let schema = schema.to_string();
         let cross_engine_refs = self.cross_engine_refs.clone();
-        let sources = self.upstream_schemas.sources.clone();
         let per_entity_sources = self.upstream_schemas.per_entity_sources.clone();
         let ephemerals = ephemeral_names.clone();
 
         Box::new(move |segs: &[String]| {
             match segs {
-                // smelt.sources.<source_name>.<table_name> and deeper paths.
-                // Phase 6: per-entity sources with a `name:` override take
-                // precedence. Without an override, the legacy `<source>.<table>`
-                // mapping is preserved so existing projects continue to work.
+                // smelt.sources.<path>: per-entity source with a `name:` override
+                // emits that override verbatim. Without an override, sources follow
+                // the same unified default mapping as models and functions:
+                //   `<target_schema>.<segs.join("_")>`
+                // (architecture.md §"Default materialization name mapping").
+                // For `smelt.sources.raw.users` with schema `main` this is
+                // `main.sources_raw_users`. Use `name: raw.users` in the source
+                // YAML when the external table lives at a different location.
                 segs if !segs.is_empty() && segs[0] == "sources" => {
                     // Per-entity source with an explicit `name:` override wins.
                     if let Some(src_info) = per_entity_sources
@@ -899,28 +902,9 @@ impl SqlCompiler {
                         if src_info.name_override.is_some() {
                             return Some(src_info.db_name(&schema));
                         }
-                        // No override — fall through to legacy mapping below so
-                        // `smelt.sources.raw.orders` still resolves to `raw.orders`.
                     }
-
-                    // Legacy sources.yml identifier override, or the default
-                    // `<source_name>.<table_name>` mapping. For
-                    // `["sources", "raw", "orders"]` this produces `raw.orders`.
-                    if segs.len() >= 3 {
-                        let source_name = &segs[segs.len() - 2];
-                        let table_name = &segs[segs.len() - 1];
-                        let emit_name = sources
-                            .sources
-                            .iter()
-                            .find(|s| s.name == *source_name)
-                            .and_then(|src| src.tables.iter().find(|t| t.name == *table_name))
-                            .and_then(|tbl| tbl.identifier.as_deref())
-                            .unwrap_or(table_name.as_str())
-                            .to_string();
-                        return Some(format!("{}.{}", source_name, emit_name));
-                    }
-
-                    // Unknown sources path — return default mapping.
+                    // No override (or not found in per-entity registry) — unified
+                    // default mapping: `<schema>.<segs.join("_")>`.
                     Some(format!("{}.{}", schema, segs.join("_")))
                 }
                 // All other non-empty paths → {schema}.{segs.join("_")}
@@ -1283,15 +1267,17 @@ impl EphemeralResolver {
 
         // Build a path-ref resolver that maps smelt.<path> to either
         // __smelt_<segs.join("_")> (if ephemeral) or schema.<segs.join("_")>.
+        // Sources follow the same unified default mapping as all other paths
+        // (architecture.md §"Default materialization name mapping"). The `name:`
+        // override is not available here (this resolver is used for a lighter
+        // compile path that does not load per-entity source info); the full
+        // override-aware resolver lives in `make_path_ref_resolver_with_ephemerals`.
         let ephemerals_owned: HashSet<String> = ephemeral_names.clone();
         let schema_owned = schema.to_string();
         let path_ref_resolver: SmeltPathRefResolver<'static> =
             Box::new(move |segs: &[String]| match segs {
-                // sources stay as <source_name>.<table_name> (Phase 6 will change this)
-                [ns, source_name, table_name] if ns == "sources" => {
-                    Some(format!("{}.{}", source_name, table_name))
-                }
-                // All other non-empty paths → either ephemeral CTE or schema.table
+                // All non-empty paths → either ephemeral CTE or schema.<segs.join("_")>.
+                // This includes sources: `smelt.sources.raw.users` → `main.sources_raw_users`.
                 segs if !segs.is_empty() => {
                     let table_name = segs.join("_");
                     if ephemerals_owned.contains(&table_name) {

@@ -1,4 +1,5 @@
 description: Raw order events; pre-loaded by the integration test
+name: raw.orders
 columns:
 - name: order_id
   type: INTEGER

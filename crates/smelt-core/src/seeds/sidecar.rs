@@ -74,6 +74,11 @@ pub enum SidecarError {
 
     #[error("Unknown type '{type_str}' in sidecar column '{column}'")]
     UnknownType { type_str: String, column: String },
+
+    #[error(
+        "Unknown materialization '{value}' — valid values are: table, ephemeral, view, materialized_view"
+    )]
+    UnknownMaterialization { value: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -145,12 +150,9 @@ pub fn parse_sidecar_from_str(text: &str, path: &Path) -> Result<SeedSidecar, Si
         "view" => SeedMaterialization::View,
         "materialized_view" => SeedMaterialization::MaterializedView,
         other => {
-            // Unknown value — fall back to Table with no error; callers may add
-            // stricter handling in the future. For now we match the spec's
-            // "view and materialized_view are detected at validation" design.
-            // Treat any unrecognised value as Table to avoid crashing the LSP.
-            let _ = other;
-            SeedMaterialization::Table
+            return Err(SidecarError::UnknownMaterialization {
+                value: other.to_string(),
+            });
         }
     };
 
@@ -244,6 +246,28 @@ mod tests {
         assert!(
             matches!(err, SidecarError::UnknownType { .. }),
             "Expected UnknownType, got {err:?}"
+        );
+    }
+
+    /// BUG-030: an unknown `materialization:` value must be a hard error, not
+    /// silently coerced to `table`.  Previously the `other =>` arm silently
+    /// fell back to `SeedMaterialization::Table`; now it must return
+    /// `SidecarError::UnknownMaterialization`.
+    #[test]
+    fn unknown_materialization_is_error_not_silent_table() {
+        let text = "materialization: bogus\n";
+        let err = parse_sidecar_from_str(text, Path::new("x.yml")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SidecarError::UnknownMaterialization { ref value } if value == "bogus"
+            ),
+            "Expected UnknownMaterialization {{ value: \"bogus\" }}, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bogus"),
+            "error message should include the unknown value, got: {msg}"
         );
     }
 }
