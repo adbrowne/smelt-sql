@@ -195,9 +195,9 @@ pub use queries::check_types::{
 pub use queries::function_diagnostics::{
     as_struct_backend_diagnostics_for_file, backends_widening_diagnostics_for_file,
     context_mismatch_diagnostics_for_file, cte_cycle_diagnostics_for_file,
-    cte_cycle_diagnostics_for_select, duplicate_function_diagnostics_for_file,
-    extern_fragment_param_diagnostics_for_file, frontmatter_parse_diagnostics_for_file,
-    function_backends, function_body_diagnostics_for_file,
+    cte_cycle_diagnostics_for_select, cte_shadow_caller_cte_diagnostics_for_file,
+    duplicate_function_diagnostics_for_file, extern_fragment_param_diagnostics_for_file,
+    frontmatter_parse_diagnostics_for_file, function_backends, function_body_diagnostics_for_file,
     invalid_function_type_ref_diagnostics_for_file, missing_provenance_advisory_for_file,
     provenance_unstable_diagnostics_for_file, smelt_fn_call_diagnostics_for_ast,
     smelt_fn_call_diagnostics_for_file, unknown_context_diagnostics_for_file,
@@ -1351,6 +1351,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // CTE cycle diagnostics (Phase 20): emitted when a function body's WITH
     // clause contains a cyclic CTE reference.
     for diag in cte_cycle_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // BUG-007: CTE-collision diagnostics — emitted when a model's top-level
+    // CTE name collides with a CTE declared in the body of a directly-called
+    // transparent function (CteShadowsCallerCte, Error).
+    for diag in cte_shadow_caller_cte_diagnostics_for_file(db, workspace, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

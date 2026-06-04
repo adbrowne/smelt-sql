@@ -251,6 +251,7 @@ impl Backend {
                 DbCode::RowRequirementUnsatisfied => "row-requirement-unsatisfied",
                 DbCode::UnknownContext => "unknown-context",
                 DbCode::CteCycle => "cte-cycle",
+                DbCode::CteShadowsCallerCte => "cte-shadows-caller-cte",
                 DbCode::ContextMismatch => "context-mismatch",
                 DbCode::FragmentColumnMissing => "fragment-column-missing",
                 DbCode::AnnotationTooWide => "annotation-too-wide",

@@ -110,6 +110,12 @@ pub enum DiagnosticCode {
     /// (directly or transitively). Anchored at the CTE name span.
     /// Introduced in Phase 20 of smelt-functions.
     CteCycle,
+    /// Emitted when a model's top-level CTE shares a name with a CTE declared
+    /// in the body of a transparent function the model directly calls. Error
+    /// severity — v1 refuses and asks the author to rename one CTE; automatic
+    /// alpha-rename is deferred to v2. Anchored at the call-site expression in
+    /// the model. Introduced in Phase C3 of the codegen-soundness plan.
+    CteShadowsCallerCte,
     /// Emitted when an explicit `Expr<T, ctx_name>` annotation disagrees with
     /// the context inferred from the parameter's splice point in the function
     /// body. Anchored at the `TypeRef` span of the offending parameter.

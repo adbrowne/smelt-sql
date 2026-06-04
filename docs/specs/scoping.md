@@ -51,6 +51,7 @@ User-visible codes anchored to scoping. Full descriptions live alongside `Diagno
 | `FragmentColumnMissing` | At a call site, a caller-supplied fragment references a column that is not in the parameter's inferred splice context. |
 | `FragmentKindMismatch` | At a call site, a caller-supplied fragment is of a lower expression kind than the parameter requires (e.g. scalar passed where `SelectItems<Agg>` is expected). |
 | `CteCycle` | A CTE in a body forms a cyclic reference, directly or transitively. |
+| `CteShadowsCallerCte` | A CTE declared in a directly-called transparent function's body shares a name with a CTE in the calling model's top-level WITH clause. Error severity — v1 refuses and asks the author to rename one CTE; automatic alpha-rename is deferred to v2. Anchored at the call site in the model. |
 
 ### Generator-file body scope
 

@@ -2003,6 +2003,133 @@ pub fn context_mismatch_diagnostics_for_file(
 }
 
 // ============================================================================
+// BUG-007: CTE-collision diagnostic (caller vs. function-body CTEs)
+// ============================================================================
+
+/// Collect CTE names from the body WITH clause of `fn_name`'s `smelt.define`
+/// in `workspace`. Returns an empty vec when the function has no body, no WITH
+/// clause, or is not found. Files are searched in sorted-by-path order so
+/// the result is deterministic even when a function name appears twice.
+fn function_body_cte_names_in_workspace(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    fn_name: &str,
+) -> Vec<String> {
+    let mut files: Vec<_> = workspace.files(db).to_vec();
+    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    for f in files {
+        let parse = parse_file(db, f);
+        let syntax = parse.syntax();
+        let Some(ast) = AstFile::cast(syntax) else {
+            continue;
+        };
+        let ctes = cte_names_from_define(&ast, fn_name);
+        if !ctes.is_empty() {
+            return ctes;
+        }
+    }
+    vec![]
+}
+
+/// BUG-007: emit [`DiagnosticCode::CteShadowsCallerCte`] (Error) when a
+/// model's top-level CTE name collides with a CTE declared in the body of a
+/// transparent (`smelt.define`) function the model directly calls.
+///
+/// The check runs at analysis time rather than in the SQL printer — both inputs
+/// (model CTE names and function body CTE names) are statically available. v1
+/// covers **direct** collisions only; transitive collisions are a known gap.
+///
+/// Diagnostic is anchored at the call-site expression in the model.
+pub fn cte_shadow_caller_cte_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+    use std::collections::HashSet;
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return vec![];
+    };
+
+    // Only model files (those with a top-level SELECT statement).
+    // Function-only files have no caller CTE scope.
+    let Some(select_stmt) = ast.select_stmt() else {
+        return vec![];
+    };
+
+    // Collect top-level CTE names from the model's WITH clause.
+    let model_cte_names: HashSet<String> = select_stmt
+        .with_clause()
+        .map(|wc| wc.ctes().filter_map(|c| c.name()).collect())
+        .unwrap_or_default();
+
+    if model_cte_names.is_empty() {
+        return vec![];
+    }
+
+    // Project-scoped function resolution (architecture.md → Project isolation rule).
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    let mut out = Vec::new();
+
+    // Walk all SMELT_PATH_CALL nodes to find transparent function calls.
+    for node in ast.syntax().descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let Some(call) = smelt_parser::ast::SmeltPathCall::cast(node.clone()) else {
+            continue;
+        };
+        let segments = call.segments();
+        let Some(fn_name) = segments.last().cloned() else {
+            continue;
+        };
+
+        let Some(proj) = project else { continue };
+        let Some(sig) = resolve_function(db, workspace, proj, fn_name.clone()) else {
+            continue;
+        };
+        // Only transparent (smelt.define) functions have expandable bodies.
+        if sig.origin != smelt_types::SigOrigin::Define {
+            continue;
+        }
+
+        // Get the function body's CTE names.
+        let body_cte_names = function_body_cte_names_in_workspace(db, workspace, &fn_name);
+        if body_cte_names.is_empty() {
+            continue;
+        }
+
+        // Find the first (alphabetically) colliding CTE name for a deterministic message.
+        let mut collisions: Vec<&str> = model_cte_names
+            .iter()
+            .filter(|n| body_cte_names.contains(*n))
+            .map(|n| n.as_str())
+            .collect();
+        collisions.sort_unstable();
+
+        if let Some(&cte_name) = collisions.first() {
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "CTE `{cte_name}` in this model collides with CTE `{cte_name}` in the body \
+                     of function `{fn_name}`; rename one — v1 does not auto-rename"
+                ),
+                range: node.text_range(),
+                code: Some(DiagnosticCode::CteShadowsCallerCte),
+                data: None,
+            });
+        }
+    }
+
+    out
+}
+
+// ============================================================================
 // Tests for _for_select pure helpers
 // ============================================================================
 

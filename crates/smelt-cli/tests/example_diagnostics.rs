@@ -3103,3 +3103,116 @@ fn frontmatter_broken_unknown_key_emits_frontmatter_parse_error() {
         smelt_db::DiagnosticCode::FrontmatterParseError,
     );
 }
+
+// ===== BUG-007: CTE-collision diagnostic (CteShadowsCallerCte) TDD test =====
+
+/// BUG-007 TDD: `examples/expansion_broken_cte_caller_collision/` emits exactly
+/// one `CteShadowsCallerCte` Error on `models/collision_model.sql`.
+///
+/// The model declares a CTE `helper` and calls `smelt.functions.with_helper`
+/// whose body also declares a CTE `helper`. At codegen time the two CTEs
+/// would collide; the analysis-time check refuses with `CteShadowsCallerCte`.
+#[test]
+fn expansion_broken_cte_caller_collision_emits_cte_shadows_caller_cte() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let example_dir = "examples/expansion_broken_cte_caller_collision";
+    let expected_file = "models/collision_model.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_cte_shadow = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| *c == smelt_db::DiagnosticCode::CteShadowsCallerCte)
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_cte_shadow(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.clone());
+            } else {
+                other_diags.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_cte_shadow(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.0.clone());
+            } else {
+                other_diags.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_diags.is_empty(),
+        "expected zero CteShadowsCallerCte diagnostics from files other than '{}', got {}:\n  {}",
+        expected_file,
+        other_diags.len(),
+        other_diags
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags.len(),
+        1,
+        "expected exactly 1 CteShadowsCallerCte diagnostic from '{}', got {}:\n  {}",
+        expected_file,
+        target_diags.len(),
+        target_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags[0].code,
+        Some(smelt_db::DiagnosticCode::CteShadowsCallerCte),
+        "expected CteShadowsCallerCte, got {:?}: {}",
+        target_diags[0].code,
+        target_diags[0].message
+    );
+}
