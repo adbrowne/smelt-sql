@@ -87,9 +87,38 @@ Dagster/Airflow plugin API. `smelt explain --json` already provides the graph st
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
+### 8. Virtual Environments — implementation (specs authored, prototype proven)
+
+SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script.
+
+**Proven** (research + Stage 0 prototype): the semantic output-fingerprint oracle ([`crates/smelt-fingerprint`](../crates/smelt-fingerprint)) with its soundness gate (`fingerprint-equal ⇒ DuckDB relations identical`) and determinism detector, all green as property tests against DuckDB. See Recently Completed below and [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md).
+
+**Specced**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative, implemented), [`virtual_environments.md`](specs/virtual_environments.md) (the orchestration layer — `state.mode`, environment addressing, fingerprint-keyed reuse, promotion, override hatches), [`run_state.md`](specs/run_state.md) (`.smelt/` layout + snapshot store).
+
+**Next** (each increment gated by the DuckDB oracle, derived via `/smelt:plan`):
+1. Wire `output_fingerprint` into the runtime (it is a standalone prototype today).
+2. Snapshot store + `(environment, model) → table` map (`run_state.md`); fingerprint-keyed reuse for a single environment.
+3. `state.mode: environments` addressing, `smelt plan/apply --environment`, `smelt promote`.
+4. Cross-model column-lineage analyser — the full "eclipse" (downstream-spared changes); the gating new analysis.
+5. Polish: typed data-diff, GC/retention, forward-only.
+
+Explicit non-goal for now: the un-annotated determinism inversion and the untracked type-system axes (decimal/collation/nullability) remain conservative-rebuild until covered (worst case parity; see `output_fingerprint.md` Known Divergences).
+
 ---
 
 ## Recently Completed
+
+### ~~Virtual Environments — research, Stage 0 prototype & specs~~ ✅ (June 1–4, 2026)
+
+Proved the core thesis of opt-in virtual data environments — *reuse a physical table when a change is provably output-preserving* — without any state or environment machinery, then specced the feature set.
+
+- **Semantic output-fingerprint oracle** ([`crates/smelt-fingerprint`](../crates/smelt-fingerprint), [spec](specs/output_fingerprint.md)): hashes a canonical normal form of a model's `SELECT` so two versions with the same fingerprint provably compute the same relation (multiset, columns by name). Recognises as equivalent — where SQLMesh's edit-script rebuilds — formatting, comments, keyword case, projection reorder, internal CTE/alias rename, and single-use-CTE ≡ derived-table (recursive sub-fingerprint). Conservative verbatim fallback everywhere else.
+- **Soundness gate**: `fingerprint-equal ⇒ DuckDB relations identical` as a property test against DuckDB, with positive/negative golden corpora — the load-bearing invariant before any reuse is wired to execution.
+- **Three soundness bugs found and fixed**, each via the discipline "generate the real-world shape and let DuckDB judge": implicit-alias column lists mis-parsed (`FROM (…) t(c1,c2)`, fixed on `main`); a derived-table-left **join** silently dropped by inlining; `LIMIT`/`OFFSET`/`QUALIFY` entirely absent from the canonical form (every top-N/paginated model collapsed to one fingerprint).
+- **Determinism detector**: structural deny-list (non-deterministic built-ins, parenless temporal specials, order-sensitive aggregates) + row-slice-without-total-order check, surfaced as `deterministic` on the result. Gated so anything flagged deterministic reproduces across two independent DuckDB builds. Closes §5.5's value axes; window-function non-determinism is the noted residual.
+- **Specs authored**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative), [`virtual_environments.md`](specs/virtual_environments.md) (staged orchestration design), [`run_state.md`](specs/run_state.md) (`.smelt/` layout); touched `architecture.md`, `incremental_models.md`, `schema_evolution.md`.
+
+Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #8](#8-virtual-environments--implementation-specs-authored-prototype-proven).
 
 ### ~~Typed Meta-Language — Phase E2: Multi-Model Production~~ ✅ (May 16, 2026)
 
