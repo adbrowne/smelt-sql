@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780564895987,
+  "lastUpdate": 1780564898121,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -23957,6 +23957,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.732854332051517,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "37e70293e261a72a4728d83f5b096d5f2b070364",
+          "message": "docs(roadmap): record virtual-environments research, prototype & specs\n\nAdd a Recently Completed entry (semantic output-fingerprint oracle, soundness\ngate, three soundness bugs fixed, determinism detector, three specs authored)\nand a What's Next item for the staged implementation queue.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-04T19:16:36+10:00",
+          "tree_id": "aa6bb6d7ba67feb504203fcdbf1e58fe6b1e00ba",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/37e70293e261a72a4728d83f5b096d5f2b070364"
+        },
+        "date": 1780564897569,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.27354974408466,
             "unit": "MB/s"
           }
         ]
