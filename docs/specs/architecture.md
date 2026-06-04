@@ -1,7 +1,7 @@
 ---
 feature: architecture
 status: stable
-last_reviewed: 2026-05-05
+last_reviewed: 2026-06-04
 owners: [andrew]
 ---
 
@@ -51,6 +51,7 @@ Each crate has a single job; downstream crates depend on it but never the revers
 | `smelt-backend-duckdb` | async              | DuckDB execution                                             |
 | `smelt-backend-spark`  | async              | Spark execution                                              |
 | `smelt-state`          | sync               | `RunManifest`, `IntervalStore`, `FileStore`                  |
+| `smelt-fingerprint`    | sync               | `output_fingerprint` — semantic output-equivalence oracle + determinism signal (see `output_fingerprint.md`) |
 | `smelt-runtime`        | async              | Compile + execute driver: `compile`, `select_executable_models`, `execute_project`, `RunReporter` trait. Composes the analysis-layer crates above; consumed by `smelt-cli` and `smelt-ui`. Not depended on by `smelt-lsp`. |
 | `smelt-ui`             | async              | Web dashboard surface (HTTP / WebSocket), reporter adapter over `smelt-runtime` |
 
@@ -270,7 +271,7 @@ enum ExecutionStep {
 
 Two identity properties hold across the pipeline. Both are property-testable.
 
-**1. Parse-level semantic anchor (PostgreSQL via pg_query).** smelt's grammar tracks PostgreSQL semantics. For SQL containing no smelt extensions, the parser's pretty-printed output is fingerprint-equivalent to the input under pg_query. This is the parser-validation oracle in `crates/smelt-parser-compat/` — it lets the grammar drift from PostgreSQL only deliberately, never by accident, and is the canonical reference for "is this construct syntactically valid smelt SQL?". Equivalence on the Spark side is checked separately against `sqlparser-rs DatabricksDialect` (and optionally `sqlglot`); pg_query is the primary anchor.
+**1. Parse-level semantic anchor (PostgreSQL via pg_query).** smelt's grammar tracks PostgreSQL semantics. For SQL containing no smelt extensions, the parser's pretty-printed output is fingerprint-equivalent to the input under pg_query. This is the parser-validation oracle in `crates/smelt-parser-compat/` — it lets the grammar drift from PostgreSQL only deliberately, never by accident, and is the canonical reference for "is this construct syntactically valid smelt SQL?". Equivalence on the Spark side is checked separately against `sqlparser-rs DatabricksDialect` (and optionally `sqlglot`); pg_query is the primary anchor. This "fingerprint-equivalence" is *syntactic* (does the parsed structure round-trip?) and is distinct from the *semantic output-fingerprint* of `output_fingerprint.md`, which hashes a canonical form to decide whether two model versions compute the same relation.
 
 **2. Print-level identity for the DuckDB dialect.** The DuckDB printer emits SQL byte-identical to the input, modulo:
 
@@ -432,7 +433,6 @@ Update as part of any plan that touches architecture.
 The spec set has explicit gaps that the following entries claim space for. Each names the in-scope future spec and which existing specs will pull content out of it:
 
 - **`diagnostics.md`** — owns the diagnostic-code catalogue. Today scattered across `lsp.md`, `functions.md`, `gradual_typing.md`, `scoping.md`, `types.md`, `planner_integration.md`, `incremental_models.md`.
-- **`run_state.md`** — owns manifest format, `.smelt/` layout, run IDs, parallelism, recovery. Today implicit in `cli.md` (`smelt status`, `smelt history`) and `incremental_models.md` (state ownership).
 - **Multi-backend execution model** — likely an expansion of §"Backend trait surface" or a dedicated `multi_backend.md`. Today scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, `smelt_yml.md`.
 - **`planner_api.md`** — owns the user-authored planner-rule surface. Working design at `docs/planner_rule_api_design.md`; needs review against the 2026-05-01 universal-addressing rework before becoming normative.
 - **`migration_from_dbt.md`** *(or docs-site guide)* — owns the dbt analogue mapping and migration story. No content today.

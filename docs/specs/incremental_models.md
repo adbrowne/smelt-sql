@@ -269,7 +269,7 @@ smelt does not track watermarks, offsets, or run history for incremental models.
 - Future Delta/Spark: transaction log; MERGE strategy.
 - Future Flink: checkpoints.
 
-Optional run-state tracking with gap detection is planned as an opt-in extension.
+Optional run-state tracking with gap detection is an opt-in extension: the `state.mode: intervals` posture (`virtual_environments.md`) enables the persisted interval ledger and gap detection without changing the stateless default. The on-disk layout is owned by `run_state.md`.
 
 ## Design
 
@@ -308,7 +308,7 @@ This section captures the load-bearing rationale behind the incremental model su
 - **Per-column `data_latency` not implemented.** Plan calls for declaring `data_latency` on upstream sources for late-arriving data; not yet available.
 - **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+incremental, incremental-only — Phase 1 of the incremental plan unified `IncrementalConfig` but the CLI dispatch is still tri-modal. Should converge.
 - **Granularity conversion boilerplate.** A duplicate `Granularity` enum existed in `smelt-planner/src/types.rs` and was reconciled with `smelt-core`; check for residual conversion code in `main.rs` (lines around 669–683 in the plan reference) when next touching this area.
-- **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is planned but opt-in; see `run_state.md` anchor in `architecture.md` §"Specs not yet authored".
+- **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is opt-in via the `state.mode: intervals` posture (`virtual_environments.md`); the persisted layout is specified in `run_state.md`.
 - **Schema evolution is unspecified.** A `partition_column` rename or an output schema change has no defined handling today.
 - **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for incremental models that consume metrics.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
