@@ -1,0 +1,24 @@
+[package]
+name = "smelt-fingerprint"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Semantic output-fingerprint over smelt's typed CST (virtual-environment table reuse)"
+repository = "https://github.com/adbrowne/smelt-sql"
+
+[dependencies]
+smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }
+smelt-db = { path = "../smelt-db" }
+rowan.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+smelt-runtime = { path = "../smelt-runtime" }
+duckdb = { workspace = true }
+proptest = { workspace = true }
+
+[features]
+# Mirror smelt-db: allow compiling DuckDB from source when no system lib is present.
+bundled-duckdb = ["duckdb/bundled"]

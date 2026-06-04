@@ -4218,6 +4218,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-fingerprint"
+version = "0.3.2"
+dependencies = [
+ "duckdb",
+ "proptest",
+ "rowan",
+ "sha2 0.10.9",
+ "smelt-db",
+ "smelt-parser",
+ "smelt-runtime",
+ "smelt-types",
+]
+
+[[package]]
 name = "smelt-lsp"
 version = "0.3.2"
 dependencies = [
