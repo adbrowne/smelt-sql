@@ -47,7 +47,7 @@ Conditions:
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| C1 | BUG-008 doc fix: correct `make_generator_frame` signature in `expansion.md` (3-arg → 2-arg) | pending | BUG-008 | | |
+| C1 | BUG-008 doc fix: correct `make_generator_frame` signature in `expansion.md` (3-arg → 2-arg) | done | BUG-008 | docs(expansion): correct make_generator_frame signature to 2-arg (closes BUG-008) | 2026-06-05 |
 | C2 | BUG-009: TableExpr `source.*` over a `smelt.<path>` arg emits valid SQL — alias the argument at the splice (`FROM <arg> AS <param>`), keep the body verbatim | pending | BUG-009 | | |
 | C3 | BUG-007: analysis-time CTE-collision check — mint `CteShadowsCallerCte` (Error) for a model CTE colliding with a directly-called function body CTE; spec increment (scoping.md table + narrow expansion.md divergence) | pending | BUG-007 | | |
 | C4 | Close-out: flip BUG-007/008/009 to `fixed` in the ledger with regression-test names; update master sub-plan table + ROADMAP; full `example_builds` + all gates green | pending | — | | |
