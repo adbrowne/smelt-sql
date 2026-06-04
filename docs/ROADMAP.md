@@ -108,6 +108,14 @@ Explicit non-goal for now: the un-annotated determinism inversion and the untrac
 
 ## Recently Completed
 
+### ~~Codegen Soundness — CTE collisions diagnosed, `source.*` valid~~ ✅ (June 5, 2026)
+
+Closed the silent-until-`smelt run` function-expansion defects found in the feature sweep ([plan](plans/20260604-codegen-soundness.md)):
+
+- **`source.*` over a `smelt.<path>` argument now emits valid SQL** (C2) — the transparent-function splice aliases the argument to the parameter name (`FROM <arg> AS <param>`) instead of text-replacing `<param>` with the qualified name. `main.base.*` → `source.*` stays single-part and DuckDB-valid. Closed BUG-009. Regression fixture: `examples/fn_tableexpr_star/`.
+- **CTE-collision diagnostic `CteShadowsCallerCte`** (C3) — new analysis-time check in `check_file_diagnostics`: when a model's top-level CTE name collides with a CTE in the body of a directly-called transparent function, the compiler emits `CteShadowsCallerCte` (Error) anchored at the call site, refusing the build rather than silently emitting wrong data. v1 covers direct collisions only; transitive collisions are a known gap (alpha-rename is v2). Closed BUG-007. Regression fixture: `examples/expansion_broken_cte_caller_collision/`.
+- **`make_generator_frame` signature corrected in `expansion.md`** (C1) — doc-only retraction of the stale 3-arg form. Closed BUG-008.
+
 ### ~~Frontmatter Parity — unified catalogue, no silent drops~~ ✅ (June 4, 2026)
 
 Collapsed two divergent frontmatter parsers into one over a key catalogue ([plan](plans/20260604-frontmatter-parity.md), [spec](specs/architecture.md) §"Unified frontmatter rule"):
