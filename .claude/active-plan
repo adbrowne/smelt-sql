@@ -27,14 +27,30 @@
 # human to scaffold the next sub-plan. <<ALL_DONE>> only when the master
 # backlog is fully remediated.
 
-master_plan: docs/plans/20260530-feature-sweep.md
-active_subplan: docs/plans/20260604-codegen-soundness.md
+# ─────────────────────────────────────────────────────────────────────────────
+# CURRENT MODE: PROBE SWEEP (resumed 2026-06-05).
+# The three remediation sub-plans are all done + rolled up, so the loop is back
+# on the master feature-sweep's own pending PROBE rows (C10–C14, D1–D8 — one
+# probe per spec / per cross-feature seam). Probe mode is driven by
+# .claude/bug-hunt-prompt.txt, which reads master_plan DIRECTLY (it does not
+# consult active_subplan); autonomy-loop.sh's default PROMPT now points at it,
+# so a bare `bash .claude/scripts/autonomy-loop.sh` resumes the sweep at the
+# next pending row (C10 — testing). active_subplan is set equal to master_plan
+# below because no remediation sub-plan is running — a fresh-context `continue`
+# should land on the master probe table, not an exhausted sub-plan. To switch
+# back to remediation, scaffold/point active_subplan at a sub-plan and launch
+# with PROMPT="$(cat .claude/diag-parity-prompt.txt)".
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Back-compat aliases (older fresh-context flows read these names). They mirror
-# active_subplan: each sub-plan is self-contained (it carries its own per-phase
-# routine + sentinel contract), so in_repo_plan == meta_plan == active_subplan.
-in_repo_plan: docs/plans/20260604-codegen-soundness.md
-meta_plan: docs/plans/20260604-codegen-soundness.md
+master_plan: docs/plans/20260530-feature-sweep.md
+active_subplan: docs/plans/20260530-feature-sweep.md
+
+# Back-compat aliases (older fresh-context flows read these names). In probe mode
+# they mirror master_plan (the in-repo probe backlog); the across-session probe
+# routine lives in the meta-plan ~/.claude/plans/we-now-have-a-idempotent-torvalds.md.
+in_repo_plan: docs/plans/20260530-feature-sweep.md
+meta_plan: docs/plans/20260530-feature-sweep.md
 
 # Completed sub-plans (rolled up): docs/plans/20260531-diagnostic-parity.md (done 2026-06-03),
-# docs/plans/20260604-frontmatter-parity.md (done 2026-06-04).
+# docs/plans/20260604-frontmatter-parity.md (done 2026-06-04),
+# docs/plans/20260604-codegen-soundness.md (done 2026-06-05).

@@ -14,18 +14,30 @@
 # plan is selected by the fresh-context discovery rules in
 # `.claude/active-plan`.
 #
-# Currently active (two-level — see .claude/active-plan):
-#   master plan:    docs/plans/20260530-feature-sweep.md (top-level backlog)
-#   active sub-plan: docs/plans/20260531-diagnostic-parity.md (self-contained)
+# Currently active: PROBE SWEEP mode (see .claude/active-plan).
+#   master plan:   docs/plans/20260530-feature-sweep.md (top-level backlog)
+#   active phases: the master's own pending probe rows C10–C14, D1–D8 (one
+#                  probe per spec / per cross-feature seam). There is NO
+#                  remediation sub-plan running — the three remediation
+#                  sub-plans (diagnostic-parity, frontmatter-parity,
+#                  codegen-soundness) are all done and rolled up.
 #
-# NOTE: this drives a spec-anchored IMPLEMENTATION plan (diagnostic parity +
-# function/meta codegen). Run with the diag-parity iteration prompt:
+# Probe mode is the DEFAULT prompt (see PROMPT below): it reads
+# .claude/bug-hunt-prompt.txt, which drives docs/plans/20260530-feature-sweep.md
+# directly via the meta-plan's per-phase probe routine (/smelt:validate drift
+# report + adversarial fixtures + existing suite; log findings to the ledger;
+# fix clear code bugs red-green, log judgment calls as needs-review). A bare
+#   bash .claude/scripts/autonomy-loop.sh
+# therefore resumes the sweep at the next pending row (C10 — testing).
+#
+# To resume REMEDIATION mode instead (work a spec-anchored sub-plan phase by
+# phase, active-plan driven), override the prompt:
 #   PROMPT="$(cat .claude/diag-parity-prompt.txt)" bash .claude/scripts/autonomy-loop.sh
-# (The earlier bug-hunt sweep used .claude/bug-hunt-prompt.txt with
-#  docs/plans/20260530-feature-sweep.md — that plan is paused, not deleted.)
+# (the generic two-level remediation prompt is also preserved inline below as
+#  REMEDIATION_PROMPT for reference).
 #
-# When swapping plans, update .claude/active-plan, the two comment
-# lines above, and the LOG_DIR below.
+# When swapping modes, update .claude/active-plan, this comment block, the
+# default PROMPT, and the LOG_DIR below.
 #
 # Sentinels (Claude must emit one and only one of these per iteration):
 #
@@ -79,7 +91,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-LOG_DIR="${HOME}/.claude/logs/diag-parity"
+LOG_DIR="${HOME}/.claude/logs/feature-sweep"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
@@ -105,10 +117,11 @@ SENTINEL_MASTER_EXHAUSTED="<<MASTER_EXHAUSTED>>"
 # Legacy sentinel — treated as SENTINEL_BLOCKED (record + continue, no halt).
 SENTINEL_PAUSE="<<PAUSE_FOR_HUMAN>>"
 
-# Prompt sent to each iteration. Anchors the agent on the plan files and the
-# sentinel emission contract — the wrapper greps the final .result for exactly
-# one sentinel. Override with $PROMPT.
-PROMPT="${PROMPT:-Resume the active autonomy loop with fresh context.
+# Generic two-level REMEDIATION prompt (active-plan driven). Preserved for when
+# the loop swaps back into remediation mode — set PROMPT="$REMEDIATION_PROMPT"
+# is not CLI-reachable, so to use it either re-point the default below or copy
+# .claude/diag-parity-prompt.txt. Kept inline so the contract isn't lost.
+REMEDIATION_PROMPT="Resume the active autonomy loop with fresh context.
 
 STRUCTURE. The work is two-level. \`.claude/active-plan\` names a \`master_plan\` (the top-level feature backlog) and an \`active_subplan\` (the focused remediation plan the loop is currently working). You work the ACTIVE SUB-PLAN phase by phase; you only touch the master when the sub-plan is exhausted (see ROLL-UP).
 
@@ -121,6 +134,14 @@ RECORD-AND-CONTINUE (no hard-stop). If the phase hits a design decision not answ
 ROLL-UP (only when the active sub-plan has NO \`pending\` rows left — all \`done\` or \`blocked\`). Consult the master plan and its ledger for the next un-remediated cluster. CONSERVATIVE RULE: you may only advance to an EXISTING sibling sub-plan that already has \`pending\` phases — if so, update \`active_subplan\` in \`.claude/active-plan\`, commit + push, and emit ${SENTINEL_ADVANCED}. You must NOT scaffold a brand-new sub-plan or author new specs/plans autonomously; if the next cluster has no existing sub-plan with pending work, emit ${SENTINEL_MASTER_EXHAUSTED} with a one-line summary of what remains (which clusters still need a human to scaffold a sub-plan, and how many phases are blocked). Emit ${SENTINEL_DONE} only if the master backlog is fully remediated and verification is green.
 
 CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_BLOCKED}, ${SENTINEL_ADVANCED}, ${SENTINEL_MASTER_EXHAUSTED}, or ${SENTINEL_DONE}. The wrapper greps the final .result for these; without one the loop halts. Put any one-line reason on the line ABOVE the sentinel.}"
+
+# Prompt sent to each iteration. DEFAULT = PROBE SWEEP mode: read the bug-hunt
+# prompt, which drives docs/plans/20260530-feature-sweep.md's pending probe rows
+# (C10–C14, D1–D8) via the meta-plan routine. It emits the legacy sentinels
+# <<PHASE_COMPLETE>>/<<ALL_DONE>>/<<PAUSE_FOR_HUMAN>> — the wrapper continues on
+# the first two and treats PAUSE as BLOCKED (record + continue). Override with
+# $PROMPT (e.g. the diag-parity remediation prompt) to swap modes.
+PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../bug-hunt-prompt.txt")}"
 
 cd "${REPO_ROOT}"
 
