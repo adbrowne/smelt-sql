@@ -19,6 +19,7 @@
 //! single-model judgement.
 
 mod canonical;
+mod determinism;
 mod hash;
 
 use smelt_parser::ast::SelectStmt;
@@ -48,6 +49,15 @@ pub struct MissedReuse {
     pub reason: String,
 }
 
+/// A reason the model's output is not provably a pure function of its inputs —
+/// an inline non-deterministic built-in (`random()`, `now()`), or a row-slicing
+/// tail clause without a provably total order. Recorded so the reuse decision is
+/// auditable; see [`FingerprintResult::deterministic`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonDeterminism {
+    pub reason: String,
+}
+
 /// Result of fingerprinting a model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintResult {
@@ -55,6 +65,20 @@ pub struct FingerprintResult {
     /// `false` when the canonicaliser fell back to a verbatim hash because it
     /// could not prove the query safe to canonicalise.
     pub canonicalisable: bool,
+    /// `true` when the model's output is, as far as the detector can establish,
+    /// a pure function of its inputs. When `false`, a fingerprint match must not
+    /// be treated as relation-equality: re-running the model would produce
+    /// different rows, so the reuse layer must rebuild (or require an explicit
+    /// author opt-in) rather than point at an existing table.
+    ///
+    /// Orthogonal to [`Self::canonicalisable`]: a model can be fully structured
+    /// yet non-deterministic (e.g. `SELECT random() AS r FROM t`), and does not
+    /// affect the fingerprint value (the same SQL fingerprints identically
+    /// whether deterministic or not).
+    pub deterministic: bool,
+    /// The specific reasons the model was judged non-deterministic; empty when
+    /// `deterministic` is `true`.
+    pub non_determinism: Vec<NonDeterminism>,
     pub missed_reuse: Vec<MissedReuse>,
 }
 
@@ -72,9 +96,12 @@ pub fn output_fingerprint(
 ) -> FingerprintResult {
     let built = canonical::build(expanded_select, output_schema);
     let canonicalisable = matches!(built.canon, canonical::Canon::Structured(_));
+    let non_determinism = determinism::analyze(expanded_select);
     FingerprintResult {
         fingerprint: Fingerprint(built.canon.fingerprint()),
         canonicalisable,
+        deterministic: non_determinism.is_empty(),
+        non_determinism,
         missed_reuse: built.missed,
     }
 }

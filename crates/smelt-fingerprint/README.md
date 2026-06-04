@@ -27,6 +27,31 @@ cannot prove a rewrite output-preserving. Completeness grows rule by rule, each 
 this oracle, exactly as `smelt-db`'s `type_property_tests.rs` grows type coverage against
 DuckDB.
 
+## Determinism (a second, orthogonal signal)
+
+A fingerprint match proves two model *versions* compute the same relation **for the same
+inputs**. That is only relation-equality if the model is a pure function of its inputs. A
+model that calls `random()`/`now()`, or slices rows with `LIMIT`/`OFFSET`/`FETCH` without a
+provably total order, produces *different* rows on each build — so a fingerprint match must
+not be treated as "the existing table is what a rebuild would give."
+
+`output_fingerprint` therefore also returns `deterministic: bool` (with the specific
+`non_determinism` reasons). It is computed by a structural detector (`src/determinism.rs`):
+a deny-list of non-deterministic built-ins plus a row-slicing-without-total-order check. It
+is **orthogonal** to `canonicalisable` (a model can be fully structured yet
+non-deterministic) and does **not** affect the fingerprint value (identical SQL fingerprints
+identically either way) — it is metadata the reuse layer must consult before treating a
+match as reuse-eligible. The §5.5 author escape hatches (*accept-current*,
+*assert-deterministic*) are downstream policy, not implemented here.
+
+The detector is conservative by design: over-flagging is sound (the model is rebuilt — worst
+case parity), so e.g. a `LIMIT` with an `ORDER BY` is still flagged because totality of the
+sort key cannot yet be proven. The load-bearing invariant is the converse, gated by
+`tests/determinism_prop.rs`: anything flagged `deterministic` yields the **same relation
+when built twice in independent DuckDB instances**. Known un-covered non-determinism source:
+order-sensitive aggregates/windows (`array_agg`/`string_agg`/`first`/`last` without an inner
+`ORDER BY`) — to be added to the deny-list, gated by the same property test.
+
 ## Equivalences recognised (the eclipse over SQLMesh)
 
 SQLMesh's syntactic edit-script rebuilds on any change other than adding a projection.
@@ -70,8 +95,9 @@ Fallbacks are recorded as `MissedReuse` on the result so a later stage can quant
 ```bash
 # unit (no DuckDB)
 cargo test -p smelt-fingerprint --lib
-# corpus + oracle + soundness (DuckDB-backed; needs DUCKDB_LIB_DIR + LD_LIBRARY_PATH)
+# corpus + oracle + soundness + determinism (DuckDB-backed; needs DUCKDB_LIB_DIR + LD_LIBRARY_PATH)
 cargo test -p smelt-fingerprint
 # deeper soundness coverage
 PROPTEST_CASES=1000 cargo test -p smelt-fingerprint --test soundness_prop
+PROPTEST_CASES=1000 cargo test -p smelt-fingerprint --test determinism_prop
 ```
