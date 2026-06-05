@@ -231,3 +231,64 @@ fn duplicate_param_name_is_error() {
 // `crates/smelt-cli/tests/broken_function_diagnostics.rs` in Phase 6.
 // New `fn_*.sql` fixtures added in later phases should add a row to
 // that harness rather than adding another file-backed test here.
+
+// ── BUG-003: Semantics #9 — default must not reference sibling parameters ────
+
+#[test]
+fn default_referencing_sibling_param_is_error() {
+    // `b`'s default `a + 1` references sibling param `a` — must emit exactly
+    // one `DefaultReferencesParameter` anchored at the default expr's range.
+    let root = PathBuf::from("/fake/project");
+    let path = root.join("functions").join("bad_default.sql");
+    let src = "smelt.define f(a: Expr<Integer>, b: Expr<Integer> = a + 1) AS (a + b)\n";
+
+    let (db, ws, files) = build_db(root, &[(path, src)]);
+    let file = files[0];
+
+    let diags = body_diags(&db, ws, file, DiagnosticCode::DefaultReferencesParameter);
+    assert_eq!(
+        diags.len(),
+        1,
+        "expected exactly one DefaultReferencesParameter diagnostic, got {diags:?}"
+    );
+
+    let diag = &diags[0];
+    assert!(
+        diag.message.contains("default") || diag.message.contains("parameter"),
+        "diagnostic message should mention default/parameter, got: {}",
+        diag.message
+    );
+
+    // Diagnostic is anchored at the default expr `a + 1`.
+    let default_start = src.find("a + 1").unwrap();
+    let default_end = default_start + "a + 1".len();
+    assert_eq!(
+        usize::from(diag.range.start()),
+        default_start,
+        "expected diagnostic start at default expr `a + 1`, got {:?}",
+        diag.range
+    );
+    assert_eq!(
+        usize::from(diag.range.end()),
+        default_end,
+        "expected diagnostic end at end of `a + 1`, got {:?}",
+        diag.range
+    );
+}
+
+#[test]
+fn self_contained_default_is_ok() {
+    // `b`'s default `1` is self-contained — must emit no DefaultReferencesParameter.
+    let root = PathBuf::from("/fake/project");
+    let path = root.join("functions").join("good_default.sql");
+    let src = "smelt.define f(a: Expr<Integer>, b: Expr<Integer> = 1) AS (a + b)\n";
+
+    let (db, ws, files) = build_db(root, &[(path, src)]);
+    let file = files[0];
+
+    let diags = body_diags(&db, ws, file, DiagnosticCode::DefaultReferencesParameter);
+    assert!(
+        diags.is_empty(),
+        "self-contained default `= 1` should emit no DefaultReferencesParameter, got {diags:?}"
+    );
+}

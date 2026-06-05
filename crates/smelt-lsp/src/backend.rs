@@ -384,6 +384,7 @@ impl Backend {
                 DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
                 DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
                 DbCode::DuplicateAddress => "duplicate-address",
+                DbCode::DefaultReferencesParameter => "default-references-parameter",
             };
             NumberOrString::String(code_str.to_string())
         });

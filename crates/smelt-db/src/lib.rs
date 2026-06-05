@@ -196,8 +196,9 @@ pub use queries::function_diagnostics::{
     as_struct_backend_diagnostics_for_file, backends_widening_diagnostics_for_file,
     context_mismatch_diagnostics_for_file, cte_cycle_diagnostics_for_file,
     cte_cycle_diagnostics_for_select, cte_shadow_caller_cte_diagnostics_for_file,
-    duplicate_function_diagnostics_for_file, extern_fragment_param_diagnostics_for_file,
-    frontmatter_parse_diagnostics_for_file, function_backends, function_body_diagnostics_for_file,
+    default_references_parameter_diagnostics_for_file, duplicate_function_diagnostics_for_file,
+    extern_fragment_param_diagnostics_for_file, frontmatter_parse_diagnostics_for_file,
+    function_backends, function_body_diagnostics_for_file,
     invalid_function_type_ref_diagnostics_for_file, missing_provenance_advisory_for_file,
     provenance_unstable_diagnostics_for_file, smelt_fn_call_diagnostics_for_ast,
     smelt_fn_call_diagnostics_for_file, unknown_context_diagnostics_for_file,
@@ -1339,6 +1340,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Invalid-type-ref diagnostics (Phase 4): emitted at each malformed
     // `Expr<T>` / unsupported-sort annotation on parameters or return types.
     for diag in invalid_function_type_ref_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // BUG-003: Semantics #9 — default must not reference sibling parameters.
+    for diag in default_references_parameter_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

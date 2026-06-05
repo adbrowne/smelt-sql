@@ -2130,6 +2130,76 @@ pub fn cte_shadow_caller_cte_diagnostics_for_file(
 }
 
 // ============================================================================
+// BUG-003: Semantics #9 — default must not reference sibling parameters
+// ============================================================================
+
+/// Per-file diagnostics for `smelt.define` defaults that violate Semantics #9
+/// ("a default expression must not reference other parameters").
+///
+/// For each `smelt.define` in the file, collects all parameter names, then for
+/// each parameter that has a default expression scans every IDENT token in that
+/// expression. If any IDENT text matches a sibling parameter name, emits
+/// `DefaultReferencesParameter` anchored at the default expression's range.
+///
+/// Pure-function-rule note: this function reads only `parse_file`; no Salsa
+/// tracked call is needed because it operates purely on the CST.
+pub fn default_references_parameter_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_parser::syntax_kind::SyntaxKind as Sk;
+
+    let parse = parse_file(db, file);
+    let Some(ast) = AstFile::cast(parse.syntax()) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+
+    for define in ast.defines() {
+        let Some(param_list) = define.param_list() else {
+            continue;
+        };
+        let params: Vec<_> = param_list.params().collect();
+        let param_names: Vec<String> = params.iter().filter_map(|p| p.name()).collect();
+
+        for param in &params {
+            let Some(default_expr) = param.default_value_expr() else {
+                continue;
+            };
+            let default_range = default_expr.syntax().text_range();
+
+            // Walk every token in the default expression and flag any IDENT
+            // that matches a sibling parameter name.
+            let mut found_reference = false;
+            for elem in default_expr.syntax().descendants_with_tokens() {
+                if let Some(tok) = elem.into_token() {
+                    if tok.kind() == Sk::IDENT {
+                        let name = tok.text();
+                        if param_names.iter().any(|pn| pn == name) {
+                            found_reference = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found_reference {
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "default expression references another parameter in the same signature; defaults must be self-contained (Semantics #9)".to_string(),
+                    range: default_range,
+                    code: Some(DiagnosticCode::DefaultReferencesParameter),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+// ============================================================================
 // Tests for _for_select pure helpers
 // ============================================================================
 

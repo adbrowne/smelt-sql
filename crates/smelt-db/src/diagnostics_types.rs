@@ -673,6 +673,11 @@ pub enum DiagnosticCode {
     /// different projects is independent). Error severity. Anchored at the
     /// second (later-discovered) file's path, at offset 0.
     DuplicateAddress,
+    /// Emitted when a `smelt.define` default expression references another
+    /// parameter in the same signature, violating Semantics #9 ("a default
+    /// expression must not reference other parameters"). Anchored at the
+    /// default expression's range. Error severity.
+    DefaultReferencesParameter,
 }
 
 /// Structured metadata attached to diagnostics for code actions

@@ -341,6 +341,14 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::WindowInScalarContext,
         message_substring: "HAVING",
     },
+    // BUG-003 — Semantics #9: default expression references a sibling parameter.
+    // `b`'s default `a + 1` must emit DefaultReferencesParameter.
+    Case {
+        fixture: "fn_default_references_param.sql",
+        companion: None,
+        code: DiagnosticCode::DefaultReferencesParameter,
+        message_substring: "default",
+    },
 ];
 
 /// Phase 52 broken fixtures — tested without unstable_schema (extern check is
