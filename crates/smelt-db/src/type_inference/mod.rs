@@ -59,9 +59,9 @@ pub use dispatch::{
 };
 
 pub use binary::{
-    check_undeclared_columns, infer_cte_columns, walk_expression_columns,
-    walk_expression_columns_with_visitor, walk_select_columns, walk_select_columns_with_visitor,
-    ColumnRefVisitor, UndeclaredColumnInfo,
+    check_crossfamily_arithmetic_diagnostics, check_undeclared_columns, infer_cte_columns,
+    walk_expression_columns, walk_expression_columns_with_visitor, walk_select_columns,
+    walk_select_columns_with_visitor, ColumnRefVisitor, UndeclaredColumnInfo,
 };
 
 pub use subquery::build_subquery_context;

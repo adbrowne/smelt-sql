@@ -3225,3 +3225,61 @@ fn expansion_broken_cte_caller_collision_emits_cte_shadows_caller_cte() {
         target_diags[0].message
     );
 }
+
+// ===== BUG-017: cross-family arithmetic TypeMismatch fixture =====
+
+/// BUG-017: `examples/types_broken_crossfamily_add/` must emit exactly one
+/// `TypeMismatch` Error diagnostic (cross-family `42 + '3'` arithmetic).
+#[test]
+fn types_broken_crossfamily_add_emits_type_mismatch() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::Workspace;
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/types_broken_crossfamily_add");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let models = discovery.discover_models().unwrap();
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut all_diags = Vec::new();
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            all_diags.push(d.clone());
+        }
+    }
+
+    let type_mismatches: Vec<_> = all_diags
+        .iter()
+        .filter(|d| d.code == Some(smelt_db::DiagnosticCode::TypeMismatch))
+        .collect();
+
+    assert_eq!(
+        type_mismatches.len(),
+        1,
+        "examples/types_broken_crossfamily_add must emit exactly 1 TypeMismatch; got {}:\n  {}",
+        all_diags.len(),
+        all_diags
+            .iter()
+            .map(|d| format!("[{:?}] {:?}: {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        type_mismatches[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "TypeMismatch for cross-family arithmetic must be Error severity"
+    );
+}

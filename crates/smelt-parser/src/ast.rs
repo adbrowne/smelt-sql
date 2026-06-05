@@ -1951,6 +1951,23 @@ impl BinaryExpr {
         None
     }
 
+    /// Get the TextRange of the arithmetic operator token (+, -, *, /, %).
+    /// Returns `None` for non-arithmetic operators or if no token is found.
+    /// Used to anchor `TypeMismatch` diagnostics at the operator span.
+    pub fn operator_token_range(&self) -> Option<rowan::TextRange> {
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                match token.kind() {
+                    PLUS | MINUS | STAR | MULTIPLY | DIVIDE | PERCENT => {
+                        return Some(token.text_range());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Check if this is a unary expression (e.g., -x, NOT y)
     /// Unary expressions have no right operand
     pub fn is_unary(&self) -> bool {

@@ -850,4 +850,64 @@ mod tests {
             diags
         );
     }
+
+    // ── BUG-017: cross-family arithmetic → TypeMismatch ───────────────────────
+
+    /// `SELECT 42 + '3'` — numeric + string — must produce exactly one
+    /// `TypeMismatch` Error diagnostic via `file_diagnostics` (BUG-017).
+    #[test]
+    fn file_diagnostics_emits_type_mismatch_crossfamily_numeric_plus_string() {
+        let (mut db, path) = setup("SELECT 42 + '3'");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TypeMismatch))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT 42 + '3' must produce exactly 1 TypeMismatch; got: {:?}",
+            diags
+        );
+        assert_eq!(
+            matches[0].severity,
+            crate::DiagnosticSeverity::Error,
+            "TypeMismatch for cross-family arithmetic must be Error severity"
+        );
+    }
+
+    /// `SELECT TRUE + 1` — boolean + numeric — must produce exactly one
+    /// `TypeMismatch` Error diagnostic via `file_diagnostics` (BUG-017).
+    #[test]
+    fn file_diagnostics_emits_type_mismatch_crossfamily_boolean_plus_numeric() {
+        let (mut db, path) = setup("SELECT TRUE + 1");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TypeMismatch))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "SELECT TRUE + 1 must produce exactly 1 TypeMismatch; got: {:?}",
+            diags
+        );
+    }
+
+    /// `SELECT 1 + 2` — same family — must produce zero `TypeMismatch` diagnostics.
+    #[test]
+    fn file_diagnostics_no_type_mismatch_for_numeric_arithmetic() {
+        let (mut db, path) = setup("SELECT 1 + 2");
+        let diags = db.file_diagnostics(path);
+        let matches: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::TypeMismatch))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            0,
+            "SELECT 1 + 2 must produce 0 TypeMismatch; got: {:?}",
+            diags
+        );
+    }
 }

@@ -1075,3 +1075,40 @@ async fn architecture_broken_path_collision_surfaces_via_lsp() {
             .collect::<Vec<_>>()
     );
 }
+
+/// LSP gate: `types_broken_crossfamily_add` produces at least one `type-mismatch`
+/// diagnostic via the real LSP backend (BUG-017 parity).
+#[tokio::test]
+async fn types_broken_crossfamily_add_emits_type_mismatch() {
+    let workspace = examples_root().join("types_broken_crossfamily_add");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+    let has_type_mismatch = all_diags.iter().any(|d| {
+        d.code.as_ref().is_some_and(
+            |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "type-mismatch"),
+        )
+    });
+    assert!(
+        has_type_mismatch,
+        "expected type-mismatch diagnostic via LSP for crossfamily_add fixture, got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}

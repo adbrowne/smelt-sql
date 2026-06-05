@@ -325,6 +325,102 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
     }
 }
 
+/// Walk all BINARY_EXPR nodes in a SELECT statement and emit one
+/// `TypeMismatch` Error at the operator span for each cross-family arithmetic
+/// operation (spec §1 and §14: `42 + '3'` → `TypeMismatch`).
+///
+/// A cross-family pair is one where both operand types are known (not `Unknown`
+/// / not `None`) and they belong to different type families (numeric vs string
+/// vs boolean vs temporal). Temporal arithmetic special-cases
+/// (`DATE + INTERVAL`, etc.) are handled by the `infer_binary_expr_type`
+/// callers before reaching `promote_numeric_operands`; by the time we check
+/// the result type here, those arms have already returned a concrete Temporal
+/// type, so they never produce `Unknown` and this check skips them.
+pub fn check_crossfamily_arithmetic_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::BINARY_EXPR;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != BINARY_EXPR {
+            continue;
+        }
+        let binary = match BinaryExpr::cast(node.clone()) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let op = match binary.operator() {
+            Some(op) => op,
+            None => continue,
+        };
+
+        if !matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
+            continue;
+        }
+
+        // Skip unary minus — no right operand.
+        if binary.is_unary() {
+            continue;
+        }
+
+        let left_tc = infer_binary_operand(&binary, 0, ctx);
+        let right_tc = infer_binary_operand(&binary, 1, ctx);
+
+        let lt = match left_tc.as_ref().map(|t| &t.data_type) {
+            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            _ => continue, // unknown/unresolved — skip, no spurious diagnostic
+        };
+        let rt = match right_tc.as_ref().map(|t| &t.data_type) {
+            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            _ => continue,
+        };
+
+        // Temporal arithmetic special-cases produce a concrete temporal type,
+        // not Unknown — infer_binary_expr_type handles them in its early-return
+        // arms. We only need to catch the cases where the result IS Unknown,
+        // i.e. where neither operand's family is consistent with the other.
+        //
+        // INTERVAL arms: if either operand is Interval we skip (handled above).
+        if matches!(lt, DataType::Interval) || matches!(rt, DataType::Interval) {
+            continue;
+        }
+
+        // Same-family pairs are fine; different families → TypeMismatch.
+        let same_family = (lt.is_numeric() && rt.is_numeric())
+            || (lt.is_string() && rt.is_string())
+            || (lt.is_temporal() && rt.is_temporal())
+            || (matches!(lt, DataType::Boolean) && matches!(rt, DataType::Boolean));
+
+        if same_family {
+            continue;
+        }
+
+        // Anchor at the operator token if available, else the full expression.
+        let range = binary
+            .operator_token_range()
+            .unwrap_or_else(|| node.text_range());
+
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: format!(
+                "Cross-family arithmetic: cannot mix {} and {} with `{}`; \
+                 consider an explicit CAST",
+                lt, rt, op
+            ),
+            range,
+            code: Some(crate::DiagnosticCode::TypeMismatch),
+            data: None,
+        });
+    }
+
+    diags
+}
+
 /// Recursively walk all sub-expressions, calling `visitor` for each column
 /// reference encountered. Also triggers `ctx.lookup_column()` for
 /// missed-lookup tracking. Unlike `infer_expression_type` which

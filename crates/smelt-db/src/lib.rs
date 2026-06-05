@@ -1867,6 +1867,24 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // BUG-017: cross-family binary arithmetic → TypeMismatch.
+            //
+            // Walks every BINARY_EXPR and emits exactly one TypeMismatch Error
+            // at the operator span when a numeric/string/boolean/temporal
+            // cross-family pair is detected (spec §1 and §14).
+            // Uses an empty TypeContext — literal operands (`42 + '3'`)
+            // resolve without column context; column-typed operands resolve
+            // if a full ctx is available later in check_type_diagnostics.
+            {
+                let xfamily_diags = type_inference::check_crossfamily_arithmetic_diagnostics(
+                    &select_stmt,
+                    &kind_ctx,
+                );
+                for diag in xfamily_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
             // Meta-language (P6) — `MetaListInScalarPosition`.
             //
             // A `List<T>`-typed expression that reaches a Data-World scalar /
