@@ -573,6 +573,9 @@ impl LogicalGraph {
             for dep in &node.dependencies {
                 if self.nodes.contains_key(dep) && result.insert(dep.clone()) {
                     self.collect_upstream(dep, result);
+                } else if self.seeds.contains(dep) {
+                    // Seeds have no further upstreams — insert without recursing.
+                    result.insert(dep.clone());
                 }
             }
         }
@@ -1020,5 +1023,163 @@ mod tests {
             names
         );
         assert_eq!(names.len(), 2, "should be exactly two models");
+    }
+
+    /// BUG-045 regression: upstream traversal must include seeds that the
+    /// model depends on via smelt.<path>. Previously `collect_upstream` only
+    /// walked `self.nodes`, so seeds (which live in `self.seeds`) were silently
+    /// skipped even when present in `node.dependencies`.
+    #[test]
+    fn select_upstream_includes_seed_dependencies() {
+        // Model A depends on seed "raw_data".
+        let models = vec![make_model("A", vec!["raw_data"])];
+        let seeds = vec![make_seed("raw_data")];
+        let config = make_test_config();
+        let graph = LogicalGraph::build(models, None, &seeds, &config, "dev").unwrap();
+
+        let selectors = vec![smelt_core::parse_selector("+A").unwrap()];
+        let selected = graph.select_models(&selectors).unwrap();
+
+        assert!(selected.contains("A"), "model A should be in the selection");
+        assert!(
+            selected.contains("raw_data"),
+            "seed 'raw_data' should appear in upstream traversal; got: {:?}",
+            selected
+        );
+    }
+
+    /// Spec Semantics — downstream traversal: `model_name+` includes the model
+    /// and all its downstream dependents.
+    #[test]
+    fn select_downstream_includes_dependents() {
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec!["A"]),
+            make_model("C", vec!["B"]),
+        ];
+        let config = make_test_config();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+
+        let selectors = vec![smelt_core::parse_selector("A+").unwrap()];
+        let selected = graph.select_models(&selectors).unwrap();
+
+        assert!(selected.contains("A"), "A should be in the selection");
+        assert!(
+            selected.contains("B"),
+            "B (downstream of A) should be included"
+        );
+        assert!(
+            selected.contains("C"),
+            "C (downstream of A via B) should be included"
+        );
+    }
+
+    /// Spec Semantics — union of selectors: multiple `--select` flags produce a
+    /// union, not an intersection.
+    #[test]
+    fn select_multiple_selectors_union() {
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec![]),
+            make_model("C", vec!["A", "B"]),
+        ];
+        let config = make_test_config();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+
+        let selectors = vec![
+            smelt_core::parse_selector("A").unwrap(),
+            smelt_core::parse_selector("B").unwrap(),
+        ];
+        let selected = graph.select_models(&selectors).unwrap();
+
+        assert!(selected.contains("A"), "A should be selected");
+        assert!(selected.contains("B"), "B should be selected");
+        assert!(
+            !selected.contains("C"),
+            "C not in either selector — should not be selected"
+        );
+    }
+
+    /// Spec Semantics — exclusion is post-selection: `exclude_models` removes
+    /// the specified models from the selected set.
+    #[test]
+    fn exclude_models_removes_from_selection() {
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec!["A"]),
+            make_model("C", vec!["B"]),
+        ];
+        let config = make_test_config();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+
+        let selectors = vec![smelt_core::parse_selector("+C").unwrap()];
+        let selected = graph.select_models(&selectors).unwrap();
+        // selected = {A, B, C}
+
+        let excludes = vec![smelt_core::parse_selector("B").unwrap()];
+        let filtered = graph.exclude_models(&selected, &excludes).unwrap();
+
+        assert!(filtered.contains("A"), "A should remain after excluding B");
+        assert!(!filtered.contains("B"), "B should be excluded");
+        assert!(filtered.contains("C"), "C should remain after excluding B");
+    }
+
+    /// Spec Semantics — no-match is not an error: a tag selector matching no
+    /// models returns an empty set without error.
+    #[test]
+    fn select_no_match_tag_returns_empty_ok() {
+        let models = vec![make_model_with_tags("A", vec![], vec!["core"])];
+        let config = make_test_config();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+
+        let selectors = vec![smelt_core::parse_selector("tag:nonexistent").unwrap()];
+        let selected = graph.select_models(&selectors).unwrap();
+
+        assert!(
+            selected.is_empty(),
+            "no models have tag:nonexistent; set should be empty"
+        );
+    }
+
+    /// Spec Semantics — GeneratorFile selector: matches nodes whose
+    /// `generator_file` field records the given workspace-relative path.
+    #[test]
+    fn select_generator_file_matches_emitted_models() {
+        let models = vec![
+            make_model("emitted_a", vec![]),
+            make_model("emitted_b", vec![]),
+            make_model("hand_authored", vec![]),
+        ];
+        let config = make_test_config();
+        let mut graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+
+        // Annotate two nodes as emitted from the same generator file.
+        let mut origins = std::collections::HashMap::new();
+        origins.insert(
+            "emitted_a".to_string(),
+            ("models/cohorts.gen.sql".to_string(), "cohort_a".to_string()),
+        );
+        origins.insert(
+            "emitted_b".to_string(),
+            ("models/cohorts.gen.sql".to_string(), "cohort_b".to_string()),
+        );
+        graph.annotate_emitted_models(&origins);
+
+        let selectors =
+            vec![smelt_core::parse_selector("generator_file:models/cohorts.gen.sql").unwrap()];
+        let selected = graph.select_models(&selectors).unwrap();
+
+        assert!(
+            selected.contains("emitted_a"),
+            "emitted_a should be selected"
+        );
+        assert!(
+            selected.contains("emitted_b"),
+            "emitted_b should be selected"
+        );
+        assert!(
+            !selected.contains("hand_authored"),
+            "hand_authored should not be selected"
+        );
     }
 }

@@ -150,7 +150,7 @@ smelt explain --select tag:revenue --json
 
 ## Selector names and scope resolution
 
-Selector values that are plain model names (not `tag:...` or `path:...` selectors) go through the same scope resolution as other CLI arguments. A bare `--select events_parsed` expands to `--select silver.events_parsed` when the active scope is `silver`. An unresolvable bare selector with multiple matches is an error — smelt never silently picks one.
+Selector values that are plain model names (not `tag:...` or `generator_file:...` selectors) go through the same scope resolution as other CLI arguments. A bare `--select events_parsed` expands to `--select silver.events_parsed` when the active scope is `silver`. An unresolvable bare selector with multiple matches is an error — smelt never silently picks one.
 
 The safest form for scripts and CI is the full canonical path:
 
