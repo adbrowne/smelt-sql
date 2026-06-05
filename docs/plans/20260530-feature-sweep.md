@@ -64,7 +64,7 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | C9 | python_models | done | 1 fixed (BUG-039: `@model()` called form crashed the SDK with `TypeError` despite being a recognized Surface form + Rust-scanner-accepted; fixed red-green in `python/smelt/core.py` via decorator-factory), 2 needs-review (BUG-038: `--- name: X ---` frontmatter override ignored when X≠function name — frontmatter silently dropped, model keeps function name, exit 0; honoring it ripples into LSP goto-def. BUG-040: Python↔SQL name collision silently de-duplicated by the LogicalGraph instead of Constraint-4 "configuration error"; same class as BUG-021). find_models/convergence/circular-detection/arity/return-type layers + all 15 python tests + gates green | (below) | 2026-05-31 |
 | C10 | testing | done | 2 fixed (BUG-041/043), 1 needs-review (BUG-042), 1 docs-gap fixed (BUG-044) | — | 2026-06-05 |
 | C11 | model_selection | done | 2 fixed (BUG-045/047), 1 needs-review (BUG-046); +6 test cases for untested rules | — | 2026-06-05 |
-| C12 | lsp | pending | | | |
+| C12 | lsp | done | 4 fixed (docs-gap), 1 deferred; 0 code bugs | — | 2026-06-05 |
 | C13 | data_catalog | pending | | | |
 | C14 | smelt_yml | pending | | | |
 | D1 | functions × incremental × timeseries | pending | | | |

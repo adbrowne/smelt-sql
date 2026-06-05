@@ -1,7 +1,7 @@
 ---
 feature: lsp
 status: experimental
-last_reviewed: 2026-05-16
+last_reviewed: 2026-06-05
 owners: [andrew]
 ---
 
@@ -32,11 +32,13 @@ Text document synchronization is **full** (not incremental). Each file change se
 
 The LSP server binary is `smelt-lsp`. Editors connect to it via stdio. It is language-server-compatible (tower-lsp) and integrates with any editor supporting LSP, including VS Code (via the official extension), Neovim, and Helix.
 
-The VS Code extension auto-activates when a `smelt.yml` is found in the workspace. It sets the server's working directory to the project root.
+The VS Code extension auto-activates when a `*.sql` file is found under a `models/` directory (`workspaceContains:**/models/**/*.sql`). It sets the server's working directory to the project root.
 
 ### Watched files
 
-The server watches for changes to `**/*.py` files (Python model files) via `workspace/didChangeWatchedFiles`. Python file changes trigger a workspace refresh — re-discovering Python models and re-running type inference.
+The server watches two glob patterns via `workspace/didChangeWatchedFiles`:
+- `**/models/**/*.py` — Python model files. Changes trigger a workspace refresh: re-discovering Python models and re-running type inference.
+- `**/functions/**/*.sql` — function definition files. External edits (e.g. `git checkout`, `sed`) that bypass `textDocument/didChange` are picked up so dependent models re-diagnose.
 
 ## Semantics
 
@@ -66,6 +68,7 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `KindMismatch` — entity used in the wrong context (e.g., a test model in a FROM clause)
 - `CircularDependency` — model dependency graph contains a cycle
 - `CteCycle` — CTE references itself directly or transitively
+- `CteShadowsCallerCte` — a transparent function body declares a CTE whose name collides with a CTE in the calling model; callers must rename one CTE to resolve the ambiguity
 
 **Columns:**
 - `UndeclaredColumn` — column reference not found in upstream schema or declared sources
@@ -78,7 +81,8 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `SourceTypeError` — invalid type string in a source `.yml` (owned by `sources.md`; mirrored here for completeness)
 
 **Functions (`smelt.define`, `smelt.extern`):**
-- `UnrecognizedFunction` — call to undefined smelt function
+- `UnrecognizedFunction` — call to an SQL built-in function not in the recognized registry
+- `UnknownSmeltFn` — call to a `smelt.functions.*` path that does not resolve to any declared `smelt.define` in the workspace
 - `DuplicateFunctionDefinition` — two `smelt.define` blocks with the same name
 - `InvalidFunctionTypeRef` — malformed type annotation
 - `FunctionBodyTypeMismatch` — type error inside function body
@@ -276,7 +280,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 - **Find-references gaps for other identifier kinds.** The following kinds support go-to-definition but not find-references and are tracked for future work: table aliases (intra-file), lambda parameters (intra-lambda), Python `@model` functions (would return SQL `smelt.<path>` call sites), and `smelt.columns_of` / `smelt.models.*` / `smelt.sources.*` accessor call paths.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 - **`UnknownSmeltPath` vs. code split.** This spec says the implementation uses a single `UnknownSmeltPath` code with a kind-aware message. The actual code (`crates/smelt-db/src/lib.rs`) instead has two separate codes: `UndefinedModelRef` (unresolved model/seed reference) and `UndefinedSource` (unresolved source reference). The spec should be updated to match the split, or the codes should be consolidated. Correction needed before `diagnostics.md` lands.
-- **Six undocumented diagnostic codes.** The following codes appear in `crates/smelt-db/src/lib.rs` but are absent from this spec: `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `DeclaredCardinalityUnverifiable`, `ExternFragmentParamUnsupported`, `MissingSeedSidecar`. They should be documented here (or in `diagnostics.md`) once their semantics are stable.
+- **Many undocumented diagnostic codes.** The following codes appear in `crates/smelt-db/src/diagnostics_types.rs` but are not yet listed in this spec: `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `DeclaredCardinalityUnverifiable`, `ExternFragmentParamUnsupported`, `MissingSeedSidecar` (the original six), plus the entire meta-language diagnostic set (Phase A–F: `MetaList*`, `Lambda*`, `Hof*`, `Reducer*`, `Ternary*`, `ConfigVar*`, `ColumnsOf*`, `ColumnRefFieldUnknown`), the record/map/loader sets (`SmeltRecordRedefinition`, `Record*`, `Map*`, `ConfigLoader*`), timeseries codes (`TimeseriesRequiredForIncremental`, `MalformedTimeseries`), types codes (`AliasColumnArityMismatch`, `EmptyValuesClause`), python code (`PythonModelNameMismatch`), and cumulative/incremental planner codes (`Cumulative*`, `IncrementalNotBatchSafe`). These codes are semantically owned by their respective feature specs (`meta_language.md`, `timeseries.md`, etc.) and will be consolidated into `diagnostics.md` when that spec lands.
 
 ## References
 
