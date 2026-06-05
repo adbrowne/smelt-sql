@@ -108,6 +108,13 @@ Explicit non-goal for now: the un-annotated determinism inversion and the untrac
 
 ## Recently Completed
 
+### ~~Function Default Self-Containment — Semantics #9 enforced~~ ✅ (June 6, 2026)
+
+Enforced the functions spec rule that a default expression must not reference other parameters in the same signature ([plan](plans/20260605-function-default-self-containment.md)):
+
+- **`DefaultReferencesParameter` diagnostic code** — new variant added to `DiagnosticCode`; documented in `functions.md` §Diagnostic codes table. Closed BUG-003 (1/2).
+- **AST-side validator** — near `default_type_lookup` in `crates/smelt-db/src/queries/function_diagnostics.rs`; for each parameter with a default, scans the default expr's identifier/column-ref tokens for a sibling-param-name match and emits `DefaultReferencesParameter` anchored at the default expr's range. Self-contained defaults (`= 1`) produce no diagnostic. Closed BUG-003 (2/2). Regression tests: `default_referencing_sibling_param_is_error`, `self_contained_default_is_ok` in `crates/smelt-db/tests/function_body_check.rs`.
+
 ### ~~smelt.yml Surface Alignment — spec drift closed, unknown-key warning~~ ✅ (June 5, 2026)
 
 Closed spec-vs-code drift on the `smelt.yml` and CLI model-selection surfaces ([plan](plans/20260605-smelt-yml-surface-alignment.md)):
