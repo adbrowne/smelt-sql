@@ -32,11 +32,9 @@ mod duckdb_seed_loading {
         );
 
         // Discover seeds via the central smelt-core strict path (BUG-063).
-        let seed_infos = smelt_core::discover_seed_infos_strict(
-            &project_root,
-            &["seeds".to_string()],
-        )
-        .expect("discover seeds");
+        let seed_infos =
+            smelt_core::discover_seed_infos_strict(&project_root, &["seeds".to_string()])
+                .expect("discover seeds");
         let seeds: Vec<SeedFile> = seed_infos
             .into_iter()
             .map(|info| SeedFile::from_seed_info(info, "main".to_string()))
