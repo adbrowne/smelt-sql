@@ -666,6 +666,13 @@ pub enum DiagnosticCode {
     /// under the planner's incremental safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).
     IncrementalNotBatchSafe,
+    /// Emitted when two files in the same project resolve to the same
+    /// `smelt.<path>` address across any entity kind (model, function, seed,
+    /// source). Hard workspace-load error; the colliding entities do not load.
+    /// Project-scoped per the project-isolation rule (same address in two
+    /// different projects is independent). Error severity. Anchored at the
+    /// second (later-discovered) file's path, at offset 0.
+    DuplicateAddress,
 }
 
 /// Structured metadata attached to diagnostics for code actions

@@ -15,9 +15,10 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
-    functions_in_file, project_source_diagnostics, yaml_edits::find_source_column_yaml_rename,
-    Database, Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
-    DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile, Workspace,
+    functions_in_file, project_address_collisions, project_source_diagnostics,
+    yaml_edits::find_source_column_yaml_rename, Database, Diagnostic as DbDiagnostic,
+    DiagnosticCode as DbCode, DiagnosticData as DbData, DiagnosticSeverity as DbSeverity,
+    ProjectInput, SourceFile, Workspace,
 };
 use smelt_parser::ast::File as AstFile;
 use smelt_parser::is_valid_sql_identifier;
@@ -382,6 +383,7 @@ impl Backend {
                 DbCode::CumulativeMultipleDrivingSources => "cumulative-multiple-driving-sources",
                 DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
                 DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
+                DbCode::DuplicateAddress => "duplicate-address",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -703,6 +705,33 @@ impl Backend {
                 let converter = self.boundary_converter(&text).await;
                 let lsp_diag = self.to_lsp_diagnostic(&sd.diagnostic, &converter);
                 by_path.entry(sd.path.clone()).or_default().push(lsp_diag);
+            }
+        }
+        for (path, diags) in by_path {
+            if let Ok(uri) = Url::from_file_path(&path) {
+                self.client.publish_diagnostics(uri, diags, None).await;
+            }
+        }
+    }
+
+    /// Publish `DuplicateAddress` diagnostics for every project in the workspace.
+    ///
+    /// Address collisions involve two files; the diagnostic is anchored at the
+    /// second (later-discovered) file, mirroring the `project_source_diagnostics`
+    /// pattern. Called once at `initialized` alongside `publish_source_diagnostics`.
+    async fn publish_address_collision_diagnostics(&self) {
+        let db = self.snapshot().await;
+        let Some(ws) = Workspace::try_get(&db) else {
+            return;
+        };
+        let mut by_path: std::collections::HashMap<PathBuf, Vec<lsp_types::Diagnostic>> =
+            std::collections::HashMap::new();
+        for project in ws.projects(&db).iter().copied() {
+            for cd in project_address_collisions(&db, project).iter() {
+                let text = std::fs::read_to_string(&cd.path).unwrap_or_default();
+                let converter = self.boundary_converter(&text).await;
+                let lsp_diag = self.to_lsp_diagnostic(&cd.diagnostic, &converter);
+                by_path.entry(cd.path.clone()).or_default().push(lsp_diag);
             }
         }
         for (path, diags) in by_path {
@@ -1193,6 +1222,9 @@ impl LanguageServer for Backend {
         // dynamic registration is slow or unsupported. Source discovery is
         // restart-scoped, so this startup publish is its lifecycle.
         self.publish_source_diagnostics().await;
+        // Publish address-collision diagnostics alongside source diagnostics.
+        // These are also project-scoped and restart-scoped.
+        self.publish_address_collision_diagnostics().await;
 
         // Register file watchers (dynamic registration). We watch:
         //   - `**/models/**/*.py` for Python model changes

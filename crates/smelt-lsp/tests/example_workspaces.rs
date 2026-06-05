@@ -1034,3 +1034,44 @@ async fn hover_on_per_entity_source_renders_columns() {
         content
     );
 }
+
+/// LSP gate (BUG-002 / P2): a model `dup.sql` and a seed `dup.csv` claiming
+/// the same `smelt.dup` address surface a `duplicate-address` diagnostic via
+/// the real LSP backend, published to the second file's URI at `initialized`.
+#[tokio::test]
+async fn architecture_broken_path_collision_surfaces_via_lsp() {
+    let workspace = examples_root().join("architecture_broken_path_collision");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let has_duplicate_address = diags.iter().any(|(_uri, ds)| {
+        ds.iter().any(|d| {
+            d.code.as_ref().is_some_and(
+                |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "duplicate-address"),
+            )
+        })
+    });
+    assert!(
+        has_duplicate_address,
+        "expected a duplicate-address diagnostic via LSP for the broken collision fixture, got: {:?}",
+        diags
+            .iter()
+            .flat_map(|(uri, ds)| ds
+                .iter()
+                .map(move |d| format!("{}: {:?}: {}", uri, d.code, d.message)))
+            .collect::<Vec<_>>()
+    );
+}

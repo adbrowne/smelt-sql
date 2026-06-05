@@ -22,8 +22,9 @@ use std::path::{Path, PathBuf};
 
 use line_index::LineIndex;
 use smelt_db::{
-    check_type_diagnostics, file_diagnostics, project_source_diagnostics, Database, Diagnostic,
-    DiagnosticAcc, DiagnosticCode, DiagnosticSeverity, Workspace,
+    check_type_diagnostics, file_diagnostics, project_address_collisions,
+    project_source_diagnostics, Database, Diagnostic, DiagnosticAcc, DiagnosticCode,
+    DiagnosticSeverity, Workspace,
 };
 
 /// A single `Error`-severity diagnostic that blocks the build, with its source
@@ -129,6 +130,19 @@ pub fn gate_diagnostics(
                 col: 1,
                 code: sd.diagnostic.code,
                 message: sd.diagnostic.message.clone(),
+            });
+        }
+        // Address-collision diagnostics: same project scope, same gating rule.
+        for cd in project_address_collisions(db, project).iter() {
+            if cd.diagnostic.severity != DiagnosticSeverity::Error {
+                continue;
+            }
+            errors.push(GateDiagnostic {
+                path: cd.path.clone(),
+                line: 1,
+                col: 1,
+                code: cd.diagnostic.code,
+                message: cd.diagnostic.message.clone(),
             });
         }
     }

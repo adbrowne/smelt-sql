@@ -236,6 +236,94 @@ pub fn project_source_diagnostics(
     Arc::new(diags)
 }
 
+/// A diagnostic produced by a `smelt.<path>` address collision between two
+/// project entities (model, function, seed, or source).
+///
+/// Unlike `SourceDiagnostic` (which anchors at a single source file), a
+/// collision always involves two files. The diagnostic is anchored at the
+/// second file's path — the "newcomer" that triggered the collision — with
+/// offset 0 (the whole-file anchor convention).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressCollisionDiagnostic {
+    /// Path of the second (later-discovered) entity — where the diagnostic is
+    /// anchored in the editor.
+    pub path: PathBuf,
+    /// Path of the first entity that claimed the address (context for the message).
+    pub other_path: PathBuf,
+    /// The diagnostic (code `DuplicateAddress`, severity `Error`, range at 0).
+    pub diagnostic: crate::Diagnostic,
+}
+
+/// Surface `smelt.<path>` address collisions as project-scoped diagnostics.
+///
+/// Per `architecture.md` §"Workspace loading parity rule", a workspace where
+/// two files in the same project resolve to the same canonical address is a
+/// hard workspace-load error. This query detects cross-kind collisions
+/// (model/function/seed/source) via `smelt_core::resolver::resolve_address_map`
+/// and surfaces each collision as a `DuplicateAddress` Error.
+///
+/// Keyed on `ProjectInput`; re-runs when `smelt.yml` changes (e.g. `paths:`
+/// updated). Model, seed, and source discovery is disk-based and restart-scoped
+/// (the same contract as `project_seeds` and `project_sources`), so editing a
+/// CSV's *contents* (not its path) does not retrigger the collision check —
+/// address collision is a purely structural property of filenames.
+#[salsa::tracked]
+pub fn project_address_collisions(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Arc<Vec<AddressCollisionDiagnostic>> {
+    use smelt_core::discovery::ModelDiscovery;
+    use smelt_core::resolver::resolve_address_map;
+
+    let project_root = project.root(db).clone();
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+
+    // Discover SQL model files from disk (restart-scoped, same as seeds/sources).
+    // `discover_models` fails with an error if no models are found; we treat that
+    // as an empty set — the workspace may be in a transient state during setup.
+    let sql_files: Vec<smelt_core::discovery::ModelFile> =
+        ModelDiscovery::new(project_root.clone(), paths.clone())
+            .discover_models()
+            .unwrap_or_default();
+
+    // Re-use the already-cached seed and source discovery results. These Salsa
+    // queries are keyed on ProjectInput and don't track file content, so they
+    // satisfy the address-only dependency constraint: a CSV content edit won't
+    // cause `project_address_collisions` to re-run.
+    let seeds = project_seeds(db, project);
+    let sources = project_sources(db, project);
+
+    let (_, collisions) = resolve_address_map(&sql_files, &seeds, &sources);
+
+    let diags = collisions
+        .into_iter()
+        .map(|collision| {
+            let address_str = collision.address.join(".");
+            let msg = format!(
+                "duplicate address `{}`: claimed by {} and {}",
+                address_str,
+                collision.first.path.display(),
+                collision.second.path.display(),
+            );
+            AddressCollisionDiagnostic {
+                path: collision.second.path.clone(),
+                other_path: collision.first.path.clone(),
+                diagnostic: crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: msg,
+                    range: TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::DuplicateAddress),
+                    data: None,
+                },
+            }
+        })
+        .collect();
+
+    Arc::new(diags)
+}
+
 /// Resolve a `smelt.seeds.<address>` or `smelt.sources.<address>` path to
 /// the on-disk file (`.csv` for seeds, `.yml` for sources) so the LSP can
 /// goto-definition into it.
