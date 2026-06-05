@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780564898121,
+  "lastUpdate": 1780701211580,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18329,6 +18329,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.28369,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "50f79773bed8bb8fc522415bce6afe52f672fd0e",
+          "message": "docs(crossfamily-arith): close out — strict family rejection enforced for arithmetic; narrow §296, update ledger + roadmap\n\n- types.md §296: add sentence confirming cross-family binary arithmetic is\n  now enforced (Unknown + TypeMismatch at operator); clarify composite-path\n  gaps (array-literal / UNION) remain deferred, tracked in 20260519-functions-meta-gaps.md\n- findings.md BUG-017: status planned → fixed; add regression test names\n  from P1/P2; summary counts fixed 53→54, planned 5→4\n- feature-sweep.md: cross-family-arithmetic-strictness sub-plan → done (2026-06-06)\n- cross-family-arithmetic-strictness.md: P3 → done (2026-06-06)\n- ROADMAP.md: add Recently Completed entry for BUG-017 close-out\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-06T09:07:13+10:00",
+          "tree_id": "8366dd2aac2f0c4ede63950c10aadf908b769f7e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/50f79773bed8bb8fc522415bce6afe52f672fd0e"
+        },
+        "date": 1780701210457,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 47.038641,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 44.942724000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.788403,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.599471,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.377736,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 2393.814826,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.516732,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.417277,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 3.410364,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.717471,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2603.6763889999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.6901,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.34287,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.186665,
             "unit": "ms"
           }
         ]
