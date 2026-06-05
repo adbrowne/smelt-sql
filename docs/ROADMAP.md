@@ -108,6 +108,16 @@ Explicit non-goal for now: the un-annotated determinism inversion and the untrac
 
 ## Recently Completed
 
+### ~~Address Collision Enforcement — workspace identity, discovery consolidation~~ ✅ (June 5, 2026) [BUG-002/021/040/063; P4 blocked]
+
+Enforced the one-path-one-entity invariant across all entity kinds and consolidated seed discovery ([plan](plans/20260605-address-collision.md)):
+
+- **Pure address-map resolver** (P1) — `smelt_core::resolve_address_map` computes the canonical `smelt.<path>` address for every discovered model (including within-file `--- name ---` sections), function, seed, and source; detects cross-kind and within-file collisions without a filesystem re-walk. Closed BUG-002 (1/2), BUG-021 (1/2). Regression test: `smelt-core::resolver::tests`.
+- **`project_address_collisions` Salsa query** (P2) — surfaces `DuplicateAddress` (Error) diagnostics to CLI and LSP via the shared diagnostic channel; fixture `examples/architecture_broken_path_collision` (model `dup.sql` + seed `dup.csv`) confirmed. `smelt build` and `smelt explain --json` now exit non-zero on a collision. Closed BUG-002 (2/2). Regression tests: `crates/smelt-cli/tests/address_collision.rs`.
+- **Model-name uniqueness surfaced** (P2b) — spec re-scoped uniqueness to canonical `smelt.<path>` address (Constraint 4 re-worded; stale cross-file example dropped); Python `ModelFile.address_segments` populated; `resolve_address_map` applied CLI-side over combined SQL+Python model set. Closed BUG-021 (2/2), BUG-040. Regression test: `test_python_model_name_collision` + `within_file_section_collision_surfaces_duplicate_address`.
+- **Seed discovery consolidated** (P3) — `smelt-cli::discover_seeds` deleted; all seed lookups route through `smelt_core::discover_seed_infos_strict`; sources/functions audited (single-sourced). Eliminates the third seed-discovery path that was the structural root cause of the asymmetric-discovery bug family. Closed BUG-063.
+- **P4 blocked** — BUG-064 (smelt-db → smelt-planner layering inversion) investigation complete: the leak is full planner logic (`detect_builtin_rules`, `parse_function_properties`, `collect_path_refs`), not a plain type. Options recorded in plan §"Blocked phases"; recommendation: move Salsa rule-diagnostic queries into `smelt-planner` (correct direction).
+
 ### ~~Codegen Soundness — CTE collisions diagnosed, `source.*` valid~~ ✅ (June 5, 2026)
 
 Closed the silent-until-`smelt run` function-expansion defects found in the feature sweep ([plan](plans/20260604-codegen-soundness.md)):
