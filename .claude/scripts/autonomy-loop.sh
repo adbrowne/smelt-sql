@@ -231,10 +231,19 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # for a human — never auto-resolved, since a wrong resolution would silently
   # corrupt every downstream phase. Runs before the sampler starts, so there is
   # no sampler to tear down on the pause paths below.
+  # Drop pure stat-dirt first (mtime-only touches from a prior cargo/test run
+  # that changed no bytes — the exact thing that stalled the loop 2026-06-06),
+  # then stash any genuinely-leftover changes so a dirty tree never halts the
+  # loop. Stash (not discard) keeps the changes recoverable via `git stash list`.
+  git update-index -q --refresh >/dev/null 2>&1 || true
   if [ -n "$(git status --porcelain)" ]; then
-    echo "===== working tree dirty at iteration start — pausing (unexpected leftover) ====="
-    exit_reason="dirty_tree_pre_merge"
-    break
+    echo "===== working tree dirty at iteration start — stashing leftover changes ====="
+    if git stash push --include-untracked \
+         --message "autonomy-loop auto-stash $(date -u +%Y%m%dT%H%M%SZ) (dirty at iteration start)"; then
+      echo "(leftover changes stashed; recover with 'git stash list' / 'git stash pop')"
+    else
+      echo "(nothing to stash after stat-refresh — proceeding)"
+    fi
   fi
   echo "----- syncing branch with origin/main -----"
   if git fetch origin main --quiet && git merge --no-edit origin/main; then
