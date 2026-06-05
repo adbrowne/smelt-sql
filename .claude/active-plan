@@ -28,18 +28,26 @@
 # backlog is fully remediated.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CURRENT MODE: PROBE SWEEP (resumed 2026-06-05).
-# The three remediation sub-plans are all done + rolled up, so the loop is back
-# on the master feature-sweep's own pending PROBE rows (C10–C14, D1–D8 — one
-# probe per spec / per cross-feature seam). Probe mode is driven by
-# .claude/bug-hunt-prompt.txt, which reads master_plan DIRECTLY (it does not
-# consult active_subplan); autonomy-loop.sh's default PROMPT now points at it,
-# so a bare `bash .claude/scripts/autonomy-loop.sh` resumes the sweep at the
-# next pending row (C10 — testing). active_subplan is set equal to master_plan
-# below because no remediation sub-plan is running — a fresh-context `continue`
-# should land on the master probe table, not an exhausted sub-plan. To switch
-# back to remediation, scaffold/point active_subplan at a sub-plan and launch
-# with PROMPT="$(cat .claude/diag-parity-prompt.txt)".
+# CURRENT MODE: UNIFIED PRIORITY (adopted 2026-06-05).
+# There is no manual probe-vs-remediation switch any more. The loop's default
+# prompt (.claude/sweep-loop-prompt.txt) dispatches each iteration by priority:
+#   1. READY REMEDIATION — the master plan's "## Spawned sub-plans" registry
+#      table is the source of truth. Any sub-plan there whose Status is not
+#      `done` AND that has a `pending` phase runs FIRST (its own per-phase
+#      routine), top-to-bottom in registry order.
+#   2. SCAN — only when no sub-plan is ready, the next `pending` probe row in
+#      master_plan's Progress-tracking table (D2–D8) runs via the probe routine
+#      in .claude/bug-hunt-prompt.txt.
+#   3. NOTHING READY — emits <<MASTER_EXHAUSTED>> to surface to you.
+# So a bare `bash .claude/scripts/autonomy-loop.sh` does the right thing: it
+# fixes everything ready (currently docs/plans/20260605-address-collision.md,
+# BUG-002/063/064), then resumes scanning. To queue more: review a cluster,
+# scaffold its sub-plan, add a NOT-`done` row to the registry table — the next
+# run picks it up first.
+#
+# `active_subplan` below is VESTIGIAL under unified mode (the registry table
+# replaces it) — kept only so older fresh-context `continue` flows that read it
+# still resolve to a real file. The loop ignores it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 master_plan: docs/plans/20260530-feature-sweep.md

@@ -1,0 +1,28 @@
+Resume the smelt autonomy loop with fresh context. Each iteration does exactly ONE unit of work and emits exactly one sentinel. You choose the work by a fixed PRIORITY: ready remediation first, scanning only when no remediation is ready.
+
+SETUP (every iteration):
+1. Read `.claude/active-plan` for the `master_plan` path (currently docs/plans/20260530-feature-sweep.md).
+2. Read the master plan's "## Spawned sub-plans (remediation)" registry table.
+
+PRIORITY 1 — READY REMEDIATION (do this before any scanning):
+3. A sub-plan is READY when BOTH hold: (a) its registry-table Status is NOT `done`, and (b) its own Progress-tracking table has at least one `pending` row (a row that is neither `done` nor `blocked`). Consider sub-plans top-to-bottom in the registry; the first READY one is this iteration's target.
+4. If a READY sub-plan exists, execute the next `pending` phase of THAT sub-plan, following the sub-plan's OWN per-phase routine and design decisions (it is self-contained: pre-flight → spec increment only if the row lists one → /smelt:implement red-green with implementer + reviewer, spec as oracle → verification gates → set the row to `done` → commit + push with the phase's commit message).
+   - If that was the sub-plan's LAST pending phase (no `pending` rows remain after it), also flip the sub-plan's Status to `done (<today>)` in the master registry table and commit that with the phase.
+   - Emit <<PHASE_COMPLETE>> (or <<PHASE_BLOCKED>> per the block rule below).
+
+PRIORITY 2 — SCAN (only if NO sub-plan is READY):
+5. Fall back to the feature-sweep probe. Read AND follow the probe routine in `.claude/bug-hunt-prompt.txt` (which reads the across-session meta-plan ~/.claude/plans/we-now-have-a-idempotent-torvalds.md for the per-phase probe routine, the bug-ledger entry format, and the triage rules). Find the next `pending` row in the master plan's OWN Progress-tracking table (the probe rows, e.g. D2–D8) and execute that one probe phase end-to-end: drift report + adversarial fixtures + existing gates; log EVERY finding to docs/bug-hunt/2026-05-30-findings.md; fix CLEAR code bugs red-green; log JUDGMENT CALLS as `needs-review` with both options + a recommendation and KEEP GOING; update the probe row to `done` with finding counts; commit + push.
+   - Emit <<PHASE_COMPLETE>> (or <<PHASE_BLOCKED>>).
+
+NOTHING READY:
+6. If NO sub-plan is READY and the master Progress-tracking table has NO `pending` probe rows, emit <<MASTER_EXHAUSTED>> with a one-line summary above the sentinel: how many `needs-review` ledger items await human triage and how many probe rows remain (zero). This is the steady-state "loop has done everything it can without you" signal — you review/scaffold, then the next run picks the new work up first.
+
+RECORD-AND-CONTINUE (block rule — applies to BOTH priorities, no hard-stop):
+If the chosen phase hits a design decision NOT answered by its plan or the spec, OR pre-flight `cargo test` is red on something that is NOT this phase's own acceptance target: do NOT halt. Instead (a) set the row to `blocked` with a one-line reason, (b) append a dated entry to that plan's "## Blocked phases" section (phase id, reason/decision, candidate options), (c) restore the tree to a clean committed state, (d) commit + push, (e) emit <<PHASE_BLOCKED>>. The next iteration skips the blocked row. A red pre-flight that IS this phase's own target (the test it exists to make green) is EXPECTED — proceed, do not block.
+
+CONSERVATIVE RULES (never violate):
+- NEVER scaffold a new sub-plan or author a new spec autonomously. Remediation sub-plans and their spec edits are human-gated; you only execute phases that already exist as `pending` rows. (A sub-plan phase MAY perform a spec increment if that phase's row explicitly lists one — that is pre-authorized by the human who wrote the plan.)
+- During a SCAN phase, never edit a spec; log spec-vs-code conflicts as `needs-review`.
+- Run exactly ONE phase this iteration.
+
+SENTINEL CONTRACT: your final user-facing message MUST contain exactly one of <<PHASE_COMPLETE>>, <<PHASE_BLOCKED>>, <<MASTER_EXHAUSTED>>, or <<ALL_DONE>>. Put any one-line reason on the line ABOVE the sentinel. (<<ALL_DONE>> only if the registry is all `done` AND every probe row is `done` AND the full suite is green; in normal operation the idle state is <<MASTER_EXHAUSTED>>, not <<ALL_DONE>>.) Legacy <<PAUSE_FOR_HUMAN>> is accepted as equivalent to <<PHASE_BLOCKED>>.

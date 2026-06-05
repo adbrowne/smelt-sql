@@ -14,30 +14,35 @@
 # plan is selected by the fresh-context discovery rules in
 # `.claude/active-plan`.
 #
-# Currently active: PROBE SWEEP mode (see .claude/active-plan).
-#   master plan:   docs/plans/20260530-feature-sweep.md (top-level backlog)
-#   active phases: the master's own pending probe rows C10–C14, D1–D8 (one
-#                  probe per spec / per cross-feature seam). There is NO
-#                  remediation sub-plan running — the three remediation
-#                  sub-plans (diagnostic-parity, frontmatter-parity,
-#                  codegen-soundness) are all done and rolled up.
+# UNIFIED PRIORITY MODE (default — see .claude/sweep-loop-prompt.txt).
+# There is no longer a manual probe-vs-remediation mode switch. Each
+# iteration the agent applies a fixed priority:
 #
-# Probe mode is the DEFAULT prompt (see PROMPT below): it reads
-# .claude/bug-hunt-prompt.txt, which drives docs/plans/20260530-feature-sweep.md
-# directly via the meta-plan's per-phase probe routine (/smelt:validate drift
-# report + adversarial fixtures + existing suite; log findings to the ledger;
-# fix clear code bugs red-green, log judgment calls as needs-review). A bare
-#   bash .claude/scripts/autonomy-loop.sh
-# therefore resumes the sweep at the next pending row (C10 — testing).
+#   PRIORITY 1 — READY REMEDIATION. Read the master plan's
+#     "## Spawned sub-plans (remediation)" registry. A sub-plan is READY
+#     when its registry Status is not `done` AND it has a `pending` phase.
+#     If any is ready, execute its next pending phase (the sub-plan's own
+#     self-contained per-phase routine) — remediation always runs before
+#     scanning resumes.
+#   PRIORITY 2 — SCAN. Only when NO sub-plan is ready, run the next
+#     `pending` probe row in the master's Progress-tracking table via the
+#     probe routine in .claude/bug-hunt-prompt.txt.
+#   NOTHING READY — no ready sub-plan AND no pending probe row: emit
+#     <<MASTER_EXHAUSTED>> and surface to the human (review needs-review
+#     ledger items / scaffold the next sub-plan).
 #
-# To resume REMEDIATION mode instead (work a spec-anchored sub-plan phase by
-# phase, active-plan driven), override the prompt:
-#   PROMPT="$(cat .claude/diag-parity-prompt.txt)" bash .claude/scripts/autonomy-loop.sh
-# (the generic two-level remediation prompt is also preserved inline below as
-#  REMEDIATION_PROMPT for reference).
+# This implements the intended workflow: run the loop whenever tokens are
+# available; review found bugs out of band and promote a cluster into a
+# sub-plan (scaffold the plan + add a NOT-`done` row to the master registry
+# table); the next run fixes that ready work FIRST, then resumes scanning.
+# The old `active_subplan` pointer and the prompt-swapping dance are
+# retired — the registry table is the single source of "what's ready", so a
+# bare `bash .claude/scripts/autonomy-loop.sh` does the right thing.
 #
-# When swapping modes, update .claude/active-plan, this comment block, the
-# default PROMPT, and the LOG_DIR below.
+# The generic two-level remediation prompt is preserved inline below as
+# REMEDIATION_PROMPT, and the standalone probe/remediation prompt files
+# (.claude/bug-hunt-prompt.txt, .claude/diag-parity-prompt.txt) remain for
+# reference and for running a single mode in isolation via PROMPT=.
 #
 # Sentinels (Claude must emit one and only one of these per iteration):
 #
@@ -135,13 +140,15 @@ ROLL-UP (only when the active sub-plan has NO \`pending\` rows left — all \`do
 
 CRITICAL — sentinel emission contract: your final user-facing message MUST contain exactly one of ${SENTINEL_PHASE}, ${SENTINEL_BLOCKED}, ${SENTINEL_ADVANCED}, ${SENTINEL_MASTER_EXHAUSTED}, or ${SENTINEL_DONE}. The wrapper greps the final .result for these; without one the loop halts. Put any one-line reason on the line ABOVE the sentinel.}"
 
-# Prompt sent to each iteration. DEFAULT = PROBE SWEEP mode: read the bug-hunt
-# prompt, which drives docs/plans/20260530-feature-sweep.md's pending probe rows
-# (C10–C14, D1–D8) via the meta-plan routine. It emits the legacy sentinels
-# <<PHASE_COMPLETE>>/<<ALL_DONE>>/<<PAUSE_FOR_HUMAN>> — the wrapper continues on
-# the first two and treats PAUSE as BLOCKED (record + continue). Override with
-# $PROMPT (e.g. the diag-parity remediation prompt) to swap modes.
-PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../bug-hunt-prompt.txt")}"
+# Prompt sent to each iteration. DEFAULT = UNIFIED PRIORITY mode: read the
+# sweep-loop prompt, which dispatches each iteration to ready remediation
+# (master registry → first sub-plan with a pending phase) before falling back
+# to the next pending probe row. It emits <<PHASE_COMPLETE>>/<<PHASE_BLOCKED>>/
+# <<MASTER_EXHAUSTED>>/<<ALL_DONE>> (legacy <<PAUSE_FOR_HUMAN>> == BLOCKED).
+# Override $PROMPT to force a single mode (e.g. PROMPT="$(cat
+# .claude/bug-hunt-prompt.txt)" to scan only, or the diag-parity prompt to work
+# one sub-plan only).
+PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../sweep-loop-prompt.txt")}"
 
 cd "${REPO_ROOT}"
 

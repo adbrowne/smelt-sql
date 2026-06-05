@@ -27,13 +27,16 @@ A lot of functionality has landed across 26 specs in `docs/specs/`. This plan dr
 
 ## Spawned sub-plans (remediation)
 
-This sweep is the **master plan**: its probe phases (S0–C9) are complete and the bug ledger `docs/bug-hunt/2026-05-30-findings.md` is the master to-do list. Remediating a *cluster* of ledger findings is done in a focused **sub-plan**, driven by the autonomy loop one at a time; the loop rolls back up here when a sub-plan is exhausted (conservatively — it advances only to an existing sibling sub-plan with pending work, never scaffolds a new one autonomously).
+This sweep is the **master plan**: its probe phases (S0–D1) are done and the remaining probe rows (D2–D8) plus the bug ledger `docs/bug-hunt/2026-05-30-findings.md` are the master to-do list. Remediating a *cluster* of ledger findings is done in a focused **sub-plan**.
+
+**This registry table is the loop's source of "ready remediation".** Under the unified-priority loop (`.claude/sweep-loop-prompt.txt`), each iteration scans this table top-to-bottom: a sub-plan whose Status is **not** `done` and that still has a `pending` phase is executed **before** the loop falls back to the probe rows in §"Progress tracking". To queue a reviewed cluster for the loop, scaffold its sub-plan and add a NOT-`done` row here; to retire it, the loop (or you) flips its Status to `done` when its last phase lands. The loop never scaffolds a sub-plan or authors specs autonomously — adding the row is the human gate.
 
 | Sub-plan | Cluster it remediates | Status |
 |----------|-----------------------|--------|
 | `docs/plans/20260531-diagnostic-parity.md` | "LSP-clean but unbuildable" bug class — BUG-006, 011, 013, 015, 018, 019, 024, 032 | done (2026-06-03) |
 | `docs/plans/20260604-frontmatter-parity.md` | "frontmatter fragility" — malformed frontmatter silently drops the block / downgrades materialization — BUG-016, 023, 025 | done (2026-06-04) |
 | `docs/plans/20260604-codegen-soundness.md` | "codegen soundness" — silent-until-`run` function-expansion defects (CTE collision → wrong data; over-qualified `source.*`) — BUG-007, 009 (+008 doc) | done (2026-06-05) |
+| `docs/plans/20260605-address-collision.md` | "workspace identity / discovery" — `smelt.<path>` uniqueness unenforced + discovery reimplemented across 3 crates + db→planner layering inversion — BUG-002, 063, 064 | pending (P1–P5) |
 
 Remaining ledger clusters without a sub-plan yet (each a candidate for a future human-scaffolded sub-plan) live in `docs/bug-hunt/2026-05-30-findings.md` under their `needs-review` entries.
 
