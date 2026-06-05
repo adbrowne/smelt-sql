@@ -9,10 +9,18 @@
 //! - `.sql` with `smelt.test` → Test
 //!
 //! Address uniqueness is global across `paths:`. Collisions are hard errors.
+//!
+//! ## Address authority
+//!
+//! `resolve_address_map` is the single authority for `smelt.<path>` address
+//! uniqueness. It operates on post-discovery descriptor sets (already have
+//! `address_segments` computed) so CLI ↔ LSP parity holds by construction.
 
+use crate::discovery::ModelFile;
+use crate::seeds::SeedInfo;
+use crate::sources::SourceInfo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 /// The kind of a project entity, determined by file format and content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,98 +181,125 @@ fn classify_sql(content: &str) -> EntityKind {
     }
 }
 
-/// Walk all `paths` under `project_root`, classify each file, compute
-/// address segments (scan-root-stripped), and check for collisions.
+// ---------------------------------------------------------------------------
+// Address-map authority (BUG-002, BUG-021)
+// ---------------------------------------------------------------------------
+
+/// The kind of entity in an address-map or collision report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityRefKind {
+    /// A SQL model or function file.
+    SqlModel,
+    /// A seed CSV file.
+    Seed,
+    /// A source YAML file.
+    Source,
+}
+
+/// A reference to a discovered workspace entity with enough information to
+/// produce a useful collision diagnostic.
+#[derive(Debug, Clone)]
+pub struct EntityRef {
+    /// The entity kind.
+    pub kind: EntityRefKind,
+    /// Primary file path on disk.
+    pub path: PathBuf,
+    /// The canonical address segments (`address_segments.join(".")` is the key).
+    pub address_segments: Vec<String>,
+}
+
+/// A collision between two entities that both claim the same `smelt.<path>` address.
+#[derive(Debug, Clone)]
+pub struct AddressCollision {
+    /// The conflicting address segments.
+    pub address: Vec<String>,
+    /// The first entity to claim this address.
+    pub first: EntityRef,
+    /// The second entity that collided with `first`.
+    pub second: EntityRef,
+}
+
+/// Compute the canonical address map and collision list across all entity kinds.
 ///
-/// Returns `Vec<ProjectEntity>` on success, or a `WorkspaceLoadError`
-/// on the first collision detected.
-pub fn walk_paths(
-    project_root: &Path,
-    paths: &[String],
-) -> Result<Vec<ProjectEntity>, WorkspaceLoadError> {
-    // address_segments → (file_path, scan_root) — collision detection.
-    let mut seen: HashMap<Vec<String>, (PathBuf, String)> = HashMap::new();
-    let mut entities: Vec<ProjectEntity> = Vec::new();
+/// This is the **single authority** for `smelt.<path>` address uniqueness per
+/// architecture.md §"Workspace loading parity rule". It operates on the
+/// post-discovery descriptor sets (callers have already computed
+/// `address_segments`) so CLI ↔ LSP parity holds by construction.
+///
+/// Returns `(address_map, collisions)`:
+/// - `address_map`: maps `address_segments.join(".")` → the first `EntityRef`
+///   that claimed it.
+/// - `collisions`: one entry per address claimed by two or more entities.
+///
+/// Entities with empty `address_segments` are silently skipped (the
+/// scan-root could not be determined — they cannot be addressed).
+pub fn resolve_address_map(
+    sql_files: &[ModelFile],
+    seeds: &[SeedInfo],
+    sources: &[SourceInfo],
+) -> (HashMap<String, EntityRef>, Vec<AddressCollision>) {
+    let mut map: HashMap<String, EntityRef> = HashMap::new();
+    let mut collisions: Vec<AddressCollision> = Vec::new();
 
-    for scan_root in paths {
-        let root_dir = project_root.join(scan_root);
-        if !root_dir.exists() {
-            continue;
+    fn register(
+        map: &mut HashMap<String, EntityRef>,
+        collisions: &mut Vec<AddressCollision>,
+        kind: EntityRefKind,
+        path: PathBuf,
+        segments: Vec<String>,
+    ) {
+        if segments.is_empty() {
+            return;
         }
-
-        // First pass: collect all files under this scan root, grouped by
-        // directory, so we can detect sibling relationships.
-        let mut by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for entry in WalkDir::new(&root_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path().to_path_buf();
-            let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
-            by_dir.entry(dir).or_default().push(path);
-        }
-
-        // Second pass: classify each file.
-        for (dir, files) in &by_dir {
-            let _ = dir; // directory used only for sibling lookup below
-            for file_path in files {
-                // Siblings are all other files in the same directory.
-                let siblings: Vec<PathBuf> =
-                    files.iter().filter(|p| *p != file_path).cloned().collect();
-
-                let kind = match classify(file_path, None, &siblings) {
-                    Some(k) => k,
-                    None => continue, // sidecar or unrecognised extension
-                };
-
-                // Compute address segments: strip project_root + scan_root prefix,
-                // then use parent dirs + stem.
-                let rel = file_path
-                    .strip_prefix(&root_dir)
-                    .expect("file is under root_dir");
-
-                let parent = rel.parent().unwrap_or(Path::new(""));
-                let stem = file_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                let mut address_segments: Vec<String> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                        _ => None,
-                    })
-                    .collect();
-                address_segments.push(stem);
-
-                // Collision detection.
-                if let Some((existing_path, _existing_root)) = seen.get(&address_segments) {
-                    return Err(WorkspaceLoadError::DuplicateAddress {
-                        address: address_segments,
-                        path1: existing_path.clone(),
-                        path2: file_path.clone(),
-                    });
-                }
-                seen.insert(
-                    address_segments.clone(),
-                    (file_path.clone(), scan_root.clone()),
-                );
-
-                entities.push(ProjectEntity {
-                    kind,
-                    path: file_path.clone(),
-                    address_segments,
-                    scan_root: scan_root.clone(),
+        let key = segments.join(".");
+        let new_ref = EntityRef {
+            kind,
+            path,
+            address_segments: segments.clone(),
+        };
+        match map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(occ) => {
+                collisions.push(AddressCollision {
+                    address: segments,
+                    first: occ.get().clone(),
+                    second: new_ref,
                 });
+            }
+            std::collections::hash_map::Entry::Vacant(vac) => {
+                vac.insert(new_ref);
             }
         }
     }
 
-    Ok(entities)
+    for model in sql_files {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::SqlModel,
+            model.path.clone(),
+            model.address_segments.clone(),
+        );
+    }
+    for seed in seeds {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::Seed,
+            seed.path.clone(),
+            seed.address_segments.clone(),
+        );
+    }
+    for source in sources {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::Source,
+            source.path.clone(),
+            source.address_segments.clone(),
+        );
+    }
+
+    (map, collisions)
 }
 
 /// Compute the default DB name for a persisted entity.
