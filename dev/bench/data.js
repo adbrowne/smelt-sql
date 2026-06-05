@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780701211580,
+  "lastUpdate": 1780701213667,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24080,6 +24080,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.27354974408466,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "50f79773bed8bb8fc522415bce6afe52f672fd0e",
+          "message": "docs(crossfamily-arith): close out — strict family rejection enforced for arithmetic; narrow §296, update ledger + roadmap\n\n- types.md §296: add sentence confirming cross-family binary arithmetic is\n  now enforced (Unknown + TypeMismatch at operator); clarify composite-path\n  gaps (array-literal / UNION) remain deferred, tracked in 20260519-functions-meta-gaps.md\n- findings.md BUG-017: status planned → fixed; add regression test names\n  from P1/P2; summary counts fixed 53→54, planned 5→4\n- feature-sweep.md: cross-family-arithmetic-strictness sub-plan → done (2026-06-06)\n- cross-family-arithmetic-strictness.md: P3 → done (2026-06-06)\n- ROADMAP.md: add Recently Completed entry for BUG-017 close-out\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-06T09:07:13+10:00",
+          "tree_id": "8366dd2aac2f0c4ede63950c10aadf908b769f7e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/50f79773bed8bb8fc522415bce6afe52f672fd0e"
+        },
+        "date": 1780701213135,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.459507767885206,
             "unit": "MB/s"
           }
         ]
