@@ -158,6 +158,7 @@ User-visible codes anchored to the surface above. Full descriptions live alongsi
 |---|---|
 | `DuplicateFunctionDefinition` | Two `smelt.define`s (or `smelt.extern`s) share a name in the workspace. |
 | `DuplicateParameterName` | Two parameters in one signature share a name. |
+| `DefaultReferencesParameter` | A `smelt.define` default expression references another parameter in the same signature. |
 | `UnknownSmeltFn` | A `smelt.<path>(...)` call references a path that does not resolve to a function (no file at that path, the file is not a `.sql`, the file does not declare a `smelt.define` of that name, or the path resolves to a non-callable kind such as a model or seed used in call position). |
 | `MissingArgument` | Call omits a required (non-defaulted) parameter. |
 | `ArgTypeMismatch` | Argument's type fails the parameter's `TypeConstraint`. |
