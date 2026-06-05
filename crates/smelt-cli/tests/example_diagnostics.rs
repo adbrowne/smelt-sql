@@ -125,6 +125,15 @@ fn fn_tableexpr_star_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_tableexpr_star");
 }
 
+/// D1 phase: functions × incremental × timeseries happy-path fixture.
+/// Verifies that a workspace mixing smelt.define predicates (called in WHERE)
+/// and partition-aligned window-function helpers inside incremental models
+/// loads without any diagnostics.
+#[test]
+fn fn_incremental_ts_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/fn_incremental_ts");
+}
+
 /// Test 4 (TDD): All example SQL files must use the unified `smelt.<path>`
 /// syntax.  This test FAILS until the migration tool has been run on all
 /// example workspaces.

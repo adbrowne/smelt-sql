@@ -1,0 +1,23 @@
+name: fn_incremental_ts_broken_safety_bypass
+version: 1
+
+# D1 broken fixture: a function body contains a non-partition-aligned window
+# function. The incremental safety check runs on the UNEXPANDED outer SQL
+# (no OVER visible), so it passes — even though the expanded SQL would have a
+# non-partition-aligned OVER that is unsafe for DELETE+INSERT.
+#
+# Expected behavior per spec: expansion runs before all analysis stages,
+# so the safety check SHOULD see the OVER in the function body and reject.
+# Actual behavior: the safety check sees only the outer SQL → silent accept.
+# This is a known limitation documented as needs-review (D1 phase).
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

@@ -1,0 +1,20 @@
+name: fn_incremental_ts
+version: 1
+
+# D1 adversarial fixture: functions × incremental × timeseries seam.
+# Probes:
+#   1. smelt.define predicate called in WHERE of an incremental model (time filter injection survives)
+#   2. smelt.define wrapping a source ref via named arg (source-filter pushdown reaches it)
+#   3. smelt.define with RANGE BETWEEN INTERVAL lookback (batch-safety sees inside function body)
+#   4. smelt.define with UNBOUNDED LAG (forces PerPartitionOnly from function body)
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

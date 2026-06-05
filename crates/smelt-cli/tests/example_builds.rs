@@ -172,6 +172,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          not seeded / not a clean build target)",
     ),
     (
+        "fn_incremental_ts",
+        "Catalog Error: Table with name sources_events does not exist \
+         (D1 probe fixture: function expansion inside incremental model works correctly; \
+         source table `main.sources_events` not seeded in standalone build env; \
+         verified e2e via fn_incremental_ts_e2e.rs)",
+    ),
+    (
         "demo_workspace",
         "Error: Dependency validation failed \
          (probe/demo fixture; not a clean standalone build target)",

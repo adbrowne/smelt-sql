@@ -1,0 +1,11 @@
+description: Raw orders stream.
+columns:
+  - { name: order_id,   type: INTEGER,   nullable: false }
+  - { name: order_ts,   type: TIMESTAMP, nullable: false }
+  - { name: order_date, type: DATE,      nullable: false }
+  - { name: user_id,    type: INTEGER,   nullable: false }
+  - { name: amount,     type: DOUBLE,    nullable: false }
+timeseries:
+  event_time_column: order_ts
+  partition_column: order_date
+  granularity: day
