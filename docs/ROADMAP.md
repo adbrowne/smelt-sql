@@ -108,6 +108,15 @@ Explicit non-goal for now: the un-annotated determinism inversion and the untrac
 
 ## Recently Completed
 
+### ~~smelt.yml Surface Alignment — spec drift closed, unknown-key warning~~ ✅ (June 5, 2026)
+
+Closed spec-vs-code drift on the `smelt.yml` and CLI model-selection surfaces ([plan](plans/20260605-smelt-yml-surface-alignment.md)):
+
+- **`backbuild` positional-selector documented** (P1) — `model_selection.md` §Flags amended: removed `backbuild` from the `--select` "Available on" cell; added a note that `backbuild` takes a single positional selector, always forces `+` upstream, and has no `--exclude`. Closed BUG-046 (spec-only).
+- **`timeseries` row added to model-config table** (P1) — `smelt_yml.md` §"Model-config shape" now lists `timeseries | object | absent | Time-dimension declaration`. Closed BUG-059 (spec-only).
+- **`cumulative_aggregate` added to `default_materialization` accepted values** (P1) — the Surface table and its `docs-site/` mirror now list all six valid values. Closed BUG-061 (spec-only).
+- **Unknown top-level key warning implemented** (P2) — `Config::parse_with_warnings` now iterates the raw YAML map against a 10-key allow-list and emits a named warning per unknown key (including typos like `default_matrialization`). Legacy keys (`model_paths`, `seed_paths`) and `unstable_schema` are allow-listed to avoid duplicate/false-positive warnings. Closed BUG-060. Regression tests: `config::tests::unknown_top_level_key_warns`, `valid_config_with_all_known_keys_emits_no_generic_warnings`, `legacy_path_key_does_not_also_get_generic_unknown_key_warning`.
+
 ### ~~Address Collision Enforcement — workspace identity, discovery consolidation~~ ✅ (June 5, 2026) [BUG-002/021/040/063; P4 blocked]
 
 Enforced the one-path-one-entity invariant across all entity kinds and consolidated seed discovery ([plan](plans/20260605-address-collision.md)):

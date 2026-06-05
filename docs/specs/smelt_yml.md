@@ -68,9 +68,9 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 
 ### Unknown keys
 
-An unknown top-level key produces a warning, not an error. The file otherwise parses normally. This is intentional — adding a key is non-breaking, and rejecting unknown keys would force a lockstep between the `smelt.yml` parser and every consumer of the config struct.
+An unknown top-level key produces a warning naming the key, not an error. The file otherwise parses normally. This is intentional — adding a key is non-breaking, and rejecting unknown keys would force a lockstep between the `smelt.yml` parser and every consumer of the config struct.
 
-A typo'd known key (e.g. `default_matrialization`) is currently silently ignored as "unknown" — escalating typos to errors is open (see Known Divergences).
+A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key and produces the same warning. Whether smelt should additionally emit a fuzzy "did you mean …" hint is open (see Known Divergences).
 
 ## Semantics
 
@@ -104,7 +104,7 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 
 ## Known Divergences / Open Questions
 
-- **Typo escalation.** Unknown top-level keys are warned; whether typos of known keys (`default_matrialization`) should also warn or escalate to errors is open. A future schema-checker pass could fuzzy-match against the known-key set and emit a hint; not implemented today.
+- **Fuzzy typo hints.** Unknown top-level keys (including typos of known keys) are warned by name. A future "did you mean …" hint that fuzzy-matches the offending key against the known-key set is open; not implemented today.
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.
 - **Multi-target precedence with frontmatter `target:`.** The model-level `target:` frontmatter overrides `smelt.yml::models.<name>.target`, which overrides the CLI `--target`. The frontmatter form is a relatively recent addition; whether it should also be allowed to declare a target *not* defined in `smelt.yml::targets` is open (today: hard error before any work begins).
 - **`unstable_schema:` discoverability.** There is no `smelt unstable_schema list` or similar way to enumerate the currently-gated keys. Users find them through individual feature docs; a discoverability mechanism is open.
