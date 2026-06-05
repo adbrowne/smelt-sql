@@ -52,6 +52,7 @@ User-visible codes anchored to scoping. Full descriptions live alongside `Diagno
 | `FragmentKindMismatch` | At a call site, a caller-supplied fragment is of a lower expression kind than the parameter requires (e.g. scalar passed where `SelectItems<Agg>` is expected). |
 | `CteCycle` | A CTE in a body forms a cyclic reference, directly or transitively. |
 | `CteShadowsCallerCte` | A CTE declared in a directly-called transparent function's body shares a name with a CTE in the calling model's top-level WITH clause. Error severity — v1 refuses and asks the author to rename one CTE; automatic alpha-rename is deferred to v2. Anchored at the call site in the model. |
+| `DuplicateAddress` | Two files in a project resolve to the same `smelt.<path>` address across any kinds — e.g. a model `dup.sql` and a seed `dup.csv` in the same directory, or `models/users.csv` and `fixtures/users.csv` under multiple `paths:` roots. Error severity — the colliding entities do not load. Project-scoped: the same address in two different projects is independent, not a collision. See `architecture.md` §Resolution (one-path-one-entity) and §"Workspace loading parity rule". |
 
 ### Generator-file body scope
 
