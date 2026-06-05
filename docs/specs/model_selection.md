@@ -42,10 +42,12 @@ method = model_name
 
 | Flag | Short | Available on |
 |------|-------|-------------|
-| `--select` | `-s` | `run`, `build`, `backbuild`, `diff`, `explain`, `docs generate`, `seed` |
+| `--select` | `-s` | `run`, `build`, `diff`, `explain`, `docs generate`, `seed` |
 | `--exclude` | `-e` | `run`, `build`, `diff`, `explain` |
 
 Both flags are repeatable. Each instance adds one selector to the set.
+
+**`smelt backbuild` uses a positional selector.** Unlike the commands above, `backbuild` takes a single positional `<SELECTOR>` argument rather than `--select`/`--exclude` flags, and always expands upstream (the `+` prefix is implicit). There is no `--exclude` support on `backbuild`.
 
 ## Semantics
 

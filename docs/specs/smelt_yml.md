@@ -19,7 +19,7 @@ owners: [andrew]
 | `version` | integer | no | `1` | Schema version of the `smelt.yml` format. Optional to remove the trip-hazard where users wrote a semver string and got a parse error. Currently only `1` is meaningful. |
 | `paths` | list of strings | no | `["models"]` | Workspace-relative directories scanned for project files (`.sql`, `.py`, `.csv`, `.yml`). Kind is determined by file format/content (`architecture.md` §"Resolution"), not by which directory the file lives in. |
 | `targets` | map of `<name>` → target object | yes | — | Named execution environments. The `--target` CLI flag selects one (default `dev`). |
-| `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts `table`, `view`, `ephemeral`, `materialized_view`, `test`. |
+| `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts `table`, `view`, `ephemeral`, `materialized_view`, `cumulative_aggregate`, `test`. |
 | `models` | map of `<name>` → model-config object | no | `{}` | Per-model overrides keyed by model name. Each entry may declare `materialization`, `tags`, `target`, `incremental`, etc. |
 | `python` | string | no | — | Path to a Python interpreter for Python-model discovery. The `SMELT_PYTHON` environment variable takes precedence. |
 | `unstable_schema` | bool | no | `false` | Gate for unstable feature surfaces. When `true`, the gated keys listed in §"`unstable_schema:` gated keys" parse without warnings. |
@@ -54,6 +54,7 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `materialization` | string | inherits `default_materialization` | Override per model. |
+| `timeseries` | object | absent | Time-dimension declaration — full shape in `timeseries.md`; required when `incremental:` is set. |
 | `incremental` | object | absent | Incremental-materialization config — full shape in `incremental_models.md`. |
 | `tags` | list of strings | `[]` | Selector tags merged with frontmatter tags (union, deduplicated). |
 | `target` | string | inherits CLI `--target` | Override which target this model executes on. |
