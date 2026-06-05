@@ -36,9 +36,14 @@ pub async fn run_seed(args: SeedArgs, scope: Option<&str>) -> Result<()> {
         )
     })?;
 
-    // 3. Discover seeds
-    let mut seeds = seed::discover_seeds(&project_dir, &config.paths, &target_config.schema)
+    // 3. Discover seeds via the central smelt-core path (BUG-063: eliminates
+    // the old CLI-local `discover_seeds` reimplementation).
+    let seed_infos = smelt_core::discover_seed_infos_strict(&project_dir, &config.paths)
         .with_context(|| "Failed to discover seeds")?;
+    let mut seeds: Vec<seed::SeedFile> = seed_infos
+        .into_iter()
+        .map(|info| seed::SeedFile::from_seed_info(info, target_config.schema.clone()))
+        .collect();
 
     if seeds.is_empty() {
         info!("No seed files found in: {}", config.paths.join(", "));

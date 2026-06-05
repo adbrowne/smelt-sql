@@ -7,7 +7,7 @@
 mod duckdb_seed_loading {
     use smelt_backend::Backend;
     use smelt_backend_duckdb::DuckDbBackend;
-    use smelt_cli::seed::{discover_seeds, execute_seed};
+    use smelt_cli::seed::{execute_seed, SeedFile};
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -31,9 +31,16 @@ mod duckdb_seed_loading {
             project_root.display()
         );
 
-        // Discover seeds — WalkDir recurses into seeds/raw/
-        let seeds =
-            discover_seeds(&project_root, &["seeds".to_string()], "main").expect("discover seeds");
+        // Discover seeds via the central smelt-core strict path (BUG-063).
+        let seed_infos = smelt_core::discover_seed_infos_strict(
+            &project_root,
+            &["seeds".to_string()],
+        )
+        .expect("discover seeds");
+        let seeds: Vec<SeedFile> = seed_infos
+            .into_iter()
+            .map(|info| SeedFile::from_seed_info(info, "main".to_string()))
+            .collect();
         assert!(
             !seeds.is_empty(),
             "expected at least one seed in examples/timeseries/seeds/"

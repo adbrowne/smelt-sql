@@ -5,12 +5,11 @@ use smelt_core::seeds::{
     arrow::to_arrow_batches,
     csv::read_csv,
     infer::infer_columns,
-    sidecar::{parse_sidecar, SeedMaterialization, SeedSidecar},
+    sidecar::{SeedMaterialization, SeedSidecar},
     validate::validate_against_sidecar,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use walkdir::WalkDir;
 
 /// A discovered seed CSV file.
 #[derive(Debug, Clone)]
@@ -51,21 +50,19 @@ impl SeedFile {
         self.address_segments.join("_")
     }
 
-    /// Read and return the sidecar for this seed's CSV path, if one exists.
+    /// Convert a `SeedInfo` (from `smelt_core::discover_seed_infos_strict`) into
+    /// a `SeedFile` by attaching the target schema.
     ///
-    /// A sidecar that exists but fails to parse (forbidden `name:` key, malformed
-    /// YAML, unknown column type) is a hard error — `seeds.md` Invariant 8 and the
-    /// "type-coercion failures are hard" doctrine. The error is propagated rather
-    /// than swallowed so the seed is never silently loaded with full inference as
-    /// if no sidecar were present.
-    fn read_sidecar_from_path(csv_path: &Path) -> Result<Option<SeedSidecar>> {
-        let yml = csv_path.with_extension("yml");
-        if yml.exists() {
-            let sidecar = parse_sidecar(&yml)
-                .with_context(|| format!("Invalid seed sidecar {}", yml.display()))?;
-            Ok(Some(sidecar))
-        } else {
-            Ok(None)
+    /// This is the canonical conversion used by the CLI `seed` command after
+    /// routing discovery through `smelt_core::discover_seed_infos_strict`
+    /// (BUG-063 consolidation).
+    pub fn from_seed_info(info: smelt_core::SeedInfo, schema: String) -> Self {
+        SeedFile {
+            name: info.name,
+            path: info.path,
+            address_segments: info.address_segments,
+            schema,
+            sidecar: info.sidecar,
         }
     }
 }
@@ -75,74 +72,6 @@ pub struct SeedResult {
     pub qualified_name: String,
     pub row_count: usize,
     pub duration: Duration,
-}
-
-/// Discover seed CSV files under the configured paths.
-///
-/// Per Phase 2: seeds are CSV files anywhere in the configured paths.
-/// The address is the path from the scan-root to the leaf (no schema
-/// prefix from directory name). The DB location is
-/// `<target_schema>.<address_segments.join("_")>`.
-pub fn discover_seeds(
-    project_root: &Path,
-    paths: &[String],
-    target_schema: &str,
-) -> Result<Vec<SeedFile>> {
-    let mut seeds = Vec::new();
-
-    for seed_path in paths {
-        let seed_dir = project_root.join(seed_path);
-        if !seed_dir.exists() {
-            continue;
-        }
-
-        for entry in WalkDir::new(&seed_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path().to_path_buf();
-            if path.extension().is_some_and(|ext| ext == "csv") {
-                let name = path
-                    .file_stem()
-                    .expect("CSV file always has a stem")
-                    .to_string_lossy()
-                    .into_owned();
-
-                // Compute address_segments: path from scan-root to leaf.
-                let rel = path
-                    .strip_prefix(&seed_dir)
-                    .expect("path is under seed_dir");
-                let parent = rel.parent().unwrap_or(std::path::Path::new(""));
-                let mut address_segments: Vec<String> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                        _ => None,
-                    })
-                    .collect();
-                address_segments.push(name.clone());
-
-                // Read sidecar YAML if present. A malformed sidecar is a hard
-                // error (propagated), never silently dropped.
-                let sidecar = SeedFile::read_sidecar_from_path(&path)?;
-
-                seeds.push(SeedFile {
-                    name,
-                    path,
-                    address_segments,
-                    schema: target_schema.to_string(),
-                    sidecar,
-                });
-            }
-        }
-    }
-
-    // Sort for deterministic ordering
-    seeds.sort_by_key(|a| a.qualified_name());
-
-    Ok(seeds)
 }
 
 /// Execute a single seed file: create schema, drop existing table, load CSV.
@@ -315,108 +244,27 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// BUG-063: `SeedFile::from_seed_info` correctly attaches the target schema
+    /// and preserves all other fields from `SeedInfo`. This is the CLI-path
+    /// assertion that the consolidation onto `smelt_core::discover_seed_infos_strict`
+    /// produces correct `SeedFile` values.
     #[test]
-    fn test_discover_seeds_top_level() {
+    fn test_seed_file_from_seed_info_preserves_fields() {
         let tmp = TempDir::new().unwrap();
-        let seeds_dir = tmp.path().join("seeds");
+        let seeds_dir = tmp.path().join("seeds").join("raw");
         fs::create_dir_all(&seeds_dir).unwrap();
-        fs::write(seeds_dir.join("my_table.csv"), "id,name\n1,a\n").unwrap();
+        fs::write(seeds_dir.join("users.csv"), "id,name\n1,alice\n").unwrap();
 
-        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "my_table");
-        assert_eq!(result[0].address_segments, vec!["my_table"]);
-        assert_eq!(result[0].schema, "main");
-        assert_eq!(result[0].qualified_name(), "main.my_table");
-    }
+        let infos =
+            smelt_core::discover_seed_infos_strict(tmp.path(), &["seeds".to_string()]).unwrap();
+        assert_eq!(infos.len(), 1);
 
-    #[test]
-    fn test_discover_seeds_nested() {
-        let tmp = TempDir::new().unwrap();
-        let raw_dir = tmp.path().join("seeds").join("raw");
-        fs::create_dir_all(&raw_dir).unwrap();
-        fs::write(raw_dir.join("users.csv"), "id,name\n1,a\n").unwrap();
-
-        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "users");
-        assert_eq!(result[0].address_segments, vec!["raw", "users"]);
-        assert_eq!(result[0].schema, "main");
-        // DB name: main.raw_users (segments joined with _)
-        assert_eq!(result[0].qualified_name(), "main.raw_users");
-    }
-
-    #[test]
-    fn test_discover_mixed_seeds() {
-        let tmp = TempDir::new().unwrap();
-        let seeds_dir = tmp.path().join("seeds");
-        let raw_dir = seeds_dir.join("raw");
-        fs::create_dir_all(&raw_dir).unwrap();
-        fs::write(seeds_dir.join("lookup.csv"), "id,val\n1,x\n").unwrap();
-        fs::write(raw_dir.join("events.csv"), "id,type\n1,click\n").unwrap();
-
-        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
-        assert_eq!(result.len(), 2);
-        // Sorted by qualified name
-        assert_eq!(result[0].qualified_name(), "main.lookup");
-        assert_eq!(result[1].qualified_name(), "main.raw_events");
-    }
-
-    #[test]
-    fn test_discover_no_seeds_dir() {
-        let tmp = TempDir::new().unwrap();
-        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
-        assert!(result.is_empty());
-    }
-
-    /// A seed sidecar that fails to parse (here: the forbidden `name:` key,
-    /// `seeds.md` Invariant 8) must surface as a hard error from discovery —
-    /// not be silently swallowed and the seed loaded with full inference.
-    /// Regression for the `parse_sidecar(...).ok()` swallow in
-    /// `read_sidecar_from_path`.
-    #[test]
-    fn test_sidecar_parse_error_is_hard_not_swallowed() {
-        let tmp = TempDir::new().unwrap();
-        let seeds_dir = tmp.path().join("seeds");
-        fs::create_dir_all(&seeds_dir).unwrap();
-        fs::write(seeds_dir.join("my_table.csv"), "id,name\n1,a\n").unwrap();
-        // `name:` is forbidden on a seed sidecar.
-        fs::write(seeds_dir.join("my_table.yml"), "name: custom\n").unwrap();
-
-        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main");
-        let err = result.expect_err(
-            "a sidecar with a forbidden `name:` key must abort discovery, not be swallowed",
-        );
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("name:"),
-            "error should explain the forbidden `name:` key, got: {msg}"
-        );
-    }
-
-    /// BUG-030: a sidecar with an unknown `materialization:` value must abort
-    /// `discover_seeds` with a hard error rather than silently coercing to
-    /// `table`.  Previously `parse_sidecar_from_str`'s `other =>` arm fell back
-    /// to `SeedMaterialization::Table`; now it returns
-    /// `SidecarError::UnknownMaterialization`, and `read_sidecar_from_path`
-    /// propagates every `parse_sidecar` error via `?`.
-    #[test]
-    fn test_sidecar_unknown_materialization_is_hard_error() {
-        let tmp = TempDir::new().unwrap();
-        let seeds_dir = tmp.path().join("seeds");
-        fs::create_dir_all(&seeds_dir).unwrap();
-        fs::write(seeds_dir.join("my_table.csv"), "id,name\n1,a\n").unwrap();
-        fs::write(seeds_dir.join("my_table.yml"), "materialization: bogus\n").unwrap();
-
-        let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main");
-        let err = result.expect_err(
-            "a sidecar with `materialization: bogus` must abort discovery, not be coerced to table",
-        );
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("bogus"),
-            "error message should mention the unknown value 'bogus', got: {msg}"
-        );
+        let seed_file = SeedFile::from_seed_info(infos.into_iter().next().unwrap(), "prod".into());
+        assert_eq!(seed_file.name, "users");
+        assert_eq!(seed_file.address_segments, vec!["raw", "users"]);
+        assert_eq!(seed_file.schema, "prod");
+        assert_eq!(seed_file.qualified_name(), "prod.raw_users");
+        assert_eq!(seed_file.table_name(), "raw_users");
     }
 
     /// BUG-028: selecting a source via `--select` must be a hard error, not a

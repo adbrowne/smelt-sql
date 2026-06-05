@@ -44,7 +44,7 @@ pub use refs::{extract_refs, RefInfo, SmeltRef};
 pub use seeds::{
     arrow::to_arrow_batches,
     csv::{read_csv, CsvRecord},
-    discover_seed_infos, discover_seed_infos_with_sidecars,
+    discover_seed_infos, discover_seed_infos_strict, discover_seed_infos_with_sidecars,
     ephemeral::build_values_cte,
     error::SeedError,
     infer::infer_columns,

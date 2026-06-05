@@ -21,6 +21,7 @@ pub use error::SeedError;
 pub use sidecar::{parse_sidecar, SeedMaterialization, SeedSidecar, SidecarColumn};
 pub use validate::{validate_against_sidecar, ValidationError};
 
+use anyhow::Context;
 use infer::infer_columns;
 use smelt_types::DataType;
 use std::path::{Path, PathBuf};
@@ -85,6 +86,89 @@ pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo
 /// as a diagnostic via a separate code path.
 pub fn discover_seed_infos_with_sidecars(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo> {
     discover_seed_infos_impl(project_dir, paths, true)
+}
+
+/// Strict variant of seed discovery for CLI use.
+///
+/// Unlike `discover_seed_infos_with_sidecars`, a sidecar that fails to parse
+/// (forbidden `name:` key, malformed YAML, unknown column type) aborts
+/// discovery with an error rather than being silently dropped. Used by the
+/// CLI `smelt seed` command where a malformed sidecar is a hard stop
+/// (`seeds.md` Invariant 8 / BUG-027 regression contract).
+pub fn discover_seed_infos_strict(
+    project_dir: &Path,
+    paths: &[String],
+) -> anyhow::Result<Vec<SeedInfo>> {
+    let mut seeds = Vec::new();
+
+    for seed_path in paths {
+        let seed_dir = project_dir.join(seed_path);
+        if !seed_dir.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(&seed_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path().to_path_buf();
+            if path.extension().is_some_and(|e| e == "csv") {
+                let name = path
+                    .file_stem()
+                    .expect("CSV file always has a stem")
+                    .to_string_lossy()
+                    .into_owned();
+
+                let rel = path
+                    .strip_prefix(&seed_dir)
+                    .expect("path is under seed_dir");
+                let parent = rel.parent().unwrap_or(std::path::Path::new(""));
+                let mut address_segments: Vec<String> = parent
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                address_segments.push(name.clone());
+
+                // Strict sidecar reading: propagate parse errors (unlike the
+                // lenient LSP path which silently ignores them).
+                let yml_path = path.with_extension("yml");
+                let sidecar =
+                    if yml_path.exists() {
+                        Some(parse_sidecar(&yml_path).with_context(|| {
+                            format!("Invalid seed sidecar {}", yml_path.display())
+                        })?)
+                    } else {
+                        None
+                    };
+
+                let columns = if let Some(sc) = &sidecar {
+                    if let Some(cols) = &sc.columns {
+                        infer_csv_columns_with_pins(&path, cols)
+                    } else {
+                        infer_csv_columns(&path)
+                    }
+                } else {
+                    infer_csv_columns(&path)
+                };
+
+                seeds.push(SeedInfo {
+                    name,
+                    path,
+                    columns,
+                    address_segments,
+                    sidecar,
+                });
+            }
+        }
+    }
+
+    seeds.sort_by(|a, b| a.address_segments.cmp(&b.address_segments));
+    Ok(seeds)
 }
 
 /// Internal implementation shared by `discover_seed_infos` and
@@ -342,6 +426,53 @@ mod tests {
         assert_eq!(col_map["note_id"], DataType::Integer);
         assert_eq!(col_map["body"], DataType::Text);
         assert_eq!(col_map["almost_date"], DataType::Text);
+    }
+
+    /// BUG-063 regression: `discover_seed_infos_strict` must propagate sidecar
+    /// parse errors (BUG-027 contract) — it is the canonical strict discovery
+    /// path that replaced the CLI-local `discover_seeds` reimplementation.
+    #[test]
+    fn test_discover_seed_infos_strict_propagates_sidecar_error() {
+        let tmp = TempDir::new().unwrap();
+        let seeds_dir = tmp.path().join("seeds");
+        fs::create_dir_all(&seeds_dir).unwrap();
+        fs::write(seeds_dir.join("users.csv"), "id,name\n1,alice\n").unwrap();
+        // `name:` is forbidden on a seed sidecar — must be a hard error.
+        fs::write(seeds_dir.join("users.yml"), "name: custom\n").unwrap();
+
+        let result = discover_seed_infos_strict(tmp.path(), &["seeds".to_string()]);
+        let err = result.expect_err("strict discovery must propagate sidecar errors");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("name:"),
+            "error should explain the forbidden `name:` key, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_discover_seed_infos_strict_unknown_materialization_is_error() {
+        let tmp = TempDir::new().unwrap();
+        let seeds_dir = tmp.path().join("seeds");
+        fs::create_dir_all(&seeds_dir).unwrap();
+        fs::write(seeds_dir.join("t.csv"), "id\n1\n").unwrap();
+        fs::write(seeds_dir.join("t.yml"), "materialization: bogus\n").unwrap();
+
+        let result = discover_seed_infos_strict(tmp.path(), &["seeds".to_string()]);
+        let err = result.expect_err("unknown materialization must abort strict discovery");
+        assert!(format!("{err:#}").contains("bogus"));
+    }
+
+    #[test]
+    fn test_discover_seed_infos_strict_happy_path() {
+        let tmp = TempDir::new().unwrap();
+        let seeds_dir = tmp.path().join("seeds");
+        let nested = seeds_dir.join("raw");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("users.csv"), "id,name\n1,alice\n").unwrap();
+
+        let result = discover_seed_infos_strict(tmp.path(), &["seeds".to_string()]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].address_segments, vec!["raw", "users"]);
     }
 
     #[test]
