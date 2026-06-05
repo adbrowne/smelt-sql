@@ -7,7 +7,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | | Project name |
-| `version` | integer | yes | | Configuration version (currently `1`) |
+| `version` | integer | no | `1` | Configuration version (currently `1`). Defaults to `1` when omitted. |
 | `paths` | string[] | no | `["models"]` | Workspace-relative directories scanned for project files (`.sql`, `.py`, `.csv`, `.yml`). Kind is determined by file format/content, not by which directory the file lives in. |
 | `targets` | map | yes | | Named execution environments (see [Targets](#targets)) |
 | `default_materialization` | string | no | `"view"` | Default materialization for all models |
@@ -110,28 +110,69 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `incremental` | object | no | | Incremental materialization configuration (see below) |
-| `schema_evolution` | object | no | | Schema evolution configuration (see [Schema Evolution](#schema-evolution-configuration)) |
-| `format` | string | no | _(from target)_ | Override the table format for this model: `delta` or `parquet`. Only relevant for Spark targets. |
-| `columns` | map | no | `{}` | Per-column metadata: `default`, `backfill`, `description`, `tests` |
+| `timeseries` | object | no | | Time-dimension declaration for incremental/cumulative models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `incremental` | object | no | | Incremental materialization configuration (see [Incremental Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
 **Tags** from `smelt.yml` and SQL frontmatter are merged (union, deduplicated).
 
-### Incremental Configuration
+### Timeseries Configuration
 
-Incremental materialization processes only new or changed data instead of rebuilding the entire table. It is only valid for models with `materialization: table`.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for incremental models and cumulative aggregates. The `timeseries:` and `incremental:` keys are siblings, not nested.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
+    timeseries:
+      event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
+      partition_column: revenue_date             # column in OUTPUT (DELETE target)
+      granularity: day
     incremental:
       enabled: true
+      unique_key:
+        - transaction_id
+```
+
+#### Timeseries Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `event_time_column` | string | yes | | Column in source data to filter on (used in the injected WHERE clause). Must be a timestamp or date. |
+| `partition_column` | string | yes | | Column in the output table to delete by (for DELETE+INSERT strategy). |
+| `granularity` | string | yes | | Partition granularity: `hour`, `day`, `week`, `month`, `quarter`, or `year`. |
+| `week_start` | string | no | | Start day for weekly partitions. Required when `granularity: week`. One of: `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`, `sunday`. |
+
+Example with weekly granularity:
+
+```yaml
+models:
+  weekly_rollup:
+    materialization: table
+    timeseries:
+      event_time_column: event_ts
+      partition_column: week_start_date
+      granularity: week
+      week_start: monday
+    incremental:
+      enabled: true
+```
+
+### Incremental Configuration
+
+Incremental materialization processes only new or changed data instead of rebuilding the entire table. It is only valid for models with `materialization: table`. A `timeseries:` block must also be present (see above).
+
+```yaml
+models:
+  daily_revenue:
+    materialization: table
+    timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
+    incremental:
+      enabled: true
       unique_key:
         - transaction_id
       safety_overrides:
@@ -143,40 +184,8 @@ models:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `enabled` | bool | no | `true` | Whether incremental processing is active |
-| `event_time_column` | string | yes | | Column in source data to filter on (used in the injected WHERE clause) |
-| `partition_column` | string | yes | | Column in the output table to delete by (for DELETE+INSERT strategy) |
-| `granularity` | string/object | yes | | Partition granularity (see [Granularity](#granularity)) |
 | `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
 | `safety_overrides` | object | no | _(all false)_ | Override safety checks for patterns that may produce different results on partial data (see [Safety Overrides](#safety-overrides)) |
-
-#### Granularity
-
-The `granularity` field controls the size of each partition window. It accepts the following values:
-
-| Value | Description |
-|-------|-------------|
-| `hour` | Hourly partitions |
-| `day` | Daily partitions |
-| `week` | Weekly partitions (requires `week_start` subfield) |
-| `month` | Monthly partitions |
-| `quarter` | Quarterly partitions |
-| `year` | Yearly partitions |
-
-For weekly granularity, you must specify the start day:
-
-```yaml
-granularity:
-  week:
-    week_start: monday
-```
-
-Valid `week_start` values: `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`, `sunday`.
-
-All other granularities are simple strings:
-
-```yaml
-granularity: day
-```
 
 #### Safety Overrides
 
@@ -286,14 +295,15 @@ models:
   transactions:
     materialization: table
 
-  # Incremental model with full configuration
+  # Incremental model — timeseries: and incremental: are sibling keys
   daily_revenue:
     materialization: table
+    timeseries:
+      event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
+      partition_column: revenue_date             # column in OUTPUT (DELETE target)
+      granularity: day
     incremental:
       enabled: true
-      event_time_column: transaction_timestamp  # Column in source data (WHERE filter)
-      partition_column: revenue_date             # Column in output (DELETE target)
-      granularity: day
 
   cube_metrics:
     materialization: table

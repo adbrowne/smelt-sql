@@ -1279,6 +1279,67 @@ targets:
         assert!(errors.is_empty());
     }
 
+    /// BUG-056: `event_time_column`/`partition_column`/`granularity` are fields
+    /// on `timeseries:`, not `incremental:`. Because `IncrementalConfig` uses
+    /// `deny_unknown_fields`, putting them under `incremental:` must fail at
+    /// parse time rather than silently being dropped.
+    #[test]
+    fn incremental_config_rejects_timeseries_fields() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    incremental:
+      enabled: true
+      event_time_column: ts
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "event_time_column under incremental: must fail — belongs under timeseries:"
+        );
+    }
+
+    /// BUG-056 regression: correct format has `timeseries:` and `incremental:`
+    /// as sibling keys on the model config, not nested.
+    #[test]
+    fn timeseries_and_incremental_are_sibling_keys() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    timeseries:
+      event_time_column: transaction_timestamp
+      partition_column: revenue_date
+      granularity: day
+    incremental:
+      enabled: true
+"#;
+        let config: Config =
+            serde_yaml::from_str(yaml).expect("timeseries + incremental as siblings must parse");
+        let model = config.models.get("daily_revenue").unwrap();
+        let ts = model.timeseries.as_ref().unwrap();
+        assert_eq!(ts.event_time_column, "transaction_timestamp");
+        assert_eq!(ts.partition_column, "revenue_date");
+        assert_eq!(ts.granularity, Granularity::Day);
+        let inc = model.incremental.as_ref().unwrap();
+        assert!(inc.enabled);
+    }
+
     /// `paths:` defaults to `["models"]` when omitted (`smelt_yml.md`
     /// Surface §"Top-level keys" / Semantics §5).
     #[test]
