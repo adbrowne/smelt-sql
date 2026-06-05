@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
+use smelt_cli::docs::TestRef;
 use smelt_cli::{
     discover_emitted_model_files, discover_python_models, find_project_root, init_db,
     parse_selector, Config, LogicalGraph, ModelDiscovery, ModelFile, SourcesConfig,
 };
+use std::collections::HashMap;
 
 use crate::DocsGenerateArgs;
 
@@ -120,6 +122,22 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         .collect();
     models.extend(emitted_model_files);
 
+    // Collect test-model → target-model mapping before filtering test models out,
+    // so each catalog model page can list the tests that exercise it.
+    let mut test_targets: HashMap<String, Vec<TestRef>> = HashMap::new();
+    for model in &models {
+        if model.is_test() {
+            if let Some(tc) = model.test_config() {
+                let target = tc.model.clone();
+                let test_ref = TestRef {
+                    name: model.name.clone(),
+                    path: model.path.display().to_string(),
+                };
+                test_targets.entry(target).or_default().push(test_ref);
+            }
+        }
+    }
+
     // Filter out test models
     models.retain(|m| !m.is_test());
 
@@ -199,7 +217,7 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .collect::<Vec<_>>(),
     );
 
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db)?;
+    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &test_targets)?;
 
     let output_dir = args
         .output

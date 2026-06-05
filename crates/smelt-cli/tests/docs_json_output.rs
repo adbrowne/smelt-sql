@@ -27,6 +27,7 @@ fn emitted_model_carries_origin_in_docs_json() {
             generator_file: "models/cohorts.gen.sql".to_string(),
             generator_name: "us_west".to_string(),
         }),
+        tests_targeting: vec![],
     };
 
     let json = serde_json::to_string(&model).expect("serialize CatalogModel");
@@ -103,7 +104,9 @@ fn emitted_model_carries_origin_in_real_docs_catalog_pipeline() {
         .expect("build logical graph");
 
     // Build catalog and check origin.
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db).expect("build catalog");
+    let catalog =
+        smelt_cli::docs::build_catalog(&graph, &config, &db, &std::collections::HashMap::new())
+            .expect("build catalog");
     let json = serde_json::to_string_pretty(&catalog).expect("serialize catalog");
 
     // Find the emitted model (key contains "east").

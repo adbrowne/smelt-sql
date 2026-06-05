@@ -153,6 +153,15 @@ pub fn render_model_page(model: &crate::docs::CatalogModel) -> String {
         out.push('\n');
     }
 
+    // Tests targeting this model
+    if !model.tests_targeting.is_empty() {
+        out.push_str("## Tests\n\n");
+        for t in &model.tests_targeting {
+            out.push_str(&format!("- [{}]({})\n", t.name, t.path));
+        }
+        out.push('\n');
+    }
+
     // Dependencies
     if !model.upstream.is_empty() {
         out.push_str("## Upstream\n\n");

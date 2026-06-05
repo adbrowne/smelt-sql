@@ -1,7 +1,7 @@
 ---
 feature: data_catalog
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-06-05
 owners: [andrew]
 ---
 
@@ -195,8 +195,6 @@ Hand-authored models omit the `origin` field (the standard `skip_serializing_if`
 
 ## Known Divergences / Open Questions
 
-- **`--select` support undocumented.** The `--select` flag on `smelt docs generate` is implemented but not mentioned in the user guide.
-- **No `--format` default documented.** The user guide does not state that `markdown` is the default format when `--format` is omitted.
 - **Column tests are stored as strings, not validated.** The `tests` array in column frontmatter is stored as raw strings and surfaced in the catalog. There is no validation that test names correspond to actual test definitions.
 - **`smelt docs path` is a stub.** The command prints a message rather than a usable path. This is intentional (docs are embedded) but the command's utility is unclear to users who expect a filesystem path.
 - **Incremental section omitted for ephemeral models.** Ephemeral models that reference incremental config are not materialized; their incremental config section is not clearly handled in the catalog spec.

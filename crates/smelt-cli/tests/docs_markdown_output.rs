@@ -1,5 +1,9 @@
-//! Phase 5 (meta-language-E2): tests for the Markdown rendering of
-//! generator-emitted models in `smelt docs generate` output.
+//! Tests for the Markdown rendering of catalog model pages.
+//!
+//! Covers:
+//!  - Generator-emitted models (Source line in metadata block).
+//!  - Test-model targeting section ("## Tests" on the targeted model's page).
+//!  - BUG-048 regression: per-model Markdown page must list test models that target it.
 //!
 //! Includes:
 //!  - Unit smoke test for `render_model_page` with a direct `CatalogModel`
@@ -10,6 +14,89 @@
 use smelt_cli::docs::CatalogModel;
 use smelt_cli::docs_render::render_model_page;
 use smelt_core::ModelOriginKind;
+
+// ── BUG-048 regression ────────────────────────────────────────────────────
+// Spec §Surface: `models/<name>.md` must contain a "Tests" section listing
+// every `materialization: test` model with `test.model: <this model>` in its
+// frontmatter.  Previously, test models were filtered from the pipeline before
+// `build_catalog()` was called, so the section was never rendered.
+
+/// Integration test (BUG-048): a model page renders a "## Tests" section
+/// listing the test model that targets it when the full catalog pipeline is
+/// exercised (the path the `smelt docs generate` command takes).
+#[test]
+fn model_page_lists_targeting_test_models() {
+    let model_sql = "SELECT 1 AS id";
+    // A test model that targets "orders".
+    let test_sql = "---\nmaterialization: test\ntest:\n  model: orders\n  expect:\n    - id: 1\n---\nSELECT id FROM orders";
+
+    let tmp = stage_workspace(&[
+        ("models/orders.sql", model_sql),
+        ("models/orders_test.sql", test_sql),
+    ]);
+    let project_dir = tmp.path().to_path_buf();
+
+    // Discover ALL models (including test models) and partition manually,
+    // mirroring what `commands/docs.rs::generate()` does.
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    let discovery = smelt_cli::ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let sql_models = discovery.discover_models().expect("discover models");
+
+    // Collect test-target mapping before filtering.
+    let mut test_targets: std::collections::HashMap<String, Vec<smelt_cli::docs::TestRef>> =
+        std::collections::HashMap::new();
+    for m in &sql_models {
+        if m.is_test() {
+            if let Some(tc) = m.test_config() {
+                test_targets
+                    .entry(tc.model.clone())
+                    .or_default()
+                    .push(smelt_cli::docs::TestRef {
+                        name: m.name.clone(),
+                        path: m.path.display().to_string(),
+                    });
+            }
+        }
+    }
+
+    // Build catalog via the non-test model path (same as the CLI command).
+    let (graph, db) = smelt_cli::build_logical_graph(&project_dir, &config, None, &[], "dev")
+        .expect("build logical graph");
+    let catalog =
+        smelt_cli::docs::build_catalog(&graph, &config, &db, &test_targets).expect("build catalog");
+
+    // "orders" should be in the catalog.
+    let orders = catalog
+        .models
+        .get("orders")
+        .expect("'orders' must be in catalog");
+
+    // The tests_targeting field must include the test model.
+    assert!(
+        !orders.tests_targeting.is_empty(),
+        "orders.tests_targeting must be non-empty; got: {:?}",
+        orders.tests_targeting
+    );
+    assert!(
+        orders
+            .tests_targeting
+            .iter()
+            .any(|t| t.name == "orders_test"),
+        "tests_targeting must include 'orders_test'; got: {:?}",
+        orders.tests_targeting
+    );
+
+    // The rendered Markdown page must contain a "## Tests" section.
+    let markdown = smelt_cli::docs_render::render_model_page(orders);
+    assert!(
+        markdown.contains("## Tests"),
+        "Markdown page for 'orders' must contain '## Tests' section; got:\n{markdown}"
+    );
+    assert!(
+        markdown.contains("orders_test"),
+        "Markdown 'Tests' section must mention 'orders_test'; got:\n{markdown}"
+    );
+}
 
 /// Unit smoke test: `render_model_page` surfaces a Source line when `origin`
 /// is set on the `CatalogModel`.
@@ -30,6 +117,7 @@ fn emitted_model_has_source_line_in_markdown() {
             generator_file: "models/cohorts.gen.sql".to_string(),
             generator_name: "us_west".to_string(),
         }),
+        tests_targeting: vec![],
     };
 
     let markdown = render_model_page(&model);
@@ -103,7 +191,9 @@ fn emitted_model_has_source_line_in_real_docs_markdown_pipeline() {
         .expect("build logical graph");
 
     // Build catalog.
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db).expect("build catalog");
+    let catalog =
+        smelt_cli::docs::build_catalog(&graph, &config, &db, &std::collections::HashMap::new())
+            .expect("build catalog");
 
     // Find the emitted model ("regions.west") and render its Markdown page.
     let (_, emitted) = catalog

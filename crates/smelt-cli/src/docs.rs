@@ -2,10 +2,17 @@ use anyhow::Result;
 use serde::Serialize;
 use smelt_core::ModelOriginKind;
 use smelt_db::ColumnSource;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::logical_graph::LogicalGraph;
 use crate::Config;
+
+/// A reference to a test model that targets a given model.
+#[derive(Debug, Clone, Serialize)]
+pub struct TestRef {
+    pub name: String,
+    pub path: String,
+}
 
 /// Complete project catalog — the top-level output of `smelt docs generate`.
 #[derive(Debug, Serialize)]
@@ -44,6 +51,10 @@ pub struct CatalogModel {
     /// models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<ModelOriginKind>,
+    /// Test models (`materialization: test`) that declare `test.model: <this model>`
+    /// in their frontmatter. Omitted when no tests target this model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tests_targeting: Vec<TestRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,10 +97,14 @@ pub struct CatalogIncremental {
 }
 
 /// Build a complete catalog from the logical graph and Salsa DB.
+///
+/// `test_targets` maps each model name to the list of test models targeting it.
+/// Pass an empty map when no test-model information is available.
 pub fn build_catalog(
     graph: &LogicalGraph,
     config: &Config,
     db: &smelt_db::Database,
+    test_targets: &HashMap<String, Vec<TestRef>>,
 ) -> Result<Catalog> {
     let execution_order = graph.execution_order()?;
 
@@ -247,6 +262,8 @@ pub fn build_catalog(
             _ => None,
         };
 
+        let tests_targeting = test_targets.get(&node.name).cloned().unwrap_or_default();
+
         models.insert(
             node.name.clone(),
             CatalogModel {
@@ -261,6 +278,7 @@ pub fn build_catalog(
                 downstream,
                 incremental,
                 origin,
+                tests_targeting,
             },
         );
     }

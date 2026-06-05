@@ -65,7 +65,7 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | C10 | testing | done | 2 fixed (BUG-041/043), 1 needs-review (BUG-042), 1 docs-gap fixed (BUG-044) | — | 2026-06-05 |
 | C11 | model_selection | done | 2 fixed (BUG-045/047), 1 needs-review (BUG-046); +6 test cases for untested rules | — | 2026-06-05 |
 | C12 | lsp | done | 4 fixed (docs-gap), 1 deferred; 0 code bugs | — | 2026-06-05 |
-| C13 | data_catalog | pending | | | |
+| C13 | data_catalog | done | 3 fixed (BUG-053/054/055: Tests section missing from model pages + 2 stale KDs removed) | — | 2026-06-05 |
 | C14 | smelt_yml | pending | | | |
 | D1 | functions × incremental × timeseries | pending | | | |
 | D2 | functions × schema_inference × types | pending | | | |
