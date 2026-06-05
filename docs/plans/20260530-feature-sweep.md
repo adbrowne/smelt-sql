@@ -36,9 +36,16 @@ This sweep is the **master plan**: its probe phases (S0–D1) are done and the r
 | `docs/plans/20260531-diagnostic-parity.md` | "LSP-clean but unbuildable" bug class — BUG-006, 011, 013, 015, 018, 019, 024, 032 | done (2026-06-03) |
 | `docs/plans/20260604-frontmatter-parity.md` | "frontmatter fragility" — malformed frontmatter silently drops the block / downgrades materialization — BUG-016, 023, 025 | done (2026-06-04) |
 | `docs/plans/20260604-codegen-soundness.md` | "codegen soundness" — silent-until-`run` function-expansion defects (CTE collision → wrong data; over-qualified `source.*`) — BUG-007, 009 (+008 doc) | done (2026-06-05) |
-| `docs/plans/20260605-address-collision.md` | "workspace identity / discovery" — `smelt.<path>` uniqueness unenforced + discovery reimplemented across 3 crates + db→planner layering inversion — BUG-002, 063, 064 | pending (P1–P5) |
+| `docs/plans/20260605-address-collision.md` | "workspace identity / discovery" — `smelt.<path>` uniqueness unenforced + duplicate model names (SQL sections + Python) + discovery reimplemented across 3 crates + db→planner layering inversion — BUG-002, 021, 040, 063, 064 | pending (P1–P5, +P2b) |
+| `docs/plans/20260605-smelt-yml-surface-alignment.md` | "smelt.yml & CLI surface alignment" — spec-vs-code drift in the smelt.yml / model-selection surface — BUG-046, 059, 060, 061 | pending (P1–P3) |
+| `docs/plans/20260605-function-default-self-containment.md` | "functions: self-contained defaults" — Semantics #9 unenforced; a default referencing a sibling parameter is silently accepted — BUG-003 | pending (P1–P3) |
+| `docs/plans/20260605-cross-family-arithmetic-strictness.md` | "types: strict family rejection" — cross-family binary arithmetic (`42 + '3'`) silently casts instead of `Unknown` + `TypeMismatch` — BUG-017 | pending (P1–P3) |
+| `docs/plans/20260605-per-target-overlay-wiring.md` | "meta_config_loading: per-target overlay" — overlay merge implemented + tested but unwired in production (`smelt build --target` ignores it) — BUG-014 | pending (P1–P5) |
+| `docs/plans/20260605-property-test-dispatch-and-week-start.md` | "testing + timeseries small fixes" — property-based `cases` never dispatched; `week_start` value-domain unvalidated — BUG-042, 026 | pending (P1–P4) |
 
 Remaining ledger clusters without a sub-plan yet (each a candidate for a future human-scaffolded sub-plan) live in `docs/bug-hunt/2026-05-30-findings.md` under their `needs-review` entries.
+
+**Triage note (2026-06-05):** a full review of the `needs-review` queue mapped every remaining genuinely-open finding to one of the six sub-plans above (the summary table's stale `needs-review` count predates the diagnostic-parity / frontmatter-parity / codegen-soundness sub-plans + the 2026-06-05 direct fixes). BUG-026's ledger recommendation ("defer — inert field") was **corrected**: `week_start` is live (it aligns weekly partition boundaries via `run.rs:1420`→`helpers.rs`), so it is validated now, not deferred. No `needs-review` finding remains unplanned.
 
 ## Progress tracking
 
