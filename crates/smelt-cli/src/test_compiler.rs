@@ -477,12 +477,13 @@ fn compile_whole_model_test_inner(
         result_sql = expand_fn_calls_in_sql(&result_sql, bodies);
     }
 
-    // Build mock CTEs
+    // Build mock CTEs — every smelt.<path> ref in the model gets a CTE.
+    // Refs present in `inputs` get the provided rows; unlisted refs get an
+    // empty CTE (zero rows) per spec Semantics §Whole-model tests.
     let mut mock_cte_parts: Vec<String> = Vec::new();
     for ref_name in &ref_names {
-        if let Some(rows) = inputs.get(ref_name) {
-            mock_cte_parts.push(yaml_rows_to_sql(ref_name, rows));
-        }
+        let rows = inputs.get(ref_name).map(|v| v.as_slice()).unwrap_or(&[]);
+        mock_cte_parts.push(yaml_rows_to_sql(ref_name, rows));
     }
 
     // Add sql_body CTEs if provided
@@ -679,6 +680,16 @@ pub fn compile_column_test(
                 ))
             }
         }
+    }
+}
+
+/// Validate the `expect` list of a test config. Returns an error string when
+/// `expect` is empty — spec Constraint-3 requires at least one expected row.
+pub fn validate_test_expect(expect: &[BTreeMap<String, serde_yaml::Value>]) -> Option<String> {
+    if expect.is_empty() {
+        Some("test has no 'expect' rows — 'expect' is required (spec Constraint-3)".to_string())
+    } else {
+        None
     }
 }
 
@@ -924,5 +935,62 @@ GROUP BY order_date
         let (name, sql) = compile_column_test("main", "orders", "amount", &test).unwrap();
         assert_eq!(name, "orders.amount.min");
         assert!(sql.contains("< 0"));
+    }
+
+    #[test]
+    fn test_compile_whole_model_test_unlisted_dep_gets_empty_cte() {
+        // BUG-041: dependencies not in `inputs` should become empty CTEs (zero rows),
+        // not be silently omitted (which produces invalid SQL when DuckDB executes it).
+        let model_sql = r#"
+SELECT u.user_id, COUNT(o.order_id) AS order_count
+FROM smelt.users u
+LEFT JOIN smelt.orders o ON u.user_id = o.user_id
+GROUP BY u.user_id
+"#;
+        let mut inputs = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert(
+            "user_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        inputs.insert("users".to_string(), vec![row]);
+        // orders is intentionally NOT in inputs — it should get an empty CTE
+        let result = compile_whole_model_test(model_sql, &inputs, None).unwrap();
+        assert!(
+            result.contains("orders AS"),
+            "unlisted dep 'orders' must be mocked as an empty CTE; got:\n{result}"
+        );
+        assert!(
+            result.contains("WHERE 1=0"),
+            "empty CTE must use WHERE 1=0; got:\n{result}"
+        );
+        assert!(
+            result.contains("users AS"),
+            "listed dep 'users' must be present; got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_validate_test_expect_empty_is_error() {
+        // BUG-043: spec Constraint-3 — `expect` is required.
+        // An empty expect list should be caught before test execution.
+        let empty: Vec<BTreeMap<String, serde_yaml::Value>> = vec![];
+        assert!(
+            validate_test_expect(&empty).is_some(),
+            "empty expect list must be flagged as an error"
+        );
+    }
+
+    #[test]
+    fn test_validate_test_expect_non_empty_is_ok() {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "x".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        assert!(
+            validate_test_expect(&[row]).is_none(),
+            "non-empty expect list must be valid"
+        );
     }
 }

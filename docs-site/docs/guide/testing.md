@@ -246,9 +246,10 @@ YAML values are automatically converted to SQL types:
 | Boolean | BOOLEAN | `true`, `false` |
 | Null | NULL | `null` |
 | Date string | DATE | `'2024-01-01'` (YYYY-MM-DD pattern) |
+| Timestamp string | TIMESTAMP | `'2024-01-01 12:00:00'` (YYYY-MM-DD HH:MM:SS or T-separator) |
 
 !!! note
-    Strings matching the `YYYY-MM-DD` pattern are automatically cast to DATE. If you need a string that looks like a date, this is a known limitation.
+    Strings matching the `YYYY-MM-DD` pattern are automatically cast to DATE, and strings matching `YYYY-MM-DD HH:MM:SS` (space or `T` separator) are cast to TIMESTAMP. There is no escape mechanism if you need a date-shaped string as VARCHAR.
 
 ## Running tests
 

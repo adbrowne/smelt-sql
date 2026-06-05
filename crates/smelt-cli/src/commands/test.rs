@@ -8,7 +8,9 @@ use crate::TestArgs;
 
 #[cfg(feature = "duckdb")]
 pub async fn run_tests(args: TestArgs) -> Result<()> {
-    use smelt_cli::test_compiler::{compile_cte_test, compile_whole_model_test};
+    use smelt_cli::test_compiler::{
+        compile_cte_test, compile_whole_model_test, validate_test_expect,
+    };
     use smelt_cli::test_runner::{run_test, TestError};
     use std::time::Instant;
 
@@ -74,6 +76,23 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                 continue;
             }
         };
+
+        // Validate config: `expect` is required (spec Constraint-3).
+        if let Some(err_msg) = validate_test_expect(&test_config.expect) {
+            let result = smelt_cli::test_runner::TestResult {
+                name: test_model.name.clone(),
+                model: test_config.model.clone(),
+                target_cte: test_config.target_cte.clone(),
+                passed: false,
+                duration: std::time::Duration::from_secs(0),
+                compiled_sql: String::new(),
+                error: Some(TestError::CompilationError(err_msg)),
+            };
+            failed += 1;
+            print_test_result(&result, args.verbose, args.show_all);
+            results.push(result);
+            continue;
+        }
 
         // Find the model being tested
         let target_model = regular_models.iter().find(|m| m.name == test_config.model);

@@ -49,7 +49,9 @@ pub use smelt_core::RefInfo;
 pub use temporal::{
     compute_incremental_windows, validate_run_window_alignment, IncrementalWindows,
 };
-pub use test_compiler::{compile_whole_model_test_with_fns, extract_ctes, CteInfo};
+pub use test_compiler::{
+    compile_whole_model_test_with_fns, extract_ctes, validate_test_expect, CteInfo,
+};
 pub use test_runner::TestResult;
 pub use transformer::{
     inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
