@@ -26,10 +26,26 @@ fn infer_binary_operand(binary: &BinaryExpr, nth: usize, ctx: &TypeContext) -> O
 
 /// Promote two numeric operands to their common widest type.
 /// Priority: Double > Float > Decimal > BigInt > Integer > SmallInt
+///
+/// Cross-family guard: if both operands are known and either is not numeric,
+/// the pair is incompatible — return `Unknown` instead of the left type.
+/// This implements spec §1 "no implicit cross-family cast" and §14
+/// strict-rejection examples (`42 + '3'` → Unknown; `TRUE + 1` → Unknown).
+/// Temporal arithmetic is handled by early-return arms in the callers,
+/// so by the time this function is reached both operands should be numeric.
 fn promote_numeric_operands(
     left: Option<DataType>,
     right: Option<DataType>,
 ) -> Option<TypedColumn> {
+    if let (Some(ref l), Some(ref r)) = (&left, &right) {
+        if !l.is_numeric() || !r.is_numeric() {
+            return Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            });
+        }
+    }
+
     match (left, right) {
         (Some(DataType::Double), _) | (_, Some(DataType::Double)) => Some(TypedColumn {
             data_type: DataType::Double,

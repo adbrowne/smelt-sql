@@ -5867,3 +5867,65 @@ fn reducer_call_only_at_reduce_second_arg() {
         hof_diags
     );
 }
+
+// ─── BUG-017: cross-family binary arithmetic must yield Unknown ───────────────
+
+/// `42 + '3'` (numeric + string) must infer `Unknown`, not `SmallInt`.
+#[test]
+fn test_cross_family_arithmetic_numeric_plus_string() {
+    let types = infer_sql("SELECT 42 + '3'");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Unknown,
+        "42 + '3' must infer Unknown (cross-family), got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// `TRUE + 1` (boolean + numeric) must infer `Unknown`, not `SmallInt`.
+#[test]
+fn test_cross_family_arithmetic_boolean_plus_numeric() {
+    let types = infer_sql("SELECT TRUE + 1");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Unknown,
+        "TRUE + 1 must infer Unknown (cross-family), got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// `42 + 'abc'` (numeric + string) must infer `Unknown`.
+#[test]
+fn test_cross_family_arithmetic_numeric_plus_string_literal() {
+    let types = infer_sql("SELECT 42 + 'abc'");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Unknown,
+        "42 + 'abc' must infer Unknown (cross-family), got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// Numeric/numeric promotion must still work: `1 + 2` → SmallInt, not Unknown.
+#[test]
+fn test_numeric_arithmetic_promotion_unchanged() {
+    let types = infer_sql("SELECT 1 + 2");
+    assert_eq!(
+        types[0].data_type,
+        DataType::SmallInt,
+        "1 + 2 must still promote to SmallInt (same-family), got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// `INTERVAL * 3` must still yield Interval (special case must survive guard).
+#[test]
+fn test_interval_times_numeric_unchanged() {
+    let types = infer_sql("SELECT INTERVAL '1' DAY * 3");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Interval,
+        "INTERVAL * numeric must still yield Interval, got: {:?}",
+        types[0].data_type
+    );
+}
