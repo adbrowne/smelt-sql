@@ -108,6 +108,14 @@ Explicit non-goal for now: the un-annotated determinism inversion and the untrac
 
 ## Recently Completed
 
+### ~~Cross-Family Arithmetic Strictness — `Unknown` + `TypeMismatch` enforced~~ ✅ (June 6, 2026)
+
+Enforced the types spec rule that cross-family binary arithmetic (e.g. `42 + '3'`, `TRUE + 1`) must produce `Unknown` and emit a `TypeMismatch` diagnostic ([plan](plans/20260605-cross-family-arithmetic-strictness.md)):
+
+- **Family guard added to `promote_numeric_operands`** (P1) — `crates/smelt-db/src/type_inference/binary.rs`: the catch-all `(Some(l), _) => Some(l)` arm now checks family compatibility before returning the left type; a cross-family pair yields `DataType::Unknown` instead of the left operand's type. Numeric/numeric promotion and `INTERVAL * numeric` special cases unchanged. Closed BUG-017 (1/2). Regression tests: `test_cross_family_arithmetic_numeric_plus_string`, `test_cross_family_arithmetic_boolean_plus_numeric`, `test_cross_family_arithmetic_numeric_plus_string_literal`.
+- **`check_crossfamily_arithmetic_diagnostics` + `TypeMismatch` emission** (P2) — new walker in `binary.rs`; wired into `file_diagnostics` and the `check_types` query so a `TypeMismatch` Error is emitted at the operator span for each cross-family arithmetic operation. Closed BUG-017 (2/2). Keepable fixture `examples/types_broken_crossfamily_add/`. Regression tests: `file_diagnostics_emits_type_mismatch_crossfamily_numeric_plus_string`, `file_diagnostics_emits_type_mismatch_crossfamily_boolean_plus_numeric`, `types_broken_crossfamily_add_emits_type_mismatch`.
+- **§296 Known Divergence narrowed** (P3) — `docs/specs/types.md` updated to clarify that cross-family binary arithmetic is now enforced while the composite-path gaps (array-literal / `UNION` unification) remain deferred.
+
 ### ~~Function Default Self-Containment — Semantics #9 enforced~~ ✅ (June 6, 2026)
 
 Enforced the functions spec rule that a default expression must not reference other parameters in the same signature ([plan](plans/20260605-function-default-self-containment.md)):
