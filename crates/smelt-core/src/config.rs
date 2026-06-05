@@ -449,12 +449,42 @@ impl Config {
         let mut warnings = Vec::new();
         if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(text) {
             if let Some(map) = value.as_mapping() {
+                // Emit targeted warnings for legacy keys (kept distinct from the generic pass
+                // so callers see the actionable migration hint, not a generic "unknown key").
                 for legacy in ["model_paths", "seed_paths"] {
                     if map.contains_key(serde_yaml::Value::String(legacy.to_string())) {
                         warnings.push(format!(
                             "warning: smelt.yml: ignoring legacy key `{}`. Use `paths:` instead — the single scan list (smelt_yml.md §Top-level keys).",
                             legacy
                         ));
+                    }
+                }
+
+                // Generic unknown-key pass: warn for any top-level key not in the allow-list.
+                // `model_paths`/`seed_paths` are included to suppress duplicate warnings
+                // (they already got the targeted message above).
+                // `unstable_schema` is consumed by `parse_unstable_schema_flag` and is not
+                // a `Config` struct field — allow-list it to avoid false positives.
+                const KNOWN_KEYS: &[&str] = &[
+                    "name",
+                    "version",
+                    "paths",
+                    "targets",
+                    "default_materialization",
+                    "models",
+                    "python",
+                    "model_paths",
+                    "seed_paths",
+                    "unstable_schema",
+                ];
+                for (key, _) in map {
+                    if let Some(key_str) = key.as_str() {
+                        if !KNOWN_KEYS.contains(&key_str) {
+                            warnings.push(format!(
+                                "warning: smelt.yml: unknown top-level key `{}` (ignored). See smelt_yml.md §Top-level keys.",
+                                key_str
+                            ));
+                        }
                     }
                 }
             }
@@ -1355,6 +1385,91 @@ targets:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.paths, vec!["models".to_string()]);
+    }
+
+    /// BUG-060: a typo'd top-level key emits exactly one warning naming that key.
+    /// Parsing still succeeds; the unknown key is silently ignored (not an error).
+    #[test]
+    fn unknown_top_level_key_warns() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+default_matrialization: table
+"#;
+        let (config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.name, "test_project");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one unknown-key warning, got: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[0].contains("default_matrialization"),
+            "warning must name the offending key: {}",
+            warnings[0]
+        );
+    }
+
+    /// BUG-060: a fully-valid config (all known keys + unstable_schema) produces
+    /// zero generic unknown-key warnings.
+    #[test]
+    fn valid_config_with_all_known_keys_emits_no_generic_warnings() {
+        let yaml = r#"
+name: test_project
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+default_materialization: table
+models: {}
+python: ~
+unstable_schema: true
+"#;
+        let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "no warnings expected for a fully-valid config, got: {:?}",
+            warnings
+        );
+    }
+
+    /// BUG-060: legacy model_paths produces only the targeted legacy warning,
+    /// not an additional generic "unknown key" warning.
+    #[test]
+    fn legacy_path_key_does_not_also_get_generic_unknown_key_warning() {
+        let yaml = r#"
+name: test_project
+version: 1
+model_paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "legacy key must produce only the targeted legacy warning, not a duplicate generic one: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[0].contains("model_paths"),
+            "warning must name the legacy key: {}",
+            warnings[0]
+        );
     }
 
     /// `paths: [...]` round-trips through (de)serialization unchanged.
