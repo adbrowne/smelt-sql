@@ -157,7 +157,7 @@ When a `name:` field appears in the frontmatter, it must equal the function name
 1. **Python evaluation is compile-time only.** Python code is not executed during database query time.
 2. **`@model` functions must accept exactly one argument** — the project context. Functions with other signatures are an error at evaluation time.
 3. **Return value must be a string.** Returning non-string (e.g., `None`, a list) is a Python-level runtime error during compilation.
-4. **Model names are unique.** Two Python model functions in the same project with the same name (or the same name as a SQL model) is a configuration error.
+4. **Canonical addresses are unique.** Two Python `@model` functions whose names resolve to the same canonical `smelt.<path>` address — or whose name matches a SQL model's canonical address — produce a `DuplicateAddress` error. Uniqueness is keyed on the full canonical address (the function name), not on the bare leaf name in isolation.
 5. **Iterative evaluation converges within 5 rounds.** If models have not stabilized after 5 rounds, smelt reports an error and halts.
 6. **Python SDK must be discoverable.** If no SDK path can be resolved, Python model evaluation fails with a clear error.
 

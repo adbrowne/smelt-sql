@@ -154,7 +154,7 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 
 smelt recursively walks each path in `paths:` (resolved relative to the project root), following symlinks, and collects all `.sql` files. Files are parsed independently — multi-model files yield multiple `ModelFile` entries, one per section.
 
-Model names must be unique across the project. If two models produce the same name (e.g., `models/users.sql` and `models/archive/users.sql`), behavior is undefined (last writer wins in the current implementation).
+Canonical `smelt.<path>` addresses must be unique across the project. Two files with different filesystem paths may coexist when they produce distinct addresses: `models/users.sql` (address `users`) and `models/archive/users.sql` (address `archive.users`) are legal. A `DuplicateAddress` error is raised when two declarations claim the same full canonical address — for example, two `--- name: dup ---` sections in one file, or a Python `@model` whose function name matches a SQL model's canonical address.
 
 ### Ephemeral inlining
 
@@ -199,14 +199,13 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 1. **Every model file is pure SQL.** No Jinja, no conditionals, no `is_incremental()`. The framework injects time filters and other execution-time rewrites; the logical SQL is static.
 2. **Ephemeral models have no database object.** They produce no `CREATE TABLE`, `CREATE VIEW`, or DDL of any kind. Their SQL exists only as text substituted into downstream models.
 3. **Test models have no database object.** `materialization: test` models are executed in-memory against a mock dataset; they never produce persistent state.
-4. **Model names are unique within a project.** The discovery pass must not yield two `ModelFile` entries with the same `model_name`.
+4. **Canonical addresses are unique within a project.** The discovery pass must not yield two `ModelFile` entries with the same canonical `smelt.<path>` address. Uniqueness is keyed on the full canonical address, not the bare leaf model name — `models/users.sql` (address `users`) and `models/archive/users.sql` (address `archive.users`) are distinct and legal.
 5. **Unknown frontmatter keys are rejected.** The parser must not silently accept and ignore unknown YAML keys.
 6. **Tags are additive.** No frontmatter tag can remove a tag assigned by `smelt.yml`.
 
 ## Known Divergences / Open Questions
 
 - **`test` mode missing from materializations user guide.** `docs-site/docs/guide/materializations.md` documents four materialization types; `test` is absent. It is documented only in the testing guide. Should be added to materializations page.
-- **Duplicate model names undefined.** Names must be unique within a project (Constraint 4) and within a file (across bare SELECTs, `smelt.define`s, and `smelt.extern`s, per `architecture.md` §"Bare-model naming"). The current implementation enforces neither: if `models/users.sql` and `models/archive/users.sql` both exist, last-discovery order wins with no diagnostic; if a single multi-model file declares two `--- name: users ---` sections (Layer 1), `crates/smelt-core/src/metadata.rs::extract_multi_model` accepts both with no diagnostic. The spec mandates uniqueness in both cases; the implementation should emit an error in both cases.
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.

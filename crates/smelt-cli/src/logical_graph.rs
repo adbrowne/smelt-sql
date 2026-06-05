@@ -92,6 +92,28 @@ impl LogicalGraph {
             })
             .collect();
 
+        // Guard: detect duplicate canonical addresses before building the graph.
+        // Seeds/sources are checked by the Salsa project_address_collisions query;
+        // this catches Python-vs-SQL and within-file-section collisions on the
+        // CLI build path, where Python models never reach Salsa.
+        {
+            let (_, collisions) = smelt_core::resolver::resolve_address_map(&models, seeds, &[]);
+            if !collisions.is_empty() {
+                let msgs: Vec<String> = collisions
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "DuplicateAddress: '{}' is claimed by both {} and {}",
+                            c.address.join("."),
+                            c.first.path.display(),
+                            c.second.path.display(),
+                        )
+                    })
+                    .collect();
+                return Err(anyhow!("{}", msgs.join("\n")));
+            }
+        }
+
         // Collect unresolved (raw-path) deps alongside each model in a single pass.
         // Deps are resolved to canonical node-name keys in a second pass once all
         // models are in `nodes`.

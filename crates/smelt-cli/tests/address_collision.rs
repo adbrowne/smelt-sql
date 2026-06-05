@@ -209,6 +209,151 @@ fn smelt_build_refuses_address_collision() {
     );
 }
 
+/// BUG-021: two `--- name: dup ---` sections in one `.sql` file produce exactly
+/// one `DuplicateAddress` Error via the Salsa `project_address_collisions` query.
+#[test]
+fn within_file_section_collision_surfaces_duplicate_address() {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+    let project_dir = tmp.path();
+
+    // Minimal smelt.yml
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+
+    let models_dir = project_dir.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+
+    // Multi-model file with two sections sharing the same name
+    std::fs::write(
+        models_dir.join("multi.sql"),
+        "--- name: dup ---\n---\nSELECT 1 AS a\n\n--- name: dup ---\n---\nSELECT 2 AS b\n",
+    )
+    .unwrap();
+
+    let config: smelt_cli::Config =
+        serde_yaml::from_str(&std::fs::read_to_string(project_dir.join("smelt.yml")).unwrap())
+            .unwrap();
+    let discovery = smelt_cli::ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+    let models = discovery.discover_models().unwrap_or_default();
+
+    let db = smelt_cli::init_db(project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+
+    let diags: Vec<_> = ws
+        .projects(&db)
+        .iter()
+        .copied()
+        .flat_map(|p| {
+            smelt_db::project_address_collisions(&db, p)
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.diagnostic.severity == smelt_db::DiagnosticSeverity::Error)
+        .collect();
+
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one DuplicateAddress Error for within-file dup sections, got {}: {:?}",
+        errors.len(),
+        diags
+            .iter()
+            .map(|d| &d.diagnostic.message)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        errors[0].diagnostic.code,
+        Some(smelt_db::DiagnosticCode::DuplicateAddress),
+        "expected DuplicateAddress code, got {:?}",
+        errors[0].diagnostic.code
+    );
+    assert!(
+        errors[0].diagnostic.message.contains("dup"),
+        "diagnostic message should reference the colliding address 'dup', got: {}",
+        errors[0].diagnostic.message
+    );
+}
+
+/// BUG-040: a Python @model whose name matches an existing SQL model's canonical
+/// address is rejected with a DuplicateAddress error via `LogicalGraph::build`.
+/// This is a CLI-path-only check (Python models never reach Salsa).
+#[cfg(feature = "python")]
+#[test]
+fn python_vs_sql_collision_surfaces_duplicate_address() {
+    use std::path::PathBuf;
+
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+    let project_dir = tmp.path();
+
+    // Set up SDK
+    let sdk_dir = project_dir.join("python").join("smelt");
+    std::fs::create_dir_all(&sdk_dir).unwrap();
+    let repo_sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("python")
+        .join("smelt");
+    for entry in std::fs::read_dir(&repo_sdk).unwrap().flatten() {
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+        }
+    }
+
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+
+    let models_dir = project_dir.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+
+    // SQL model named "colliding"
+    std::fs::write(models_dir.join("colliding.sql"), "SELECT 1 as from_sql").unwrap();
+
+    // Python model also named "colliding"
+    std::fs::write(
+        models_dir.join("gen_colliding.py"),
+        "from smelt import model\n\n@model\ndef colliding(project):\n    return 'SELECT 2 as from_python'\n",
+    )
+    .unwrap();
+
+    let config: smelt_cli::Config =
+        serde_yaml::from_str(&std::fs::read_to_string(project_dir.join("smelt.yml")).unwrap())
+            .unwrap();
+    let discovery = smelt_cli::ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+    let sql_models = discovery.discover_models().unwrap();
+    let python_files = discovery.discover_python_files().unwrap();
+
+    let python_models =
+        smelt_cli::discover_python_models(&python_files, &sql_models, &config, project_dir, None)
+            .unwrap();
+
+    let mut all_models = sql_models;
+    all_models.extend(python_models);
+
+    let result = smelt_cli::LogicalGraph::build(all_models, None, &[], &config, "dev");
+    assert!(
+        result.is_err(),
+        "expected DuplicateAddress error for Python-vs-SQL collision, got Ok"
+    );
+    let msg = result.err().expect("expected Err").to_string();
+    assert!(
+        msg.contains("DuplicateAddress") || msg.contains("colliding"),
+        "error should mention the collision: {msg}"
+    );
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap().flatten() {

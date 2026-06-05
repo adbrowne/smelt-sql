@@ -340,8 +340,9 @@ pub fn discover_python_models(
                         queries: output.queries.clone(),
                     },
                     model_id,
-                    // Python model address_segments are computed in discover_python_models.
-                    address_segments: Vec::new(),
+                    // Python model address is the function name (a single-segment address).
+                    // This enables `resolve_address_map` to detect Python-vs-SQL collisions.
+                    address_segments: vec![output.name.clone()],
                 });
             }
         }
@@ -1210,8 +1211,8 @@ def no_matches(project):
 
     #[test]
     fn test_python_model_name_collision() {
-        // When a Python model produces a model with the same name as an existing SQL model,
-        // the graph build silently overwrites. This test documents the current behavior.
+        // BUG-040: a Python @model whose name matches a SQL model's canonical address
+        // must be rejected with a DuplicateAddress error (not silently deduped).
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -1268,7 +1269,7 @@ def colliding(project):
         let python_models =
             discover_python_models(&python_files, &sql_models, &config, project_dir, None).unwrap();
 
-        // Both exist but graph will have collision - one overwrites the other
+        // Both exist in the combined Vec before graph build.
         let mut all_models = sql_models;
         all_models.extend(python_models);
         let colliding_count = all_models.iter().filter(|m| m.name == "colliding").count();
@@ -1277,13 +1278,18 @@ def colliding(project):
             "both models should exist before graph build"
         );
 
-        let graph =
-            crate::logical_graph::LogicalGraph::build(all_models, None, &[], &config, "dev")
-                .unwrap();
-        // Graph silently keeps one (HashMap semantics) - documenting current behavior
-        let order = graph.execution_order().unwrap();
-        let colliding_in_order = order.iter().filter(|n| *n == "colliding").count();
-        assert_eq!(colliding_in_order, 1, "graph deduplicates by name");
+        // LogicalGraph::build must now reject the collision instead of silently deduping.
+        let result =
+            crate::logical_graph::LogicalGraph::build(all_models, None, &[], &config, "dev");
+        assert!(
+            result.is_err(),
+            "expected DuplicateAddress error for Python-vs-SQL collision, got Ok"
+        );
+        let err_msg = result.err().expect("expected Err").to_string();
+        assert!(
+            err_msg.contains("DuplicateAddress") || err_msg.contains("colliding"),
+            "error message should reference the collision: {err_msg}"
+        );
     }
 
     #[test]
