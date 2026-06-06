@@ -41,7 +41,7 @@ Explicit non-goals: `smelt backbuild` migration (separate command, own plan); `s
 
 ### 2. Finish the Feature Sweep / Bug Ledger
 
-The autonomy loop drives a two-level backlog — a top-level feature-sweep ledger (the master to-do list) and focused remediation sub-plans (see `CLAUDE.md` § Autonomy loop). The recent run of `BUG-*` closures in [Recently Completed](#recently-completed) is its output: cross-family arithmetic strictness, function-default self-containment, address-collision enforcement, codegen soundness, frontmatter parity, and diagnostic parity. Goal: drive the ledger to green — every "LSP-clean but unbuildable" defect and spec-vs-code drift the sweep surfaces is either fixed or recorded as a tracked divergence.
+The autonomy loop drives a two-level backlog — a top-level feature-sweep ledger (the master to-do list) and focused remediation sub-plans (see `CLAUDE.md` § Autonomy loop). The recent run of `BUG-*` closures in [Recently Completed](#recently-completed) is its output: property-test dispatch + `week_start` domain enforcement, cross-family arithmetic strictness, function-default self-containment, per-target overlay wiring, address-collision enforcement, codegen soundness, frontmatter parity, and diagnostic parity. Goal: drive the ledger to green — every "LSP-clean but unbuildable" defect and spec-vs-code drift the sweep surfaces is either fixed or recorded as a tracked divergence.
 
 This is the correctness baseline the rest of the queue builds on, so it stays near the top and is finished before the new big-rock features begin.
 
