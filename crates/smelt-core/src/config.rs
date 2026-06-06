@@ -476,6 +476,7 @@ impl Config {
                     "version",
                     "paths",
                     "targets",
+                    "target",
                     "default_materialization",
                     "models",
                     "python",

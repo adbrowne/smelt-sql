@@ -1172,6 +1172,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // Loader call diagnostics for generator files: smelt.config.load_yaml /
+            // load_json calls in the generator body must also be validated (path
+            // literals, schema arguments, content, and per-target overlay validation).
+            // These diagnostics are emitted here (before the early return) so that
+            // generator files surface the same loader-call diagnostics as regular
+            // model files.  BUG-014 P4: this is the seam that surfaces overlay
+            // validation errors (`ConfigLoaderUnknownField` etc.) for generator files.
+            for diag in
+                crate::queries::loader::loader_call_diagnostics_for_file(db, workspace, file)
+            {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+
             // Generator files are not SQL models; skip the model-validity check
             // and all SQL-only diagnostics.
             return;

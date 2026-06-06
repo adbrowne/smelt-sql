@@ -1708,6 +1708,22 @@ fn meta_config_broken_config_loader_null_coercion() {
     );
 }
 
+/// BUG-014 P4 TDD: A schema-violating overlay file surfaces
+/// `ConfigLoaderUnknownField` anchored at the generator call site.
+///
+/// `examples/meta_config_overlay_probe_invalid/` has `target: prod` in
+/// `smelt.yml` so the overlay `cohorts.prod.yaml` is always active.  That
+/// overlay contains `extra_field` (not in the schema) → exactly one
+/// `ConfigLoaderUnknownField` must fire for `models/cohorts.gen.sql`.
+#[test]
+fn overlay_probe_invalid_overlay_emits_unknown_field() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_overlay_probe_invalid",
+        "models/cohorts.gen.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderUnknownField,
+    );
+}
+
 // ===== Phase E2 (multi-model production) TDD tests =====
 //
 // Layout:
