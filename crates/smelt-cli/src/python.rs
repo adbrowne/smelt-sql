@@ -505,6 +505,7 @@ def dynamic_model(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let python_models =
@@ -589,6 +590,7 @@ def union_model(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let python_models =
@@ -722,6 +724,7 @@ def model_two(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let python_models =
@@ -798,6 +801,7 @@ def called_form(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let python_models =
@@ -899,6 +903,7 @@ def combined(project):
             default_materialization: crate::config::Materialization::View,
             models: model_config,
             python: None,
+            target: None,
         };
 
         let python_models =
@@ -976,6 +981,7 @@ def circular_model(project):
             default_materialization: crate::config::Materialization::View,
             models: model_config,
             python: None,
+            target: None,
         };
 
         let result = discover_python_models(&python_files, &[], &config, project_dir, None);
@@ -1032,6 +1038,7 @@ def bad_model(project)
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let result = discover_python_models(&python_files, &[], &config, project_dir, None);
@@ -1086,6 +1093,7 @@ def bad_return(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let result = discover_python_models(&python_files, &[], &config, project_dir, None);
@@ -1140,6 +1148,7 @@ def bad_sql(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let result =
@@ -1200,6 +1209,7 @@ def no_matches(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let result =
@@ -1264,6 +1274,7 @@ def colliding(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let python_models =
@@ -1327,6 +1338,7 @@ def colliding(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let result = validate_fixed_point(&[model], &config);
@@ -1369,6 +1381,7 @@ def colliding(project):
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         let result = validate_fixed_point(&[model], &config);
@@ -1470,6 +1483,7 @@ SELECT 1 AS id
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
             python: None,
+            target: None,
         };
 
         // discover_python_models must succeed (not return Err) — the mismatch

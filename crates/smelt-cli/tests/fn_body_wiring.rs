@@ -63,6 +63,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        target: None,
     }
 }
 

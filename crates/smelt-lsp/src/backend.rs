@@ -785,6 +785,7 @@ impl Backend {
                     default_materialization: smelt_core::Materialization::View,
                     models: std::collections::HashMap::new(),
                     python: None,
+                    target: None,
                 });
             build_python_context(&all_files, &config)
         };

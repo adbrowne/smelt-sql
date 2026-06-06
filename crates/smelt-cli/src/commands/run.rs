@@ -81,7 +81,10 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     // Initialise a Salsa DB from ALL discovered files (including generator files
     // whose meta-language bodies contain parse errors when treated as SQL). The DB
     // is used by the emitted-models pipeline below.
-    let gen_salsa_db = init_db(&project_dir, &raw_sql_models);
+    let mut gen_salsa_db = init_db(&project_dir, &raw_sql_models);
+    // Override the active target with the CLI --target flag so downstream
+    // overlay resolution uses the user-selected target.
+    gen_salsa_db.set_active_target(Some(std::sync::Arc::from(args.target.as_str())));
 
     // Phase E2: expand generator files (*.gen.sql / `generates: models` frontmatter)
     // into virtual ModelFile entries via the Salsa emitted-models pipeline.
@@ -324,7 +327,9 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
             .discover_models()
             .with_context(|| "Failed to discover models for diagnostic gate")?;
         gate_files.extend(function_files.iter().cloned());
-        let gate_db = init_db(&project_dir, &gate_files);
+        let mut gate_db = init_db(&project_dir, &gate_files);
+        // Override the active target with the CLI --target flag (parity with gen_salsa_db).
+        gate_db.set_active_target(Some(std::sync::Arc::from(args.target.as_str())));
         let gate_ws =
             smelt_db::Workspace::try_get(&gate_db).expect("workspace not initialized by init_db");
         let selected_set: std::collections::HashSet<&str> =
@@ -701,7 +706,9 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     // not materialisable models.
     let mut db_files: Vec<_> = all_models.clone();
     db_files.extend(function_files.iter().cloned());
-    let type_db = init_db(&project_dir, &db_files);
+    let mut type_db = init_db(&project_dir, &db_files);
+    // Override the active target with the CLI --target flag (parity with gen_salsa_db).
+    type_db.set_active_target(Some(std::sync::Arc::from(args.target.as_str())));
 
     // Build upstream schemas (model + seed + source columns) once and share
     // them across every compiler in the registry. Without this, the CLI's

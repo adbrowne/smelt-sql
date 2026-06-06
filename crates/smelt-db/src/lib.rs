@@ -435,9 +435,9 @@ impl Database {
     /// Set the active build target on the workspace singleton.
     ///
     /// Changing the target causes Salsa to re-evaluate any tracked query that reads
-    /// `workspace.active_target(db)`. Once the loader dispatch is wired (P3), this
-    /// causes `collect_loader_values` to switch to `loader_resolved_value_with_overlay`
-    /// when a matching `<basename>.<target>.<ext>` overlay file exists.
+    /// `workspace.active_target(db)`. The loader dispatch reads this value and selects
+    /// `loader_resolved_value_with_overlay` when a matching `<basename>.<target>.<ext>`
+    /// overlay file exists, falling back to the base file when no overlay is present.
     pub fn set_active_target(&mut self, target: Option<Arc<str>>) {
         if let Some(ws) = Workspace::try_get(self) {
             ws.set_active_target(self).to(target);

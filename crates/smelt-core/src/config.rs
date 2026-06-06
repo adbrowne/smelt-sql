@@ -1148,6 +1148,7 @@ models:
             default_materialization: Materialization::View,
             models: HashMap::new(),
             python: None,
+            target: None,
         };
 
         let mut metadata = HashMap::new();
@@ -1179,6 +1180,7 @@ models:
             default_materialization: Materialization::View,
             models: HashMap::new(),
             python: None,
+            target: None,
         };
 
         let mut metadata = HashMap::new();
@@ -1295,6 +1297,7 @@ targets:
             default_materialization: Materialization::View,
             models: HashMap::new(),
             python: None,
+            target: None,
         };
 
         let mut metadata = HashMap::new();

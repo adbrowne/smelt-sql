@@ -40,6 +40,7 @@ fn config_with_targets(targets: &[&str]) -> Config {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        target: None,
     }
 }
 

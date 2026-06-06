@@ -174,6 +174,12 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
     // `load_json` calls in generator files can evaluate. Shared helper.
     smelt_db::workspace_ingest::register_loader_files_from_disk(&mut db, project_dir);
 
+    // Set the active target from the project's smelt.yml `target:` field
+    // (symmetric with ingest_loaded_workspace — Workspace Loading Parity rule).
+    if let Ok(cfg) = smelt_core::config::Config::load(project_dir) {
+        db.set_active_target(cfg.target.map(|t| std::sync::Arc::from(t.as_str())));
+    }
+
     db
 }
 

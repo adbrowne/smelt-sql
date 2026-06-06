@@ -50,6 +50,7 @@ fn duckdb_config_and_target() -> (Config, Target) {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        target: None,
     };
     (config, target)
 }
