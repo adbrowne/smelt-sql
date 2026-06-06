@@ -75,7 +75,7 @@ A note on `smelt backbuild`: this plan does **not** migrate `commands/backbuild.
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1 — Move `compute_incremental_windows` + per-source bound helpers into `smelt-runtime`. `execute_project`'s batch planner switches to bound-aware windowing. | done | (next commit) | 2026-06-06 |
+| 1 — Move `compute_incremental_windows` + per-source bound helpers into `smelt-runtime`. `execute_project`'s batch planner switches to bound-aware windowing. | done | 9730fc2a | 2026-06-06 |
 | 2 — Move planner safety check + temporal bound derivation into `smelt-runtime`. `ExecuteRequest` gains `enforce_safety` + schema-evolution flags. | pending |  |  |
 | 3 — Eliminate `PhysicalGraph` / `LogicalGraph`. Runtime returns `PlanSummary` for `--show-plan`. CLI consumes the smaller surface. | pending |  |  |
 | 4 — Migrate `smelt-cli/src/commands/run.rs` to `execute_project`. Add `StdoutReporter`. Add `RunReporter::model_compiled` callback. | pending |  |  |
