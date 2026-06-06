@@ -94,6 +94,12 @@ pub struct Config {
     /// Path to Python interpreter (overridden by SMELT_PYTHON env var)
     #[serde(default)]
     pub python: Option<String>,
+    /// Default active build target (key into `targets`). Both the CLI and the LSP
+    /// use this as the effective target when no `--target` override is supplied.
+    /// Absent when no default is configured — resolution falls back to base-only
+    /// loader dispatch (no overlay files applied).
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 fn default_config_version() -> u32 {

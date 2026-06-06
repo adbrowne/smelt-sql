@@ -55,6 +55,13 @@ pub fn ingest_loaded_workspace(db: &mut Database, loaded: &LoadedWorkspace) -> I
         paths.push(model.path.clone());
     }
 
+    // Set the active build target from the project's smelt.yml `target:` field.
+    // Both the CLI and the LSP use this as the effective target when no `--target`
+    // override is supplied, keeping discovery symmetric (Workspace Loading Parity rule).
+    // Calling this before register_loader_files_from_disk ensures the Workspace
+    // singleton exists so loader files are added to its loader_files list.
+    db.set_active_target(loaded.config.target.as_deref().map(Arc::from));
+
     register_loader_files_from_disk(db, &loaded.project_root);
 
     IngestedProject {
@@ -149,5 +156,43 @@ mod tests {
         }
         // ProjectInput should be retrievable by root.
         assert!(db.project_input(dir.path()).is_some());
+    }
+
+    #[test]
+    fn ingest_sets_active_target_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\ntargets: {}\ntarget: prod\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let loaded = load_workspace(dir.path());
+        let mut db = Database::default();
+        ingest_loaded_workspace(&mut db, &loaded);
+
+        let ws = crate::Workspace::try_get(&db).expect("workspace not initialized");
+        assert_eq!(ws.active_target(&db).as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn ingest_without_config_target_leaves_active_target_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\ntargets: {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let loaded = load_workspace(dir.path());
+        let mut db = Database::default();
+        ingest_loaded_workspace(&mut db, &loaded);
+
+        let ws = crate::Workspace::try_get(&db).expect("workspace not initialized");
+        assert!(ws.active_target(&db).is_none());
     }
 }
