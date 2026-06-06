@@ -121,6 +121,16 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Per-Target Config Overlay — production wiring complete~~ ✅ (June 6, 2026)
+
+Closed BUG-014: a headline `meta_config_loading` feature (`smelt build --target prod` reading a sibling `<basename>.prod.<ext>` overlay and merging it into the base) that was implemented and unit-tested at the loader layer but had zero production callers ([plan](plans/20260605-per-target-overlay-wiring.md)):
+
+- **`active_target` Salsa input** (P1) — `Option<Arc<str>>` field on the singleton `Workspace` input in `crates/smelt-db/src/lib.rs`; `set_active_target` setter; retiring the lib.rs stub comment. Salsa invalidation verified.
+- **Target threading through `load_workspace`** (P2) — `smelt-core::workspace::load_workspace` reads the `smelt.yml` `target:` field as the default; CLI `--target` overrides it on the build/run path. Overlay files (`cohorts.prod.yaml`) paired as overlay inputs rather than orphan base inputs in `workspace_ingest.rs`. Dual gate (`example_diagnostics` + `example_workspaces`) stays green — CLI↔LSP discovery symmetric.
+- **`collect_loader_values` dispatches to overlay** (P3) — computes `<basename>.<target>.<ext>` from the effective target and calls `loader_resolved_value_with_overlay` when the overlay input exists; falls back to base-only resolution when target is unset or the overlay is absent. `examples/meta_config_overlay_probe`: `smelt build --target prod` now yields `revenue >= 999` (not the base `>= 100`).
+- **Overlay validation diagnostics wired** (P4) — a schema-violating overlay surfaces `ConfigLoaderUnknownField` anchored at the overlay file's offending row and fails the build; same diagnostic family as a base-file mismatch. `examples/meta_config_overlay_probe_invalid` gate.
+- **Close-out** (P5) — end-to-end regression test `meta_config_e2e.rs::e2e_per_target_overlay_wires_into_generator_build` confirms dev/prod row counts; spec References updated; BUG-014 flipped to fixed in ledger.
+
 ### ~~Cross-Family Arithmetic Strictness — `Unknown` + `TypeMismatch` enforced~~ ✅ (June 6, 2026)
 
 Enforced the types spec rule that cross-family binary arithmetic (e.g. `42 + '3'`, `TRUE + 1`) must produce `Unknown` and emit a `TypeMismatch` diagnostic ([plan](plans/20260605-cross-family-arithmetic-strictness.md)):
