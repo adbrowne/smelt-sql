@@ -280,20 +280,24 @@ pub struct Workspace {
     /// enumerate registered loader files without downcasting.
     #[returns(ref)]
     pub loader_files: Vec<LoaderFileInput>,
+    /// The active build target (e.g. `"prod"`, `"staging"`). When `Some`, the
+    /// loader resolution path dispatches to `loader_resolved_value_with_overlay`
+    /// using `<basename>.<target>.<ext>` overlay files. `None` means base-only
+    /// resolution. Set from the `smelt.yml` `target:` field (default) or via
+    /// the `--target` CLI flag (override). Both CLI and LSP read the same
+    /// config-derived default to keep discovery symmetric.
+    pub active_target: Option<Arc<str>>,
 }
 
 // ============================================================================
-// Loader file inputs (Phase E1 Phase 5)
+// Loader file inputs
 // ============================================================================
 
 /// A per-loader-call file path registered as a Salsa input.
 ///
-/// Phase 5: one `LoaderFileInput` is created per unique loader-target path
-/// encountered in the workspace. The LSP (and CLI build orchestration) creates
-/// and updates these inputs when the corresponding files change on disk.
-///
-/// Phase 6 will add per-target overlay inputs; the shape below is designed to
-/// accommodate the Phase 6 overlay query without restructuring.
+/// One `LoaderFileInput` is created per unique loader-target path encountered
+/// in the workspace. The LSP (and CLI build orchestration) creates and updates
+/// these inputs when the corresponding files change on disk.
 #[salsa::input]
 pub struct LoaderFileInput {
     /// Workspace-relative path with `/` separators (e.g. `"configs/cohorts.yaml"`).
@@ -404,17 +408,18 @@ impl Database {
 
     /// Set (or create) the workspace singleton with the given file and project lists.
     ///
-    /// Preserves the existing `loader_files` list if the workspace already exists;
-    /// `set_loader_file` is responsible for keeping that list up to date.
+    /// Preserves the existing `loader_files` and `active_target` if the workspace
+    /// already exists; `set_loader_file` and `set_active_target` manage those fields.
     pub fn set_workspace(&mut self, files: Vec<SourceFile>, projects: Vec<ProjectInput>) {
         match Workspace::try_get(self) {
             Some(ws) => {
                 ws.set_files(self).to(files);
                 ws.set_projects(self).to(projects);
-                // loader_files is preserved as-is; set_loader_file manages it.
+                // loader_files and active_target are preserved; managed by
+                // set_loader_file and set_active_target respectively.
             }
             None => {
-                Workspace::new(self, files, projects, Vec::new());
+                Workspace::new(self, files, projects, Vec::new(), None);
             }
         }
     }
@@ -423,7 +428,21 @@ impl Database {
     pub fn workspace(&mut self) -> Workspace {
         match Workspace::try_get(self) {
             Some(ws) => ws,
-            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new()),
+            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), None),
+        }
+    }
+
+    /// Set the active build target on the workspace singleton.
+    ///
+    /// Changing the target causes Salsa to re-evaluate any tracked query that reads
+    /// `workspace.active_target(db)`. Once the loader dispatch is wired (P3), this
+    /// causes `collect_loader_values` to switch to `loader_resolved_value_with_overlay`
+    /// when a matching `<basename>.<target>.<ext>` overlay file exists.
+    pub fn set_active_target(&mut self, target: Option<Arc<str>>) {
+        if let Some(ws) = Workspace::try_get(self) {
+            ws.set_active_target(self).to(target);
+        } else {
+            Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), target);
         }
     }
 
@@ -433,9 +452,6 @@ impl Database {
     /// is discovered (during workspace load) or edited (during an LSP edit
     /// session). Salsa propagates invalidations to `loader_file_parsed` and
     /// `loader_resolved_value` automatically.
-    ///
-    /// Phase 6 will extend this to register per-target overlay files alongside
-    /// the base file.
     pub fn set_loader_file(
         &mut self,
         path: Arc<str>,

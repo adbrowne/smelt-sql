@@ -5403,6 +5403,100 @@ fn overlay_file_change_invalidates_loader_value() {
     }
 }
 
+// ============================================================================
+// P1: Active-build-target Salsa input wiring tests
+// ============================================================================
+
+/// Verify that the `Workspace` singleton's `active_target` field can be set
+/// and read back, and that Salsa tracks changes to it.
+///
+/// - When no target is set, `active_target` returns `None`.
+/// - After calling `set_active_target(Some("prod"))`, it returns `Some("prod")`.
+/// - After clearing with `set_active_target(None)`, it returns `None` again.
+#[test]
+fn active_build_target_salsa_input_tracks_changes() {
+    let mut db = Database::default();
+
+    // Create the workspace singleton with no target.
+    db.set_workspace(Vec::new(), Vec::new());
+
+    let ws = db.workspace();
+    assert_eq!(
+        ws.active_target(&db),
+        None,
+        "initial active_target must be None"
+    );
+
+    // Set the target to "prod".
+    db.set_active_target(Some(Arc::from("prod")));
+    let ws = db.workspace();
+    assert_eq!(
+        ws.active_target(&db).as_deref(),
+        Some("prod"),
+        "active_target must reflect the newly set value"
+    );
+
+    // Change the target to "staging".
+    db.set_active_target(Some(Arc::from("staging")));
+    let ws = db.workspace();
+    assert_eq!(
+        ws.active_target(&db).as_deref(),
+        Some("staging"),
+        "active_target must reflect the updated value"
+    );
+
+    // Clear the target.
+    db.set_active_target(None);
+    let ws = db.workspace();
+    assert_eq!(
+        ws.active_target(&db),
+        None,
+        "active_target must be None after clearing"
+    );
+}
+
+/// Verify that `active_target = None` leaves `loader_resolved_value` (the
+/// base-only path) byte-identical — the new field has no effect on loader
+/// resolution until the dispatch is wired in P3.
+#[test]
+fn active_target_none_leaves_base_only_resolution_unchanged() {
+    let mut db = Database::default();
+
+    // Register a base loader file.
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // Resolve before any target is set.
+    let resolved_no_target = loader_resolved_value(&db, base_input, call_site.clone());
+
+    // Set a target — base-only resolution must remain unaffected (P3 wires dispatch).
+    db.set_active_target(Some(Arc::from("prod")));
+    let resolved_with_target = loader_resolved_value(&db, base_input, call_site);
+
+    assert!(
+        resolved_no_target.diagnostics.is_empty(),
+        "base-only resolution must have no diagnostics; got: {:?}",
+        resolved_no_target.diagnostics
+    );
+    assert!(
+        resolved_with_target.diagnostics.is_empty(),
+        "base-only resolution must still have no diagnostics when target is set; got: {:?}",
+        resolved_with_target.diagnostics
+    );
+    assert_eq!(
+        resolved_no_target.merged, resolved_with_target.merged,
+        "merged value must be identical before and after setting target (dispatch not yet wired)"
+    );
+}
+
 /// Verify that `smelt_record_declarations` collects declarations from all
 /// files in the workspace and returns them in file order.
 ///
