@@ -201,3 +201,70 @@ SELECT 1 AS val
         diags_for(&db, ws, file)
     );
 }
+
+// ── BUG-026: week_start value-domain (LSP / file_diagnostics path) ──────────
+
+/// `week_start: wednesday` on `granularity: week` must emit `MalformedTimeseries`
+/// through `file_diagnostics` (the LSP/Salsa path), proving BUG-024's Error-severity
+/// gate carries this new emission site.
+#[test]
+fn week_start_bad_value_emits_malformed_timeseries_in_file_diagnostics() {
+    let root = PathBuf::from("/fake/model_fm_bad_week_start");
+    let path = root.join("models").join("bad_week_start.sql");
+    let src = "\
+---
+materialization: table
+timeseries:
+  event_time_column: event_timestamp
+  partition_column: dt
+  granularity: week
+  week_start: wednesday
+---
+SELECT date_trunc('week', event_timestamp) AS dt, event_timestamp
+FROM events
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedTimeseries);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error),
+        "expected MalformedTimeseries Error for week_start: wednesday; got {:#?}",
+        diags_for(&db, ws, file)
+    );
+}
+
+/// `week_start: monday` and `week_start: sunday` must NOT emit any MalformedTimeseries
+/// for the value-domain rule (other rules still apply).
+#[test]
+fn week_start_monday_and_sunday_do_not_emit_malformed_timeseries_for_value_domain() {
+    for day in ["monday", "sunday"] {
+        let root = PathBuf::from(format!("/fake/model_fm_week_start_{day}"));
+        let path = root.join("models").join(format!("week_start_{day}.sql"));
+        let src = format!(
+            "\
+---
+materialization: table
+timeseries:
+  event_time_column: event_timestamp
+  partition_column: dt
+  granularity: week
+  week_start: {day}
+---
+SELECT date_trunc('week', event_timestamp) AS dt, event_timestamp
+FROM events
+"
+        );
+        let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src.as_str())]);
+        let file = files[0];
+
+        let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedTimeseries);
+        assert!(
+            diags.is_empty(),
+            "week_start: {day} must not emit MalformedTimeseries; got {:#?}",
+            diags_for(&db, ws, file)
+        );
+    }
+}

@@ -177,6 +177,35 @@ fn gate_blocks_config_loader_error() {
     );
 }
 
+/// BUG-026: `week_start: wednesday` on `granularity: week` is outside the
+/// valid domain {monday, sunday} → `MalformedTimeseries` (Error). `smelt build`
+/// must refuse to compile it and name the diagnostic.
+#[test]
+fn gate_blocks_invalid_week_start_value() {
+    let model = "\
+---
+materialization: table
+timeseries:
+  partition_column: dt
+  event_time_column: event_timestamp
+  granularity: week
+  week_start: wednesday
+---
+SELECT date_trunc('week', event_timestamp) AS dt, event_timestamp
+FROM (SELECT TIMESTAMP '2024-01-01' AS event_timestamp) t
+";
+    let ws = make_workspace(&[("smelt.yml", DEV_SMELT_YML), ("models/bad_ws.sql", model)]);
+    let (ok, output) = run_build(ws.path());
+    assert!(
+        !ok,
+        "expected `smelt build` to FAIL on week_start: wednesday, but it succeeded.\n{output}"
+    );
+    assert!(
+        output.contains("MalformedTimeseries"),
+        "build failed but did not name the MalformedTimeseries diagnostic.\n{output}"
+    );
+}
+
 /// Negative control: a clean workspace must still build (the gate must not
 /// over-block).
 #[test]
