@@ -17,7 +17,9 @@ The mandatory plan structure (execution prompt, per-phase TDD tests, implementer
 
 ## What's Next
 
-The items below are the current priority queue. See completed items in [Recently Completed](#recently-completed) below.
+The items below are the current priority queue, top to bottom. See completed items in [Recently Completed](#recently-completed) below.
+
+The spine of the near-term roadmap is a single through-thread: **finish the shared runtime and the bug sweep → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority.
 
 ### 1. CLI Execute-Loop Migration to `smelt-runtime` (in-flight)
 
@@ -37,72 +39,72 @@ A two-plan architectural refactor consolidating CLI and UI on a shared compile +
 
 Explicit non-goals: `smelt backbuild` migration (separate command, own plan); `smelt-language-service` extraction (separate plan, awaits UI editor work).
 
-### 2. Type Inference, Parser & Ref Resolution Fixes (from smelt_shop validation)
+### 2. Finish the Feature Sweep / Bug Ledger
 
-A real-world 19-model ecommerce pipeline ([smelt_shop report](../smelt_report.md)) exposed critical bugs in type inference and ref resolution. These are user-facing correctness issues that block real-world adoption.
+The autonomy loop drives a two-level backlog — a top-level feature-sweep ledger (the master to-do list) and focused remediation sub-plans (see `CLAUDE.md` § Autonomy loop). The recent run of `BUG-*` closures in [Recently Completed](#recently-completed) is its output: cross-family arithmetic strictness, function-default self-containment, address-collision enforcement, codegen soundness, frontmatter parity, and diagnostic parity. Goal: drive the ledger to green — every "LSP-clean but unbuildable" defect and spec-vs-code drift the sweep surfaces is either fixed or recorded as a tracked divergence.
 
-**Critical/Major:**
-- **Seeds not recognized by `smelt.ref()`** — `resolve_ref()` only searches `all_models()`; seeds aren't in the type-checking model. Workaround: declare seeds as sources in `sources.yml`.
-- **Type inference wrong with JOINs on source tables** — multi-table JOIN context produces incorrect CAST wrappers (e.g., VARCHAR→DOUBLE). Workaround: explicit CAST on every output column.
-- **CASE expressions produce invalid SQL** — `CAST(? AS TYPE) AS ?` placeholders instead of actual column names/expressions. Workaround: replace CASE with boolean/arithmetic equivalents.
-- **`EXTRACT(EPOCH FROM ...)` confuses parser** — FROM inside EXTRACT treated as SQL FROM clause. Workaround: use DuckDB's `EPOCH()` function.
-- **CTEs break type inference** — `build_subquery_context()` lacks access to resolved model schemas, can't trace types through CTE chains. Workaround: split CTEs into separate materialized models.
-- **Subqueries in FROM don't get ref replacement** — same root cause as CTEs; `smelt.ref()` in subqueries not resolved. Workaround: use top-level JOINs instead.
+This is the correctness baseline the rest of the queue builds on, so it stays near the top and is finished before the new big-rock features begin.
 
-**Minor:**
-- DECIMAL type inference too narrow for division results (overflow > 99)
-- FLOAT not handled correctly (DOUBLE works fine)
-- Materialization type changes (view↔table) not auto-handled (need manual DROP)
+Open structural residue worth calling out:
+- **BUG-064** — `smelt-db → smelt-planner` layering inversion (P4, blocked). Investigation complete; the leak is full planner logic, not a plain type. Recommended direction recorded: move the Salsa rule-diagnostic queries into `smelt-planner`.
 
-**Root cause pattern:** Issues #5 and #6 share the same root cause — `build_subquery_context()` in `type_inference.rs` is a pure function with no database access, so it can't resolve `smelt.ref()` or `smelt.source()` calls. Fix: thread resolved schemas into context-building functions (consistent with pure-function architecture).
+### 3. Type-System Axes — Decimal, Nullability, Collation, Timezone
 
-### 3. Packaging — Source Distribution & Python 3.14 Wheels
+smelt's type system tracks base types and NULL propagation structurally, but four axes are coarse or untracked. They are simultaneously (a) real-world correctness gaps and (b) the precision blocker for virtual environments — `output_fingerprint.md` lists decimal/collation/nullability among the untracked axes that force conservative rebuild. Covering them sharpens both, which is why they are sequenced immediately before Virtual Environments.
 
-smelt-sql 0.2.0 has limited wheel availability — only macOS ARM64 (cp314), Windows (cp312), Linux x86_64 (cp311), Linux ARM64 (cp311). No source distribution (sdist). Python 3.14 is the current release and should have wheels on all platforms.
+- **Decimal** — carry precision/scale through inference and arithmetic; widen division results correctly (today DECIMAL inference is too narrow and overflows past 99 — the residual from the smelt_shop validation).
+- **Nullability** — tighten NULL tracking into an exact, fingerprint-grade property rather than an advisory one.
+- **Collation** — model string comparison/sort semantics as a tracked attribute; required before collation-sensitive output can be declared equivalent.
+- **Timezone** — distinguish timestamp-with / -without-timezone and make inference tz-aware.
 
-- Publish sdist so users can build from source on any platform
-- Add cp314 wheels for all platforms (Linux x86_64, Linux ARM64, Windows, macOS ARM64)
-- Ensure CI release workflow covers the full matrix
+As each axis lands, the fingerprint oracle gains real precision on it instead of falling back to verbatim rebuild.
 
-### 4. Testing Strategy Improvements
+### 4. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
 
-The smelt_shop bugs weren't caught because existing tests don't exercise real-world SQL patterns. Four gaps identified:
-
-1. **"Compile and execute" integration test** — For each example workspace, compile every model to target SQL via the dialect printer, then execute against DuckDB. Catches invalid CAST wrappers, broken ref replacement, and code-gen bugs that static analysis (LSP diagnostics) misses.
-2. **Complex example workspace** — Add a workspace (or subset of smelt_shop) that exercises JOINs on multiple sources, CASE expressions, CTEs, EXTRACT, subqueries with refs. Becomes both regression test and real-world patterns reference.
-3. **Model-level property tests** — Extend proptest suite to generate full model SQL (not just expressions) with JOINs, CTEs, CASE — verify compiled output executes against DuckDB without errors.
-4. **Seed integration in type checking** — Seeds are currently a CLI/runtime concept invisible to the type-checking layer. After fixing seed refs, add test coverage for seed schema resolution.
-
-### 5. `smelt check` — LLM-Optimised Diagnostic CLI
-
-Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
-
-See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
-
-### 6. Orchestrator Integration
-
-Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
-
-### 7. PostgreSQL Backend
-
-Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
-
-### 8. Virtual Environments — implementation (specs authored, prototype proven)
-
-SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script.
+SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script. The same machinery powers **backbuild change-detection** — deciding precisely which models a change forces to rebuild versus spares.
 
 **Proven** (research + Stage 0 prototype): the semantic output-fingerprint oracle ([`crates/smelt-fingerprint`](../crates/smelt-fingerprint)) with its soundness gate (`fingerprint-equal ⇒ DuckDB relations identical`) and determinism detector, all green as property tests against DuckDB. See Recently Completed below and [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md).
 
 **Specced**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative, implemented), [`virtual_environments.md`](specs/virtual_environments.md) (the orchestration layer — `state.mode`, environment addressing, fingerprint-keyed reuse, promotion, override hatches), [`run_state.md`](specs/run_state.md) (`.smelt/` layout + snapshot store).
 
 **Next** (each increment gated by the DuckDB oracle, derived via `/smelt:plan`):
-1. Wire `output_fingerprint` into the runtime (it is a standalone prototype today).
+1. Wire `output_fingerprint` into the runtime (it is a standalone prototype today). Depends on the runtime consolidation in #1.
 2. Snapshot store + `(environment, model) → table` map (`run_state.md`); fingerprint-keyed reuse for a single environment.
 3. `state.mode: environments` addressing, `smelt plan/apply --environment`, `smelt promote`.
-4. Cross-model column-lineage analyser — the full "eclipse" (downstream-spared changes); the gating new analysis.
+4. **Backbuild change-detection** — the cross-model column-lineage analyser computing the full "eclipse" (downstream models spared by an output-preserving upstream change); the gating new analysis, and the substrate item #5 builds on.
 5. Polish: typed data-diff, GC/retention, forward-only.
 
-Explicit non-goal for now: the un-annotated determinism inversion and the untracked type-system axes (decimal/collation/nullability) remain conservative-rebuild until covered (worst case parity; see `output_fingerprint.md` Known Divergences).
+Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #3 and unlock fingerprint precision as they land.
+
+### 5. General Schema Migration on the VE Substrate
+
+Generalise schema change management on top of the fingerprint + column-lineage machinery from #4. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
+
+### 6. Spark — Production Hardening
+
+The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow, Spark Connect / Databricks Connect). Remaining gaps to production-grade:
+
+- **Integration-test parity** — run the DuckDB integration suite against a local Spark Connect server, so Spark is verified at the same depth as DuckDB.
+- **JSON incompatibility rewrites** — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY`; emit compile-time warnings where no faithful rewrite exists.
+- **Authentication docs** — tokens, OAuth, and instance profiles for Databricks Connect / EMR / Dataproc.
+
+### 7. `smelt check` — LLM-Optimised Diagnostic CLI
+
+Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
+
+See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
+
+### 8. Orchestrator Integration
+
+Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
+
+### 9. PostgreSQL Backend
+
+Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
+
+### 10. Databricks Support + Metrics-View Compatibility (low priority)
+
+Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
 ---
 
@@ -183,7 +185,7 @@ Proved the core thesis of opt-in virtual data environments — *reuse a physical
 - **Determinism detector**: structural deny-list (non-deterministic built-ins, parenless temporal specials, order-sensitive aggregates) + row-slice-without-total-order check, surfaced as `deterministic` on the result. Gated so anything flagged deterministic reproduces across two independent DuckDB builds. Closes §5.5's value axes; window-function non-determinism is the noted residual.
 - **Specs authored**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative), [`virtual_environments.md`](specs/virtual_environments.md) (staged orchestration design), [`run_state.md`](specs/run_state.md) (`.smelt/` layout); touched `architecture.md`, `incremental_models.md`, `schema_evolution.md`.
 
-Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #8](#8-virtual-environments--implementation-specs-authored-prototype-proven).
+Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #4](#4-virtual-environments--backbuild-change-detection-specs-authored-prototype-proven).
 
 ### ~~Typed Meta-Language — Phase E2: Multi-Model Production~~ ✅ (May 16, 2026)
 
@@ -585,7 +587,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 **Next steps**:
 - Pre-built binaries via GitHub Releases (dev-release.yml workflow exists)
-- Source distribution (sdist) + Python 3.14 wheels for all platforms (see [What's Next #2](#2-packaging--source-distribution--python-314-wheels))
+- Source distribution (sdist): verify the `maturin sdist` job actually ships on release — `release.yml` currently builds the four platform wheels but has no sdist job, despite the April 10 packaging work claiming one. (Wheels themselves are resolved: `bindings = "bin"` produces `py3-none` wheels covering Python 3.9–3.14 on all four platforms, so there is no remaining cp314-specific gap.)
 - Datagen: geometric distribution `min` parameter (currently can produce 0, unsuitable for quantity fields)
 - dbt-to-smelt cheat sheet showing common pattern equivalents
 - Publish Python SDK to PyPI (currently TestPyPI only)
@@ -600,4 +602,5 @@ Items here are interesting design problems without committed timelines.
 - **OpenLineage / column-level lineage**: Export model and column-level lineage in OpenLineage format for catalog integration (DataHub, Amundsen, Atlan). Internal lineage tracking partially exists — interesting graph analysis problem.
 - **Substrait integration**: Portable plan representation, DataFusion interop
 - **Smelt Functions — next frontiers**: Steps 1–13 are ✅ complete (April 2026). Remaining open design problems: generics in `smelt.define` (user-polymorphic functions, §16 #14 deferred), variadics in `smelt.define` (§16 #15), parameterized models (`smelt.param()`), metrics DSL integration (`smelt.metric()`), and full function-body SQL lowering (replacing `LogicalNode::Raw` placeholders with structured plan nodes for end-to-end `smelt build` code generation from function bodies). See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
+- **Python as meta-layer input** (not whole models): Today Python authors entire models via the `@model` decorator. A lighter mode would let a Python script *feed the meta layer* — emit values (lists, maps, records) that the typed meta-language consumes to generate models — rather than producing model SQL itself. This keeps generation logic in smelt's typed meta-language while using Python only as a data/config source (e.g. pulling a cohort list or schema map from an external system). Interface and the typed boundary between Python output and meta-language input need design work; relationship to existing YAML/JSON/TOML loaders (`smelt.config.load_*`) should be worked out so they share one ingestion model.
 - **Learning from history**: Use run statistics to suggest optimizations
