@@ -110,7 +110,7 @@ A source declaring `timeseries:` opts in to being a pushdown target for downstre
 3. **Type constraint on event_time_column.** Must be a date, timestamp, or timestamp-with-timezone type per `types.md`. Violation produces `MalformedTimeseries`.
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.
 5. **Granularity closure.** Must be one of the enumerated values. Unknown values produce `MalformedTimeseries`. Custom granularity is reserved for a future plugin surface (see `incremental_models.md` § "Granularity values").
-6. **`week_start` requires `granularity: week`.** Setting `week_start` on any other granularity is `MalformedTimeseries`.
+6. **`week_start` requires `granularity: week` and must be `monday` or `sunday`.** Setting `week_start` on any other granularity, or setting it to a weekday other than `monday` or `sunday`, is `MalformedTimeseries`.
 
 ### LSP surface
 
@@ -148,7 +148,6 @@ This section captures the load-bearing rationale.
 ## Known Divergences / Open Questions
 
 - **Migration from nested `incremental: { event_time_column, partition_column, granularity, enabled }`.** Today's implementation reads the time-dimension fields from inside `incremental:`. The migration to the `timeseries:` block is the subject of an upcoming plan derived from `docs/research/20260521-incremental-as-planner-rule.md`. The implementation cuts over in one pass — no transitional dual-form support per the project's no-backward-compatibility doctrine.
-- **`week_start` not yet implemented.** The field is specced as the home for the configurable week-start day; backend support is part of the same migration plan.
 - **Custom granularity plugin surface.** Reserved for future work. No plugin shipping today; the closed enum is authoritative.
 - **`smelt verify` against the database.** A future pass could check that an external source's declared `partition_column` and `event_time_column` exist in the live database. Out of scope here; mentioned in `sources.md` Known Divergences as well.
 - **LSP enrichment.** Hover and goto-definition for `timeseries:` fields are specced (Semantics § "LSP surface") but not yet implemented in the LSP. Tracked alongside the migration plan.
