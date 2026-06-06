@@ -15,7 +15,7 @@ use smelt_planner::{
 use tracing::warn;
 
 use crate::logical_graph::LogicalGraph;
-use crate::temporal::compute_incremental_windows;
+use crate::temporal::compute_single_window;
 use smelt_runtime::TimeRange;
 
 /// A computed execution plan for one model during a backfill/backbuild.
@@ -153,14 +153,8 @@ pub fn compute_backbuild_plans(
                 .and_then(|m| m.columns.get(&ts.event_time_column))
                 .and_then(|c| c.data_latency.as_ref());
 
-            let windows = compute_incremental_windows(
-                &model.content,
-                inc,
-                ts,
-                sources,
-                model_latency,
-                &range,
-            );
+            let windows =
+                compute_single_window(&model.content, inc, ts, sources, model_latency, &range);
 
             // Each upstream must provide data for this model's filter range
             let upstream_range = &windows.filter_range;
@@ -340,7 +334,7 @@ fn compute_model_backfill_plan(
     let model_latency = model_metadata
         .and_then(|m| m.columns.get(&ts_config.event_time_column))
         .and_then(|c| c.data_latency.as_ref());
-    let windows = compute_incremental_windows(
+    let windows = compute_single_window(
         sql,
         inc_config,
         ts_config,

@@ -47,7 +47,8 @@ pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
 pub use temporal::{
-    compute_incremental_windows, validate_run_window_alignment, IncrementalWindows,
+    compute_incremental_windows, compute_single_window, validate_run_window_alignment,
+    IncrementalBatch, IncrementalWindows, SingleIncrementalWindow,
 };
 pub use test_compiler::{
     compile_whole_model_test_with_fns, extract_ctes, validate_test_expect, CteInfo,

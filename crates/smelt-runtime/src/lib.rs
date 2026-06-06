@@ -26,6 +26,7 @@ pub mod reporter;
 pub mod select;
 pub mod transformer;
 pub mod types;
+pub mod windowing;
 
 pub use compile::{
     bind_named_args, build_source_bound_map, expand_function_calls, prepend_ephemeral_ctes,

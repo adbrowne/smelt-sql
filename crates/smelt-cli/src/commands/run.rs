@@ -6,7 +6,7 @@ use smelt_cli::{
     argument_resolution::{compute_scope, resolve_selector_args},
     build_source_bound_map,
     compiler::UpstreamSchemas,
-    compute_batches_for_model, compute_incremental_windows, discover_emitted_model_files,
+    compute_batches_for_model, compute_single_window, discover_emitted_model_files,
     discover_python_models, executor, find_project_root, init_db, inject_source_filters,
     inject_time_filter, migration, parse_selector, BackendRegistry, BackfillOptions,
     CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
@@ -1062,7 +1062,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     .as_ref()
                     .and_then(|m| m.columns.get(&inc_ts.event_time_column))
                     .and_then(|c| c.data_latency.as_ref());
-                let windows = compute_incremental_windows(
+                let windows = compute_single_window(
                     &model.content,
                     inc_config,
                     inc_ts,
@@ -1125,7 +1125,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     .as_ref()
                     .and_then(|m| m.columns.get(&inc_ts.event_time_column))
                     .and_then(|c| c.data_latency.as_ref());
-                let windows = compute_incremental_windows(
+                let windows = compute_single_window(
                     &model.content,
                     inc_config,
                     inc_ts,

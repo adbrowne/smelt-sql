@@ -18,13 +18,13 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{NaiveDate, Utc};
 use tokio_util::sync::CancellationToken;
 
 use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
-use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
@@ -34,6 +34,7 @@ use crate::reporter::RunReporter;
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{inject_time_filter, TimeRange};
 use crate::types::{ExecuteRequest, RunOutcome};
+use crate::windowing::{compute_incremental_windows, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
 
 /// Plan for one model's execution. Internal to `execute_project` — the
@@ -49,28 +50,8 @@ struct ModelPlan {
 struct IncrementalPlan {
     config: smelt_core::IncrementalConfig,
     timeseries: smelt_core::config::TimeseriesConfig,
-    batches: Vec<BatchPlan>,
-}
-
-struct BatchPlan {
-    // The DELETE+INSERT both operate on [filter_start, filter_end): the output
-    // is clamped to this range by inject_time_filter and the DELETE must cover
-    // exactly what the INSERT writes. For a model with no lookback this equals
-    // the run window; for a lookback/rebasing model it is widened so the
-    // contract stays idempotent (see the partition construction below).
-    filter_start: NaiveDate,
-    filter_end: NaiveDate,
-}
-
-fn granularity_days(g: &smelt_core::Granularity) -> u32 {
-    match g {
-        smelt_core::Granularity::Hour => 1,
-        smelt_core::Granularity::Day => 1,
-        smelt_core::Granularity::Week => 7,
-        smelt_core::Granularity::Month => 30,
-        smelt_core::Granularity::Quarter => 91,
-        smelt_core::Granularity::Year => 365,
-    }
+    /// Batches with separate partition and filter ranges (bound-aware windowing).
+    batches: Vec<IncrementalBatch>,
 }
 
 /// Future returned by `BackendFactory::create`. Pinned + boxed so the trait
@@ -229,55 +210,32 @@ pub async fn execute_project(
 
         match (inc_config, ts_config, start_date, end_date) {
             (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
-                let model_info = ModelInfo {
-                    name: model_name.clone(),
-                    sql: expand_function_calls(&model.content, &fn_bodies),
-                    refs: model
-                        .refs
-                        .iter()
-                        .map(|r| r.smelt_ref.to_path().join("."))
-                        .collect(),
-                    timeseries_config: Some(ts.clone()),
-                    incremental_config: Some(inc.clone()),
-                };
-                let safety = analyze_batch_safety(&model_info);
+                // Resolve data latency from model column metadata for the event-time column.
+                let data_latency_days = metadata
+                    .and_then(|m| m.columns.get(&ts.event_time_column))
+                    .and_then(|c| c.data_latency.as_ref())
+                    .map(|l| l.to_days())
+                    .unwrap_or(0);
 
-                let (batch_days, context_days) = if request.per_partition {
-                    (granularity_days(&ts.granularity), 0)
-                } else if let Some(override_days) = request.batch_size_days {
-                    let ctx = match &safety {
-                        BatchSafety::BoundedSafe { context_days, .. } => *context_days,
-                        _ => 0,
-                    };
-                    (override_days, ctx)
-                } else {
-                    match &safety {
-                        BatchSafety::FullyBatchSafe => {
-                            ((end_date - start_date).num_days() as u32, 0)
-                        }
-                        BatchSafety::BoundedSafe {
-                            max_chunk_days,
-                            context_days,
-                            ..
-                        } => (*max_chunk_days, *context_days),
-                        BatchSafety::PerPartitionOnly { .. } => {
-                            (granularity_days(&ts.granularity), 0)
-                        }
-                    }
+                let full_range = TimeRange {
+                    start: start_date.format("%Y-%m-%d").to_string(),
+                    end: end_date.format("%Y-%m-%d").to_string(),
                 };
 
-                let mut batches = Vec::new();
-                let mut batch_start = start_date;
-                while batch_start < end_date {
-                    let batch_end = (batch_start + Duration::days(batch_days as i64)).min(end_date);
-                    let filter_start = batch_start - Duration::days(context_days as i64);
-                    batches.push(BatchPlan {
-                        filter_start,
-                        filter_end: batch_end,
-                    });
-                    batch_start = batch_end;
-                }
+                // Use bound-aware windowing: SQL temporal dependencies + data latency
+                // determine filter widening (not just analyze_batch_safety context_days).
+                let expanded_sql = expand_function_calls(&model.content, &fn_bodies);
+                let inc_windows = compute_incremental_windows(
+                    &ts,
+                    &inc,
+                    &expanded_sql,
+                    data_latency_days,
+                    &full_range,
+                    request.batch_size_days,
+                    request.per_partition,
+                );
 
+                let batches = inc_windows.batches;
                 total_batches += batches.len();
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
