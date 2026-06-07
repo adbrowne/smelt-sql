@@ -229,7 +229,7 @@ async fn test_cube_split_with_ref_calls() {
         .map(|step| match step {
             ExecutionStep::CreateTemp { name, sql } => ExecutionStep::CreateTemp {
                 name: name.clone(),
-                sql: smelt_cli::resolve_refs_in_sql(sql, "main"),
+                sql: smelt_runtime::resolve_refs_in_sql(sql, "main"),
             },
             other => other.clone(),
         })
@@ -327,12 +327,12 @@ GROUP BY 1, 2"#;
 
     // Full refresh: days 1-5
     let stripped_sql = Frontmatter::strip(model_sql);
-    let range = smelt_cli::TimeRange {
+    let range = smelt_runtime::TimeRange {
         start: "2024-01-01".to_string(),
         end: "2024-01-06".to_string(),
     };
     let filtered_sql =
-        smelt_cli::inject_time_filter(stripped_sql, &event_time_col, &range).unwrap();
+        smelt_runtime::inject_time_filter(stripped_sql, &event_time_col, &range).unwrap();
 
     backend
         .execute_sql(&format!(
@@ -361,12 +361,12 @@ GROUP BY 1, 2"#;
         .unwrap();
 
     // Incremental run for day 6
-    let range_day6 = smelt_cli::TimeRange {
+    let range_day6 = smelt_runtime::TimeRange {
         start: "2024-01-06".to_string(),
         end: "2024-01-07".to_string(),
     };
     let filtered_day6 =
-        smelt_cli::inject_time_filter(stripped_sql, &event_time_col, &range_day6).unwrap();
+        smelt_runtime::inject_time_filter(stripped_sql, &event_time_col, &range_day6).unwrap();
 
     // DELETE + INSERT pattern
     backend
@@ -492,7 +492,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
         .unwrap();
 
     // Execute cube split steps with time filtering for full range
-    let range = smelt_cli::TimeRange {
+    let range = smelt_runtime::TimeRange {
         start: "2024-01-01".to_string(),
         end: "2024-01-06".to_string(),
     };
@@ -500,7 +500,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
     for step in &steps {
         match step {
             ExecutionStep::CreateTemp { name, sql } => {
-                let filtered = smelt_cli::inject_time_filter(sql, &event_time_col, &range).unwrap();
+                let filtered = smelt_runtime::inject_time_filter(sql, &event_time_col, &range).unwrap();
                 let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, filtered);
                 backend.execute_sql(&create_sql).await.unwrap();
             }

@@ -81,7 +81,7 @@ A note on `smelt backbuild`: this plan does **not** migrate `commands/backbuild.
 | 4 — Migrate `smelt-cli/src/commands/run.rs` to `execute_project`. Add `StdoutReporter`. Add `RunReporter::model_compiled` callback. | done | 0c2aa53b | 2026-06-07 |
 | 5 — End-to-end CLI ↔ UI parity CI gate: `cargo test -p smelt-runtime --test execute_parity` runs identical fixtures through both entry points. | done | 8cfde1eb | 2026-06-07 |
 | 6 — Surface lockdown: `pub(crate)` on `SqlCompiler` constructors, `PrintContext` builders, emitter factories. Half-compile construction becomes a type error. | done | b362e10b | 2026-06-07 |
-| 7 — Delete `smelt-cli`'s shim modules + lib.rs re-exports. Tests and external callers move to `smelt_runtime::*`. Spec update lands. | pending |  |  |
+| 7 — Delete `smelt-cli`'s shim modules + lib.rs re-exports. Tests and external callers move to `smelt_runtime::*`. Spec update lands. | done | TBD | 2026-06-07 |
 
 ---
 

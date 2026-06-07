@@ -11,7 +11,7 @@
 mod ephemeral_seed_cte_injection {
     use smelt_backend::Backend;
     use smelt_backend_duckdb::DuckDbBackend;
-    use smelt_cli::{compiler::EphemeralResolver, CompilerRegistry, Config, ModelDiscovery};
+    use smelt_cli::{CompilerRegistry, Config, EphemeralResolver, ModelDiscovery};
     use std::path::Path;
     use tempfile::TempDir;
 

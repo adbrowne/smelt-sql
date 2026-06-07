@@ -2,9 +2,7 @@ pub mod argument_resolution;
 pub mod backend_factory;
 pub mod backend_registry;
 pub mod backfill;
-pub mod compiler;
 pub mod config;
-pub mod cumulative;
 pub mod diagnostics_terminal;
 pub mod discovery;
 pub mod docs;
@@ -22,17 +20,11 @@ pub mod temporal;
 pub mod test_compiler;
 pub mod test_property;
 pub mod test_runner;
-pub mod transformer;
 
 pub use backend_registry::BackendRegistry;
 pub use backfill::{
     compute_backbuild_plans, compute_batches_for_model, compute_range_run_plans,
     format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
-};
-pub use compiler::{
-    build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
-    resolve_refs_in_sql, CompiledModel, CompilerRegistry, EphemeralResolver, FnBodyMap,
-    SqlCompiler,
 };
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
@@ -47,6 +39,12 @@ pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMeta
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
+pub use smelt_runtime::{
+    build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
+    inject_source_filters, inject_time_filter, resolve_refs_in_sql, CompiledModel,
+    CompilerRegistry, EphemeralResolver, FnBodyMap, SourceBound, SqlCompiler, TimeRange,
+    TransformError, UpstreamSchemas,
+};
 pub use temporal::{
     compute_incremental_windows, compute_single_window, validate_run_window_alignment,
     IncrementalBatch, IncrementalWindows, SingleIncrementalWindow,
@@ -55,9 +53,6 @@ pub use test_compiler::{
     compile_whole_model_test_with_fns, extract_ctes, validate_test_expect, CteInfo,
 };
 pub use test_runner::TestResult;
-pub use transformer::{
-    inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
-};
 
 use anyhow::Context as _;
 use std::collections::HashMap;

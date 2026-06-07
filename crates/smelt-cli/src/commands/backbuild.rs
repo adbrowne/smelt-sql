@@ -3,11 +3,10 @@ use chrono::NaiveDate;
 use smelt_backend::PartitionRange;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_argument},
-    compiler::UpstreamSchemas,
     compute_backbuild_plans, discover_python_models, executor, find_project_root,
     format_plan_summary, init_db, inject_time_filter, parse_selector, BackendRegistry,
     BackfillOptions, CompilerRegistry, Config, Materialization, ModelDiscovery, SourcesConfig,
-    TimeRange,
+    TimeRange, UpstreamSchemas,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;

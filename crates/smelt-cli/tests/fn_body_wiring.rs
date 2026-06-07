@@ -2,7 +2,7 @@
 //! `CompilerRegistry` so that `smelt build` / `smelt run` actually expands
 //! call sites instead of emitting verbatim `smelt.fn.*` text.
 //!
-//! These tests cover the orchestration helper [`smelt_cli::build_fn_body_map`]
+//! These tests cover the orchestration helper [`smelt_runtime::build_fn_body_map`]
 //! and the registry-level setter [`CompilerRegistry::set_function_bodies_all`]
 //! that the production codepaths now invoke. They do not execute SQL — they
 //! only assert on emitted text, so no `bundled-duckdb` feature is required.
