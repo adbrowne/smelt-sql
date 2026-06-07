@@ -2216,36 +2216,18 @@ fn count_from_sources(select_stmt: &smelt_parser::ast::SelectStmt) -> usize {
 // Phase 30 — Logical plan construction
 // ============================================================================
 //
-// Kept in lib.rs because the call sites are pre-gathered with mixed Salsa
-// queries (resolve_function, file_signature_inputs, parse_file,
-// project_unstable_schema, workspace_function_bodies, function_call_cycle_fn_ids)
-// and the only consumer is the planner. The pure plan builder
-// (`build_logical_plan_pure`) follows the pure-function rule.
+// The Salsa thin wrapper lives here; it gathers inputs from mixed Salsa queries
+// (resolve_function, file_signature_inputs, parse_file, project_unstable_schema,
+// workspace_function_bodies, function_call_cycle_fn_ids) and delegates to the
+// pure builder `smelt_logical::build_logical_plan_pure` (Salsa-purity rule).
 
 use smelt_parser::ast::SmeltPathCall;
 
-/// Pre-gathered inputs for one `smelt.fn.*` call site, collected by the Salsa
-/// query before passing to the pure plan builder.
-struct FnCallInput {
-    fn_id: String,
-    transparent: bool,
-    properties: smelt_planner::logical::FunctionProperties,
-    /// Resolved provenance: either the declared provenance (when the workspace
-    /// opted in to `unstable_schema`) or `Unknown`.
-    provenance: smelt_planner::logical::Provenance,
-    /// Phase 41: the callee's body text, captured eagerly by the Salsa query.
-    /// `None` for opaque calls, unresolved references, and calls suppressed by
-    /// the cycle pre-pass.  When `Some`, the body is attached to the
-    /// `FunctionCall` plan node as a `LogicalNode::Raw { sql_text }` subtree;
-    /// the Phase 41 expansion rule clones it into the resulting `ExpandedCall`.
-    body_text: Option<String>,
-}
-
-/// Build a [`smelt_planner::logical::Plan`] from a single source file.
+/// Build a [`smelt_logical::Plan`] from a single source file.
 ///
 /// This tracked query gathers all Salsa inputs — the parsed AST, resolved
 /// signatures, and per-declaration frontmatter — then delegates to the pure
-/// helper [`build_logical_plan_pure`] which takes no `db` reference.
+/// helper [`smelt_logical::build_logical_plan_pure`] which takes no `db` reference.
 ///
 /// Returns `None` when the file does not parse as a valid SQL model.
 #[salsa::tracked]
@@ -2253,8 +2235,8 @@ pub fn logical_plan(
     db: &dyn salsa::Database,
     workspace: Workspace,
     file: SourceFile,
-) -> Option<smelt_planner::logical::Plan> {
-    use smelt_planner::logical::Provenance;
+) -> Option<smelt_logical::Plan> {
+    use smelt_logical::Provenance;
 
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
@@ -2277,7 +2259,7 @@ pub fn logical_plan(
     let cycle_set = function_call_cycle_fn_ids(db, workspace);
 
     // Walk the CST to collect all smelt.functions.* (path-form) call sites.
-    let call_inputs: Vec<FnCallInput> = ast
+    let call_inputs: Vec<smelt_logical::FnCallInput> = ast
         .syntax()
         .descendants()
         .filter_map(smelt_parser::ast::SmeltPathCall::cast)
@@ -2342,7 +2324,7 @@ pub fn logical_plan(
                             // `check_file_diagnostics`), which has the declaration's name range
                             // for proper anchoring. The logical-plan path only needs the props.
                             fm_with_kind.map(|(text, kind)| {
-                                smelt_planner::logical::parse_function_properties(&text, kind).0
+                                smelt_logical::parse_function_properties(&text, kind).0
                             })
                         })
                 })
@@ -2373,7 +2355,7 @@ pub fn logical_plan(
                 None
             };
 
-            FnCallInput {
+            smelt_logical::FnCallInput {
                 fn_id,
                 transparent,
                 properties,
@@ -2383,48 +2365,7 @@ pub fn logical_plan(
         })
         .collect();
 
-    Some(build_logical_plan_pure(call_inputs))
-}
-
-/// Pure plan builder — takes no `db` reference and calls no Salsa queries.
-///
-/// Constructs a minimal `Select` root with the first collected `FunctionCall`
-/// as its `from` child. Phase 32+ replaces this with a full projection tree.
-fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logical::Plan {
-    use smelt_planner::logical::LogicalNode;
-
-    let fn_call_nodes: Vec<Arc<LogicalNode>> = call_inputs
-        .into_iter()
-        .map(|input| {
-            let body = input
-                .body_text
-                .map(|t| Arc::new(LogicalNode::Raw { sql_text: t }));
-            Arc::new(LogicalNode::FunctionCall {
-                fn_id: input.fn_id,
-                args: Vec::new(), // Phase 30 stub — arg sub-plans deferred to Phase 32+
-                transparent: input.transparent,
-                provenance: input.provenance,
-                properties: input.properties,
-                pushed_filter: None,
-                body,
-            })
-        })
-        .collect();
-
-    if fn_call_nodes.is_empty() {
-        Arc::new(LogicalNode::Select {
-            projections: Vec::new(),
-            from: None,
-            filter: None,
-        })
-    } else {
-        let first = fn_call_nodes.into_iter().next().unwrap();
-        Arc::new(LogicalNode::Select {
-            projections: Vec::new(),
-            from: Some(first),
-            filter: None,
-        })
-    }
+    Some(smelt_logical::build_logical_plan_pure(call_inputs))
 }
 
 /// Phase 41: workspace-wide map from `fn_id` → body text for every

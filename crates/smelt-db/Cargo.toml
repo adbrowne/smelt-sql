@@ -15,6 +15,7 @@ serde_json.workspace = true
 serde_yaml = "0.9"
 marked-yaml = "0.8"
 smelt-core = { path = "../smelt-core" }
+smelt-logical = { path = "../smelt-logical" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-planner = { path = "../smelt-planner" }
 smelt-types = { path = "../smelt-types" }

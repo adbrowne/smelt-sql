@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod graph;
 pub mod logical;
 pub mod lowering;
+pub mod plan_builder;
 pub mod rules;
 pub mod types;
 
@@ -17,6 +18,7 @@ pub use logical::{
     Provenance, ProvenanceTag,
 };
 pub use lowering::as_struct::{as_struct_to_sql, backend_supports_struct_literal};
+pub use plan_builder::{build_logical_plan_pure, FnCallInput};
 pub use rules::cumulative::{
     classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
     CumulativeClassification, CumulativeDiagnostic, DrivingSource, SourceTimeseriesMap,
