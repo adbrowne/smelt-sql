@@ -79,7 +79,7 @@ A note on `smelt backbuild`: this plan does **not** migrate `commands/backbuild.
 | 2 — Move planner safety check + temporal bound derivation into `smelt-runtime`. `ExecuteRequest` gains `enforce_safety` + schema-evolution flags. | done | b0f568e4 | 2026-06-07 |
 | 3 — Eliminate `PhysicalGraph` / `LogicalGraph`. Runtime returns `PlanSummary` for `--show-plan`. CLI consumes the smaller surface. | done | 73eec7dd | 2026-06-07 |
 | 4 — Migrate `smelt-cli/src/commands/run.rs` to `execute_project`. Add `StdoutReporter`. Add `RunReporter::model_compiled` callback. | done | 0c2aa53b | 2026-06-07 |
-| 5 — End-to-end CLI ↔ UI parity CI gate: `cargo test -p smelt-runtime --test execute_parity` runs identical fixtures through both entry points. | done | TBD | 2026-06-07 |
+| 5 — End-to-end CLI ↔ UI parity CI gate: `cargo test -p smelt-runtime --test execute_parity` runs identical fixtures through both entry points. | done | 8cfde1eb | 2026-06-07 |
 | 6 — Surface lockdown: `pub(crate)` on `SqlCompiler` constructors, `PrintContext` builders, emitter factories. Half-compile construction becomes a type error. | pending |  |  |
 | 7 — Delete `smelt-cli`'s shim modules + lib.rs re-exports. Tests and external callers move to `smelt_runtime::*`. Spec update lands. | pending |  |  |
 
