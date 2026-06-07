@@ -301,11 +301,31 @@ impl DependencyGraph {
                     })
                     .map(|(name, _)| name.clone())
                     .collect(),
-                // `GeneratorFile` selection requires the emitted-models pipeline
-                // (smelt-db layer). At the DependencyGraph level we return an
-                // empty match set — callers that need generator-file selection
-                // must use the smelt-db `resolve_generator_file_selector` helper.
-                SelectionMethod::GeneratorFile { .. } => vec![],
+                // Match emitted models whose virtual path was produced by the
+                // named generator file. Virtual paths have the form
+                // `<abs-gen-dir>/<gen-filename>::<smelt-name>` — the `::` marker
+                // distinguishes them from hand-authored models. We strip the
+                // `<smelt-name>` suffix and check if the remainder ends with the
+                // workspace-relative selector path (forward- or OS-slash).
+                SelectionMethod::GeneratorFile { path } => {
+                    let sel_fwd = path.to_string_lossy().replace('\\', "/");
+                    let sel_os = path
+                        .to_string_lossy()
+                        .replace('/', std::path::MAIN_SEPARATOR_STR);
+                    self.models
+                        .iter()
+                        .filter(|(_, model)| {
+                            let p = model.path.to_string_lossy();
+                            if let Some(gen_path_str) = p.split("::").next() {
+                                let gen_fwd = gen_path_str.replace('\\', "/");
+                                gen_fwd.ends_with(&*sel_fwd) || gen_fwd.ends_with(&*sel_os)
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect()
+                }
             };
 
             for model_name in &direct_matches {

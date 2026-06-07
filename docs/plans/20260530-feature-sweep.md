@@ -84,7 +84,7 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | D3 | meta_language × functions × config_loading | done | 1 fixed (BUG-066: generator files without `.gen.sql` suffix failed to build — frontmatter-only detection not implemented), 2 needs-review (BUG-067: smelt.config.var in smelt.define body; BUG-068: List<T> not admissible as smelt.define parameter type) | — | 2026-06-08 |
 | D4 | incremental × cumulative_aggregate × timeseries | done | 1 fixed (BUG-069: CumulativeForbidsTimeseries/Incremental not surfaced in LSP — `_ => None` in `file_diagnostics` dropped both; added DiagnosticCode entries + wiring), 2 needs-review (BUG-070: backbuild with cumulative uses legacy path → full-refresh, not merge loop; BUG-071: cumulative Known Divergences missing Month/Quarter/Year limitation) | — | 2026-06-08 |
 | D5 | seeds × sources × types | done | 0 fixed, 2 needs-review (BUG-072: source timeseries silently ignored — SourceInfo has no timeseries field; BUG-073: inject_source_filters not wired into incremental execute path); SourceTypeError test fixture added (code was correct, untested) | — | 2026-06-08 |
-| D6 | model_selection × generators × cli | pending | | | |
+| D6 | model_selection × generators × cli | done | 1 fixed (BUG-074: generator_file: selector broken post CLI-runtime migration — returned empty; fixed in DependencyGraph::select_models via virtual-path ::‐suffix matching) | — | 2026-06-08 |
 | D7 | project isolation × lsp | pending | | | |
 | D8 | run-pipeline parity (cli ↔ ui) | pending | | | |
 
