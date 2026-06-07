@@ -680,7 +680,7 @@ pub fn provenance_unstable_diagnostics_for_file(
     file: SourceFile,
     unstable_schema: bool,
 ) -> Vec<Diagnostic> {
-    use smelt_planner::logical::Provenance;
+    use smelt_logical::logical::Provenance;
 
     if unstable_schema {
         return Vec::new();
@@ -703,7 +703,7 @@ pub fn provenance_unstable_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(
+        let (props, _fm_diags) = smelt_logical::logical::parse_function_properties(
             &fm,
             smelt_core::DeclarationKind::Define,
         );
@@ -733,7 +733,7 @@ pub fn provenance_unstable_diagnostics_for_file(
         let Some(fm) = ext.frontmatter(raw_text) else {
             continue;
         };
-        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(
+        let (props, _fm_diags) = smelt_logical::logical::parse_function_properties(
             &fm,
             smelt_core::DeclarationKind::Extern,
         );
@@ -765,9 +765,9 @@ pub fn provenance_unstable_diagnostics_for_file(
 /// `smelt.define` and `smelt.extern` declarations.
 ///
 /// For each declaration's frontmatter (if any), runs the shared
-/// [`smelt_planner::logical::parse_function_properties`] parser (which now
+/// [`smelt_logical::logical::parse_function_properties`] parser (which now
 /// routes through the unified catalogue) and converts every
-/// [`smelt_planner::logical::FrontmatterDiagnostic`] it returns into a full
+/// [`smelt_logical::logical::FrontmatterDiagnostic`] it returns into a full
 /// [`Diagnostic`] anchored at the declaration's name range.
 ///
 /// Unlike [`provenance_unstable_diagnostics_for_file`], this helper does
@@ -795,7 +795,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(
+        let (_props, fm_diags) = smelt_logical::logical::parse_function_properties(
             &fm,
             smelt_core::DeclarationKind::Define,
         );
@@ -818,7 +818,7 @@ pub fn frontmatter_parse_diagnostics_for_file(
         let Some(fm) = ext.frontmatter(raw_text) else {
             continue;
         };
-        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(
+        let (_props, fm_diags) = smelt_logical::logical::parse_function_properties(
             &fm,
             smelt_core::DeclarationKind::Extern,
         );
@@ -839,14 +839,14 @@ pub fn frontmatter_parse_diagnostics_for_file(
     out
 }
 
-/// Translate a parser-side [`smelt_planner::logical::FrontmatterDiagnostic`]
+/// Translate a parser-side [`smelt_logical::logical::FrontmatterDiagnostic`]
 /// into a full [`Diagnostic`] anchored at the declaration's name range.
 /// Phase 43.
 fn frontmatter_diag_to_diagnostic(
-    fm: smelt_planner::logical::FrontmatterDiagnostic,
+    fm: smelt_logical::logical::FrontmatterDiagnostic,
     range: rowan::TextRange,
 ) -> Diagnostic {
-    use smelt_planner::logical::FrontmatterSeverity;
+    use smelt_logical::logical::FrontmatterSeverity;
     let severity = match fm.severity {
         FrontmatterSeverity::Error => DiagnosticSeverity::Error,
         FrontmatterSeverity::Warning => DiagnosticSeverity::Warning,
@@ -936,7 +936,7 @@ pub fn missing_provenance_advisory_for_file(
     workspace: Workspace,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
-    use smelt_planner::logical::Provenance;
+    use smelt_logical::logical::Provenance;
 
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
@@ -1009,7 +1009,7 @@ pub fn missing_provenance_advisory_for_file(
                         .defines()
                         .find(|d| d.name().as_deref() == Some(fn_name.as_str()))
                         .and_then(|d| d.frontmatter(&decl_raw))?;
-                    let (props, _) = smelt_planner::logical::parse_function_properties(
+                    let (props, _) = smelt_logical::logical::parse_function_properties(
                         &fm,
                         smelt_core::DeclarationKind::Define,
                     );

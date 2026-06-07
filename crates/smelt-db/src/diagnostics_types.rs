@@ -642,7 +642,7 @@ pub enum DiagnosticCode {
     PythonModelNameMismatch,
 
     // ── Planner-rule diagnostic codes (surfaced via the uniform rule →
-    //    diagnostics interface; see `smelt_planner::rule_diagnostics`) ──────────
+    //    diagnostics interface; see `smelt_logical::rules::rule_diagnostics`) ────
     /// `cumulative_aggregate` SELECT has no GROUP BY (the key columns).
     CumulativeRequiresGroupBy,
     /// A `cumulative_aggregate` projection uses a non-allowlisted aggregator or

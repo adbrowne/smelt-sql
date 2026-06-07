@@ -942,8 +942,8 @@ pub fn file_diagnostics(
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
 /// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
 /// (`architecture.md` §"Planner scope").
-fn rule_diagnostic_code(code: smelt_planner::RuleDiagnosticCode) -> DiagnosticCode {
-    use smelt_planner::RuleDiagnosticCode as R;
+fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCode {
+    use smelt_logical::RuleDiagnosticCode as R;
     match code {
         R::CumulativeRequiresGroupBy => DiagnosticCode::CumulativeRequiresGroupBy,
         R::CumulativeUnknownAggregator => DiagnosticCode::CumulativeUnknownAggregator,
@@ -1304,10 +1304,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         };
         if !materialization.is_empty() {
             let stripped = smelt_parser::strip_frontmatter(text);
-            let refs = smelt_planner::collect_path_refs(&stripped);
+            let refs = smelt_logical::collect_path_refs(&stripped);
             // The cumulative classifier resolves its driving source by looking
             // each ref up in this map; the incremental rule does not use it.
-            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
+            let mut source_timeseries: smelt_logical::SourceTimeseriesMap = HashMap::new();
             if materialization == "cumulative_aggregate" {
                 for r in &refs {
                     if let Some(ts) = ref_timeseries_config(db, workspace, r) {
@@ -1320,7 +1320,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let ctx = smelt_planner::RuleContext {
+            let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,
                 sql: &stripped,
@@ -1330,11 +1330,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 incremental_config: metadata.incremental.as_ref(),
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
-            for rd in smelt_planner::detect_builtin_rules(&ctx) {
+            for rd in smelt_logical::detect_builtin_rules(&ctx) {
                 DiagnosticAcc(Diagnostic {
                     severity: match rd.severity {
-                        smelt_planner::RuleSeverity::Error => DiagnosticSeverity::Error,
-                        smelt_planner::RuleSeverity::Warning => DiagnosticSeverity::Warning,
+                        smelt_logical::RuleSeverity::Error => DiagnosticSeverity::Error,
+                        smelt_logical::RuleSeverity::Warning => DiagnosticSeverity::Warning,
                     },
                     message: rd.message,
                     range: rowan::TextRange::empty(body_start),
