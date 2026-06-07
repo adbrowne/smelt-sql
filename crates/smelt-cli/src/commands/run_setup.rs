@@ -41,7 +41,10 @@ pub(super) fn discover_models_for_run(
 
     let mut models: Vec<ModelFile> = raw_sql_models
         .into_iter()
+        // Skip generator files: by filename convention (.gen.sql) or by
+        // `generates: models` frontmatter (spec: the filename is not load-bearing).
         .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
+        .filter(|m| m.metadata.as_ref().is_none_or(|md| md.generates.is_none()))
         .filter(|m| !m.is_test())
         .collect();
     models.extend(emitted_model_files);

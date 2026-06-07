@@ -3299,3 +3299,15 @@ fn types_broken_crossfamily_add_emits_type_mismatch() {
         "TypeMismatch for cross-family arithmetic must be Error severity"
     );
 }
+
+/// BUG-066 regression: a generator file whose filename does NOT end with
+/// `.gen.sql` must be discovered as a generator (no parse errors) and must
+/// emit models on `smelt build`.
+///
+/// Spec: meta_language.md §"Multi-model production" — "The `.gen.sql` extension
+/// is a recommended convention; it is **not load-bearing**. The compiler
+/// determines a file's status from the frontmatter alone."
+#[test]
+fn d3_meta_fn_config_generator_without_gen_suffix_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/d3_meta_fn_config");
+}

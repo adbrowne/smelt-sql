@@ -270,6 +270,39 @@ pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<Model
     };
 
     match file_metadata {
+        Some(FileMetadata::Generator { metadata, .. }) => {
+            // Generator files (`generates: models` frontmatter) are handled by the
+            // W1–W4 Salsa pipeline, not by the SQL model discovery path.  Return
+            // the file's content so the Salsa DB can register it (for the
+            // `generator_files` query), but skip SQL parsing — the body is a
+            // meta-language expression, not a `smelt.define` or SELECT statement.
+            //
+            // Spec: meta_language.md §"Multi-model production" — "The `.gen.sql`
+            // extension is a recommended convention; it is **not load-bearing**.
+            // The compiler determines a file's status from the frontmatter alone."
+            // (BUG-066 fix: previously the `_ =>` arm parsed generators as SQL.)
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+
+            let address_segments = scan_root
+                .map(|root| ModelDiscovery::compute_address_segments(path, root))
+                .unwrap_or_default();
+
+            Ok(vec![ModelFile {
+                name,
+                path: path.to_path_buf(),
+                content,
+                refs: vec![],
+                parse_errors: vec![],
+                metadata: Some(metadata),
+                kind: ModelKind::Sql,
+                model_id: ModelId::from_path(path.to_path_buf()),
+                address_segments,
+            }])
+        }
         Some(FileMetadata::Multi { models }) => {
             // Multi-model file: create one ModelFile per section
             let base_segments = scan_root
@@ -680,6 +713,49 @@ SELECT 2 AS id
             models[0].canonical_path(),
             "daily_revenue",
             "canonical path leaf must be the file stem, not frontmatter name:"
+        );
+    }
+
+    /// A generator file (`generates: models` frontmatter) whose filename does
+    /// NOT end with `.gen.sql` must return zero parse errors from `parse_sql_file`.
+    ///
+    /// Spec: meta_language.md §"Multi-model production" — "The `.gen.sql` extension
+    /// is a recommended convention; it is **not load-bearing**. The compiler
+    /// determines a file's status from the frontmatter alone."
+    ///
+    /// Before the fix this test red-paths: `parse_sql_file` fell into the `_ =>`
+    /// arm, parsed the meta-expression body as SQL, and returned parse errors.
+    #[test]
+    fn generator_file_without_gen_suffix_has_no_parse_errors() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // A generator file named with a plain `.sql` extension (no `.gen.`).
+        let content = r#"---
+generates: models
+---
+smelt.config.load_yaml('cohorts.yaml', List<{ name: Text }>)
+  |> map(fn c => ModelDef {
+       name: c.name,
+       body: SELECT 1 AS x
+     })
+"#;
+        let file_path = models_dir.join("cohort_generator.sql");
+        std::fs::File::create(&file_path)
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+
+        let models = parse_sql_file(&file_path, None).unwrap();
+        assert!(
+            models.is_empty() || models.iter().all(|m| m.parse_errors.is_empty()),
+            "generator file without .gen.sql suffix must produce no parse errors; got: {:?}",
+            models
+                .iter()
+                .flat_map(|m| m.parse_errors.iter())
+                .collect::<Vec<_>>()
         );
     }
 }

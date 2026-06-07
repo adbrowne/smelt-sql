@@ -1,0 +1,6 @@
+- name: acme
+  schema: raw_acme
+  threshold: 50
+- name: globex
+  schema: raw_globex
+  threshold: 200
