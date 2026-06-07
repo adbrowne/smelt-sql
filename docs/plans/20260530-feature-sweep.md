@@ -82,7 +82,7 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | D1 | functions × incremental × timeseries | done | 0 fixed, 1 deferred docs-gap (BUG-062) | — | 2026-06-05 |
 | D2 | functions × schema_inference × types | done | 1 fixed (BUG-065: struct `.*` spread inside CTE body infers Unknown — `SMELT_PATH_CALL_STAR` unhandled in `infer_select_output_schema` + fn sigs not seeded before CTE processing; fixed red-green) | — | 2026-06-08 |
 | D3 | meta_language × functions × config_loading | done | 1 fixed (BUG-066: generator files without `.gen.sql` suffix failed to build — frontmatter-only detection not implemented), 2 needs-review (BUG-067: smelt.config.var in smelt.define body; BUG-068: List<T> not admissible as smelt.define parameter type) | — | 2026-06-08 |
-| D4 | incremental × cumulative_aggregate × timeseries | pending | | | |
+| D4 | incremental × cumulative_aggregate × timeseries | done | 1 fixed (BUG-069: CumulativeForbidsTimeseries/Incremental not surfaced in LSP — `_ => None` in `file_diagnostics` dropped both; added DiagnosticCode entries + wiring), 2 needs-review (BUG-070: backbuild with cumulative uses legacy path → full-refresh, not merge loop; BUG-071: cumulative Known Divergences missing Month/Quarter/Year limitation) | — | 2026-06-08 |
 | D5 | seeds × sources × types | pending | | | |
 | D6 | model_selection × generators × cli | pending | | | |
 | D7 | project isolation × lsp | pending | | | |

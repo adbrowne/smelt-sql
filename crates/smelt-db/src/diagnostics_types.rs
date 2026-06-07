@@ -662,6 +662,14 @@ pub enum DiagnosticCode {
     CumulativeMultipleDrivingSources,
     /// A `cumulative_aggregate` SELECT could not be parsed for classification.
     CumulativeSqlNotParseable,
+    /// A `cumulative_aggregate` model incorrectly declares a `timeseries:` block.
+    /// The cumulative output has no partition column; the rule reads it from the
+    /// driving source. Anchored at offset 0. Error severity.
+    CumulativeForbidsTimeseries,
+    /// A `cumulative_aggregate` model incorrectly declares an `incremental:` block.
+    /// The two materializations have different equivalence contracts; pick one.
+    /// Anchored at offset 0. Error severity.
+    CumulativeForbidsIncremental,
     /// Advisory (`Warning`): an `incremental` model's SQL is not batch-safe
     /// under the planner's incremental safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).

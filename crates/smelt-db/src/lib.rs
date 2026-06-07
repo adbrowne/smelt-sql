@@ -1271,6 +1271,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
+                smelt_core::metadata::MetadataError::CumulativeForbidsTimeseries => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::CumulativeForbidsTimeseries,
+                )),
+                smelt_core::metadata::MetadataError::CumulativeForbidsIncremental => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::CumulativeForbidsIncremental,
+                )),
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
                 _ => None,
