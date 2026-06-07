@@ -4233,6 +4233,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-logical"
+version = "0.3.2"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "smelt-core",
+ "smelt-parser",
+ "smelt-types",
+]
+
+[[package]]
 name = "smelt-lsp"
 version = "0.3.2"
 dependencies = [
@@ -4289,6 +4300,7 @@ dependencies = [
  "serde_yaml",
  "smelt-core",
  "smelt-db",
+ "smelt-logical",
  "smelt-parser",
  "smelt-types",
  "tempfile",

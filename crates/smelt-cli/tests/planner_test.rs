@@ -500,7 +500,8 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
     for step in &steps {
         match step {
             ExecutionStep::CreateTemp { name, sql } => {
-                let filtered = smelt_runtime::inject_time_filter(sql, &event_time_col, &range).unwrap();
+                let filtered =
+                    smelt_runtime::inject_time_filter(sql, &event_time_col, &range).unwrap();
                 let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, filtered);
                 backend.execute_sql(&create_sql).await.unwrap();
             }

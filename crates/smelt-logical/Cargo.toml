@@ -11,5 +11,7 @@ repository = "https://github.com/adbrowne/smelt-sql"
 smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
