@@ -1,0 +1,12 @@
+# Intentionally malformed: `NOTAREAL_TYPE` is not a recognised smelt DataType.
+# Expected: SourceTypeError Error diagnostic, NOT silent discovery drop.
+description: Events feed with a bad column type
+columns:
+  - name: event_id
+    type: INTEGER
+    nullable: false
+  - name: event_ts
+    type: NOTAREAL_TYPE
+    nullable: false
+  - name: payload
+    type: VARCHAR

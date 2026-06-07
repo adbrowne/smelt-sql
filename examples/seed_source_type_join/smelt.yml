@@ -1,0 +1,19 @@
+name: seed_source_type_join
+version: 1
+
+# D5 probe fixture: seeds × sources × types seam.
+# - Seeds: lookup CSV with type-inferred columns (INTEGER, VARCHAR, DECIMAL)
+# - Sources: externally-managed table with declared types (BIGINT, TIMESTAMP, alias INT)
+# - Models: join seed × source; arithmetic on DECIMAL column; type aliases accepted
+
+paths:
+  - models
+  - seeds
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

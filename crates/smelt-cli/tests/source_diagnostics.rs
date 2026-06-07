@@ -1,8 +1,16 @@
+//! Source-YAML diagnostic tests (BUG-032 / P2c + D5 probe).
+//!
 //! BUG-032 / P2c: malformed per-entity source YAML must surface as a
 //! `MalformedSource` diagnostic through the analyzer surface (and therefore be
 //! refused by the `smelt build` diagnostic-parity gate), instead of being
 //! silently dropped by source discovery and failing the build downstream with a
 //! misleading "schema does not exist".
+//!
+//! D5 probe: `SourceTypeError` must surface for a source with an unrecognised
+//! column type string (`sources.md` §"Diagnostic codes"). The clean
+//! `seed_source_type_join` fixture must produce zero source diagnostics even
+//! with type aliases (INT, BOOL, INT8, TIMESTAMPTZ) in both the seed sidecar
+//! and the source YAML.
 //!
 //! Spec: `docs/specs/architecture.md` §"Diagnostic parity rule (analysis ↔
 //! build)"; `docs/specs/sources.md` §"Diagnostic codes".
@@ -145,6 +153,78 @@ fn smelt_build_refuses_malformed_source() {
     assert!(
         combined.contains("MalformedSource"),
         "expected the build error to name the MalformedSource code.\n{combined}"
+    );
+}
+
+/// D5 probe: a source with an unrecognised column type string (`NOTAREAL_TYPE`)
+/// surfaces exactly one `SourceTypeError` Error anchored at the offending `.yml`.
+/// This is distinct from `MalformedSource` (which covers other structural violations).
+/// Spec: `sources.md` §"Diagnostic codes" — `SourceTypeError` | Error | "A `columns[].type`
+/// value is not a recognised smelt `DataType`".
+#[test]
+fn source_type_error_surfaces_diagnostic() {
+    let diags = source_diagnostics_for("sources_broken_unknown_type");
+
+    let errors: Vec<&SourceDiagnostic> = diags
+        .iter()
+        .filter(|d| d.diagnostic.severity == DiagnosticSeverity::Error)
+        .collect();
+
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one SourceTypeError, got {}: {:?}",
+        errors.len(),
+        diags
+            .iter()
+            .map(|d| format!(
+                "[{:?}] {}: {}",
+                d.diagnostic.code,
+                d.path.display(),
+                d.diagnostic.message
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let d = errors[0];
+    assert_eq!(
+        d.diagnostic.code,
+        Some(DiagnosticCode::SourceTypeError),
+        "expected SourceTypeError, got {:?}: {}",
+        d.diagnostic.code,
+        d.diagnostic.message
+    );
+    assert!(
+        d.path.ends_with("sources/raw/events.yml"),
+        "diagnostic should be anchored at the offending source file, got {}",
+        d.path.display()
+    );
+    assert!(
+        d.diagnostic.message.contains("NOTAREAL_TYPE"),
+        "message should name the bad type, got: {}",
+        d.diagnostic.message
+    );
+}
+
+/// D5 probe (clean path): the `seed_source_type_join` fixture uses type aliases
+/// (INT, BOOL, INT8, DECIMAL(4,2), TIMESTAMPTZ, TEXT) in both the seed sidecar
+/// and the source YAML. All aliases must parse to recognised smelt DataTypes.
+/// Expected: zero source diagnostics (the alias set maps fully to DataType vocabulary).
+#[test]
+fn seed_source_type_join_clean() {
+    let diags = source_diagnostics_for("seed_source_type_join");
+    assert!(
+        diags.is_empty(),
+        "seed_source_type_join uses only valid type aliases — expected zero source diagnostics, got: {:?}",
+        diags
+            .iter()
+            .map(|d| format!(
+                "[{:?}] {}: {}",
+                d.diagnostic.code,
+                d.path.display(),
+                d.diagnostic.message
+            ))
+            .collect::<Vec<_>>()
     );
 }
 

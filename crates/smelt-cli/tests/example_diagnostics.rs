@@ -1939,6 +1939,15 @@ fn staging_from_sources_example_has_zero_diagnostics() {
     check_workspace_no_diagnostics("examples/staging_from_sources");
 }
 
+/// D5 probe (clean path): `seed_source_type_join` joins a seed (inferred types
+/// via CSV + sidecar using aliases INT/BOOL/DECIMAL) with a source (declared
+/// aliases INT8/TIMESTAMPTZ/TEXT). All type aliases must resolve to recognised
+/// smelt DataTypes; no LSP diagnostics must fire.
+#[test]
+fn seed_source_type_join_has_zero_diagnostics() {
+    check_workspace_no_diagnostics("examples/seed_source_type_join");
+}
+
 /// Non-ASCII fixture: `examples/non_ascii_columns/` has Greek-letter column
 /// aliases and must produce zero diagnostics.
 #[test]
