@@ -260,6 +260,21 @@ pub trait RefSchemaProvider {
     ) -> Option<Vec<(String, TypedColumn)>> {
         None
     }
+
+    /// Returns all `smelt.define` / `smelt.extern` function signatures in the
+    /// workspace. Called by `build_type_context` to seed the `TypeContext`
+    /// before CTE processing so that struct-spread items inside CTE bodies
+    /// (`SELECT smelt.functions.f(...).*`) can be expanded into their declared
+    /// struct fields (function_schema_inference.md §"Struct returns and .*
+    /// spread", §"Propagation through CTEs, subqueries, and joins").
+    ///
+    /// The default implementation returns an empty Vec (used by
+    /// `StaticRefSchemaProvider` and test stubs that don't need full workspace
+    /// resolution). `SalsaRefSchemaProvider` overrides this with a workspace
+    /// scan via `file_signature_inputs`.
+    fn all_function_signatures(&self) -> Vec<smelt_types::signatures::FunctionSig> {
+        vec![]
+    }
 }
 
 /// `RefSchemaProvider` impl that delegates to the Salsa database. Used by the
@@ -726,6 +741,19 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
     ) -> Option<Vec<(String, TypedColumn)>> {
         self.resolve_smelt_path_call_schema(call)
     }
+
+    fn all_function_signatures(&self) -> Vec<smelt_types::signatures::FunctionSig> {
+        use crate::queries::functions::file_signature_inputs;
+        let mut sigs = Vec::new();
+        let mut files: Vec<_> = self.workspace.files(self.db).to_vec();
+        files.sort_by(|a, b| a.path(self.db).cmp(b.path(self.db)));
+        for f in &files {
+            for sig in file_signature_inputs(self.db, *f).iter() {
+                sigs.push(sig.clone());
+            }
+        }
+        sigs
+    }
 }
 
 /// Fully pure `RefSchemaProvider` for batch compilation (CLI, planner). Holds
@@ -761,6 +789,15 @@ pub fn build_type_context(
     refs: &dyn RefSchemaProvider,
 ) -> TypeContext {
     let mut ctx = TypeContext::new();
+
+    // Seed function signatures first so that struct-spread items inside CTE
+    // bodies (`SELECT smelt.functions.f(...).*`) can be expanded during CTE
+    // processing below. Without pre-seeding, `try_expand_struct_spread_item`
+    // in `infer_select_output_schema` cannot find the function's declared
+    // return type and falls back to a single Unknown column.
+    for sig in refs.all_function_signatures() {
+        ctx.add_function_signature(&sig.name.clone(), sig);
+    }
 
     // Source columns from sources.yml.
     for source in &sources_config.sources {

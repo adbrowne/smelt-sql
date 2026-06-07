@@ -475,6 +475,20 @@ pub fn infer_select_output_schema(
     };
 
     for (i, item) in select_list.items().enumerate() {
+        // Handle `smelt.functions.f(...).*` struct-spread items.
+        //
+        // These produce SMELT_PATH_CALL_STAR nodes with no single column
+        // name. They must expand to N typed columns (one per struct field)
+        // so that struct fields propagate through CTE bodies transparently
+        // (function_schema_inference.md §"Struct returns and .* spread",
+        // §"Propagation through CTEs, subqueries, and joins").
+        if let Some(expr) = item.expression() {
+            if let Some(expanded) = try_expand_struct_spread_item(expr.syntax(), &inner_ctx) {
+                columns.extend(expanded);
+                continue;
+            }
+        }
+
         let col_name = if let Some(alias) = item.alias() {
             alias
         } else if let Some(expr) = item.expression() {
@@ -499,6 +513,79 @@ pub fn infer_select_output_schema(
     }
 
     columns
+}
+
+/// If `expr_node` contains a `SMELT_PATH_CALL_STAR` wrapping a closed-struct
+/// returning function, expand it into `(field_name, TypedColumn)` pairs.
+///
+/// Returns `None` when the expression is not a struct spread, allowing
+/// the caller to fall through to the normal single-column path.
+///
+/// Mirrors `collect_struct_spread_columns` in `schema.rs` for the CTE /
+/// subquery context (function_schema_inference.md §"Struct returns and .*
+/// spread" and §"Propagation through CTEs, subqueries, and joins").
+/// Pure — no Salsa access.
+fn try_expand_struct_spread_item(
+    expr_node: &smelt_parser::syntax_kind::SyntaxNode,
+    ctx: &TypeContext,
+) -> Option<Vec<(String, TypedColumn)>> {
+    use crate::type_inference::function_call::infer_smelt_path_call_type;
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::{SMELT_PATH_CALL, SMELT_PATH_CALL_STAR};
+    use smelt_types::signatures::{SmeltType, StructRowTail};
+
+    // Find a SMELT_PATH_CALL_STAR child of the expression node.
+    let inner_call: SmeltPathCall = expr_node.children().find_map(|child| {
+        if child.kind() == SMELT_PATH_CALL_STAR {
+            child.children().find_map(|inner| {
+                if inner.kind() == SMELT_PATH_CALL {
+                    SmeltPathCall::cast(inner)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    })?;
+
+    // Only expand closed structs (no row-tail marker).
+    let fn_name = inner_call.segments().last().cloned().unwrap_or_default();
+    let is_closed_struct = ctx
+        .lookup_function_signature(&fn_name)
+        .map(|sig| {
+            matches!(
+                &sig.return_type,
+                Some(Ok(SmeltType::Struct {
+                    tail: StructRowTail::None,
+                    ..
+                }))
+            )
+        })
+        .unwrap_or(false);
+    if !is_closed_struct {
+        return None;
+    }
+
+    // Resolve the call's return type and expand struct fields.
+    let typed = infer_smelt_path_call_type(&inner_call, ctx)?;
+    if let DataType::Struct(fields) = typed.data_type {
+        let cols = fields
+            .into_iter()
+            .map(|(name, dt)| {
+                (
+                    name,
+                    TypedColumn {
+                        data_type: dt,
+                        nullable: true,
+                    },
+                )
+            })
+            .collect();
+        Some(cols)
+    } else {
+        None
+    }
 }
 
 /// Infer a column name from an expression

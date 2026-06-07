@@ -80,7 +80,7 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | C13 | data_catalog | done | 3 fixed (BUG-053/054/055: Tests section missing from model pages + 2 stale KDs removed) | — | 2026-06-05 |
 | C14 | smelt_yml | done | 2 fixed (BUG-056/057: timeseries fields in wrong docs key; version required=yes), 1 deferred (BUG-058), 3 needs-review (BUG-059/060/061) | — | 2026-06-05 |
 | D1 | functions × incremental × timeseries | done | 0 fixed, 1 deferred docs-gap (BUG-062) | — | 2026-06-05 |
-| D2 | functions × schema_inference × types | pending | | | |
+| D2 | functions × schema_inference × types | done | 1 fixed (BUG-065: struct `.*` spread inside CTE body infers Unknown — `SMELT_PATH_CALL_STAR` unhandled in `infer_select_output_schema` + fn sigs not seeded before CTE processing; fixed red-green) | — | 2026-06-08 |
 | D3 | meta_language × functions × config_loading | pending | | | |
 | D4 | incremental × cumulative_aggregate × timeseries | pending | | | |
 | D5 | seeds × sources × types | pending | | | |

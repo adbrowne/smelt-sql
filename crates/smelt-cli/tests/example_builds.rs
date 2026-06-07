@@ -179,6 +179,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          verified e2e via fn_incremental_ts_e2e.rs)",
     ),
     (
+        "fn_struct_spread_cte",
+        "Catalog Error: Table with name sources_gps_readings does not exist \
+         (D2 probe fixture: struct spread inside CTE body schema propagation; \
+         source table not seeded in standalone build env; \
+         verified via type_command_function_returns::struct_spread_inside_cte_body_propagates_field_types)",
+    ),
+    (
         "demo_workspace",
         "Error: Dependency validation failed \
          (probe/demo fixture; not a clean standalone build target)",
