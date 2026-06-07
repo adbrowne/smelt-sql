@@ -28,3 +28,5 @@ line-index.workspace = true
 [dev-dependencies]
 rowan.workspace = true
 tempfile = "3"
+smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

@@ -4304,6 +4304,7 @@ dependencies = [
  "rowan",
  "serde",
  "smelt-backend",
+ "smelt-backend-duckdb",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
