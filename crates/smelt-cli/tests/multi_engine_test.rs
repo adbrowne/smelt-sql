@@ -9,10 +9,9 @@
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    compiler::SqlCompiler,
     config::{Config, Materialization, ModelConfig, Target},
     discovery::{ModelFile, ModelKind, RefInfo},
-    ModelDiscovery,
+    CompilerRegistry, ModelDiscovery,
 };
 use smelt_core::graph::DependencyGraph;
 use std::collections::HashMap;
@@ -169,18 +168,17 @@ fn test_compiler_cross_engine_ref_emits_read_parquet() {
 
     let mut targets = HashMap::new();
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
-    let config = make_config_with_targets(targets);
+    let config = make_config_with_targets(targets.clone());
 
-    let target = make_duckdb_target("main");
-    let mut compiler = SqlCompiler::new(config, &target);
-
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "spark_model".to_string(),
         "read_parquet('/warehouse/default/spark_model/**/*.parquet', hive_partitioning=true)"
             .to_string(),
     );
-    compiler.set_cross_engine_refs(cross_refs);
+    registry.set_cross_engine_refs("duckdb_local", cross_refs);
+    let compiler = registry.get("duckdb_local");
 
     let compiled = compiler
         .compile(&model, "main")
@@ -214,18 +212,17 @@ JOIN smelt.spark_model b ON a.id = b.id
 
     let mut targets = HashMap::new();
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
-    let config = make_config_with_targets(targets);
+    let config = make_config_with_targets(targets.clone());
 
-    let target = make_duckdb_target("main");
-    let mut compiler = SqlCompiler::new(config, &target);
-
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "spark_model".to_string(),
         "read_parquet('/warehouse/default/spark_model/**/*.parquet', hive_partitioning=true)"
             .to_string(),
     );
-    compiler.set_cross_engine_refs(cross_refs);
+    registry.set_cross_engine_refs("duckdb_local", cross_refs);
+    let compiler = registry.get("duckdb_local");
 
     let compiled = compiler
         .compile(&model, "main")
@@ -360,11 +357,9 @@ FROM smelt.visitor_daily"#;
 
     let mut targets = HashMap::new();
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
-    let config = make_config_with_targets(targets);
+    let config = make_config_with_targets(targets.clone());
 
-    let target = make_duckdb_target("main");
-    let mut compiler = SqlCompiler::new(config, &target);
-
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "visitor_daily".to_string(),
@@ -373,7 +368,8 @@ FROM smelt.visitor_daily"#;
             parquet_dir.display()
         ),
     );
-    compiler.set_cross_engine_refs(cross_refs);
+    registry.set_cross_engine_refs("duckdb_local", cross_refs);
+    let compiler = registry.get("duckdb_local");
 
     let compiled = compiler
         .compile(&model, "main")

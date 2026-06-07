@@ -89,7 +89,7 @@ pub fn build_source_bound_map(
 /// has already emitted a diagnostic for missing required args).
 /// Unknown named-argument keys are silently ignored (also already rejected by
 /// the type-checker via `UnknownPassingParameter`).
-pub fn bind_named_args(
+pub(crate) fn bind_named_args(
     params: &[(String, Option<String>)],
     positional: &[String],
     named: &[(String, String)],
@@ -658,7 +658,7 @@ impl UpstreamSchemas {
 }
 
 impl SqlCompiler {
-    pub fn new(config: Config, target: &Target) -> Self {
+    pub(crate) fn new(config: Config, target: &Target) -> Self {
         let (dialect, capabilities) = dialect_for_backend(target.backend_type());
         Self {
             config,
@@ -671,13 +671,13 @@ impl SqlCompiler {
     }
 
     /// Set cross-engine ref mappings (model_name -> parquet read expression).
-    pub fn set_cross_engine_refs(&mut self, refs: HashMap<String, String>) {
+    pub(crate) fn set_cross_engine_refs(&mut self, refs: HashMap<String, String>) {
         self.cross_engine_refs = refs;
     }
 
     /// Provide upstream model/seed/source schemas so `apply_type_casts` can
     /// resolve `smelt.ref()` and `smelt.source()` column types correctly.
-    pub fn set_upstream_schemas(&mut self, schemas: Arc<UpstreamSchemas>) {
+    pub(crate) fn set_upstream_schemas(&mut self, schemas: Arc<UpstreamSchemas>) {
         self.upstream_schemas = schemas;
     }
 
@@ -686,7 +686,10 @@ impl SqlCompiler {
     /// Maps leaf function name → (param_names, body_sql). When set, `smelt.fn.*`
     /// calls in compiled models are expanded inline. When not set (the default),
     /// they pass through verbatim.
-    pub fn set_function_bodies(&mut self, bodies: FnBodyMap) {
+    ///
+    /// For multi-target setups use [`CompilerRegistry::set_function_bodies_all`].
+    #[allow(dead_code)]
+    pub(crate) fn set_function_bodies(&mut self, bodies: FnBodyMap) {
         self.fn_bodies = Some(Arc::new(bodies));
     }
 
@@ -1035,8 +1038,12 @@ impl SqlCompiler {
     }
 
     /// Compile a model with custom SQL (e.g., for transformed queries).
-    /// This is used for incremental processing where the SQL has been transformed.
-    pub fn compile_with_sql(
+    ///
+    /// Restricted to crate-internal use: external callers must use
+    /// [`SqlCompiler::compile_with_sql_and_ephemerals`] so ephemeral inlining is
+    /// never accidentally bypassed.
+    #[allow(dead_code)]
+    pub(crate) fn compile_with_sql(
         &self,
         model: &ModelFile,
         schema: &str,
@@ -1420,7 +1427,7 @@ impl EphemeralResolver {
 /// Prepend ephemeral CTEs to a compiled SQL string.
 ///
 /// Handles merging with existing WITH clauses in the model's SQL.
-pub fn prepend_ephemeral_ctes(sql: &str, cte_list: &[(String, String)]) -> String {
+pub(crate) fn prepend_ephemeral_ctes(sql: &str, cte_list: &[(String, String)]) -> String {
     if cte_list.is_empty() {
         return sql.to_string();
     }

@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use smelt_cli::{
-    discover_emitted_model_files, discover_python_models, executor, init_db, Config, ModelDiscovery,
-    ModelFile, SourcesConfig,
+    discover_emitted_model_files, discover_python_models, executor, init_db, Config,
+    ModelDiscovery, ModelFile, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_state::file_store::FileStore;
@@ -178,7 +178,10 @@ pub(super) fn compute_auto_time_range(
     }
     if let Some(start_date) = latest {
         let start = start_date.format("%Y-%m-%d").to_string();
-        info!("[AUTO] Time range: {} to {} (from interval store)", start, today);
+        info!(
+            "[AUTO] Time range: {} to {} (from interval store)",
+            start, today
+        );
         Some((start, today))
     } else {
         info!("[AUTO] No interval history found. Use --start/--end for initial run.");

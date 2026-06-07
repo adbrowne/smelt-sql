@@ -4,7 +4,6 @@ pub mod backend_registry;
 pub mod backfill;
 pub mod compiler;
 pub mod config;
-pub mod reporter;
 pub mod cumulative;
 pub mod diagnostics_terminal;
 pub mod discovery;
@@ -16,6 +15,7 @@ pub mod explain;
 pub mod metadata;
 pub mod migration;
 pub mod python;
+pub mod reporter;
 pub mod seed;
 pub mod selector;
 pub mod temporal;
@@ -31,8 +31,8 @@ pub use backfill::{
 };
 pub use compiler::{
     build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
-    prepend_ephemeral_ctes, resolve_refs_in_sql, CompiledModel, CompilerRegistry,
-    EphemeralResolver, FnBodyMap, SqlCompiler,
+    resolve_refs_in_sql, CompiledModel, CompilerRegistry, EphemeralResolver, FnBodyMap,
+    SqlCompiler,
 };
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,

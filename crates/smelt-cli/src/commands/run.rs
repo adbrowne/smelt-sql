@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::info;
 
-use crate::RunArgs;
 use super::run_setup::*;
+use crate::RunArgs;
 
 pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let run_start = Utc::now();
@@ -24,14 +24,19 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let project_dir = smelt_cli::find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
     info!("Project directory: {}", project_dir.display());
-    let config = Config::load(&project_dir)
-        .with_context(|| "Failed to load smelt.yml configuration")?;
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
     info!("Project: {} (version {})", config.name, config.version);
     if !config.targets.contains_key(&args.target) {
         return Err(anyhow::anyhow!(
             "Target '{}' not found in smelt.yml. Available targets: {}",
             args.target,
-            config.targets.keys().cloned().collect::<Vec<_>>().join(", ")
+            config
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
@@ -68,8 +73,10 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     graph.add_seeds(&seeds);
     graph.warn_unused_ephemerals(&config);
 
-    let mut gen_salsa_db =
-        smelt_cli::init_db(&project_dir, &discovery.discover_models().unwrap_or_default());
+    let mut gen_salsa_db = smelt_cli::init_db(
+        &project_dir,
+        &discovery.discover_models().unwrap_or_default(),
+    );
     gen_salsa_db.set_active_target(Some(Arc::from(args.target.as_str())));
     let gen_salsa_ws =
         smelt_db::Workspace::try_get(&gen_salsa_db).expect("workspace not initialized");
@@ -80,11 +87,19 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
     let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
     let resolved_select = resolve_selector_args(
-        &gen_salsa_db, gen_salsa_ws, gen_salsa_project, active_scope.as_ref(), &args.select,
+        &gen_salsa_db,
+        gen_salsa_ws,
+        gen_salsa_project,
+        active_scope.as_ref(),
+        &args.select,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
     let resolved_exclude = resolve_selector_args(
-        &gen_salsa_db, gen_salsa_ws, gen_salsa_project, active_scope.as_ref(), &args.exclude,
+        &gen_salsa_db,
+        gen_salsa_ws,
+        gen_salsa_project,
+        active_scope.as_ref(),
+        &args.exclude,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -96,10 +111,8 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
             if let smelt_cli::SelectionMethod::ModelName(name) = &sel.method {
                 if !sel.include_upstream && !sel.include_downstream {
                     if let Ok(model) = graph.get_model(name) {
-                        let mat = config.get_materialization_with_metadata(
-                            name,
-                            model.metadata.as_deref(),
-                        );
+                        let mat = config
+                            .get_materialization_with_metadata(name, model.metadata.as_deref());
                         if mat == smelt_core::config::Materialization::Ephemeral {
                             return Err(anyhow::anyhow!(
                                 "Cannot run ephemeral model '{}' directly — ephemeral models \
@@ -149,8 +162,13 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     .await;
 
     // 7. Build Salsa DB for execute_project, then run.
-    let salsa_db =
-        build_execute_salsa_db(&discovery, &function_files, &models, &project_dir, &args.target)?;
+    let salsa_db = build_execute_salsa_db(
+        &discovery,
+        &function_files,
+        &models,
+        &project_dir,
+        &args.target,
+    )?;
 
     let request = ExecuteRequest {
         target: args.target.clone(),
@@ -217,7 +235,10 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     .count()
             })
             .unwrap_or(0);
-        info!("[DRY RUN] Compiled {} model(s); no execution performed.", planned);
+        info!(
+            "[DRY RUN] Compiled {} model(s); no execution performed.",
+            planned
+        );
         return Ok(());
     }
 

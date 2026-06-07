@@ -7,7 +7,7 @@
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_cli::{Config, ModelDiscovery, SourcesConfig, SqlCompiler};
+use smelt_cli::{CompilerRegistry, Config, ModelDiscovery, SourcesConfig};
 use smelt_core::graph::DependencyGraph;
 use std::path::Path;
 use tempfile::TempDir;
@@ -136,8 +136,9 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
     seed_database(&backend).await?;
 
     // Compile and execute each model in dependency order
-    let target = config.targets.get(default_target).unwrap();
-    let compiler = SqlCompiler::new(config.clone(), target);
+    let target_map = config.targets.clone();
+    let registry = CompilerRegistry::new(&config, &target_map);
+    let compiler = registry.get(default_target);
 
     let mut errors = Vec::new();
     for model_name in &exec_order {

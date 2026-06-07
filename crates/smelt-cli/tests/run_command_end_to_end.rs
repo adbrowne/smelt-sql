@@ -114,11 +114,7 @@ fn test_full_refresh_run() {
 #[test]
 fn test_verbose_prints_compiled_sql() {
     let tmp = TempDir::new().unwrap();
-    let ws = stage_workspace(
-        &tmp,
-        "run_verbose_ws",
-        &[("simple.sql", SQL_SIMPLE)],
-    );
+    let ws = stage_workspace(&tmp, "run_verbose_ws", &[("simple.sql", SQL_SIMPLE)]);
 
     let output = run_smelt(&ws, &["--verbose"]);
 

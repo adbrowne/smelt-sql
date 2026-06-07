@@ -31,9 +31,9 @@ pub mod types;
 pub mod windowing;
 
 pub use compile::{
-    bind_named_args, build_source_bound_map, expand_function_calls, prepend_ephemeral_ctes,
-    resolve_refs_in_sql, substitute_params_with_named, CompiledModel, CompilerRegistry,
-    EphemeralResolver, SqlCompiler, UpstreamSchemas,
+    build_source_bound_map, expand_function_calls, resolve_refs_in_sql,
+    substitute_params_with_named, CompiledModel, CompilerRegistry, EphemeralResolver, SqlCompiler,
+    UpstreamSchemas,
 };
 pub use cumulative::{
     build_cumulative_merge_sql, classify_cumulative_sql, execute_cumulative_aggregate,

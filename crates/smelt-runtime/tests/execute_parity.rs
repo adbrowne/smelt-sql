@@ -202,11 +202,7 @@ async fn test_cli_ui_manifest_parity() {
 
     // Fixture models.
     write_model(project_dir, "base", "SELECT 1 AS id, 'hello' AS label");
-    write_model(
-        project_dir,
-        "derived",
-        "SELECT id, label FROM smelt.base",
-    );
+    write_model(project_dir, "derived", "SELECT id, label FROM smelt.base");
     write_model(
         project_dir,
         "ephemeral_helper",

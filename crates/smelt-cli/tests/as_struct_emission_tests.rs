@@ -9,7 +9,7 @@
 
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::{ModelFile, ModelKind};
-use smelt_runtime::{SqlCompiler, UpstreamSchemas};
+use smelt_runtime::{CompilerRegistry, UpstreamSchemas};
 use smelt_types::{DataType, TypedColumn};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,10 +55,11 @@ fn duckdb_config_and_target() -> (Config, Target) {
     (config, target)
 }
 
-/// Build a minimal DuckDB compiler.
-fn duckdb_compiler() -> SqlCompiler {
-    let (config, target) = duckdb_config_and_target();
-    SqlCompiler::new(config, &target)
+/// Build a minimal DuckDB compiler registry.
+fn duckdb_registry() -> CompilerRegistry {
+    let (config, _) = duckdb_config_and_target();
+    let targets = config.targets.clone();
+    CompilerRegistry::new(&config, &targets)
 }
 
 /// Build upstream schemas with known columns for a model name.
@@ -91,7 +92,6 @@ fn upstream_with_model(model_name: &str, cols: Vec<(String, DataType)>) -> Arc<U
 
 #[test]
 fn as_struct_emits_duckdb_struct_literal() {
-    let mut compiler = duckdb_compiler();
     // The upstream model `orders` has two columns: order_id (BigInt), total (Double).
     let schemas = upstream_with_model(
         "orders",
@@ -100,7 +100,9 @@ fn as_struct_emits_duckdb_struct_literal() {
             ("total".to_string(), DataType::Double),
         ],
     );
-    compiler.set_upstream_schemas(schemas);
+    let mut registry = duckdb_registry();
+    registry.set_upstream_schemas_all(schemas);
+    let compiler = registry.get("default");
 
     // A model that uses smelt.as_struct on the alias `o`.
     // Note: avoid `row` as an alias name — it's a SQL reserved word that confuses the parser.
@@ -132,7 +134,6 @@ fn as_struct_emits_duckdb_struct_literal() {
 
 #[test]
 fn as_struct_except_excludes_columns() {
-    let mut compiler = duckdb_compiler();
     let schemas = upstream_with_model(
         "orders",
         vec![
@@ -141,7 +142,9 @@ fn as_struct_except_excludes_columns() {
             ("tax".to_string(), DataType::Double),
         ],
     );
-    compiler.set_upstream_schemas(schemas);
+    let mut registry = duckdb_registry();
+    registry.set_upstream_schemas_all(schemas);
+    let compiler = registry.get("default");
 
     let sql = "SELECT smelt.as_struct(o EXCEPT tax) AS order_row FROM smelt.models.orders o";
     let model = model_file("test_as_struct_except", sql);
@@ -176,7 +179,6 @@ fn as_struct_except_excludes_columns() {
 #[test]
 fn smelt_fn_call_expands_body() {
     // A function `safe_div` with params (a, b) and body: a / NULLIF(b, 0)
-    let mut compiler = duckdb_compiler();
     let mut fn_bodies: smelt_runtime::FnBodyMap = HashMap::new();
     fn_bodies.insert(
         "safe_div".to_string(),
@@ -185,7 +187,9 @@ fn smelt_fn_call_expands_body() {
             "a / NULLIF(b, 0)".to_string(),
         ),
     );
-    compiler.set_function_bodies(fn_bodies);
+    let mut registry = duckdb_registry();
+    registry.set_function_bodies_all(fn_bodies);
+    let compiler = registry.get("default");
 
     let sql = "SELECT smelt.functions.safe_div(revenue, cost) AS result FROM t";
     let model = model_file("test_fn_call", sql);
@@ -210,7 +214,8 @@ fn smelt_fn_call_expands_body() {
 #[test]
 fn smelt_fn_call_passthrough_when_no_body_map() {
     // When no function_bodies are set (legacy / test mode), smelt.functions.* passes through.
-    let compiler = duckdb_compiler();
+    let registry = duckdb_registry();
+    let compiler = registry.get("default");
     let sql = "SELECT smelt.functions.some_fn(x) FROM t";
     let model = model_file("test_fn_passthrough", sql);
     // Should not fail, but pass through verbatim

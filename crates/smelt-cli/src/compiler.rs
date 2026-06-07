@@ -8,7 +8,7 @@
 //! `smelt_runtime` directly.
 
 pub use smelt_runtime::{
-    bind_named_args, build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
-    prepend_ephemeral_ctes, resolve_refs_in_sql, substitute_params_with_named, CompiledModel,
-    CompilerRegistry, EphemeralResolver, FnBodyMap, SqlCompiler, UpstreamSchemas,
+    build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
+    resolve_refs_in_sql, substitute_params_with_named, CompiledModel, CompilerRegistry,
+    EphemeralResolver, FnBodyMap, SqlCompiler, UpstreamSchemas,
 };

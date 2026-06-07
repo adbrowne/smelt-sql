@@ -12,11 +12,11 @@
 //!
 //! The end-to-end CLI-vs-UI run-output parity test lands in Phase 4
 //! (`execute_parity.rs`); this file proves the compile API is callable from
-//! outside `smelt-runtime`.
+//! outside `smelt-runtime` through the `CompilerRegistry` entry point.
 
 use smelt_core::config::{Config, Materialization, Target};
 use smelt_runtime::{
-    build_source_bound_map, inject_time_filter, EphemeralResolver, FnBodyMap, SqlCompiler,
+    build_source_bound_map, inject_time_filter, CompilerRegistry, EphemeralResolver, FnBodyMap,
     TimeRange, UpstreamSchemas,
 };
 use smelt_types::{DataType, TypedColumn};
@@ -75,7 +75,9 @@ fn test_compile_with_function_call() {
     let sql = "SELECT smelt.functions.safe_div(a, b) AS r FROM smelt.models.t";
     let model = make_model("uses_fn", sql);
 
-    let mut compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let config = test_config();
+    let targets = config.targets.clone();
+    let mut registry = CompilerRegistry::new(&config, &targets);
 
     // Wire a function body. `safe_div(num, den)` → `(CASE WHEN den = 0 THEN NULL ELSE num/den END)`.
     let mut fn_bodies: FnBodyMap = HashMap::new();
@@ -86,8 +88,9 @@ fn test_compile_with_function_call() {
             "(CASE WHEN den = 0 THEN NULL ELSE num/den END)".to_string(),
         ),
     );
-    compiler.set_function_bodies(fn_bodies);
+    registry.set_function_bodies_all(fn_bodies);
 
+    let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler
         .compile_with_sql_and_ephemerals(&model, "main", sql, &resolver)
@@ -116,7 +119,9 @@ fn test_expand_function_calls_reveals_inner_range_bound() {
     let sql = "SELECT * FROM smelt.functions.windowed(src => smelt.silver.events_parsed)";
     let model = make_model("uses_window_fn", sql);
 
-    let mut compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let config = test_config();
+    let targets = config.targets.clone();
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut fn_bodies: FnBodyMap = HashMap::new();
     fn_bodies.insert(
         "windowed".to_string(),
@@ -127,7 +132,8 @@ fn test_expand_function_calls_reveals_inner_range_bound() {
                 .to_string(),
         ),
     );
-    compiler.set_function_bodies(fn_bodies);
+    registry.set_function_bodies_all(fn_bodies);
+    let compiler = registry.get("default");
     let _ = &model;
 
     let expanded = compiler.expand_function_calls(sql);
@@ -183,7 +189,10 @@ fn test_compile_with_ephemeral_dep() {
     let downstream_sql = "SELECT * FROM smelt.upstream_ephemeral";
     let downstream = make_model("downstream", downstream_sql);
 
-    let compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let config = test_config();
+    let targets = config.targets.clone();
+    let registry = CompilerRegistry::new(&config, &targets);
+    let compiler = registry.get("default");
 
     let ephemerals = vec![(
         "upstream_ephemeral".to_string(),
@@ -218,7 +227,9 @@ fn test_compile_applies_type_casts() {
     let sql = "SELECT SUM(amount) AS total FROM smelt.models.events";
     let model = make_model("agg", sql);
 
-    let mut compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let config = test_config();
+    let targets = config.targets.clone();
+    let mut registry = CompilerRegistry::new(&config, &targets);
 
     let upstream = UpstreamSchemas {
         models: {
@@ -237,8 +248,9 @@ fn test_compile_applies_type_casts() {
         },
         ..Default::default()
     };
-    compiler.set_upstream_schemas(Arc::new(upstream));
+    registry.set_upstream_schemas_all(Arc::new(upstream));
 
+    let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler
         .compile_with_sql_and_ephemerals(&model, "main", sql, &resolver)
@@ -266,7 +278,10 @@ fn test_compile_with_time_filter_injection() {
     };
     let filtered = inject_time_filter(sql, "event_time", &range).expect("filter ok");
 
-    let compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let config = test_config();
+    let targets = config.targets.clone();
+    let registry = CompilerRegistry::new(&config, &targets);
+    let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler
         .compile_with_sql_and_ephemerals(&model, "main", &filtered, &resolver)
@@ -290,7 +305,10 @@ fn test_compile_path_ref_resolution() {
     let sql = "SELECT * FROM smelt.staging.events";
     let model = make_model("uses_path", sql);
 
-    let compiler = SqlCompiler::new(test_config(), &duckdb_target());
+    let config = test_config();
+    let targets = config.targets.clone();
+    let registry = CompilerRegistry::new(&config, &targets);
+    let compiler = registry.get("default");
     let resolver = EphemeralResolver::empty();
     let compiled = compiler
         .compile_with_sql_and_ephemerals(&model, "warehouse", sql, &resolver)
