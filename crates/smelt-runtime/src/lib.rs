@@ -23,6 +23,8 @@ pub mod fn_bodies;
 pub mod gate;
 pub mod meta_eval;
 pub mod reporter;
+pub mod safety;
+pub mod schema_evolution;
 pub mod select;
 pub mod transformer;
 pub mod types;

@@ -60,6 +60,31 @@ pub struct ExecuteRequest {
     /// any backend. Used by the UI's `/api/run/plan` preview endpoint.
     #[serde(default)]
     pub dry_run: bool,
+
+    /// Run the planner incremental safety check before execution. When
+    /// `true` (the default), a model whose SQL fails the safety classifier
+    /// or whose temporal bounds are not derivable causes the run to be
+    /// refused. Set to `false` to mirror `--allow-downgrade`: models fall
+    /// back to full-table refresh with a warning.
+    #[serde(default = "default_true")]
+    pub enforce_safety: bool,
+
+    /// Permit `ALTER TABLE … DROP COLUMN` during schema evolution. When
+    /// `false` (the default), a column-removal diff blocks the run. Set to
+    /// `true` to mirror `--allow-column-removal`.
+    #[serde(default)]
+    pub allow_column_removal: bool,
+
+    /// Permit a full-table refresh when schema evolution requires one (e.g.
+    /// a type change that cannot be migrated with ALTER TABLE). When `false`
+    /// (the default), such a diff blocks the run. Set to `true` to mirror
+    /// `--allow-full-refresh`.
+    #[serde(default)]
+    pub allow_full_refresh: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Outcome of a completed run. The runtime returns this from

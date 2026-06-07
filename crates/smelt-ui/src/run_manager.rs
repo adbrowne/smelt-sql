@@ -173,6 +173,9 @@ fn to_runtime_request(request: RunExecuteRequest) -> smelt_runtime::ExecuteReque
         per_partition: request.per_partition,
         full_refresh: false,
         dry_run: false,
+        enforce_safety: true,
+        allow_column_removal: false,
+        allow_full_refresh: false,
     }
 }
 

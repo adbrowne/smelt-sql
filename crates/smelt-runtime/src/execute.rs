@@ -31,6 +31,10 @@ use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
 use crate::compile::CompilerRegistry;
 use crate::reporter::RunReporter;
+use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
+use crate::schema_evolution::{
+    check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
+};
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{inject_time_filter, TimeRange};
 use crate::types::{ExecuteRequest, RunOutcome};
@@ -187,6 +191,21 @@ pub async fn execute_project(
         if let Err(errors) = crate::gate::gate_diagnostics(db_ref, workspace, &model_paths) {
             anyhow::bail!("{}", crate::gate::format_gate_errors(&errors));
         }
+    }
+
+    // ── Planner safety check + temporal bound derivation ───────────────
+    // Guard: refuse to execute if any selected incremental model fails the
+    // planner's incremental safety classifier or has an undefinable temporal
+    // bound (a bare LAG/LEAD without RANGE BETWEEN INTERVAL). Both checks
+    // mirror what the CLI previously did inline in `commands/run.rs` before
+    // building the physical graph.
+    //
+    // `enforce_safety = false` (mirrors `--allow-downgrade`) demotes
+    // refusals to `warn!` and lets the model fall back to full-table refresh.
+    {
+        let model_graph = build_model_graph(&selected, &graph_lock, &config);
+        check_planner_safety(&model_graph, request.enforce_safety)?;
+        check_bound_derivation(&model_graph, request.enforce_safety)?;
     }
 
     // ── Model-plan construction + ephemeral collection ──────────────────
@@ -381,6 +400,96 @@ pub async fn execute_project(
         let backend = backends[model_target].as_ref();
         let schema = &config.targets[model_target].schema;
 
+        // ── Schema evolution gate (incremental models only) ──────────────
+        // For incremental models that have a deployed schema, check whether
+        // the inferred columns have changed and apply (or block) the required
+        // migration. `force_full_refresh` overrides the planned incremental
+        // strategy to a full-table rebuild when evolution requires it.
+        let mut force_full_refresh = false;
+        if plan.incremental.is_some() {
+            let evolution_strategy = plan
+                .model_file
+                .metadata
+                .as_deref()
+                .and_then(|m| m.schema_evolution.as_ref())
+                .map(|se| &se.strategy);
+            let use_alter = !matches!(
+                evolution_strategy,
+                Some(smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh)
+            );
+
+            if use_alter {
+                if let Ok(true) = backend
+                    .table_exists(schema, &plan.model_file.db_name_owned())
+                    .await
+                {
+                    let inferred_columns = {
+                        let db_guard = db.lock().await;
+                        infer_deployed_columns(&db_guard, &plan.model_file)
+                    };
+                    if !inferred_columns.is_empty() {
+                        let db_table_name = plan.model_file.db_name_owned();
+                        let (column_defaults, backfill_exprs) =
+                            extract_evolution_maps(plan.model_file.metadata.as_deref());
+                        let target_config = config
+                            .targets
+                            .get(model_target)
+                            .expect("target config must exist");
+                        let table_format = plan
+                            .model_file
+                            .metadata
+                            .as_deref()
+                            .and_then(|m| m.format.as_ref())
+                            .cloned()
+                            .or_else(|| target_config.table_format());
+                        let ddl_backend =
+                            ddl_backend_for_dialect(backend.dialect(), table_format, None);
+                        match check_and_migrate(
+                            backend,
+                            &file_store,
+                            &db_table_name,
+                            &plan.sql,
+                            schema,
+                            &inferred_columns,
+                            request.allow_column_removal,
+                            request.allow_full_refresh,
+                            request.dry_run,
+                            &column_defaults,
+                            &backfill_exprs,
+                            Some(&ddl_backend),
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                match crate::safety::should_force_full_refresh(
+                                    &result,
+                                    &plan.name,
+                                    request.allow_column_removal,
+                                    request.allow_full_refresh,
+                                ) {
+                                    Ok(should_refresh) => force_full_refresh = should_refresh,
+                                    Err(e) => {
+                                        reporter.run_failed(
+                                            &run_id,
+                                            Some(&plan.name),
+                                            &e.to_string(),
+                                        );
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Schema evolution check failed: {}. Continuing with incremental.",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Cumulative-aggregate dispatch — handled separately from the
         // incremental / full-refresh branches because it has its own per-
         // partition merge loop (see `smelt_runtime::cumulative` and
@@ -494,7 +603,7 @@ pub async fn execute_project(
             continue;
         }
 
-        let result: Result<()> = match &plan.incremental {
+        let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
             Some(inc_plan) => {
                 let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
 
