@@ -4,6 +4,7 @@ pub mod backend_registry;
 pub mod backfill;
 pub mod compiler;
 pub mod config;
+pub mod reporter;
 pub mod cumulative;
 pub mod diagnostics_terminal;
 pub mod discovery;
