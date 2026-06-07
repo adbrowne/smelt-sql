@@ -116,6 +116,26 @@ impl DependencyGraph {
         })
     }
 
+    /// Add seed names as valid `smelt.ref()` targets so that `validate()` does
+    /// not report them as undefined. Seeds are CSV files (or sidecar-declared)
+    /// that are valid ref targets but are not SQL models or external sources.
+    ///
+    /// Called before `validate()` when the caller has discovered seeds via
+    /// `smelt_core::discover_seed_infos[_with_sidecars]`.
+    pub fn add_seeds(&mut self, seeds: &[crate::SeedInfo]) {
+        for seed in seeds {
+            // Seeds are addressable by their canonical dot-path (address_segments.join("."))
+            // and by their leaf name. Add both forms so both resolution styles work.
+            let cp = seed.address_segments.join(".");
+            if !cp.is_empty() {
+                self.sources.insert(cp);
+            }
+            if !seed.name.is_empty() {
+                self.sources.insert(seed.name.clone());
+            }
+        }
+    }
+
     /// Validate all references exist (either as models or sources)
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();

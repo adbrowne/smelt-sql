@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_selector_args},
     discover_python_models, find_project_root, init_db, migration, parse_selector, Config,
-    LogicalGraph, ModelDiscovery, SourcesConfig,
+    ModelDiscovery, SourcesConfig,
 };
+use smelt_core::graph::DependencyGraph;
 use smelt_state::file_store::FileStore;
 use smelt_state::schema_tracking::{diff_schemas, plan_migration, MigrationAction, SchemaDiff};
 use std::collections::HashSet;
@@ -70,20 +71,9 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
         .project_input(&project_dir)
         .expect("project not initialized");
 
-    let default_target = config
-        .targets
-        .keys()
-        .next()
-        .map(|s| s.as_str())
-        .unwrap_or("dev");
-    let graph = LogicalGraph::build(
-        models.clone(),
-        sources.as_ref(),
-        &seeds,
-        &config,
-        default_target,
-    )
-    .with_context(|| "Failed to build logical graph")?;
+    let mut graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+    graph.add_seeds(&seeds);
 
     graph
         .validate()
@@ -107,7 +97,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
                 .iter()
                 .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
                 .collect::<Result<_, _>>()?;
-            graph.select_models(&selectors)?
+            graph.select_models(&selectors, &config)?
         } else {
             graph.execution_order()?.into_iter().collect::<HashSet<_>>()
         };
@@ -119,7 +109,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
                     parse_selector(s).with_context(|| format!("Invalid exclude selector '{}'", s))
                 })
                 .collect::<Result<_, _>>()?;
-            selected = graph.exclude_models(&selected, &excludes)?;
+            selected = graph.exclude_models(&selected, &excludes, &config)?;
         }
 
         selected
@@ -136,10 +126,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
     let file_store = FileStore::new(&project_dir);
 
-    // Build model name → ModelFile lookup keyed by the canonical dot-path
-    // (`graph.execution_order()` / `ordered_models` use canonical keys). Keying
-    // by the leaf `m.name` would miss sub-directory models (canonical
-    // `staging.stg_orders` ≠ leaf `stg_orders`), silently skipping them.
+    // Build model name → ModelFile lookup keyed by the canonical dot-path.
     let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();
     let model_lookup: std::collections::HashMap<String, &smelt_cli::ModelFile> =
         all_models.iter().map(|m| (m.canonical_path(), m)).collect();
@@ -154,13 +141,18 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
         let inferred = infer_deployed_columns(&db, model);
 
-        // Stored schemas are keyed by the db-name (`db_name_owned()`), matching
-        // the run-pipeline save path. Loading by the canonical `name` would
-        // never find a sub-directory model's schema (always reporting it NEW).
+        // Stored schemas are keyed by the db-name (`db_name_owned()`).
         let db_name = model.db_name_owned();
         let deployed = file_store
             .load_schema(&db_name)
             .with_context(|| format!("Failed to load deployed schema for {}", name))?;
+
+        let default_target = config
+            .targets
+            .keys()
+            .next()
+            .map(|s| s.as_str())
+            .unwrap_or("dev");
 
         let status = match deployed {
             None => ModelDiffStatus::New,
@@ -169,11 +161,12 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
                 if schema_diff.is_empty() {
                     ModelDiffStatus::Unchanged
                 } else {
-                    // Use the model's target schema for ALTER TABLE statement generation
-                    let schema_name = graph
-                        .get_node(name)
-                        .ok()
-                        .and_then(|node| config.targets.get(&node.target))
+                    // Use the model's target schema for ALTER TABLE statement generation.
+                    let model_target =
+                        config.get_target(name, model.metadata.as_deref(), default_target);
+                    let schema_name = config
+                        .targets
+                        .get(&model_target)
                         .map(|t| t.schema.as_str())
                         .unwrap_or("main");
                     let (column_defaults, backfill_exprs) =

@@ -383,10 +383,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
             return Err(MetadataError::MalformedTimeseries {
                 message: format!(
                     "week_start must be 'monday' or 'sunday'; got '{}'",
-                    serde_yaml::to_string(ws)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string()
+                    serde_yaml::to_string(ws).unwrap_or_default().trim()
                 ),
             });
         }

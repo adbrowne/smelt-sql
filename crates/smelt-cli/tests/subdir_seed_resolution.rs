@@ -11,7 +11,7 @@
 //! (`"lookup.regions"`), so it rejected the reference with
 //! `references undefined model/source 'lookup.regions'`. That asymmetry — LSP
 //! clean, CLI broken — is exactly the bug class `CLAUDE.md` warns about. This
-//! test drives `build_logical_graph` (the shared CLI discovery path) so the
+//! test drives `build_dependency_graph` (the shared CLI discovery path) so the
 //! seam is covered at the example level, not just by a unit test.
 
 use std::path::PathBuf;
@@ -48,10 +48,11 @@ fn ephemeral_demo_subdir_seed_resolves_in_cli_path() {
 
     // The build itself runs dependency validation; before the fix this returned
     // `references undefined model/source 'lookup.regions'`.
-    let (graph, _db) = smelt_cli::build_logical_graph(&project_dir, &config, None, &seeds, "dev")
-        .expect("logical graph must build: sub-directory seed must resolve as a ref target");
+    let (graph, _db) =
+        smelt_cli::build_dependency_graph(&project_dir, &config, None, &seeds, "dev")
+            .expect("logical graph must build: sub-directory seed must resolve as a ref target");
 
-    let model_names: Vec<&str> = graph.iter_nodes().map(|n| n.name.as_str()).collect();
+    let model_names: Vec<&str> = graph.iter_models().map(|(name, _)| name).collect();
     assert!(
         model_names.contains(&"region_report"),
         "region_report must be in the graph; saw {model_names:?}"

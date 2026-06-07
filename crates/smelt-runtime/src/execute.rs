@@ -37,7 +37,7 @@ use crate::schema_evolution::{
 };
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{inject_time_filter, TimeRange};
-use crate::types::{ExecuteRequest, RunOutcome};
+use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::windowing::{compute_incremental_windows, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
 
@@ -125,6 +125,238 @@ pub async fn execute_project(
         );
     }
 
+    // ── Function bodies (needed for both dry_run and live run) ──────────────
+    let fn_bodies = {
+        let db_guard = db.lock().await;
+        let db_ref: &smelt_db::Database = &db_guard;
+        let workspace = smelt_db::Workspace::try_get(db_ref)
+            .ok_or_else(|| anyhow::anyhow!("workspace not initialised in DB"))?;
+        build_fn_body_map(db_ref, workspace)
+    };
+
+    // ── Diagnostic-parity gate (analysis ↔ build) — runs for dry_run too ────
+    {
+        let mut model_paths: Vec<std::path::PathBuf> = selected
+            .iter()
+            .filter_map(|name| graph_lock.get_model(name).ok().map(|m| m.path.clone()))
+            .collect();
+        model_paths.extend(smelt_core::discover_function_file_paths(project_dir));
+        let db_guard = db.lock().await;
+        let db_ref: &smelt_db::Database = &db_guard;
+        let workspace = smelt_db::Workspace::try_get(db_ref)
+            .ok_or_else(|| anyhow::anyhow!("workspace not initialised in DB"))?;
+        if let Err(errors) = crate::gate::gate_diagnostics(db_ref, workspace, &model_paths) {
+            anyhow::bail!("{}", crate::gate::format_gate_errors(&errors));
+        }
+    }
+
+    // ── Planner safety check + temporal bound derivation (also for dry_run) ──
+    // Must run before the dry_run early return so that `--dry-run` on an
+    // unsafe incremental model (bare LAG, NotDerivable bound) is refused
+    // identically to a live run. This mirrors the CLI's original behaviour
+    // where `--dry-run` runs through compilation and thus through the planner.
+    {
+        let model_graph = build_model_graph(&selected, &graph_lock, &config);
+        check_planner_safety(&model_graph, request.enforce_safety)?;
+        check_bound_derivation(&model_graph, request.enforce_safety)?;
+    }
+
+    // ── Dry-run: build PlanSummary, compile models, and return without any backend call ──────
+    // When `dry_run = true` we resolve the execution strategy per model from
+    // graph config alone, compile each model's SQL (full-refresh form only),
+    // emit `reporter.model_compiled` for each, and return the plan without
+    // invoking `BackendFactory::create` or executing any SQL.
+    //
+    // Parity rule: the reporter callback is the only place compiled SQL is
+    // surfaced to the consumer. CLI/UI must not re-implement compilation after
+    // this returns. See `docs/specs/architecture.md` §"Run pipeline parity rule".
+    if request.dry_run {
+        let summary_models: Vec<ModelPlanRecord> = selected
+            .iter()
+            .map(|model_name| {
+                let strategy = if let Ok(model) = graph_lock.get_model(model_name) {
+                    let metadata = model.metadata.as_deref();
+                    let frontmatter = Frontmatter::parse(&model.content);
+                    let materialization =
+                        config.get_materialization_with_metadata(model_name, metadata);
+                    let inc_config = config
+                        .get_incremental_with_metadata(model_name, metadata)
+                        .cloned()
+                        .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+                    let ts_config = config
+                        .get_timeseries_with_metadata(model_name, metadata)
+                        .cloned()
+                        .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+
+                    match materialization {
+                        smelt_core::config::Materialization::CumulativeAggregate => {
+                            ModelStrategy::Cumulative
+                        }
+                        smelt_core::config::Materialization::Ephemeral => ModelStrategy::Ephemeral,
+                        _ => match (
+                            inc_config,
+                            ts_config,
+                            request.start.as_deref(),
+                            request.end.as_deref(),
+                        ) {
+                            (Some(_inc), Some(ts), Some(_), Some(_)) => {
+                                ModelStrategy::Incremental {
+                                    partition_column: ts.partition_column.clone(),
+                                    granularity: format!("{:?}", ts.granularity).to_lowercase(),
+                                }
+                            }
+                            _ => ModelStrategy::FullRefresh,
+                        },
+                    }
+                } else {
+                    ModelStrategy::FullRefresh
+                };
+
+                let materialization = graph_lock
+                    .get_model(model_name)
+                    .ok()
+                    .map(|m| {
+                        config.get_materialization_with_metadata(model_name, m.metadata.as_deref())
+                    })
+                    .unwrap_or(smelt_core::config::Materialization::View);
+
+                let dependencies = graph_lock.get_upstream(model_name);
+
+                ModelPlanRecord {
+                    name: model_name.clone(),
+                    strategy,
+                    materialization,
+                    dependencies,
+                }
+            })
+            .collect();
+
+        let plan_summary = PlanSummary {
+            models: summary_models,
+        };
+
+        // ── Dry-run compile: build minimal CompilerRegistry + EphemeralResolver
+        // so we can emit model_compiled callbacks without requiring a backend.
+        // We compile the full-refresh form (no time-filter injection) because
+        // dry-run is about showing what SQL *would* run, not a specific batch.
+        {
+            let needed_targets_dry: HashSet<String> = selected
+                .iter()
+                .filter_map(|name| {
+                    graph_lock
+                        .get_model(name)
+                        .ok()
+                        .map(|m| config.get_target(name, m.metadata.as_deref(), &request.target))
+                })
+                .collect();
+
+            let needed_target_configs_dry: HashMap<String, smelt_core::config::Target> =
+                needed_targets_dry
+                    .iter()
+                    .filter_map(|t| config.targets.get(t).map(|c| (t.clone(), c.clone())))
+                    .collect();
+
+            let mut compilers_dry =
+                CompilerRegistry::new(config.as_ref(), &needed_target_configs_dry);
+
+            let all_models_dry: Vec<smelt_core::ModelFile> =
+                graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
+
+            // Build UpstreamSchemas from the Salsa DB.
+            if let Ok(upstream) = {
+                let db_guard = db.lock().await;
+                let db_ref: &smelt_db::Database = &db_guard;
+                UpstreamSchemas::from_database(db_ref, project_dir, &all_models_dry)
+            } {
+                compilers_dry.set_upstream_schemas_all(Arc::new(upstream));
+            }
+            if !fn_bodies.is_empty() {
+                compilers_dry.set_function_bodies_all(fn_bodies);
+            }
+
+            // Build ephemeral resolvers.
+            let mut ephemerals_by_target_dry: HashMap<String, Vec<(String, String)>> =
+                HashMap::new();
+            {
+                let exec_order = graph_lock.execution_order().unwrap_or_default();
+                for mn in &exec_order {
+                    let Ok(mf) = graph_lock.get_model(mn) else {
+                        continue;
+                    };
+                    let md = mf.metadata.as_deref();
+                    let mat = config.get_materialization_with_metadata(mn, md);
+                    if mat == smelt_core::config::Materialization::Ephemeral {
+                        let t = config.get_target(mn, md, &request.target);
+                        ephemerals_by_target_dry
+                            .entry(t)
+                            .or_default()
+                            .push((mn.clone(), mf.content.clone()));
+                    }
+                }
+            }
+            let mut ephemeral_resolvers_dry: HashMap<String, EphemeralResolver> = HashMap::new();
+            for target_name in &needed_targets_dry {
+                let schema = &config.targets[target_name].schema;
+                let models_slice = ephemerals_by_target_dry
+                    .get(target_name)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let compiler = compilers_dry.get(target_name);
+                ephemeral_resolvers_dry.insert(
+                    target_name.clone(),
+                    compiler.build_ephemeral_resolver(models_slice, schema),
+                );
+            }
+            // Inject seed CTEs.
+            if !request.ephemeral_seed_ctes.is_empty() {
+                for resolver in ephemeral_resolvers_dry.values_mut() {
+                    resolver.add_seed_ctes(request.ephemeral_seed_ctes.clone());
+                }
+            }
+
+            static EMPTY_RESOLVER: std::sync::OnceLock<EphemeralResolver> =
+                std::sync::OnceLock::new();
+
+            for model_name in &selected {
+                let Ok(model_file) = graph_lock.get_model(model_name) else {
+                    reporter.model_compiled(&run_id, model_name, "");
+                    continue;
+                };
+                let metadata = model_file.metadata.as_deref();
+                let mat = config.get_materialization_with_metadata(model_name, metadata);
+                // Ephemerals are inlined — no standalone SQL to show.
+                if mat == smelt_core::config::Materialization::Ephemeral {
+                    continue;
+                }
+                let model_target = config.get_target(model_name, metadata, &request.target);
+                let schema = &config.targets[&model_target].schema;
+                let compiler = compilers_dry.get(&model_target);
+                let resolver = ephemeral_resolvers_dry
+                    .get(&model_target)
+                    .unwrap_or_else(|| EMPTY_RESOLVER.get_or_init(EphemeralResolver::empty));
+                let clean_sql = smelt_parser::strip_frontmatter(&model_file.content);
+                let sql_to_emit = match compiler
+                    .compile_with_sql_and_ephemerals(model_file, schema, &clean_sql, resolver)
+                {
+                    Ok(compiled) => compiled.sql,
+                    Err(_) => String::new(),
+                };
+                reporter.model_compiled(&run_id, model_name, &sql_to_emit);
+            }
+        }
+
+        let outcome = RunOutcome {
+            run_id: run_id.to_string(),
+            started_at: run_start,
+            completed_at: Some(Utc::now()),
+            models: HashMap::new(),
+            total_rows: 0,
+            plan_summary: Some(plan_summary),
+        };
+        drop(graph_lock);
+        return Ok(outcome);
+    }
+
     // ── Backend creation ────────────────────────────────────────────────
     let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
     let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
@@ -154,59 +386,6 @@ pub async fn execute_project(
         (None, None) => (None, None),
         _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
     };
-
-    // Function bodies, built up-front so batch-safety classification below can
-    // see a lookback declared inside a `smelt.define` body (parity with the CLI
-    // run path). Reused for the compile context further down.
-    let fn_bodies = {
-        let db_guard = db.lock().await;
-        let db_ref: &smelt_db::Database = &db_guard;
-        let workspace = smelt_db::Workspace::try_get(db_ref)
-            .ok_or_else(|| anyhow::anyhow!("workspace not initialised in DB"))?;
-        build_fn_body_map(db_ref, workspace)
-    };
-
-    // ── Diagnostic-parity gate (analysis ↔ build) ───────────────────────
-    // Refuse to compile/execute if the analyzer (the same surface the LSP
-    // publishes) reports any `Error`-severity diagnostic on a selected model
-    // or in-DAG dep. Shared with the CLI run path via `crate::gate`. Spec:
-    // `docs/specs/architecture.md` §"Diagnostic parity rule (analysis ↔ build)".
-    //
-    // Function-definition files are gated alongside the selected models:
-    // function-body diagnostics (e.g. `CteCycle`) are reported against the
-    // `smelt.define` file, not its callers, so omitting them would let a
-    // selected model that calls a broken function build through this path while
-    // the editor flags it red (a parity gap). Paths the DB has not registered
-    // are skipped by the helper, so listing all function files is safe.
-    {
-        let mut model_paths: Vec<std::path::PathBuf> = selected
-            .iter()
-            .filter_map(|name| graph_lock.get_model(name).ok().map(|m| m.path.clone()))
-            .collect();
-        model_paths.extend(smelt_core::discover_function_file_paths(project_dir));
-        let db_guard = db.lock().await;
-        let db_ref: &smelt_db::Database = &db_guard;
-        let workspace = smelt_db::Workspace::try_get(db_ref)
-            .ok_or_else(|| anyhow::anyhow!("workspace not initialised in DB"))?;
-        if let Err(errors) = crate::gate::gate_diagnostics(db_ref, workspace, &model_paths) {
-            anyhow::bail!("{}", crate::gate::format_gate_errors(&errors));
-        }
-    }
-
-    // ── Planner safety check + temporal bound derivation ───────────────
-    // Guard: refuse to execute if any selected incremental model fails the
-    // planner's incremental safety classifier or has an undefinable temporal
-    // bound (a bare LAG/LEAD without RANGE BETWEEN INTERVAL). Both checks
-    // mirror what the CLI previously did inline in `commands/run.rs` before
-    // building the physical graph.
-    //
-    // `enforce_safety = false` (mirrors `--allow-downgrade`) demotes
-    // refusals to `warn!` and lets the model fall back to full-table refresh.
-    {
-        let model_graph = build_model_graph(&selected, &graph_lock, &config);
-        check_planner_safety(&model_graph, request.enforce_safety)?;
-        check_bound_derivation(&model_graph, request.enforce_safety)?;
-    }
 
     // ── Model-plan construction + ephemeral collection ──────────────────
     let mut model_plans: Vec<ModelPlan> = Vec::new();
@@ -363,6 +542,16 @@ pub async fn execute_project(
             target_name.clone(),
             compiler.build_ephemeral_resolver(models, schema),
         );
+    }
+
+    // Inject pre-built ephemeral seed CTEs from the request (e.g. CSV seeds
+    // with `materialization: ephemeral` discovered by the CLI). The CTEs are
+    // already formatted (alias_with_cols + VALUES body) so they bypass the
+    // SQL compiler and are added directly to every resolver.
+    if !request.ephemeral_seed_ctes.is_empty() {
+        for resolver in ephemeral_resolvers.values_mut() {
+            resolver.add_seed_ctes(request.ephemeral_seed_ctes.clone());
+        }
     }
 
     // ── Execute loop ────────────────────────────────────────────────────
@@ -640,6 +829,7 @@ pub async fn execute_project(
                         &filtered_sql,
                         resolver,
                     )?;
+                    reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
 
                     // The DELETE range must cover the full set of partitions the
                     // INSERT actually writes. `inject_time_filter` clamps the output
@@ -668,7 +858,7 @@ pub async fn execute_project(
                     let exec_result = backend
                         .execute_model_incremental(
                             schema,
-                            &plan.name,
+                            &plan.model_file.db_name_owned(),
                             &compiled.sql,
                             Materialization::Table,
                             strategy,
@@ -735,6 +925,7 @@ pub async fn execute_project(
                     &clean_sql,
                     resolver,
                 )?;
+                reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
 
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
@@ -754,12 +945,49 @@ pub async fn execute_project(
                 };
 
                 let exec_result = backend
-                    .execute_model(schema, &plan.name, &compiled.sql, mat, false)
+                    .execute_model(
+                        schema,
+                        &plan.model_file.db_name_owned(),
+                        &compiled.sql,
+                        mat,
+                        false,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                 total_rows = exec_result.row_count;
                 total_rows_overall += exec_result.row_count;
+
+                // Save deployed schema for full-refresh models (best-effort).
+                // This enables `smelt diff` to report schema changes on subsequent runs.
+                {
+                    let db_guard = db.lock().await;
+                    let inferred_columns = crate::schema_evolution::infer_deployed_columns(
+                        &db_guard,
+                        &plan.model_file,
+                    );
+                    if !inferred_columns.is_empty() {
+                        let db_table_name = plan.model_file.db_name_owned();
+                        let existing_version = file_store
+                            .load_schema(&db_table_name)
+                            .ok()
+                            .flatten()
+                            .map(|s| s.version);
+                        if let Err(e) = crate::schema_evolution::save_deployed_schema(
+                            &file_store,
+                            &db_table_name,
+                            &plan.sql,
+                            &inferred_columns,
+                            existing_version,
+                        ) {
+                            tracing::warn!(
+                                "Failed to save deployed schema for '{}': {}",
+                                plan.name,
+                                e
+                            );
+                        }
+                    }
+                }
 
                 manifest.models.insert(
                     plan.name.clone(),
@@ -791,6 +1019,25 @@ pub async fn execute_project(
         tracing::warn!("Failed to save run manifest: {}", e);
     }
 
+    // Stale schema cleanup: remove .smelt/schemas/<name>.json entries for models
+    // that no longer exist in the project. Uses db-names (not canonical paths)
+    // so sub-directory models match correctly.
+    {
+        let current_names: std::collections::HashSet<String> =
+            all_models.iter().map(|m| m.db_name_owned()).collect();
+        for orphan in file_store
+            .list_deployed_model_names()
+            .into_iter()
+            .filter(|n| !current_names.contains(n))
+        {
+            if let Err(e) = file_store.delete_schema(&orphan) {
+                tracing::warn!("Failed to delete stale schema for '{}': {}", orphan, e);
+            } else {
+                tracing::debug!("Removed stale schema for deleted model '{}'", orphan);
+            }
+        }
+    }
+
     let total_duration: StdDuration = execution_start.elapsed();
     reporter.run_completed(&run_id, total_rows_overall, total_duration);
 
@@ -816,5 +1063,6 @@ fn build_outcome(
         completed_at,
         models: manifest.models,
         total_rows,
+        plan_summary: None,
     }
 }

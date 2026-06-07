@@ -176,6 +176,7 @@ fn to_runtime_request(request: RunExecuteRequest) -> smelt_runtime::ExecuteReque
         enforce_safety: true,
         allow_column_removal: false,
         allow_full_refresh: false,
+        ephemeral_seed_ctes: vec![],
     }
 }
 

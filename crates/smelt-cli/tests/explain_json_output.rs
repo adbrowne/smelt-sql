@@ -100,7 +100,7 @@ fn stage_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
 /// Integration test: `build_explain_output()` emits `origin` for emitted models
 /// and no `origin` for hand-authored models when the real pipeline is exercised.
 ///
-/// Uses `build_logical_graph` so that discovery, generator-file filtering, and
+/// Uses `build_dependency_graph` so that discovery, generator-file filtering, and
 /// provenance annotation are all handled by the same helper the CLI command
 /// handler uses — the test never calls `discover_emitted_model_files` or
 /// `annotate_emitted_models` directly.
@@ -121,20 +121,26 @@ fn emitted_model_carries_origin_in_real_explain_pipeline() {
     ]);
     let project_dir = tmp.path().to_path_buf();
 
-    // `build_logical_graph` runs the full pipeline: discover SQL files, init the
+    // `build_dependency_graph` runs the full pipeline: discover SQL files, init the
     // Salsa DB, run the emitted-models generator pipeline, filter generator files
     // from the hand-authored set, build the LogicalGraph, and annotate provenance.
     // The test relies on this helper — it does NOT call discover_emitted_model_files
     // or annotate_emitted_models directly.
     let config = smelt_cli::Config::load(&project_dir).expect("load config");
-    let (graph, _db) = smelt_cli::build_logical_graph(&project_dir, &config, None, &[], "dev")
-        .expect("build logical graph");
+    let (graph, _db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
 
     // Build explain output and assert on the JSON.
     // This test asserts on emitted-model provenance, not batch-safety, so it
     // needs no function registry.
-    let output = smelt_cli::build_explain_output(&graph, &smelt_runtime::FnBodyMap::new())
-        .expect("build explain output");
+    let output = smelt_cli::build_explain_output(
+        &graph,
+        &config,
+        &smelt_runtime::FnBodyMap::new(),
+        &origins,
+    )
+    .expect("build explain output");
     let json = serde_json::to_string_pretty(&output).expect("serialize ExplainOutput");
 
     // --- Assert emitted models have origin ---

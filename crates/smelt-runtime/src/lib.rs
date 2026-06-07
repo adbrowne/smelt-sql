@@ -46,7 +46,7 @@ pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{
     inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
 };
-pub use types::{ExecuteRequest, RunOutcome};
+pub use types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 
 #[cfg(test)]
 mod tests {

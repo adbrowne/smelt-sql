@@ -1,4 +1,5 @@
 pub mod argument_resolution;
+pub mod backend_factory;
 pub mod backend_registry;
 pub mod backfill;
 pub mod compiler;
@@ -11,10 +12,8 @@ pub mod docs_render;
 pub mod errors;
 pub mod executor;
 pub mod explain;
-pub mod logical_graph;
 pub mod metadata;
 pub mod migration;
-pub mod physical_graph;
 pub mod python;
 pub mod seed;
 pub mod selector;
@@ -39,10 +38,11 @@ pub use config::{
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
-pub use explain::{build_explain_output, build_physical_explain, ExplainModel, ExplainOutput};
-pub use logical_graph::{LogicalGraph, LogicalNode};
+pub use explain::{
+    build_explain_output, build_physical_explain, ExplainIncremental, ExplainModel, ExplainOutput,
+    ExplainPhysical, ExplainPhysicalNode, SourceBoundJson,
+};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
-pub use physical_graph::{PhysicalGraph, PhysicalGraphBuilder, PhysicalNode, PhysicalStrategy};
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
@@ -62,7 +62,11 @@ use anyhow::Context as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Build a [`LogicalGraph`] from a project directory, handling generator-emitted
+/// Provenance map from emitted model name to `(generator_file_rel, generator_def_name)`.
+/// Returned alongside `DependencyGraph` by `build_dependency_graph_with_origins`.
+pub type EmittedOrigins = HashMap<String, (String, String)>;
+
+/// Build a [`DependencyGraph`] from a project directory, handling generator-emitted
 /// models automatically.
 ///
 /// This function:
@@ -72,18 +76,59 @@ use std::path::{Path, PathBuf};
 /// 3. Discovers generator-emitted virtual `ModelFile`s and their provenance.
 /// 4. Filters generator files (`.gen.sql`) and test models out of the regular
 ///    model set so they don't pollute the graph.
-/// 5. Builds a [`LogicalGraph`] from the combined (hand-authored + emitted) models.
-/// 6. Annotates the graph nodes with generator provenance via
-///    [`LogicalGraph::annotate_emitted_models`].
-/// 7. Returns both the annotated graph and the Salsa database (the caller may
-///    need the database for further queries, e.g. type inference in `build_catalog`).
-pub fn build_logical_graph(
+/// 5. Builds a [`DependencyGraph`] from the combined (hand-authored + emitted) models.
+/// 6. Returns the graph and the Salsa database.
+pub fn build_dependency_graph(
     project_dir: &Path,
     config: &Config,
     sources: Option<&smelt_core::SourcesConfig>,
-    seeds: &[smelt_core::SeedInfo],
-    default_target: &str,
-) -> anyhow::Result<(LogicalGraph, smelt_db::Database)> {
+    _seeds: &[smelt_core::SeedInfo],
+    _default_target: &str,
+) -> anyhow::Result<(smelt_core::graph::DependencyGraph, smelt_db::Database)> {
+    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+    let sql_models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    // Salsa DB initialised from raw files (includes generator files).
+    let db = init_db(project_dir, &sql_models);
+
+    // Emitted-models pipeline: virtual ModelFile entries + provenance map.
+    let (emitted_model_files, _origins) =
+        discover_emitted_model_files(&db, project_dir, &config.paths);
+
+    // Hand-authored models: exclude generator files so they don't collide with
+    // their emitted children in the graph, and exclude test models.
+    let mut models: Vec<ModelFile> = sql_models
+        .into_iter()
+        .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
+        .filter(|m| !m.is_test())
+        .collect();
+    models.extend(emitted_model_files);
+
+    let mut graph = smelt_core::graph::DependencyGraph::build(models, sources)
+        .with_context(|| "Failed to build dependency graph")?;
+    if !_seeds.is_empty() {
+        graph.add_seeds(_seeds);
+    }
+
+    Ok((graph, db))
+}
+
+/// Build a [`DependencyGraph`] from a project directory along with the emitted-model
+/// origins map. Use this variant when you need generator provenance (e.g. for
+/// `build_explain_output` or `build_catalog`).
+pub fn build_dependency_graph_with_origins(
+    project_dir: &Path,
+    config: &Config,
+    sources: Option<&smelt_core::SourcesConfig>,
+    _seeds: &[smelt_core::SeedInfo],
+    _default_target: &str,
+) -> anyhow::Result<(
+    smelt_core::graph::DependencyGraph,
+    smelt_db::Database,
+    EmittedOrigins,
+)> {
     let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
     let sql_models = discovery
         .discover_models()
@@ -105,12 +150,13 @@ pub fn build_logical_graph(
         .collect();
     models.extend(emitted_model_files);
 
-    let mut graph = LogicalGraph::build(models, sources, seeds, config, default_target)
-        .with_context(|| "Failed to build logical graph")?;
+    let mut graph = smelt_core::graph::DependencyGraph::build(models, sources)
+        .with_context(|| "Failed to build dependency graph")?;
+    if !_seeds.is_empty() {
+        graph.add_seeds(_seeds);
+    }
 
-    graph.annotate_emitted_models(&origins);
-
-    Ok((graph, db))
+    Ok((graph, db, origins))
 }
 
 /// Initialize a Salsa database from discovered models and a project directory.
@@ -189,7 +235,7 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
 ///
 /// Returns a pair:
 /// - `Vec<ModelFile>`: one virtual `ModelFile` per surviving emitted model
-///   (to be added to the models list before `LogicalGraph::build()`).
+///   (to be added to the models list before calling `DependencyGraph::build()`).
 /// - `HashMap<String, (String, String)>`: maps the emitted model's smelt-path
 ///   name (e.g. `"cohorts.us_west"`) to `(generator_file_workspace_relative,
 ///   generator_def_name)` (e.g. `("models/cohorts.gen.sql", "us_west")`).
@@ -198,8 +244,8 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
 /// They are used by `smelt_db::emitted_model_smelt_path` to strip the scan-root
 /// prefix when computing the smelt path.
 ///
-/// Call `LogicalGraph::annotate_emitted_models(&origins)` after
-/// `LogicalGraph::build()` to set provenance on the newly-inserted nodes.
+/// The returned origins map can be passed to downstream tools (e.g.
+/// `build_explain_output`) to surface generator provenance on graph nodes.
 pub fn discover_emitted_model_files(
     db: &smelt_db::Database,
     project_dir: &Path,

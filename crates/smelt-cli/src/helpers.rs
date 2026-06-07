@@ -15,6 +15,7 @@ use smelt_backend_duckdb::DuckDbBackend;
 #[cfg(feature = "spark")]
 use smelt_backend_spark::SparkBackend;
 
+#[allow(dead_code)]
 pub fn granularity_label(g: &Granularity) -> &'static str {
     match g {
         Granularity::Hour => "hours",
@@ -67,6 +68,7 @@ pub fn infer_deployed_columns(
 ///
 /// `week_start` is the first day of the week for weekly partitions.
 /// Only relevant when `granularity` is `Week`. When `None`, defaults to Monday.
+#[allow(dead_code)]
 pub fn generate_partition_values(
     start: &str,
     end: &str,
@@ -169,6 +171,7 @@ pub fn generate_partition_values(
 }
 
 /// Convert smelt `Weekday` to `chrono::Weekday`.
+#[allow(dead_code)]
 fn weekday_to_chrono(day: &Weekday) -> ChronoWeekday {
     match day {
         Weekday::Monday => ChronoWeekday::Mon,

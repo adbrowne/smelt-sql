@@ -46,6 +46,14 @@ pub trait RunReporter: Send + Sync {
     ) {
     }
 
+    /// A model's SQL has been compiled. Called after compilation and before
+    /// execution. The `sql` argument is the fully-resolved SQL string.
+    ///
+    /// Consumers that implement `--verbose` (the CLI) print `sql` to stdout.
+    /// Default: no-op. This is the Phase 4 hook; consumers that need verbose
+    /// output implement it; others inherit the default.
+    fn model_compiled(&self, _run_id: &str, _model: &str, _sql: &str) {}
+
     /// One batch of an incremental model completed. `batch_index` is
     /// 0-based; `batches_total` is the count of batches in this model's
     /// plan.

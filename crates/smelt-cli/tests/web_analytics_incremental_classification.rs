@@ -18,7 +18,8 @@
 //! as `bounded_safe` rather than `fully_batch_safe`.  Both are safe; the test
 //! gates against silent downgrades to the unsafe/refused class only.
 
-use smelt_cli::{build_explain_output, build_logical_graph, Config};
+use smelt_cli::{build_dependency_graph, build_explain_output, Config};
+use std::collections::HashMap;
 use std::path::Path;
 
 fn examples_dir() -> &'static Path {
@@ -84,13 +85,14 @@ fn assert_incremental_and_fully_batch_safe(
 fn web_analytics_incremental_models_classify_as_safe() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, db) =
-        build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
+    let (graph, db) = build_dependency_graph(&project_dir, &config, None, &[], "dev")
+        .expect("build logical graph");
     let fn_bodies = smelt_runtime::build_fn_body_map(
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    let output = build_explain_output(&graph, &fn_bodies).expect("build explain output");
+    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+        .expect("build explain output");
 
     // Models without a Form B date filter: must stay fully_batch_safe.
     // Listed explicitly so adding a new incremental model without a

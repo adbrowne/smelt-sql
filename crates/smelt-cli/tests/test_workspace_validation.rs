@@ -5,7 +5,8 @@
 
 use std::path::Path;
 
-use smelt_cli::{Config, LogicalGraph, ModelDiscovery, SourcesConfig};
+use smelt_cli::{Config, ModelDiscovery, SourcesConfig};
+use smelt_core::graph::DependencyGraph;
 
 fn project_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -65,16 +66,15 @@ fn test_workspace_no_undefined_refs() {
     }
 
     let sources = SourcesConfig::load(&project_dir).ok();
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
+    let _seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
-    let default_target = config
+    let _default_target = config
         .targets
         .keys()
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph =
-        LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target).unwrap();
+    let graph = DependencyGraph::build(models, sources.as_ref()).unwrap();
     graph.validate().expect(
         "All refs in test_workspace models should resolve.\n\
          If this fails, a model references an undefined model or source.",

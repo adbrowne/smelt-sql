@@ -3,8 +3,9 @@ use include_dir::{include_dir, Dir};
 use smelt_cli::docs::TestRef;
 use smelt_cli::{
     discover_emitted_model_files, discover_python_models, find_project_root, init_db,
-    parse_selector, Config, LogicalGraph, ModelDiscovery, ModelFile, SourcesConfig,
+    parse_selector, Config, ModelDiscovery, ModelFile, SourcesConfig,
 };
+use smelt_core::graph::DependencyGraph;
 use std::collections::HashMap;
 
 use crate::DocsGenerateArgs;
@@ -97,7 +98,7 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
     let sources = SourcesConfig::load(&project_dir).ok();
 
     // Seeds are valid `smelt.ref()` targets (bug #2 in 20260417 follow-up).
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
+    let _seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let sql_models = discovery
@@ -157,55 +158,34 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         models.extend(python_models);
     }
 
-    let default_target = config
-        .targets
-        .keys()
-        .next()
-        .map(|s| s.as_str())
-        .unwrap_or("dev");
-    let mut graph = LogicalGraph::build(
-        models.clone(),
-        sources.as_ref(),
-        &seeds,
-        &config,
-        default_target,
-    )
-    .with_context(|| "Failed to build logical graph")?;
-
-    // Annotate generator-emitted nodes with their provenance before validation
-    // so that any selector-based graph rebuild below also retains annotations.
-    graph.annotate_emitted_models(&origins);
+    let graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
 
     graph
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
     // Apply --select filters if provided
-    let graph = if !args.select.is_empty() {
+    let (graph, origins) = if !args.select.is_empty() {
         let selectors: Vec<_> = args
             .select
             .iter()
             .map(|s| parse_selector(s))
             .collect::<Result<_, _>>()
             .with_context(|| "Failed to parse selector")?;
-        let selected = graph.select_models(&selectors)?;
+        let selected = graph.select_models(&selectors, &config)?;
         let filtered_models: Vec<_> = models
             .into_iter()
-            .filter(|m| selected.contains(&m.name))
+            .filter(|m| {
+                let cp = m.canonical_path();
+                selected.contains(&cp) || selected.contains(&m.name)
+            })
             .collect();
-        let mut filtered_graph = LogicalGraph::build(
-            filtered_models,
-            sources.as_ref(),
-            &seeds,
-            &config,
-            default_target,
-        )
-        .with_context(|| "Failed to build filtered logical graph")?;
-        // Re-apply provenance annotations to the filtered graph.
-        filtered_graph.annotate_emitted_models(&origins);
-        filtered_graph
+        let filtered_graph = DependencyGraph::build(filtered_models, sources.as_ref())
+            .with_context(|| "Failed to build filtered dependency graph")?;
+        (filtered_graph, origins)
     } else {
-        graph
+        (graph, origins)
     };
 
     // Initialize Salsa DB for type inference (uses the final post-filter model set).
@@ -217,7 +197,7 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .collect::<Vec<_>>(),
     );
 
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &test_targets)?;
+    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets)?;
 
     let output_dir = args
         .output

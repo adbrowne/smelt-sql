@@ -165,9 +165,8 @@ fn test_schema_evolution_column_removal_allowed_with_flag() {
         columns: vec!["old_col".to_string()],
     };
     let force = should_force_full_refresh(&result, "my_model", true, false);
-    assert_eq!(
+    assert!(
         force.unwrap(),
-        true,
         "ColumnRemovalBlocked with allow_column_removal=true should force full refresh"
     );
 }
@@ -195,9 +194,8 @@ fn test_schema_evolution_full_refresh_allowed_with_flag() {
         reason: "type change".to_string(),
     };
     let force = should_force_full_refresh(&result, "my_model", false, true);
-    assert_eq!(
+    assert!(
         force.unwrap(),
-        true,
         "FullRefreshBlocked with allow_full_refresh=true should force full refresh"
     );
 }
@@ -205,16 +203,10 @@ fn test_schema_evolution_full_refresh_allowed_with_flag() {
 #[test]
 fn test_schema_evolution_no_change_does_not_force_refresh() {
     let result = SchemaEvolutionResult::NoChange;
-    assert_eq!(
-        should_force_full_refresh(&result, "my_model", false, false).unwrap(),
-        false
-    );
+    assert!(!should_force_full_refresh(&result, "my_model", false, false).unwrap());
 
     let result = SchemaEvolutionResult::FirstDeployment;
-    assert_eq!(
-        should_force_full_refresh(&result, "my_model", false, false).unwrap(),
-        false
-    );
+    assert!(!should_force_full_refresh(&result, "my_model", false, false).unwrap());
 }
 
 #[test]
@@ -222,8 +214,5 @@ fn test_schema_evolution_full_refresh_required_forces_refresh() {
     let result = SchemaEvolutionResult::FullRefreshRequired {
         reason: "column type changed".to_string(),
     };
-    assert_eq!(
-        should_force_full_refresh(&result, "my_model", false, false).unwrap(),
-        true
-    );
+    assert!(should_force_full_refresh(&result, "my_model", false, false).unwrap());
 }
