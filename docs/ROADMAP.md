@@ -45,8 +45,7 @@ The autonomy loop drives a two-level backlog — a top-level feature-sweep ledge
 
 This is the correctness baseline the rest of the queue builds on, so it stays near the top and is finished before the new big-rock features begin.
 
-Open structural residue worth calling out:
-- **BUG-064** — `smelt-db → smelt-planner` layering inversion. The fix is now a committed plan ([`20260606-smelt-logical-extraction.md`](plans/20260606-smelt-logical-extraction.md), P1–P5): extract a new `smelt-logical` crate holding the logical Plan / `LogicalNode` model + rule cluster *beneath* both `smelt-db` and `smelt-planner` — superseding the earlier "move the queries into `smelt-planner`" idea.
+Open structural residue: all tracked layering inversions are now closed. BUG-064 (`smelt-db → smelt-planner`) was fixed 2026-06-08 — `smelt-logical` crate extracted, `smelt-db` repointed, production edge removed.
 
 ### 3. Silent Failures & Code-Health Hardening
 
@@ -163,7 +162,7 @@ Enforced the one-path-one-entity invariant across all entity kinds and consolida
 - **`project_address_collisions` Salsa query** (P2) — surfaces `DuplicateAddress` (Error) diagnostics to CLI and LSP via the shared diagnostic channel; fixture `examples/architecture_broken_path_collision` (model `dup.sql` + seed `dup.csv`) confirmed. `smelt build` and `smelt explain --json` now exit non-zero on a collision. Closed BUG-002 (2/2). Regression tests: `crates/smelt-cli/tests/address_collision.rs`.
 - **Model-name uniqueness surfaced** (P2b) — spec re-scoped uniqueness to canonical `smelt.<path>` address (Constraint 4 re-worded; stale cross-file example dropped); Python `ModelFile.address_segments` populated; `resolve_address_map` applied CLI-side over combined SQL+Python model set. Closed BUG-021 (2/2), BUG-040. Regression test: `test_python_model_name_collision` + `within_file_section_collision_surfaces_duplicate_address`.
 - **Seed discovery consolidated** (P3) — `smelt-cli::discover_seeds` deleted; all seed lookups route through `smelt_core::discover_seed_infos_strict`; sources/functions audited (single-sourced). Eliminates the third seed-discovery path that was the structural root cause of the asymmetric-discovery bug family. Closed BUG-063.
-- **P4 blocked** — BUG-064 (smelt-db → smelt-planner layering inversion) investigation complete: the leak is full planner logic (`detect_builtin_rules`, `parse_function_properties`, `collect_path_refs`), not a plain type. Options recorded in plan §"Blocked phases"; recommendation: move Salsa rule-diagnostic queries into `smelt-planner` (correct direction).
+- **BUG-064 closed via `smelt-logical` extraction** (P4 of address-collision plan + dedicated extraction plan P1–P5) — `smelt-logical` crate extracted; `smelt-db → smelt-planner` production edge removed. Closed BUG-064 (2026-06-08). Structural gate: `cargo tree -p smelt-db -i smelt-planner` shows no production path.
 
 ### ~~Codegen Soundness — CTE collisions diagnosed, `source.*` valid~~ ✅ (June 5, 2026)
 
