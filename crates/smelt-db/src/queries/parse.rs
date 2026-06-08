@@ -199,7 +199,7 @@ mod tests {
             String::new(),
             String::new(),
         );
-        let ws = crate::Workspace::new(&db, vec![file], vec![project], vec![]);
+        let ws = crate::Workspace::new(&db, vec![file], vec![project], vec![], None);
         crate::file_diagnostics(&db, ws, file)
     }
 

@@ -11,9 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use smelt_logical::logical::{JoinSpec, Provenance};
 use smelt_parser::ast::{ColumnRef, Expr, SelectStmt};
 use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_planner::logical::{JoinSpec, Provenance};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 
@@ -233,8 +233,8 @@ pub fn provenance_validator_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: crate::SourceFile,
 ) -> Vec<Diagnostic> {
+    use smelt_logical::logical::Provenance;
     use smelt_parser::File as AstFile;
-    use smelt_planner::logical::Provenance;
 
     let raw_text = file.text(db);
     let parse = crate::parse_file(db, file);
@@ -249,7 +249,7 @@ pub fn provenance_validator_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let (props, _) = smelt_planner::logical::parse_function_properties(
+        let (props, _) = smelt_logical::logical::parse_function_properties(
             &fm,
             smelt_core::DeclarationKind::Define,
         );

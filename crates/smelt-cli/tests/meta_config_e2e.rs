@@ -173,3 +173,84 @@ fn e2e_config_loader_map_keys_executes_against_duckdb() {
     // BTreeMap returns keys in lexicographic order: tenant_a < tenant_b
     assert_eq!(keys, "tenant_a, tenant_b");
 }
+
+/// BUG-014 regression: per-target overlay resolution is wired into the
+/// production build path.
+///
+/// A generator loads `List<{name, region, min_revenue}>` from `cohorts.yaml`
+/// (base: `min_revenue: 100`) with a sibling overlay `cohorts.prod.yaml`
+/// (overlay: `min_revenue: 999`) and maps each row to a model whose WHERE
+/// clause filters by `revenue >= c.min_revenue`.  The `orders` table has two
+/// rows: revenue=150 and revenue=80.
+///
+/// - **Base target (dev)**: threshold is 100 → the revenue=150 row passes →
+///   1 row in `main.west`.
+/// - **Prod target**: overlay replaces the list entirely → threshold is 999 →
+///   no row passes → 0 rows in `main.west`.
+///
+/// Before the fix, both builds produced 1 row (overlay silently ignored).
+#[test]
+fn e2e_per_target_overlay_wires_into_generator_build() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let dev_db = proj.join("dev.duckdb");
+    let prod_db = proj.join("prod.duckdb");
+
+    write_workspace(
+        proj,
+        &[
+            (
+                "smelt.yml",
+                &format!(
+                    "name: e2e_overlay\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {dev}\n    schema: main\n  prod:\n    type: duckdb\n    database: {prod}\n    schema: main\ndefault_materialization: table\n",
+                    dev = dev_db.display(),
+                    prod = prod_db.display()
+                ),
+            ),
+            // Base cohorts: one cohort with min_revenue=100
+            (
+                "cohorts.yaml",
+                "- name: west\n  region: us-west-2\n  min_revenue: 100\n",
+            ),
+            // Prod overlay: same cohort but min_revenue bumped to 999
+            (
+                "cohorts.prod.yaml",
+                "- name: west\n  region: us-west-2\n  min_revenue: 999\n",
+            ),
+            // Generator: produce one model per cohort row; inline data so no dep
+            (
+                "models/cohorts.gen.sql",
+                "---\ngenerates: models\n---\n\
+                 smelt.config.load_yaml('cohorts.yaml', List<{ name: Text, region: Text, min_revenue: Integer }>)\n\
+                 |> map(fn c => ModelDef {\n\
+                      name: c.name,\n\
+                      body: SELECT revenue\n\
+                            FROM (VALUES (150), (80)) AS t(revenue)\n\
+                            WHERE revenue >= c.min_revenue\n\
+                    })\n",
+            ),
+        ],
+    );
+
+    // dev build: base threshold=100 → the revenue=150 row passes → 1 row
+    run_smelt_build(proj, "dev");
+    let dev_conn = duckdb::Connection::open(&dev_db).expect("open dev.duckdb");
+    let dev_count: i64 = dev_conn
+        .query_row("SELECT count(*) FROM main.cohorts_west", [], |r| r.get(0))
+        .expect("query main.cohorts_west (dev)");
+    assert_eq!(
+        dev_count, 1,
+        "dev target: expected 1 row (revenue=150 >= 100)"
+    );
+
+    // prod build: overlay threshold=999 → no row passes → 0 rows
+    run_smelt_build(proj, "prod");
+    let prod_conn = duckdb::Connection::open(&prod_db).expect("open prod.duckdb");
+    let prod_count: i64 = prod_conn
+        .query_row("SELECT count(*) FROM main.cohorts_west", [], |r| r.get(0))
+        .expect("query main.cohorts_west (prod)");
+    assert_eq!(
+        prod_count, 0,
+        "prod target: expected 0 rows (revenue < 999 for all rows)"
+    );
+}

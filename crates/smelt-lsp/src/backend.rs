@@ -382,6 +382,8 @@ impl Backend {
                 DbCode::CumulativeNoDrivingSource => "cumulative-no-driving-source",
                 DbCode::CumulativeMultipleDrivingSources => "cumulative-multiple-driving-sources",
                 DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
+                DbCode::CumulativeForbidsTimeseries => "cumulative-forbids-timeseries",
+                DbCode::CumulativeForbidsIncremental => "cumulative-forbids-incremental",
                 DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
                 DbCode::DuplicateAddress => "duplicate-address",
                 DbCode::DefaultReferencesParameter => "default-references-parameter",
@@ -785,6 +787,7 @@ impl Backend {
                     default_materialization: smelt_core::Materialization::View,
                     models: std::collections::HashMap::new(),
                     python: None,
+                    target: None,
                 });
             build_python_context(&all_files, &config)
         };

@@ -1,0 +1,5 @@
+category_id,category_name,discount_pct,is_active
+1,Electronics,0.10,true
+2,Clothing,0.20,true
+3,Books,0.05,false
+4,Sports,0.15,true

@@ -10,7 +10,7 @@
 
 use smelt_cli::explain::SourceBoundJson;
 use smelt_cli::{
-    build_explain_output, build_logical_graph, inject_source_filters, Config, SourceBound,
+    build_dependency_graph, build_explain_output, inject_source_filters, Config, SourceBound,
     TimeRange,
 };
 use smelt_parser::strip_frontmatter;
@@ -32,13 +32,14 @@ fn examples_dir() -> &'static Path {
 fn sessions_explain() -> smelt_cli::explain::ExplainOutput {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, db) =
-        build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
+    let (graph, db) = build_dependency_graph(&project_dir, &config, None, &[], "dev")
+        .expect("build logical graph");
     let fn_bodies = smelt_runtime::build_fn_body_map(
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    build_explain_output(&graph, &fn_bodies).expect("build explain output")
+    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+        .expect("build explain output")
 }
 
 /// Convert `SourceBoundJson` from the explain output to `SourceBound` for `inject_source_filters`.

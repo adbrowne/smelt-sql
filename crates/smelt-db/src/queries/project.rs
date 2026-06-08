@@ -17,7 +17,9 @@ use smelt_types::parse_type;
 
 use crate::config_vars;
 use crate::queries::functions::file_signature_inputs;
-use crate::queries::loader::{loader_resolved_value, LoaderCallSiteId};
+use crate::queries::loader::{
+    loader_resolved_value, loader_resolved_value_with_overlay, LoaderCallSiteId,
+};
 use crate::queries::parse::{parse_file, parse_model};
 use crate::queries::schema::{
     add_source_info_to_type_context, build_type_context, RefSchemaProvider, SalsaRefSchemaProvider,
@@ -1494,6 +1496,9 @@ fn collect_loader_values(
         input_by_path.insert(inp.path(db).to_string(), *inp);
     }
 
+    // Capture the active build target once for all loader calls in this generator.
+    let active_target = workspace.active_target(db);
+
     for node in syntax.descendants() {
         if node.kind() != SMELT_PATH_CALL {
             continue;
@@ -1562,7 +1567,20 @@ fn collect_loader_values(
             schema_text,
         };
 
-        let resolved = loader_resolved_value(db, loader_input, call_site);
+        // Dispatch: when a build target is active and a matching overlay file
+        // `<basename>.<target>.<ext>` is registered, use the overlay query so
+        // the merged (overlay-wins) value is returned.  Otherwise fall back to
+        // base-only resolution (§Semantics rule 4: at most one overlay per call).
+        let resolved = if let Some(target) = &active_target {
+            let overlay_path = crate::workspace_ingest::overlay_path_for(&path_value, target);
+            if let Some(&overlay_input) = input_by_path.get(&overlay_path) {
+                loader_resolved_value_with_overlay(db, loader_input, overlay_input, call_site)
+            } else {
+                loader_resolved_value(db, loader_input, call_site)
+            }
+        } else {
+            loader_resolved_value(db, loader_input, call_site)
+        };
 
         if let Some(merged) = &resolved.merged {
             result.push((path_value, merged.clone()));

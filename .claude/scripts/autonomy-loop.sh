@@ -192,6 +192,14 @@ sample_memory() {
     done
 }
 
+# Export the sampler function and the globals it reads so the background
+# sampler can run under a distinct argv[0] via `bash -c` (see launch below)
+# without re-defining its body. Otherwise the backgrounded shell function
+# inherits this script's command line and shows up in `ps` as a second
+# `bash …autonomy-loop.sh`, which looks like a duplicate loop.
+export -f sample_memory
+export SELF_CGROUP SAMPLE_INTERVAL
+
 echo "===== Autonomy loop starting ====="
 echo "Repo:            ${REPO_ROOT}"
 echo "Logs:            ${LOG_DIR}"
@@ -267,7 +275,12 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # runs in the same cgroup as the wrapper; if oomd kills the cgroup the
   # sampler dies too, but every snapshot up to that moment is already on
   # disk and survives.
-  sample_memory "${memlog}" &
+  # Relabel the backgrounded sampler so `ps` shows `smelt-mem-sampler`
+  # instead of an identical `bash …autonomy-loop.sh` line (it's a forked
+  # shell function, which otherwise inherits this script's command line and
+  # looks like a second loop). exec -a sets argv[0]; the exported
+  # sample_memory function (above) keeps the body in one place.
+  ( exec -a smelt-mem-sampler bash -c 'sample_memory "$1"' smelt-mem-sampler "${memlog}" ) &
   sampler_pid=$!
 
   # --print:                         headless, single response, exit

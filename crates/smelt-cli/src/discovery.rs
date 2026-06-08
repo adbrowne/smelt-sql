@@ -256,6 +256,34 @@ impl ModelDiscovery {
         };
 
         match file_metadata {
+            Some(FileMetadata::Generator { metadata, .. }) => {
+                // Generator files (`generates: models` frontmatter) are handled by the
+                // W1–W4 Salsa pipeline, not by the SQL model discovery path.  Return
+                // the file's content so the Salsa DB can register it, but skip SQL
+                // parsing — the body is a meta-language expression, not SQL.
+                //
+                // Spec: meta_language.md §"Multi-model production" — "The `.gen.sql`
+                // extension is a recommended convention; it is **not load-bearing**.
+                // The compiler determines a file's status from the frontmatter alone."
+                // (BUG-066 fix: previously the `_ =>` arm parsed generators as SQL.)
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+
+                Ok(vec![ModelFile {
+                    name,
+                    path: path.to_path_buf(),
+                    content,
+                    refs: vec![],
+                    parse_errors: vec![],
+                    metadata: Some(metadata),
+                    kind: ModelKind::Sql,
+                    model_id: ModelId::from_path(path.to_path_buf()),
+                    address_segments: Vec::new(),
+                }])
+            }
             Some(FileMetadata::Multi { models }) => {
                 // Multi-model file: create one ModelFile per section
                 let mut result = Vec::with_capacity(models.len());

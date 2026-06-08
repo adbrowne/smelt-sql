@@ -1,0 +1,3 @@
+- name: west
+  region: us-west-2
+  min_revenue: 100

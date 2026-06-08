@@ -11,7 +11,7 @@
 mod ephemeral_seed_cte_injection {
     use smelt_backend::Backend;
     use smelt_backend_duckdb::DuckDbBackend;
-    use smelt_cli::{compiler::EphemeralResolver, Config, ModelDiscovery, SqlCompiler};
+    use smelt_cli::{CompilerRegistry, Config, EphemeralResolver, ModelDiscovery};
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -79,9 +79,10 @@ mod ephemeral_seed_cte_injection {
         // Build a resolver with the ephemeral seed CTEs.
         let resolver = build_seed_resolver(&project_dir, &config);
 
-        // Compile region_report with ephemeral injection.
-        let default_target = config.targets.values().next().unwrap();
-        let compiler = SqlCompiler::new(config.clone(), default_target);
+        // Compile region_report with ephemeral injection via the registry.
+        let target_name = config.targets.keys().next().unwrap().clone();
+        let registry = CompilerRegistry::new(&config, &config.targets);
+        let compiler = registry.get(&target_name);
         let compiled = compiler
             .compile_with_ephemerals(region_report, "main", &resolver)
             .expect("compile_with_ephemerals must succeed");
@@ -163,8 +164,9 @@ mod ephemeral_seed_cte_injection {
         let region_report = models.iter().find(|m| m.name == "region_report").unwrap();
 
         let resolver = build_seed_resolver(&project_dir, &config);
-        let default_target = config.targets.values().next().unwrap();
-        let compiler = SqlCompiler::new(config.clone(), default_target);
+        let target_name = config.targets.keys().next().unwrap().clone();
+        let registry = CompilerRegistry::new(&config, &config.targets);
+        let compiler = registry.get(&target_name);
         let compiled = compiler
             .compile_with_ephemerals(region_report, "main", &resolver)
             .expect("compile_with_ephemerals must succeed");

@@ -60,6 +60,45 @@ pub struct ExecuteRequest {
     /// any backend. Used by the UI's `/api/run/plan` preview endpoint.
     #[serde(default)]
     pub dry_run: bool,
+
+    /// Run the planner incremental safety check before execution. When
+    /// `true` (the default), a model whose SQL fails the safety classifier
+    /// or whose temporal bounds are not derivable causes the run to be
+    /// refused. Set to `false` to mirror `--allow-downgrade`: models fall
+    /// back to full-table refresh with a warning.
+    #[serde(default = "default_true")]
+    pub enforce_safety: bool,
+
+    /// Permit `ALTER TABLE … DROP COLUMN` during schema evolution. When
+    /// `false` (the default), a column-removal diff blocks the run. Set to
+    /// `true` to mirror `--allow-column-removal`.
+    #[serde(default)]
+    pub allow_column_removal: bool,
+
+    /// Permit a full-table refresh when schema evolution requires one (e.g.
+    /// a type change that cannot be migrated with ALTER TABLE). When `false`
+    /// (the default), such a diff blocks the run. Set to `true` to mirror
+    /// `--allow-full-refresh`.
+    #[serde(default)]
+    pub allow_full_refresh: bool,
+
+    /// Pre-built ephemeral seed CTEs to inject into the ephemeral resolvers.
+    ///
+    /// Each entry is `(canonical_name, alias_with_cols, cte_body)`:
+    /// - `canonical_name`: `address_segments.join("_")` — the lookup key for
+    ///   ref resolution (e.g. `"lookup_regions"`).
+    /// - `alias_with_cols`: the CTE alias with column list
+    ///   (e.g. `"__smelt_lookup_regions(region_id, region_name)"`).
+    /// - `cte_body`: the VALUES literal (e.g. `"VALUES\n  (1, 'AMER')"`).
+    ///
+    /// The CLI populates this from `discover_seed_infos_with_sidecars` when
+    /// ephemeral seeds are present; the UI defaults to empty.
+    #[serde(default)]
+    pub ephemeral_seed_ctes: Vec<(String, String, String)>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Outcome of a completed run. The runtime returns this from
@@ -77,4 +116,57 @@ pub struct RunOutcome {
     /// Sum of row counts across all models. Tests assert on this; the UI
     /// surfaces it as the run total.
     pub total_rows: usize,
+    /// Resolved execution plan, populated when `ExecuteRequest::dry_run` is
+    /// `true`. The plan lists each selected model with its resolved strategy
+    /// (full refresh, incremental, cumulative, ephemeral, or skipped). When
+    /// `dry_run` is `false` this is `None`.
+    pub plan_summary: Option<PlanSummary>,
+}
+
+/// Resolved execution plan returned by `execute_project` when `dry_run = true`.
+///
+/// Summarises which strategy each model will use without invoking any backend.
+/// Consumed by `commands/explain.rs` to render `--show-plan` output and by the
+/// UI's `/api/run/plan` preview endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanSummary {
+    /// Per-model entries in execution (topological) order.
+    pub models: Vec<ModelPlanRecord>,
+}
+
+/// Plan entry for one model in a `PlanSummary`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPlanRecord {
+    /// Canonical model name (dot-path, e.g. `"silver.events_parsed"`).
+    pub name: String,
+    /// Resolved execution strategy for this model.
+    pub strategy: ModelStrategy,
+    /// Materialization type (`Table`, `View`, `Ephemeral`, etc.).
+    pub materialization: smelt_core::config::Materialization,
+    /// Canonical names of upstream dependencies (in the same canonical-path form).
+    pub dependencies: Vec<String>,
+}
+
+/// Per-model execution strategy resolved during plan construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelStrategy {
+    /// Drop and rebuild the table/view every run.
+    FullRefresh,
+    /// Incremental batch processing. Only possible when a time window is provided.
+    Incremental {
+        /// Column used to partition data (e.g. `"event_date"`).
+        partition_column: String,
+        /// Granularity label (e.g. `"day"`, `"week"`, `"month"`).
+        granularity: String,
+    },
+    /// Cumulative aggregate merge loop.
+    Cumulative,
+    /// Inlined as a CTE into downstream models — not materialized directly.
+    Ephemeral,
+    /// Excluded from execution.
+    Skipped {
+        /// Human-readable reason (e.g. `"test model"`, `"generator file"`).
+        reason: String,
+    },
 }

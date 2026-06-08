@@ -179,6 +179,7 @@ mod tests {
             default_materialization: smelt_core::config::Materialization::View,
             models: HashMap::new(),
             python: None,
+            target: None,
         };
 
         let (change_tx, _) = broadcast::channel(16);

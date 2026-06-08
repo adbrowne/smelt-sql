@@ -116,6 +116,26 @@ impl DependencyGraph {
         })
     }
 
+    /// Add seed names as valid `smelt.ref()` targets so that `validate()` does
+    /// not report them as undefined. Seeds are CSV files (or sidecar-declared)
+    /// that are valid ref targets but are not SQL models or external sources.
+    ///
+    /// Called before `validate()` when the caller has discovered seeds via
+    /// `smelt_core::discover_seed_infos[_with_sidecars]`.
+    pub fn add_seeds(&mut self, seeds: &[crate::SeedInfo]) {
+        for seed in seeds {
+            // Seeds are addressable by their canonical dot-path (address_segments.join("."))
+            // and by their leaf name. Add both forms so both resolution styles work.
+            let cp = seed.address_segments.join(".");
+            if !cp.is_empty() {
+                self.sources.insert(cp);
+            }
+            if !seed.name.is_empty() {
+                self.sources.insert(seed.name.clone());
+            }
+        }
+    }
+
     /// Validate all references exist (either as models or sources)
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
@@ -281,11 +301,31 @@ impl DependencyGraph {
                     })
                     .map(|(name, _)| name.clone())
                     .collect(),
-                // `GeneratorFile` selection requires the emitted-models pipeline
-                // (smelt-db layer). At the DependencyGraph level we return an
-                // empty match set — callers that need generator-file selection
-                // must use the smelt-db `resolve_generator_file_selector` helper.
-                SelectionMethod::GeneratorFile { .. } => vec![],
+                // Match emitted models whose virtual path was produced by the
+                // named generator file. Virtual paths have the form
+                // `<abs-gen-dir>/<gen-filename>::<smelt-name>` — the `::` marker
+                // distinguishes them from hand-authored models. We strip the
+                // `<smelt-name>` suffix and check if the remainder ends with the
+                // workspace-relative selector path (forward- or OS-slash).
+                SelectionMethod::GeneratorFile { path } => {
+                    let sel_fwd = path.to_string_lossy().replace('\\', "/");
+                    let sel_os = path
+                        .to_string_lossy()
+                        .replace('/', std::path::MAIN_SEPARATOR_STR);
+                    self.models
+                        .iter()
+                        .filter(|(_, model)| {
+                            let p = model.path.to_string_lossy();
+                            if let Some(gen_path_str) = p.split("::").next() {
+                                let gen_fwd = gen_path_str.replace('\\', "/");
+                                gen_fwd.ends_with(&*sel_fwd) || gen_fwd.ends_with(&*sel_os)
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect()
+                }
             };
 
             for model_name in &direct_matches {
@@ -743,6 +783,7 @@ mod tests {
             default_materialization: Materialization::View,
             models,
             python: None,
+            target: None,
         }
     }
 

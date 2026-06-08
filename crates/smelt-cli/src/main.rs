@@ -148,6 +148,11 @@ struct RunArgs {
     /// Use this only as a temporary escape hatch while fixing the model SQL.
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
+
+    /// Print the resolved execution plan (model names + strategies) and exit.
+    /// Combine with --dry-run to see the plan without executing.
+    #[arg(long = "show-plan")]
+    show_plan: bool,
 }
 
 #[derive(Parser)]

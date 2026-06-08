@@ -2945,7 +2945,7 @@ pub fn declared_return_hover_text(sig: &FunctionSig) -> Option<String> {
 // existing `smelt-db::function_body_check::{as_struct_to_sql,
 // backend_supports_struct_literal}` call sites (and the published unit
 // tests in `crates/smelt-db/tests/as_struct_tests.rs`) keep working.
-pub use smelt_planner::lowering::{as_struct_to_sql, backend_supports_struct_literal};
+pub use smelt_logical::lowering::{as_struct_to_sql, backend_supports_struct_literal};
 
 /// Phase C (meta-language) HOF dispatcher: check a SELECT statement for
 /// `ColumnRefFieldUnknown` errors that arise when a HOF lambda body accesses

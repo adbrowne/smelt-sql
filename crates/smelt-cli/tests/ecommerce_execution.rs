@@ -7,7 +7,8 @@
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_cli::{Config, LogicalGraph, ModelDiscovery, SourcesConfig, SqlCompiler};
+use smelt_cli::{CompilerRegistry, Config, ModelDiscovery, SourcesConfig};
+use smelt_core::graph::DependencyGraph;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -114,7 +115,7 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery.discover_models()?;
     let sources = SourcesConfig::load(&project_dir).ok();
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
+    let _seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
     let default_target = config
         .targets
@@ -123,14 +124,8 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
         .map(|s| s.as_str())
         .unwrap_or("dev");
 
-    // Build the logical graph and get execution order
-    let graph = LogicalGraph::build(
-        models.clone(),
-        sources.as_ref(),
-        &seeds,
-        &config,
-        default_target,
-    )?;
+    // Build the dependency graph and get execution order
+    let graph = DependencyGraph::build(models.clone(), sources.as_ref())?;
     let exec_order = graph.execution_order()?;
 
     // Set up DuckDB
@@ -141,8 +136,9 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
     seed_database(&backend).await?;
 
     // Compile and execute each model in dependency order
-    let target = config.targets.get(default_target).unwrap();
-    let compiler = SqlCompiler::new(config.clone(), target);
+    let target_map = config.targets.clone();
+    let registry = CompilerRegistry::new(&config, &target_map);
+    let compiler = registry.get(default_target);
 
     let mut errors = Vec::new();
     for model_name in &exec_order {

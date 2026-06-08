@@ -3,7 +3,7 @@ use smelt_cli::{find_project_root, Config, ModelDiscovery};
 
 use tracing::{debug, warn};
 
-use crate::helpers::print_test_result;
+use crate::helpers::{print_property_test_result, print_test_result};
 use crate::TestArgs;
 
 #[cfg(feature = "duckdb")]
@@ -129,6 +129,28 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                 Some(trimmed.to_string())
             }
         };
+
+        // Property-test dispatch: when the CTE body references columns absent from
+        // inputs, skip the single-compile path — run_property_test recompiles with
+        // augmented inputs on each iteration.
+        {
+            use smelt_cli::test_property::try_dispatch_property_test;
+            if let Some(prop_result) = try_dispatch_property_test(
+                &test_model.name,
+                &test_config.model,
+                test_config.target_cte.as_deref(),
+                model_sql,
+                test_config,
+            ) {
+                if prop_result.passed {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+                print_property_test_result(&prop_result, args.verbose, args.show_all);
+                continue;
+            }
+        }
 
         // Compile the test
         let compiled_sql = if let Some(ref target_cte) = test_config.target_cte {

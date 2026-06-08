@@ -1,0 +1,13 @@
+name: timeseries_broken_cumulative_with_timeseries
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

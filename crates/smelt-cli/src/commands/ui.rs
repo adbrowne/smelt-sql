@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use smelt_cli::{find_project_root, init_db, Config, ModelDiscovery, SourcesConfig};
+use smelt_cli::{
+    discover_emitted_model_files, find_project_root, init_db, Config, ModelDiscovery, SourcesConfig,
+};
 
 use tracing::info;
 
@@ -15,26 +17,45 @@ pub async fn ui(args: UiArgs) -> Result<()> {
     let sources = SourcesConfig::load(&project_dir).ok();
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let models = discovery
+    let raw_models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    info!("Found {} models", models.len());
+    info!("Found {} raw models", raw_models.len());
 
     let function_files = discovery
         .discover_function_files()
         .with_context(|| "Failed to discover function files")?;
 
-    // Initialize smelt-db for schema queries; include function files so
-    // smelt.functions.* calls resolve without "Unknown function" diagnostics.
-    let mut db_files: Vec<smelt_core::ModelFile> = models.to_vec();
-    db_files.extend(function_files);
+    // Initialize smelt-db with raw SQL + function files so the meta-language
+    // evaluator can expand generator bodies and smelt.functions.* calls resolve.
+    let mut db_files: Vec<smelt_core::ModelFile> = raw_models.to_vec();
+    db_files.extend(function_files.iter().cloned());
     let db = init_db(&project_dir, &db_files);
 
-    // Build dependency graph. `models` is `Vec<smelt_core::ModelFile>` so
-    // the previous field-by-field rebuild is redundant since the type was
-    // unified across CLI and core; just clone.
-    let core_models: Vec<smelt_core::ModelFile> = models.to_vec();
+    // Expand generator files: discover the models they emit and add them to the
+    // graph alongside the hand-authored models (generator files themselves are
+    // filtered out — their bodies are meta-language, not executable SQL).
+    // This mirrors what `discover_models_for_run` does for CLI runs; without it
+    // generator-emitted models would be silently absent from every UI run.
+    let (emitted, _origins) = discover_emitted_model_files(&db, &project_dir, &config.paths);
+    if !emitted.is_empty() {
+        info!(
+            "Generator pipeline produced {} emitted model(s)",
+            emitted.len()
+        );
+    }
+
+    let mut core_models: Vec<smelt_core::ModelFile> = raw_models
+        .into_iter()
+        .filter(|m| m.metadata.as_ref().is_none_or(|md| md.generates.is_none()))
+        .collect();
+    core_models.extend(emitted);
+
+    info!(
+        "Building dependency graph with {} model(s)",
+        core_models.len()
+    );
     let graph = smelt_core::graph::DependencyGraph::build(core_models, sources.as_ref())
         .with_context(|| "Failed to build UI dependency graph")?;
 

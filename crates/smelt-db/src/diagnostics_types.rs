@@ -642,7 +642,7 @@ pub enum DiagnosticCode {
     PythonModelNameMismatch,
 
     // ── Planner-rule diagnostic codes (surfaced via the uniform rule →
-    //    diagnostics interface; see `smelt_planner::rule_diagnostics`) ──────────
+    //    diagnostics interface; see `smelt_logical::rules::rule_diagnostics`) ────
     /// `cumulative_aggregate` SELECT has no GROUP BY (the key columns).
     CumulativeRequiresGroupBy,
     /// A `cumulative_aggregate` projection uses a non-allowlisted aggregator or
@@ -662,6 +662,14 @@ pub enum DiagnosticCode {
     CumulativeMultipleDrivingSources,
     /// A `cumulative_aggregate` SELECT could not be parsed for classification.
     CumulativeSqlNotParseable,
+    /// A `cumulative_aggregate` model incorrectly declares a `timeseries:` block.
+    /// The cumulative output has no partition column; the rule reads it from the
+    /// driving source. Anchored at offset 0. Error severity.
+    CumulativeForbidsTimeseries,
+    /// A `cumulative_aggregate` model incorrectly declares an `incremental:` block.
+    /// The two materializations have different equivalence contracts; pick one.
+    /// Anchored at offset 0. Error severity.
+    CumulativeForbidsIncremental,
     /// Advisory (`Warning`): an `incremental` model's SQL is not batch-safe
     /// under the planner's incremental safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).

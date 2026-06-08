@@ -1,0 +1,8 @@
+# Invalid overlay: contains unknown field `extra_field` (not in the schema
+# List<{ name: Text, region: Text, min_revenue: Integer }>).
+# Expected diagnostic: ConfigLoaderUnknownField anchored at the call site in
+# models/cohorts.gen.sql.
+- name: west
+  region: us-west-2
+  min_revenue: 999
+  extra_field: this_is_an_unknown_field

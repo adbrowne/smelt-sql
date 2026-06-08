@@ -9,11 +9,11 @@
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    compiler::SqlCompiler,
     config::{Config, Materialization, ModelConfig, Target},
     discovery::{ModelFile, ModelKind, RefInfo},
-    LogicalGraph, ModelDiscovery,
+    CompilerRegistry, ModelDiscovery,
 };
+use smelt_core::graph::DependencyGraph;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -52,6 +52,7 @@ fn make_config_with_targets(targets: HashMap<String, Target>) -> Config {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        target: None,
     }
 }
 
@@ -78,7 +79,22 @@ fn make_model_file(name: &str, sql: &str) -> ModelFile {
     }
 }
 
-// ─── LogicalGraph Cross-Engine Edge Detection ──────────────────────
+// ─── DependencyGraph Cross-Engine Edge Detection ───────────────────
+
+/// Compute target assignments for all models in a DependencyGraph.
+fn compute_target_assignments(
+    graph: &DependencyGraph,
+    config: &Config,
+    default_target: &str,
+) -> HashMap<String, String> {
+    graph
+        .iter_models()
+        .map(|(name, model)| {
+            let target = config.get_target(name, model.metadata.as_deref(), default_target);
+            (name.to_string(), target)
+        })
+        .collect()
+}
 
 #[test]
 fn test_logical_graph_cross_engine_edges() {
@@ -109,15 +125,16 @@ fn test_logical_graph_cross_engine_edges() {
         },
     );
 
-    let graph = LogicalGraph::build(models, None, &[], &config, "duckdb_local")
-        .expect("Graph build should succeed");
+    let graph = DependencyGraph::build(models, None).expect("Graph build should succeed");
 
-    let edges = graph.find_cross_backend_edges();
+    let assignments = compute_target_assignments(&graph, &config, "duckdb_local");
+    let edges = graph.find_cross_backend_edges(&assignments);
     assert_eq!(edges.len(), 1, "Should detect one cross-engine edge");
-    assert_eq!(edges[0].upstream, "upstream_model");
-    assert_eq!(edges[0].downstream, "downstream_model");
-    assert_eq!(edges[0].upstream_target, "spark_local");
-    assert_eq!(edges[0].downstream_target, "duckdb_local");
+    let (downstream, upstream, downstream_target, upstream_target) = &edges[0];
+    assert_eq!(upstream, "upstream_model");
+    assert_eq!(downstream, "downstream_model");
+    assert_eq!(upstream_target, "spark_local");
+    assert_eq!(downstream_target, "duckdb_local");
 }
 
 #[test]
@@ -132,10 +149,10 @@ fn test_logical_graph_no_cross_engine_edges_same_target() {
 
     let config = make_config_with_targets(targets);
 
-    let graph = LogicalGraph::build(models, None, &[], &config, "duckdb_local")
-        .expect("Graph build should succeed");
+    let graph = DependencyGraph::build(models, None).expect("Graph build should succeed");
 
-    let edges = graph.find_cross_backend_edges();
+    let assignments = compute_target_assignments(&graph, &config, "duckdb_local");
+    let edges = graph.find_cross_backend_edges(&assignments);
     assert!(
         edges.is_empty(),
         "Should detect no cross-engine edges when all models on same target"
@@ -151,18 +168,17 @@ fn test_compiler_cross_engine_ref_emits_read_parquet() {
 
     let mut targets = HashMap::new();
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
-    let config = make_config_with_targets(targets);
+    let config = make_config_with_targets(targets.clone());
 
-    let target = make_duckdb_target("main");
-    let mut compiler = SqlCompiler::new(config, &target);
-
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "spark_model".to_string(),
         "read_parquet('/warehouse/default/spark_model/**/*.parquet', hive_partitioning=true)"
             .to_string(),
     );
-    compiler.set_cross_engine_refs(cross_refs);
+    registry.set_cross_engine_refs("duckdb_local", cross_refs);
+    let compiler = registry.get("duckdb_local");
 
     let compiled = compiler
         .compile(&model, "main")
@@ -196,18 +212,17 @@ JOIN smelt.spark_model b ON a.id = b.id
 
     let mut targets = HashMap::new();
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
-    let config = make_config_with_targets(targets);
+    let config = make_config_with_targets(targets.clone());
 
-    let target = make_duckdb_target("main");
-    let mut compiler = SqlCompiler::new(config, &target);
-
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "spark_model".to_string(),
         "read_parquet('/warehouse/default/spark_model/**/*.parquet', hive_partitioning=true)"
             .to_string(),
     );
-    compiler.set_cross_engine_refs(cross_refs);
+    registry.set_cross_engine_refs("duckdb_local", cross_refs);
+    let compiler = registry.get("duckdb_local");
 
     let compiled = compiler
         .compile(&model, "main")
@@ -342,11 +357,9 @@ FROM smelt.visitor_daily"#;
 
     let mut targets = HashMap::new();
     targets.insert("duckdb_local".to_string(), make_duckdb_target("main"));
-    let config = make_config_with_targets(targets);
+    let config = make_config_with_targets(targets.clone());
 
-    let target = make_duckdb_target("main");
-    let mut compiler = SqlCompiler::new(config, &target);
-
+    let mut registry = CompilerRegistry::new(&config, &targets);
     let mut cross_refs = HashMap::new();
     cross_refs.insert(
         "visitor_daily".to_string(),
@@ -355,7 +368,8 @@ FROM smelt.visitor_daily"#;
             parquet_dir.display()
         ),
     );
-    compiler.set_cross_engine_refs(cross_refs);
+    registry.set_cross_engine_refs("duckdb_local", cross_refs);
+    let compiler = registry.get("duckdb_local");
 
     let compiled = compiler
         .compile(&model, "main")
@@ -475,10 +489,11 @@ fn test_multi_engine_example_parses() {
     );
 
     // Build graph and verify cross-engine edges exist
-    let graph = LogicalGraph::build(models, None, &[], &config, "duckdb_local")
+    let graph = DependencyGraph::build(models, None)
         .expect("Graph build should succeed for multi-engine example");
 
-    let edges = graph.find_cross_backend_edges();
+    let assignments = compute_target_assignments(&graph, &config, "duckdb_local");
+    let edges = graph.find_cross_backend_edges(&assignments);
     assert!(
         !edges.is_empty(),
         "Multi-engine example should have cross-engine edges"

@@ -280,20 +280,24 @@ pub struct Workspace {
     /// enumerate registered loader files without downcasting.
     #[returns(ref)]
     pub loader_files: Vec<LoaderFileInput>,
+    /// The active build target (e.g. `"prod"`, `"staging"`). When `Some`, the
+    /// loader resolution path dispatches to `loader_resolved_value_with_overlay`
+    /// using `<basename>.<target>.<ext>` overlay files. `None` means base-only
+    /// resolution. Set from the `smelt.yml` `target:` field (default) or via
+    /// the `--target` CLI flag (override). Both CLI and LSP read the same
+    /// config-derived default to keep discovery symmetric.
+    pub active_target: Option<Arc<str>>,
 }
 
 // ============================================================================
-// Loader file inputs (Phase E1 Phase 5)
+// Loader file inputs
 // ============================================================================
 
 /// A per-loader-call file path registered as a Salsa input.
 ///
-/// Phase 5: one `LoaderFileInput` is created per unique loader-target path
-/// encountered in the workspace. The LSP (and CLI build orchestration) creates
-/// and updates these inputs when the corresponding files change on disk.
-///
-/// Phase 6 will add per-target overlay inputs; the shape below is designed to
-/// accommodate the Phase 6 overlay query without restructuring.
+/// One `LoaderFileInput` is created per unique loader-target path encountered
+/// in the workspace. The LSP (and CLI build orchestration) creates and updates
+/// these inputs when the corresponding files change on disk.
 #[salsa::input]
 pub struct LoaderFileInput {
     /// Workspace-relative path with `/` separators (e.g. `"configs/cohorts.yaml"`).
@@ -404,17 +408,18 @@ impl Database {
 
     /// Set (or create) the workspace singleton with the given file and project lists.
     ///
-    /// Preserves the existing `loader_files` list if the workspace already exists;
-    /// `set_loader_file` is responsible for keeping that list up to date.
+    /// Preserves the existing `loader_files` and `active_target` if the workspace
+    /// already exists; `set_loader_file` and `set_active_target` manage those fields.
     pub fn set_workspace(&mut self, files: Vec<SourceFile>, projects: Vec<ProjectInput>) {
         match Workspace::try_get(self) {
             Some(ws) => {
                 ws.set_files(self).to(files);
                 ws.set_projects(self).to(projects);
-                // loader_files is preserved as-is; set_loader_file manages it.
+                // loader_files and active_target are preserved; managed by
+                // set_loader_file and set_active_target respectively.
             }
             None => {
-                Workspace::new(self, files, projects, Vec::new());
+                Workspace::new(self, files, projects, Vec::new(), None);
             }
         }
     }
@@ -423,7 +428,21 @@ impl Database {
     pub fn workspace(&mut self) -> Workspace {
         match Workspace::try_get(self) {
             Some(ws) => ws,
-            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new()),
+            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), None),
+        }
+    }
+
+    /// Set the active build target on the workspace singleton.
+    ///
+    /// Changing the target causes Salsa to re-evaluate any tracked query that reads
+    /// `workspace.active_target(db)`. The loader dispatch reads this value and selects
+    /// `loader_resolved_value_with_overlay` when a matching `<basename>.<target>.<ext>`
+    /// overlay file exists, falling back to the base file when no overlay is present.
+    pub fn set_active_target(&mut self, target: Option<Arc<str>>) {
+        if let Some(ws) = Workspace::try_get(self) {
+            ws.set_active_target(self).to(target);
+        } else {
+            Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), target);
         }
     }
 
@@ -433,9 +452,6 @@ impl Database {
     /// is discovered (during workspace load) or edited (during an LSP edit
     /// session). Salsa propagates invalidations to `loader_file_parsed` and
     /// `loader_resolved_value` automatically.
-    ///
-    /// Phase 6 will extend this to register per-target overlay files alongside
-    /// the base file.
     pub fn set_loader_file(
         &mut self,
         path: Arc<str>,
@@ -926,8 +942,8 @@ pub fn file_diagnostics(
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
 /// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
 /// (`architecture.md` §"Planner scope").
-fn rule_diagnostic_code(code: smelt_planner::RuleDiagnosticCode) -> DiagnosticCode {
-    use smelt_planner::RuleDiagnosticCode as R;
+fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCode {
+    use smelt_logical::RuleDiagnosticCode as R;
     match code {
         R::CumulativeRequiresGroupBy => DiagnosticCode::CumulativeRequiresGroupBy,
         R::CumulativeUnknownAggregator => DiagnosticCode::CumulativeUnknownAggregator,
@@ -1156,6 +1172,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // Loader call diagnostics for generator files: smelt.config.load_yaml /
+            // load_json calls in the generator body must also be validated (path
+            // literals, schema arguments, content, and per-target overlay validation).
+            // These diagnostics are emitted here (before the early return) so that
+            // generator files surface the same loader-call diagnostics as regular
+            // model files.  BUG-014 P4: this is the seam that surfaces overlay
+            // validation errors (`ConfigLoaderUnknownField` etc.) for generator files.
+            for diag in
+                crate::queries::loader::loader_call_diagnostics_for_file(db, workspace, file)
+            {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+
             // Generator files are not SQL models; skip the model-validity check
             // and all SQL-only diagnostics.
             return;
@@ -1242,6 +1271,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
+                smelt_core::metadata::MetadataError::CumulativeForbidsTimeseries => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::CumulativeForbidsTimeseries,
+                )),
+                smelt_core::metadata::MetadataError::CumulativeForbidsIncremental => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::CumulativeForbidsIncremental,
+                )),
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
                 _ => None,
@@ -1275,10 +1312,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         };
         if !materialization.is_empty() {
             let stripped = smelt_parser::strip_frontmatter(text);
-            let refs = smelt_planner::collect_path_refs(&stripped);
+            let refs = smelt_logical::collect_path_refs(&stripped);
             // The cumulative classifier resolves its driving source by looking
             // each ref up in this map; the incremental rule does not use it.
-            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
+            let mut source_timeseries: smelt_logical::SourceTimeseriesMap = HashMap::new();
             if materialization == "cumulative_aggregate" {
                 for r in &refs {
                     if let Some(ts) = ref_timeseries_config(db, workspace, r) {
@@ -1291,7 +1328,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let ctx = smelt_planner::RuleContext {
+            let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,
                 sql: &stripped,
@@ -1301,11 +1338,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 incremental_config: metadata.incremental.as_ref(),
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
-            for rd in smelt_planner::detect_builtin_rules(&ctx) {
+            for rd in smelt_logical::detect_builtin_rules(&ctx) {
                 DiagnosticAcc(Diagnostic {
                     severity: match rd.severity {
-                        smelt_planner::RuleSeverity::Error => DiagnosticSeverity::Error,
-                        smelt_planner::RuleSeverity::Warning => DiagnosticSeverity::Warning,
+                        smelt_logical::RuleSeverity::Error => DiagnosticSeverity::Error,
+                        smelt_logical::RuleSeverity::Warning => DiagnosticSeverity::Warning,
                     },
                     message: rd.message,
                     range: rowan::TextRange::empty(body_start),
@@ -2187,36 +2224,18 @@ fn count_from_sources(select_stmt: &smelt_parser::ast::SelectStmt) -> usize {
 // Phase 30 — Logical plan construction
 // ============================================================================
 //
-// Kept in lib.rs because the call sites are pre-gathered with mixed Salsa
-// queries (resolve_function, file_signature_inputs, parse_file,
-// project_unstable_schema, workspace_function_bodies, function_call_cycle_fn_ids)
-// and the only consumer is the planner. The pure plan builder
-// (`build_logical_plan_pure`) follows the pure-function rule.
+// The Salsa thin wrapper lives here; it gathers inputs from mixed Salsa queries
+// (resolve_function, file_signature_inputs, parse_file, project_unstable_schema,
+// workspace_function_bodies, function_call_cycle_fn_ids) and delegates to the
+// pure builder `smelt_logical::build_logical_plan_pure` (Salsa-purity rule).
 
 use smelt_parser::ast::SmeltPathCall;
 
-/// Pre-gathered inputs for one `smelt.fn.*` call site, collected by the Salsa
-/// query before passing to the pure plan builder.
-struct FnCallInput {
-    fn_id: String,
-    transparent: bool,
-    properties: smelt_planner::logical::FunctionProperties,
-    /// Resolved provenance: either the declared provenance (when the workspace
-    /// opted in to `unstable_schema`) or `Unknown`.
-    provenance: smelt_planner::logical::Provenance,
-    /// Phase 41: the callee's body text, captured eagerly by the Salsa query.
-    /// `None` for opaque calls, unresolved references, and calls suppressed by
-    /// the cycle pre-pass.  When `Some`, the body is attached to the
-    /// `FunctionCall` plan node as a `LogicalNode::Raw { sql_text }` subtree;
-    /// the Phase 41 expansion rule clones it into the resulting `ExpandedCall`.
-    body_text: Option<String>,
-}
-
-/// Build a [`smelt_planner::logical::Plan`] from a single source file.
+/// Build a [`smelt_logical::Plan`] from a single source file.
 ///
 /// This tracked query gathers all Salsa inputs — the parsed AST, resolved
 /// signatures, and per-declaration frontmatter — then delegates to the pure
-/// helper [`build_logical_plan_pure`] which takes no `db` reference.
+/// helper [`smelt_logical::build_logical_plan_pure`] which takes no `db` reference.
 ///
 /// Returns `None` when the file does not parse as a valid SQL model.
 #[salsa::tracked]
@@ -2224,8 +2243,8 @@ pub fn logical_plan(
     db: &dyn salsa::Database,
     workspace: Workspace,
     file: SourceFile,
-) -> Option<smelt_planner::logical::Plan> {
-    use smelt_planner::logical::Provenance;
+) -> Option<smelt_logical::Plan> {
+    use smelt_logical::Provenance;
 
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
@@ -2248,7 +2267,7 @@ pub fn logical_plan(
     let cycle_set = function_call_cycle_fn_ids(db, workspace);
 
     // Walk the CST to collect all smelt.functions.* (path-form) call sites.
-    let call_inputs: Vec<FnCallInput> = ast
+    let call_inputs: Vec<smelt_logical::FnCallInput> = ast
         .syntax()
         .descendants()
         .filter_map(smelt_parser::ast::SmeltPathCall::cast)
@@ -2313,7 +2332,7 @@ pub fn logical_plan(
                             // `check_file_diagnostics`), which has the declaration's name range
                             // for proper anchoring. The logical-plan path only needs the props.
                             fm_with_kind.map(|(text, kind)| {
-                                smelt_planner::logical::parse_function_properties(&text, kind).0
+                                smelt_logical::parse_function_properties(&text, kind).0
                             })
                         })
                 })
@@ -2344,7 +2363,7 @@ pub fn logical_plan(
                 None
             };
 
-            FnCallInput {
+            smelt_logical::FnCallInput {
                 fn_id,
                 transparent,
                 properties,
@@ -2354,48 +2373,7 @@ pub fn logical_plan(
         })
         .collect();
 
-    Some(build_logical_plan_pure(call_inputs))
-}
-
-/// Pure plan builder — takes no `db` reference and calls no Salsa queries.
-///
-/// Constructs a minimal `Select` root with the first collected `FunctionCall`
-/// as its `from` child. Phase 32+ replaces this with a full projection tree.
-fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logical::Plan {
-    use smelt_planner::logical::LogicalNode;
-
-    let fn_call_nodes: Vec<Arc<LogicalNode>> = call_inputs
-        .into_iter()
-        .map(|input| {
-            let body = input
-                .body_text
-                .map(|t| Arc::new(LogicalNode::Raw { sql_text: t }));
-            Arc::new(LogicalNode::FunctionCall {
-                fn_id: input.fn_id,
-                args: Vec::new(), // Phase 30 stub — arg sub-plans deferred to Phase 32+
-                transparent: input.transparent,
-                provenance: input.provenance,
-                properties: input.properties,
-                pushed_filter: None,
-                body,
-            })
-        })
-        .collect();
-
-    if fn_call_nodes.is_empty() {
-        Arc::new(LogicalNode::Select {
-            projections: Vec::new(),
-            from: None,
-            filter: None,
-        })
-    } else {
-        let first = fn_call_nodes.into_iter().next().unwrap();
-        Arc::new(LogicalNode::Select {
-            projections: Vec::new(),
-            from: Some(first),
-            filter: None,
-        })
-    }
+    Some(smelt_logical::build_logical_plan_pure(call_inputs))
 }
 
 /// Phase 41: workspace-wide map from `fn_id` → body text for every

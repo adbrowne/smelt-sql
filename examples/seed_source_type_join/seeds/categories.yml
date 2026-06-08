@@ -1,0 +1,17 @@
+# Seed sidecar pinning the schema to prevent inference drift.
+# Uses type aliases to verify that the source YAML parser handles them:
+#   INT → INTEGER, BOOL → BOOLEAN, NUMERIC(p,s) → DECIMAL(p,s)
+description: Product category reference data
+columns:
+  - name: category_id
+    type: INT
+    nullable: false
+  - name: category_name
+    type: VARCHAR
+    nullable: false
+  - name: discount_pct
+    type: DECIMAL(4,2)
+    nullable: false
+  - name: is_active
+    type: BOOL
+    nullable: false

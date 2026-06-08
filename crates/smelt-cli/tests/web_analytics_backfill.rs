@@ -10,9 +10,10 @@
 //! seeded source data.
 
 use smelt_cli::{
-    build_explain_output, build_logical_graph, compute_batches_for_model, BackfillOptions, Config,
-    TimeRange,
+    build_dependency_graph, build_explain_output, compute_batches_for_model, BackfillOptions,
+    Config, TimeRange,
 };
+use std::collections::HashMap;
 use std::path::Path;
 
 fn examples_dir() -> &'static Path {
@@ -32,13 +33,14 @@ fn examples_dir() -> &'static Path {
 fn test_60_day_backfill_one_call() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
-    let (graph, db) =
-        build_logical_graph(&project_dir, &config, None, &[], "dev").expect("build logical graph");
+    let (graph, db) = build_dependency_graph(&project_dir, &config, None, &[], "dev")
+        .expect("build logical graph");
     let fn_bodies = smelt_runtime::build_fn_body_map(
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    let output = build_explain_output(&graph, &fn_bodies).expect("build explain output");
+    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+        .expect("build explain output");
 
     // events_parsed is the simplest FullyBatchSafe incremental model.
     // It lives in models/silver/ so its canonical path is "silver.events_parsed".
@@ -58,20 +60,32 @@ fn test_60_day_backfill_one_call() {
     );
 
     // Now compute batches for a 60-day window.
-    let node = graph.get_node("silver.events_parsed").expect("node exists");
+    let model_file = graph
+        .get_model("silver.events_parsed")
+        .expect("node exists");
+    let metadata = model_file.metadata.as_deref();
+    let frontmatter = smelt_planner::Frontmatter::parse(&model_file.content);
 
     let sixty_day_range = TimeRange {
         start: "2024-01-01".to_string(),
         end: "2024-03-01".to_string(),
     };
 
-    let ts = node.timeseries.as_ref().expect("timeseries config");
-    let inc_cfg = node.incremental.as_ref().expect("incremental config");
+    let ts = config
+        .get_timeseries_with_metadata("silver.events_parsed", metadata)
+        .cloned()
+        .or_else(|| metadata.and_then(|m| m.timeseries.clone()))
+        .expect("timeseries config");
+    let inc_cfg = config
+        .get_incremental_with_metadata("silver.events_parsed", metadata)
+        .cloned()
+        .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()))
+        .expect("incremental config");
 
     let (batch_safety, batches) = compute_batches_for_model(
-        &node.model_file.content,
-        inc_cfg,
-        ts,
+        &model_file.content,
+        &inc_cfg,
+        &ts,
         &sixty_day_range,
         &sixty_day_range,
         &BackfillOptions::default(),

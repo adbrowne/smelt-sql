@@ -151,3 +151,42 @@ fn rollup_dashboard_session_id_not_unknown() {
         dt
     );
 }
+
+/// D2 adversarial regression: struct `.*` spread inside a CTE body must
+/// propagate the struct fields (lat: Double, lon: Double) into the CTE's
+/// schema so that the outer SELECT can resolve them to concrete types.
+///
+/// The bug: `infer_cte_columns` → `infer_select_output_schema` processes a
+/// `SELECT fn(...).*` CTE body as a single unnamed `Unknown` column because
+/// `infer_expression_type` has no branch for `SMELT_PATH_CALL_STAR`. The
+/// outer SELECT then cannot resolve `lat` or `lon` and returns `Unknown`.
+///
+/// The fix: expand `SMELT_PATH_CALL_STAR` items inside CTE bodies using
+/// `collect_struct_spread_columns` (or equivalent), matching the top-level
+/// model SELECT path.
+#[test]
+fn struct_spread_inside_cte_body_propagates_field_types() {
+    // Top-level struct spread must work (baseline).
+    let lat_top = inferred_output_type("examples/fn_struct_spread_cte", "top_level_spread", "lat");
+    assert!(
+        matches!(lat_top, Some(DataType::Double)),
+        "top_level_spread.lat must resolve to Double from the struct spread; got {:?}",
+        lat_top
+    );
+
+    // Struct spread inside a CTE body must also propagate.
+    let lat_cte = inferred_output_type("examples/fn_struct_spread_cte", "cte_spread", "lat");
+    assert!(
+        matches!(lat_cte, Some(DataType::Double)),
+        "cte_spread.lat must resolve to Double — struct spread fields must propagate \
+         through a CTE body into the outer SELECT; got {:?} (struct-spread-in-CTE bug)",
+        lat_cte
+    );
+
+    let lon_cte = inferred_output_type("examples/fn_struct_spread_cte", "cte_spread", "lon");
+    assert!(
+        matches!(lon_cte, Some(DataType::Double)),
+        "cte_spread.lon must resolve to Double; got {:?}",
+        lon_cte
+    );
+}

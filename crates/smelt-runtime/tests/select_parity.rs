@@ -40,6 +40,7 @@ fn config_with_targets(targets: &[&str]) -> Config {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        target: None,
     }
 }
 
@@ -59,6 +60,71 @@ fn make_model(name: &str, sql: &str, metadata: Option<ModelMetadata>) -> smelt_c
         kind: smelt_core::ModelKind::Sql,
         model_id: smelt_core::ModelId::from_path(path),
         address_segments: vec![name.to_string()],
+    }
+}
+
+/// Make an emitted (generator) model whose virtual path follows the
+/// `<gen_file>::<smelt_name>` convention used by `model_file_from_emitted_def`.
+fn make_emitted_model(gen_file: &str, smelt_name: &str) -> smelt_core::ModelFile {
+    let gen_path = std::path::PathBuf::from(gen_file);
+    let gen_filename = gen_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("gen");
+    let virtual_path = gen_path
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join(format!("{}::{}", gen_filename, smelt_name));
+    let address_segments: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+    smelt_core::ModelFile {
+        name: smelt_name.to_string(),
+        path: virtual_path.clone(),
+        content: "SELECT 1".to_string(),
+        refs: vec![],
+        parse_errors: vec![],
+        metadata: None,
+        kind: smelt_core::ModelKind::Sql,
+        model_id: smelt_core::ModelId::multi_model(
+            std::path::PathBuf::from(gen_file),
+            smelt_name.to_string(),
+        ),
+        address_segments,
+    }
+}
+
+/// Like `make_emitted_model` but lets the caller supply SQL so refs are parsed.
+fn make_emitted_model_with_sql(
+    gen_file: &str,
+    smelt_name: &str,
+    sql: &str,
+) -> smelt_core::ModelFile {
+    let gen_path = std::path::PathBuf::from(gen_file);
+    let gen_filename = gen_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("gen");
+    let virtual_path = gen_path
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join(format!("{}::{}", gen_filename, smelt_name));
+    let address_segments: Vec<String> = smelt_name.split('.').map(|s| s.to_string()).collect();
+    let parse = smelt_parser::parse(sql);
+    let refs = smelt_parser::ast::File::cast(parse.syntax())
+        .map(|f| smelt_core::extract_refs(&f))
+        .unwrap_or_default();
+    smelt_core::ModelFile {
+        name: smelt_name.to_string(),
+        path: virtual_path,
+        content: sql.to_string(),
+        refs,
+        parse_errors: parse.errors,
+        metadata: None,
+        kind: smelt_core::ModelKind::Sql,
+        model_id: smelt_core::ModelId::multi_model(
+            std::path::PathBuf::from(gen_file),
+            smelt_name.to_string(),
+        ),
+        address_segments,
     }
 }
 
@@ -214,5 +280,101 @@ fn test_per_model_target_assignment() {
     assert_eq!(
         plan.target_assignments.get("overridden"),
         Some(&"warehouse".to_string())
+    );
+}
+
+/// BUG-074 regression: `generator_file:` selector silently matched nothing.
+/// Emitted models have virtual paths `<gen_file>::<smelt_name>`. The selector
+/// must resolve to all emitted survivors from the named generator file.
+#[test]
+fn test_generator_file_selector_matches_emitted_models() {
+    let gen_file = "models/cohorts.gen.sql";
+    // Three models emitted by cohorts.gen.sql.
+    let us_west = make_emitted_model(gen_file, "us_west");
+    let us_east = make_emitted_model(gen_file, "us_east");
+    let eu = make_emitted_model(gen_file, "eu");
+    // One hand-authored model that must NOT be selected.
+    let orders = make_model("orders", "SELECT 1", None);
+
+    let models = vec![us_west, us_east, eu, orders];
+    let graph = DependencyGraph::build(models, None).unwrap();
+    let config = config_with_targets(&["default"]);
+
+    let request = SelectionRequest {
+        select: vec![format!("generator_file:{gen_file}")],
+        exclude: vec![],
+        target: "default".to_string(),
+    };
+    let plan = select_executable_models(&graph, &config, &request).unwrap();
+
+    let selected: std::collections::HashSet<_> = plan.ordered_models.into_iter().collect();
+    assert!(
+        selected.contains("us_west"),
+        "us_west must be selected; got: {selected:?}"
+    );
+    assert!(
+        selected.contains("us_east"),
+        "us_east must be selected; got: {selected:?}"
+    );
+    assert!(
+        selected.contains("eu"),
+        "eu must be selected; got: {selected:?}"
+    );
+    assert!(
+        !selected.contains("orders"),
+        "hand-authored orders must not be selected; got: {selected:?}"
+    );
+}
+
+/// `generator_file:` pointing at a non-generator path matches nothing (no error).
+#[test]
+fn test_generator_file_selector_non_generator_matches_nothing() {
+    let models = vec![
+        make_model("orders", "SELECT 1", None),
+        make_emitted_model("models/cohorts.gen.sql", "eu"),
+    ];
+    let graph = DependencyGraph::build(models, None).unwrap();
+    let config = config_with_targets(&["default"]);
+
+    let request = SelectionRequest {
+        select: vec!["generator_file:models/hand_authored.sql".to_string()],
+        exclude: vec![],
+        target: "default".to_string(),
+    };
+    let plan = select_executable_models(&graph, &config, &request).unwrap();
+    assert!(
+        plan.ordered_models.is_empty(),
+        "selector against non-generator path must match nothing; got: {:?}",
+        plan.ordered_models
+    );
+}
+
+/// `generator_file:` + `+` upstream expansion: emitted model + its upstreams.
+#[test]
+fn test_generator_file_selector_with_upstream_expansion() {
+    let gen_file = "models/cohorts.gen.sql";
+    // 'eu' emitted model whose body references smelt.orders (upstream dep).
+    let eu = make_emitted_model_with_sql(gen_file, "eu", "SELECT * FROM smelt.orders");
+    let orders = make_model("orders", "SELECT 1", None);
+
+    let models = vec![eu, orders];
+    let graph = DependencyGraph::build(models, None).unwrap();
+    let config = config_with_targets(&["default"]);
+
+    let request = SelectionRequest {
+        select: vec![format!("+generator_file:{gen_file}")],
+        exclude: vec![],
+        target: "default".to_string(),
+    };
+    let plan = select_executable_models(&graph, &config, &request).unwrap();
+
+    let selected: std::collections::HashSet<_> = plan.ordered_models.iter().cloned().collect();
+    assert!(
+        selected.contains("eu"),
+        "eu must be selected; got: {selected:?}"
+    );
+    assert!(
+        selected.contains("orders"),
+        "upstream 'orders' must be selected via + expansion; got: {selected:?}"
     );
 }

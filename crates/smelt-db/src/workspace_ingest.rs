@@ -55,6 +55,13 @@ pub fn ingest_loaded_workspace(db: &mut Database, loaded: &LoadedWorkspace) -> I
         paths.push(model.path.clone());
     }
 
+    // Set the active build target from the project's smelt.yml `target:` field.
+    // Both the CLI and the LSP use this as the effective target when no `--target`
+    // override is supplied, keeping discovery symmetric (Workspace Loading Parity rule).
+    // Calling this before register_loader_files_from_disk ensures the Workspace
+    // singleton exists so loader files are added to its loader_files list.
+    db.set_active_target(loaded.config.target.as_deref().map(Arc::from));
+
     register_loader_files_from_disk(db, &loaded.project_root);
 
     IngestedProject {
@@ -111,6 +118,37 @@ pub fn register_loader_files_from_disk(db: &mut Database, project_root: &Path) {
     }
 }
 
+/// Compute the overlay path for a base file path and a target name.
+///
+/// Given `base_path` like `"cohorts.yaml"` and `target` like `"prod"`,
+/// returns `"cohorts.prod.yaml"`.  Directory prefixes are preserved:
+/// `"configs/cohorts.yaml"` → `"configs/cohorts.prod.yaml"`.
+///
+/// If `base_path` has no extension the target is appended with a dot:
+/// `"cohorts"` → `"cohorts.prod"`.
+pub fn overlay_path_for(base_path: &str, target: &str) -> String {
+    let path = Path::new(base_path);
+    let parent = path.parent();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(base_path);
+    let ext = path.extension().and_then(|e| e.to_str());
+
+    let file_name = match ext {
+        Some(e) => format!("{}.{}.{}", stem, target, e),
+        None => format!("{}.{}", stem, target),
+    };
+
+    match parent {
+        Some(p) if p != Path::new("") => {
+            let prefix = p.to_string_lossy();
+            format!("{}/{}", prefix, file_name)
+        }
+        _ => file_name,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +187,64 @@ mod tests {
         }
         // ProjectInput should be retrievable by root.
         assert!(db.project_input(dir.path()).is_some());
+    }
+
+    #[test]
+    fn ingest_sets_active_target_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\ntargets: {}\ntarget: prod\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let loaded = load_workspace(dir.path());
+        let mut db = Database::default();
+        ingest_loaded_workspace(&mut db, &loaded);
+
+        let ws = crate::Workspace::try_get(&db).expect("workspace not initialized");
+        assert_eq!(ws.active_target(&db).as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn ingest_without_config_target_leaves_active_target_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\ntargets: {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let loaded = load_workspace(dir.path());
+        let mut db = Database::default();
+        ingest_loaded_workspace(&mut db, &loaded);
+
+        let ws = crate::Workspace::try_get(&db).expect("workspace not initialized");
+        assert!(ws.active_target(&db).is_none());
+    }
+
+    #[test]
+    fn overlay_path_for_computes_correct_path() {
+        // Simple file with extension.
+        assert_eq!(
+            overlay_path_for("cohorts.yaml", "prod"),
+            "cohorts.prod.yaml"
+        );
+        // File with directory prefix.
+        assert_eq!(
+            overlay_path_for("configs/cohorts.yaml", "prod"),
+            "configs/cohorts.prod.yaml"
+        );
+        // Different extension.
+        assert_eq!(
+            overlay_path_for("metrics.json", "staging"),
+            "metrics.staging.json"
+        );
+        // File with no extension.
+        assert_eq!(overlay_path_for("cohorts", "prod"), "cohorts.prod");
     }
 }

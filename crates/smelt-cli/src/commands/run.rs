@@ -1,48 +1,32 @@
 use anyhow::{Context, Result};
-use arrow::util::pretty;
-use chrono::{NaiveDate, Utc};
-use smelt_backend::PartitionRange;
+use chrono::Utc;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_selector_args},
-    build_source_bound_map,
-    compiler::UpstreamSchemas,
-    compute_batches_for_model, compute_incremental_windows, discover_emitted_model_files,
-    discover_python_models, executor, find_project_root, init_db, inject_source_filters,
-    inject_time_filter, migration, parse_selector, BackendRegistry, BackfillOptions,
-    CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
-    PhysicalStrategy, SourcesConfig, TimeRange,
+    backend_factory::CliBackendFactory,
+    reporter::{format_strategy, CliReporter},
+    Config, ModelDiscovery, SourcesConfig,
 };
-use smelt_core::metadata::SchemaEvolutionStrategy;
-use smelt_planner::{derive_model_source_bounds, Frontmatter, ModelGraph, ModelInfo, Planner};
-use smelt_state::file_store::FileStore;
-use smelt_state::intervals::compute_model_hash;
-use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
-use std::collections::{HashMap, HashSet};
+use smelt_core::graph::DependencyGraph;
+use smelt_runtime::types::ExecuteRequest;
+use smelt_state::generate_run_id;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-use tracing::{debug, info, warn};
+use tracing::info;
 
-use crate::helpers::{
-    generate_partition_values, granularity_label, infer_deployed_columns, strategy_label,
-};
+use super::run_setup::*;
 use crate::RunArgs;
 
 pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let run_start = Utc::now();
 
-    // 1. Find project root
-    let project_dir = find_project_root(&args.project_dir)
+    // 1. Resolve project root + config.
+    let project_dir = smelt_cli::find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
-
     info!("Project directory: {}", project_dir.display());
-
-    // 2. Load configuration
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
-
     info!("Project: {} (version {})", config.name, config.version);
-
-    // Validate default target exists early
     if !config.targets.contains_key(&args.target) {
         return Err(anyhow::anyhow!(
             "Target '{}' not found in smelt.yml. Available targets: {}",
@@ -56,88 +40,22 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
 
-    // Load source configuration (optional)
+    // 2. Load optional sources + seeds.
     let sources = SourcesConfig::load(&project_dir).ok();
-
-    if let Some(ref source_config) = sources {
-        let source_count: usize = source_config.sources.iter().map(|s| s.tables.len()).sum();
-        info!("Loaded {} source tables", source_count);
+    if let Some(ref sc) = sources {
+        let n: usize = sc.sources.iter().map(|s| s.tables.len()).sum();
+        info!("Loaded {} source tables", n);
     }
-
-    // Discover seeds so they validate as `smelt.ref()` targets without a
-    // sources.yml workaround (bug #2 in the 20260417 follow-up plan).
-    // Phase 5: use with_sidecars to pick up ephemeral materialization.
     let seeds = smelt_core::discover_seed_infos_with_sidecars(&project_dir, &config.paths);
     if !seeds.is_empty() {
         info!("Discovered {} seed(s) as ref targets", seeds.len());
     }
 
-    // 3. Discover models (SQL + Python)
+    // 3. Discover models and function files.
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let raw_sql_models = discovery
-        .discover_models()
-        .with_context(|| "Failed to discover models")?;
-
-    // Initialise a Salsa DB from ALL discovered files (including generator files
-    // whose meta-language bodies contain parse errors when treated as SQL). The DB
-    // is used by the emitted-models pipeline below.
-    let gen_salsa_db = init_db(&project_dir, &raw_sql_models);
-
-    // Phase E2: expand generator files (*.gen.sql / `generates: models` frontmatter)
-    // into virtual ModelFile entries via the Salsa emitted-models pipeline.
-    let (emitted_model_files, _origins) =
-        discover_emitted_model_files(&gen_salsa_db, &project_dir, &config.paths);
-    if !emitted_model_files.is_empty() {
-        info!(
-            "Generator pipeline produced {} emitted model(s)",
-            emitted_model_files.len()
-        );
-    }
-
-    // Build the working model list:
-    // • exclude generator files (they are not materialisable SQL models; their
-    //   body is a meta-language expression, not a SELECT statement)
-    // • exclude test models (handled separately by `smelt test`)
-    // • add emitted virtual models
-    let mut models: Vec<smelt_cli::ModelFile> = raw_sql_models
-        .into_iter()
-        .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
-        .filter(|m| !m.is_test())
-        .collect();
-    models.extend(emitted_model_files);
-
-    // Discover function files (smelt.define / smelt.extern). These are NOT
-    // materialisable models (they don't enter the LogicalGraph) but they must
-    // be registered with the Salsa DB so `build_fn_body_map` can extract
-    // bodies for `smelt.fn.*` expansion at compile time.
-    let function_files = discovery
-        .discover_function_files()
-        .with_context(|| "Failed to discover function files")?;
-
-    // Discover and execute Python models
-    let python_files = discovery
-        .discover_python_files()
-        .with_context(|| "Failed to scan for Python models")?;
-
-    if !python_files.is_empty() {
-        let python_models = discover_python_models(
-            &python_files,
-            &models,
-            &config,
-            &project_dir,
-            config.python.as_deref(),
-        )
-        .with_context(|| "Failed to discover Python models")?;
-
-        if !python_models.is_empty() {
-            info!(
-                "Found {} Python model(s) from {} file(s)",
-                python_models.len(),
-                python_files.len()
-            );
-            models.extend(python_models);
-        }
-    }
+    let (models, function_files) =
+        discover_models_for_run(&discovery, &args.target, &project_dir, &config)?;
+    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
 
     if models.is_empty() {
         return Err(anyhow::anyhow!(
@@ -145,75 +63,27 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
             config.paths.join(", ")
         ));
     }
-
     info!("Found {} models total", models.len());
+    check_parse_errors(&models)?;
+    validate_materialization_configs(&models, &config)?;
 
-    // Surface parse errors as a hard failure. Previously these were only
-    // warned via tracing — a `smelt run` against a workspace with a parse
-    // error would silently exit 0 if the user had no `RUST_LOG` filter set
-    // (bug #5 in the 20260417 follow-up plan). Failing early gives both
-    // dry-run and live runs the same fail-fast behaviour.
-    let mut parse_error_models: Vec<String> = Vec::new();
-    for model in &models {
-        if !model.parse_errors.is_empty() {
-            parse_error_models.push(model.name.clone());
-            tracing::error!("Parse errors in {}:", model.name);
-            for error in &model.parse_errors {
-                tracing::error!("  - {} at {:?}", error.message, error.range);
-            }
-            // Mirror to stderr unconditionally so the user sees the failure
-            // even without RUST_LOG configured.
-            eprintln!("error: parse errors in model '{}':", model.name);
-            for error in &model.parse_errors {
-                eprintln!("  - {} at {:?}", error.message, error.range);
-            }
-        }
-    }
-    if !parse_error_models.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Parse errors in {} model(s): {}",
-            parse_error_models.len(),
-            parse_error_models.join(", "),
-        ));
-    }
+    // 4. Build dependency graph + resolve selectors.
+    let mut graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+    graph.add_seeds(&seeds);
+    graph.warn_unused_ephemerals(&config);
 
-    // Validate materialization configs (e.g. ephemeral + incremental conflicts)
-    {
-        let metadata_map: HashMap<String, smelt_cli::ModelMetadata> = models
-            .iter()
-            .filter_map(|m| {
-                m.metadata
-                    .as_ref()
-                    .map(|md| (m.name.clone(), md.as_ref().clone()))
-            })
-            .collect();
-        let config_errors = config.validate_model_configs(&metadata_map);
-        if !config_errors.is_empty() {
-            for (model, msg) in &config_errors {
-                tracing::error!("model '{}': {}", model, msg);
-            }
-            return Err(anyhow::anyhow!(
-                "Model configuration validation failed ({} error(s))",
-                config_errors.len()
-            ));
-        }
-    }
-
-    // Get workspace and project from the Salsa DB for scope resolution.
+    let mut gen_salsa_db = smelt_cli::init_db(
+        &project_dir,
+        &discovery.discover_models().unwrap_or_default(),
+    );
+    gen_salsa_db.set_active_target(Some(Arc::from(args.target.as_str())));
     let gen_salsa_ws =
         smelt_db::Workspace::try_get(&gen_salsa_db).expect("workspace not initialized");
     let gen_salsa_project = gen_salsa_db
         .project_input(&project_dir)
         .expect("project not initialized");
 
-    // 4. Build logical graph (eagerly resolves config per model)
-    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
-        .with_context(|| "Failed to build logical graph")?;
-
-    graph.warn_unused_ephemerals();
-
-    // 5. Determine execution order (with optional selector filtering)
-    // Resolve --select / --exclude args through scope before parsing selectors.
     let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
     let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
     let resolved_select = resolve_selector_args(
@@ -233,551 +103,138 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let execution_order = if resolved_select.is_empty() && resolved_exclude.is_empty() {
-        graph
-            .execution_order()
-            .with_context(|| "Failed to determine execution order")?
-    } else {
-        let mut selected = if resolved_select.is_empty() {
-            graph.all_model_names()
-        } else {
-            let selectors: Vec<_> = resolved_select
-                .iter()
-                .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
-                .collect::<Result<_, _>>()?;
-
-            // Check if any directly-selected model is ephemeral
-            for selector in &selectors {
-                if let smelt_cli::SelectionMethod::ModelName(name) = &selector.method {
-                    if !selector.include_upstream && !selector.include_downstream {
-                        if let Ok(node) = graph.get_node(name) {
-                            if node.materialization == Materialization::Ephemeral {
-                                return Err(anyhow::anyhow!(
-                                    "Cannot run ephemeral model '{}' directly — ephemeral models are inlined as CTEs into downstream models.",
-                                    name
-                                ));
-                            }
+    // Reject directly-selected ephemeral models.
+    if !resolved_select.is_empty() {
+        for s in &resolved_select {
+            let sel = smelt_cli::parse_selector(s)
+                .with_context(|| format!("Invalid selector '{}'", s))?;
+            if let smelt_cli::SelectionMethod::ModelName(name) = &sel.method {
+                if !sel.include_upstream && !sel.include_downstream {
+                    if let Ok(model) = graph.get_model(name) {
+                        let mat = config
+                            .get_materialization_with_metadata(name, model.metadata.as_deref());
+                        if mat == smelt_core::config::Materialization::Ephemeral {
+                            return Err(anyhow::anyhow!(
+                                "Cannot run ephemeral model '{}' directly — ephemeral models \
+                                 are inlined as CTEs into downstream models.",
+                                name
+                            ));
                         }
                     }
                 }
             }
-
-            graph
-                .select_models(&selectors)
-                .with_context(|| "Failed to select models")?
-        };
-
-        if !resolved_exclude.is_empty() {
-            let excludes: Vec<_> = resolved_exclude
-                .iter()
-                .map(|s| {
-                    parse_selector(s).with_context(|| format!("Invalid exclude selector '{}'", s))
-                })
-                .collect::<Result<_, _>>()?;
-
-            selected = graph
-                .exclude_models(&selected, &excludes)
-                .with_context(|| "Failed to apply exclude selectors")?;
         }
+    }
 
-        if selected.is_empty() {
-            info!("No models matched the selectors");
-            eprintln!("smelt: no models matched the selector(s)");
-            return Ok(());
-        }
+    // 5. Compute time range.
+    let effective_start = args.start.as_ref().or(args.event_time_start.as_ref());
+    let effective_end = args.end.as_ref().or(args.event_time_end.as_ref());
+    if let (Some(s), Some(e)) = (effective_start, effective_end) {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .with_context(|| format!("Invalid start date format: {}. Expected YYYY-MM-DD", s))?;
+        chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d")
+            .with_context(|| format!("Invalid end date format: {}. Expected YYYY-MM-DD", e))?;
+        info!("Time range: {} to {} (exclusive)", s, e);
+    } else if effective_start.is_some() != effective_end.is_some() {
+        return Err(anyhow::anyhow!(
+            "Both --start and --end (or --event-time-start and --event-time-end) must be provided together"
+        ));
+    }
+    let (auto_start, auto_end) = if args.auto && effective_start.is_none() {
+        compute_auto_time_range(&project_dir, &graph)
+            .map_or((None, None), |(s, e)| (Some(s), Some(e)))
+    } else {
+        (None, None)
+    };
+    let start_val = effective_start.cloned().or(auto_start);
+    let end_val = effective_end.cloned().or(auto_end);
 
-        graph
-            .filtered_execution_order(&selected)
-            .with_context(|| "Failed to determine execution order")?
+    // 6. Validate sources (best-effort, non-fatal).
+    validate_sources_optional(
+        sources.as_ref(),
+        &config,
+        &args.target,
+        args.database.clone(),
+        &resolved_select,
+        &resolved_exclude,
+        &project_dir,
+    )
+    .await;
+
+    // 7. Build Salsa DB for execute_project, then run.
+    let salsa_db = build_execute_salsa_db(
+        &discovery,
+        &function_files,
+        &models,
+        &project_dir,
+        &args.target,
+    )?;
+
+    let request = ExecuteRequest {
+        target: args.target.clone(),
+        select: resolved_select,
+        exclude: resolved_exclude,
+        start: start_val,
+        end: end_val,
+        batch_size_days: args.batch_size,
+        per_partition: args.per_partition,
+        full_refresh: false,
+        dry_run: args.dry_run,
+        enforce_safety: !args.allow_downgrade,
+        allow_column_removal: args.allow_column_removal,
+        allow_full_refresh: args.allow_full_refresh,
+        ephemeral_seed_ctes,
     };
 
-    info!(
-        "Execution order: {}",
-        execution_order
-            .iter()
-            .enumerate()
-            .map(|(i, name)| format!("{}. {}", i + 1, name))
-            .collect::<Vec<_>>()
-            .join(" → ")
-    );
+    let run_id = generate_run_id();
+    let config_arc = Arc::new(config);
+    let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
+    let db_arc = Arc::new(tokio::sync::Mutex::new(salsa_db));
+    let reporter = CliReporter::new(args.verbose, args.dry_run, args.show_results);
+    let backend_factory = CliBackendFactory {
+        database_override: args.database,
+    };
 
-    // ── Diagnostic-parity gate (analysis ↔ build) ────────────────────────
-    // Refuse the build if the analyzer — the same surface the LSP publishes
-    // (`file_diagnostics` + `check_type_diagnostics`) — reports any
-    // `Error`-severity diagnostic. Shared with the UI run path via
-    // `smelt_runtime::gate_diagnostics`. Spec: `docs/specs/architecture.md`
-    // §"Diagnostic parity rule (analysis ↔ build)" — the gate runs over the
-    // *selected models + in-DAG deps* (the `execution_order` set), so building
-    // one model is not blocked by an unrelated broken model elsewhere in the
-    // project. It runs before any model is compiled/executed.
-    //
-    // The gate DB registers the *discovered* files — raw SQL models (including
-    // generator `*.gen.sql` files, so refs to generator-emitted models resolve
-    // through the `emitted_models` query) plus function-definition files. The
-    // checked set always includes every function-definition and generator file:
-    // their diagnostics (e.g. `CteCycle` on a `smelt.define`, or a malformed
-    // generator-emitted body) are reported against the definition/generator
-    // file, not the selected caller, so a selected model that consumes a broken
-    // one must still be gated.
-    {
-        let mut gate_files: Vec<smelt_cli::ModelFile> = discovery
-            .discover_models()
-            .with_context(|| "Failed to discover models for diagnostic gate")?;
-        gate_files.extend(function_files.iter().cloned());
-        let gate_db = init_db(&project_dir, &gate_files);
-        let gate_ws =
-            smelt_db::Workspace::try_get(&gate_db).expect("workspace not initialized by init_db");
-        let selected_set: std::collections::HashSet<&str> =
-            execution_order.iter().map(|s| s.as_str()).collect();
-        let gate_paths: Vec<std::path::PathBuf> = gate_files
-            .iter()
-            .filter(|m| {
-                let is_function = function_files.iter().any(|f| f.path == m.path);
-                let is_generator = m.path.to_string_lossy().ends_with(".gen.sql");
-                is_function
-                    || is_generator
-                    || selected_set.contains(m.name.as_str())
-                    || selected_set.contains(m.canonical_path().as_str())
-            })
-            .map(|m| m.path.clone())
-            .collect();
-        if let Err(errors) = smelt_runtime::gate_diagnostics(&gate_db, gate_ws, &gate_paths) {
-            for e in &errors {
-                eprintln!("error: {e}");
-            }
-            return Err(anyhow::anyhow!(
-                "{}",
-                smelt_runtime::format_gate_errors(&errors)
-            ));
-        }
-    }
-
-    // Dependency validation runs *after* the diagnostic-parity gate so an
-    // analyzer Error (e.g. a config-loader schema violation, a cyclic-CTE
-    // function) is reported by its real diagnostic code rather than a downstream
-    // "undefined model/source" dependency error (BUG-015/019). Selection above
-    // operates on the unvalidated graph (pure traversal); validation here
-    // guards compilation/execution.
-    graph
-        .validate()
-        .with_context(|| "Dependency validation failed")?;
-
-    // (dry-run no longer returns here — it now runs through compilation so
-    // it can surface diagnostics and print the planned SQL per model. See
-    // the dry-run handler block further down before model execution.)
-
-    // 6. Create backends for needed targets
-    // Log cross-backend references (supported via Parquet exchange)
-    let cross_edges = graph.find_cross_backend_edges();
-    if !cross_edges.is_empty() {
-        info!(
-            "Cross-engine references detected ({} transfer(s) via Parquet):",
-            cross_edges.len()
-        );
-        for edge in &cross_edges {
-            info!(
-                "  {} ({}) -> {} ({})",
-                edge.upstream, edge.upstream_target, edge.downstream, edge.downstream_target
-            );
-        }
-    }
-
-    let needed_targets: HashSet<String> = execution_order
-        .iter()
-        .filter_map(|name| graph.get_node(name).ok())
-        .map(|node| node.target.clone())
-        .collect();
-    let registry = BackendRegistry::new(
-        &config.targets,
-        &needed_targets,
+    let outcome = smelt_runtime::execute_project(
+        run_id.clone(),
+        request,
+        config_arc,
+        graph_arc,
+        db_arc,
         &project_dir,
-        args.database,
+        &backend_factory,
+        &reporter,
+        CancellationToken::new(),
     )
     .await?;
 
-    let needed_target_configs: HashMap<String, _> = needed_targets
-        .iter()
-        .map(|name| (name.clone(), config.targets[name].clone()))
-        .collect();
-    let mut compilers = CompilerRegistry::new(&config, &needed_target_configs);
-
-    // Set up cross-engine ref resolution (Parquet exchange)
-    // Only resolve edges where the downstream model is in the execution order.
-    // Paths are computed from target config (warehouse field) so we don't need
-    // the upstream backend to be instantiated (e.g., Spark may not be running).
-    if !cross_edges.is_empty() {
-        let execution_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
-        let mut refs_by_target: HashMap<String, HashMap<String, String>> = HashMap::new();
-        for edge in &cross_edges {
-            if !execution_set.contains(edge.downstream.as_str()) {
-                continue;
-            }
-            let upstream_target_config = &config.targets[&edge.upstream_target];
-            let upstream_schema = &upstream_target_config.schema;
-            // Compute materialized path from config: warehouse/schema/model_name
-            let rel_path = if let Some(ref warehouse) = upstream_target_config.warehouse {
-                Some(std::path::PathBuf::from(format!(
-                    "{}/{}/{}",
-                    warehouse, upstream_schema, edge.upstream
-                )))
-            } else if needed_targets.contains(&edge.upstream_target) {
-                // Fallback: if backend is available, ask it
-                registry
-                    .get(&edge.upstream_target)
-                    .materialized_path(upstream_schema, &edge.upstream)
-            } else {
-                None
-            };
-            if let Some(rel_path) = rel_path {
-                let abs_path = project_dir.join(&rel_path);
-                let parquet_expr = format!(
-                    "read_parquet('{}/**/*.parquet', hive_partitioning=true)",
-                    abs_path.display()
-                );
-                refs_by_target
-                    .entry(edge.downstream_target.clone())
-                    .or_default()
-                    .insert(edge.upstream.clone(), parquet_expr);
-            }
-        }
-        for (target, refs) in refs_by_target {
-            compilers.set_cross_engine_refs(&target, refs);
-        }
-    }
-
-    // 7. Validate sources exist (if sources.yml present)
-    // Skip source validation when --select/--exclude is used: the selected models
-    // may not reference all sources, and some sources may live on backends that
-    // aren't running (e.g., Spark sources when only DuckDB models are selected).
-    if let Some(ref source_config) = sources {
-        if resolved_select.is_empty() && resolved_exclude.is_empty() {
-            executor::validate_sources(registry.get(&args.target), source_config)
-                .await
-                .with_context(|| "Source validation failed")?;
-        } else {
-            debug!("Skipping source validation (--select/--exclude active)");
-        }
-    }
-
-    // 8. Parse time range if provided (for incremental processing)
-    //    --start/--end are aliases for --event-time-start/--event-time-end
-    let effective_start = args.start.as_ref().or(args.event_time_start.as_ref());
-    let effective_end = args.end.as_ref().or(args.event_time_end.as_ref());
-
-    let time_range = match (effective_start, effective_end) {
-        (Some(start), Some(end)) => {
-            // Validate date format
-            NaiveDate::parse_from_str(start, "%Y-%m-%d").with_context(|| {
-                format!("Invalid start date format: {}. Expected YYYY-MM-DD", start)
-            })?;
-            NaiveDate::parse_from_str(end, "%Y-%m-%d").with_context(|| {
-                format!("Invalid end date format: {}. Expected YYYY-MM-DD", end)
-            })?;
-
-            info!("Time range: {} to {} (exclusive)", start, end);
-            Some(TimeRange {
-                start: start.clone(),
-                end: end.clone(),
-            })
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(anyhow::anyhow!(
-                "Both --start and --end (or --event-time-start and --event-time-end) must be provided together"
-            ));
-        }
-        _ => None,
-    };
-
-    // Handle --auto mode: compute time range from interval store
-    let time_range = if args.auto && time_range.is_none() {
-        let file_store = FileStore::new(&project_dir);
-        let interval_store = match file_store.load_intervals() {
-            Ok(store) => store,
-            Err(e) => {
-                warn!(
-                    "Failed to load interval store: {}. Starting with empty history.",
-                    e
-                );
-                smelt_state::intervals::IntervalStore::default()
-            }
-        };
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-
-        // Find the latest covered date across all incremental models
-        let mut latest: Option<NaiveDate> = None;
-        for model_name in &execution_order {
-            if let Some(intervals) = interval_store.get(model_name) {
-                if let Some(date) = intervals.latest_date() {
-                    latest = Some(match latest {
-                        Some(prev) => prev.min(date), // use the earliest "latest" — conservative
-                        None => date,
-                    });
-                }
-            }
-        }
-
-        if let Some(start_date) = latest {
-            let start = start_date.format("%Y-%m-%d").to_string();
-            info!(
-                "[AUTO] Time range: {} to {} (from interval store)",
-                start, today
-            );
-            Some(TimeRange { start, end: today })
-        } else {
-            info!("[AUTO] No interval history found. Use --start/--end for initial run.");
-            None
-        }
-    } else {
-        time_range
-    };
-
-    let backfill_options = BackfillOptions {
-        batch_size_days: args.batch_size,
-        per_partition: args.per_partition,
-    };
-
-    // 9. Run optimizer on discovered models
-    let mut opt_graph = ModelGraph::new();
-    for model_name in &execution_order {
-        let model = graph.get_model(model_name)?;
-        let frontmatter = Frontmatter::parse(&model.content);
-        opt_graph.add_model(ModelInfo {
-            name: model.name.clone(),
-            sql: model.content.clone(),
-            refs: model
-                .refs
-                .iter()
-                .map(|r| r.smelt_ref.to_path().join("."))
-                .collect(),
-            timeseries_config: frontmatter.as_ref().and_then(|f| f.timeseries.clone()),
-            incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
-        });
-    }
-
-    let planner = Planner::new();
-    let (transformations, plan_errors) = planner.plan(&opt_graph);
-
-    if !plan_errors.is_empty() {
-        if args.allow_downgrade {
-            // Explicit opt-in: log and continue with full-table refresh fallback.
-            for err in &plan_errors {
-                warn!(
-                    "Incremental safety check failed (falling back to full-table refresh \
-                     because --allow-downgrade is set): {}",
-                    err
-                );
-            }
-        } else {
-            // Hard refusal: models that fail the safety classifier are not run.
-            // Use --allow-downgrade to enable full-table fallback as an escape hatch.
-            let mut msg = String::from(
-                "Incremental safety check refused the following model(s). \
-                 Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n",
-            );
-            for err in &plan_errors {
-                msg.push_str("  • ");
-                msg.push_str(err);
-                msg.push('\n');
-            }
-            return Err(anyhow::anyhow!("{}", msg.trim_end()));
-        }
-    }
-
-    // Constraint 10: derive per-source temporal bounds for every incremental model.
-    // A model whose SQL contains a bare LAG/LEAD (no RANGE BETWEEN INTERVAL) over a
-    // timeseries source produces NotDerivable — refuse execution unless --allow-downgrade.
-    {
-        let mut bound_errors: Vec<String> = Vec::new();
-        for model_info in opt_graph.models() {
-            if model_info.incremental_config.is_some() && model_info.timeseries_config.is_some() {
-                if let Err(diag) = derive_model_source_bounds(model_info, &opt_graph) {
-                    bound_errors.push(diag);
-                }
-            }
-        }
-        if !bound_errors.is_empty() {
-            if args.allow_downgrade {
-                for err in &bound_errors {
-                    warn!(
-                        "Bound derivation failed (falling back to full-table refresh \
-                         because --allow-downgrade is set): {}",
-                        err
-                    );
-                }
-            } else {
-                let mut msg = String::from(
-                    "Temporal bound derivation refused the following model(s) — \
-                     Fix the SQL or use --allow-downgrade to fall back to full-table refresh:\n",
-                );
-                for err in &bound_errors {
-                    msg.push_str("  • ");
-                    msg.push_str(err);
-                    msg.push('\n');
-                }
-                return Err(anyhow::anyhow!("{}", msg.trim_end()));
+    // --show-plan works in both dry-run and live-run modes.
+    if args.show_plan {
+        if let Some(ref plan) = outcome.plan_summary {
+            println!("Execution plan:");
+            for record in &plan.models {
+                println!("  {} [{}]", record.name, format_strategy(&record.strategy));
             }
         }
     }
 
-    // 10. Build physical graph (resolves strategies, ephemeral resolvers)
-    let target_schemas: HashMap<String, String> = needed_targets
-        .iter()
-        .map(|name| (name.clone(), registry.target_config(name).schema.clone()))
-        .collect();
-
-    let mut physical_graph = PhysicalGraphBuilder::new(
-        &graph,
-        &transformations,
-        time_range.clone(),
-        &compilers,
-        target_schemas,
-    )
-    .build()
-    .with_context(|| "Failed to build physical graph")?;
-
-    // Phase 5: inject ephemeral seed CTEs into the resolvers.
-    // For each ephemeral seed, read the CSV rows and build a VALUES CTE body.
-    {
-        let ephemeral_seeds: Vec<_> = seeds.iter().filter(|s| s.is_ephemeral()).collect();
-        if !ephemeral_seeds.is_empty() {
-            let mut seed_ctes: Vec<(String, String, String)> = Vec::new();
-            for seed in ephemeral_seeds {
-                // Read CSV rows for the VALUES body.
-                if let Ok((_headers, rows_iter)) = smelt_core::seeds::csv::read_csv(&seed.path) {
-                    let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
-                    let canonical_name = seed.address_segments.join("_");
-                    let col_names: Vec<&str> =
-                        seed.columns.iter().map(|(n, _)| n.as_str()).collect();
-                    // Build alias with column names for DuckDB named CTE:
-                    // __smelt_lookup_regions(region_id, region_name)
-                    let alias_with_cols =
-                        format!("__smelt_{}({})", canonical_name, col_names.join(", "));
-                    let cte_body =
-                        smelt_core::seeds::ephemeral::build_values_cte(&seed.columns, &rows);
-                    seed_ctes.push((canonical_name, alias_with_cols, cte_body));
-                }
-            }
-            physical_graph.add_ephemeral_seed_ctes_all_targets(seed_ctes);
-        }
-    }
-
-    // Print planner summary
-    let planner_summary = physical_graph.planner_summary();
-    if !planner_summary.is_empty() {
-        info!("Planner:");
-        for (model, desc) in &planner_summary {
-            info!("  {} -> {}", model, desc);
-        }
-    }
-
-    // Mandatory time range check: if any model has planner-detected incremental and no time range
-    if time_range.is_none() {
-        let inc_models: Vec<&str> = physical_graph
-            .iter_in_order()
-            .filter(|n| matches!(n.strategy, PhysicalStrategy::Incremental { .. }))
-            .map(|n| n.name.as_str())
-            .collect();
-        if !inc_models.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Incremental models selected for run ({}) but --event-time-start and --event-time-end not provided.\n\
-                 These are required when running incremental models, similar to dbt's microbatch parameters.",
-                inc_models.join(", ")
-            ));
-        }
-    }
-
-    // 11. Compile and execute each model
-
-    // Initialize type inference DB for schema evolution
-    let all_models: Vec<_> = physical_graph
-        .iter_in_order()
-        .map(|node| &node.model_file)
-        .cloned()
-        .collect();
-    // Function files must be registered alongside models so `parse_file` can
-    // resolve `smelt.define` bodies for `build_fn_body_map`. They are
-    // intentionally excluded from `all_models` (which feeds
-    // `UpstreamSchemas::from_database` and the physical graph) — they are
-    // not materialisable models.
-    let mut db_files: Vec<_> = all_models.clone();
-    db_files.extend(function_files.iter().cloned());
-    let type_db = init_db(&project_dir, &db_files);
-
-    // Build upstream schemas (model + seed + source columns) once and share
-    // them across every compiler in the registry. Without this, the CLI's
-    // `apply_type_casts` would build an empty TypeContext and aggregates over
-    // `smelt.ref()` columns would silently narrow to BIGINT (bug #3).
-    let upstream_schemas = Arc::new(UpstreamSchemas::from_database(
-        &type_db,
-        &project_dir,
-        &all_models,
-    )?);
-    compilers.set_upstream_schemas_all(upstream_schemas);
-
-    // Wire `smelt.fn.*` function bodies through every compiler. Skipped when
-    // the project has no functions so legacy projects compile byte-for-byte
-    // identically to the pre-Phase-56 codepath (the `Option<Arc<FnBodyMap>>`
-    // field stays `None`).
-    let workspace =
-        smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
-    {
-        let fn_bodies = smelt_runtime::build_fn_body_map(&type_db, workspace);
-        if !fn_bodies.is_empty() {
-            compilers.set_function_bodies_all(fn_bodies);
-        }
-    }
-
-    // Path-prefix enforcement (spec: `docs/specs/functions.md` §"Function call
-    // syntax") — UnknownSmeltFn and every other `Error`-severity diagnostic is
-    // now caught up-front by the diagnostic-parity gate above
-    // (`smelt_runtime::gate_diagnostics`), which fails the build before this
-    // point. No code-specific block is needed here.
-
-    let file_store = FileStore::new(&project_dir);
-
-    // --- Dry-run handler --------------------------------------------------
-    //
-    // Bug #5 in the 20260417 follow-up plan: `smelt run --dry-run` used to
-    // return early before this point and print nothing to stdout. With no
-    // `RUST_LOG` set the user got zero output and exit 0 — even when the
-    // equivalent live run would have failed at compilation time.
-    //
-    // Now dry-run runs through compilation for every model in the physical
-    // graph (using the same compiler registry the live run uses), prints a
-    // `Would run: <model>` header followed by the planned SQL to stdout, and
-    // exits non-zero on any compile error via `?`. Stdout (not tracing) is
-    // the contract — the user must see the plan without configuring a log
-    // filter.
     if args.dry_run {
-        let selected_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
-        let mut planned = 0usize;
-        for phys_node in physical_graph.iter_in_order().filter(|n| {
-            selected_set.contains(n.name.as_str())
-                || n.logical_origins
+        let planned = outcome
+            .plan_summary
+            .as_ref()
+            .map(|ps| {
+                ps.models
                     .iter()
-                    .any(|o| selected_set.contains(o.as_str()))
-        }) {
-            let model_name = &phys_node.name;
-            let model = &phys_node.model_file;
-            let compiler = compilers.get(&phys_node.target);
-            let schema = &registry.target_config(&phys_node.target).schema;
-            let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
-
-            let compiled = compiler
-                .compile_with_ephemerals(model, schema, resolver)
-                .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-            // Stdout, not tracing — dry-run output is part of the CLI
-            // contract and must be visible without a log-level env var.
-            println!(
-                "-- Would run: {} (target={}, materialization={:?})",
-                model_name, phys_node.target, compiled.materialization
-            );
-            println!("{}", compiled.sql.trim_end());
-            println!();
-            planned += 1;
-        }
-
+                    .filter(|r| {
+                        !matches!(
+                            r.strategy,
+                            smelt_runtime::types::ModelStrategy::Ephemeral
+                                | smelt_runtime::types::ModelStrategy::Skipped { .. }
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
         info!(
             "[DRY RUN] Compiled {} model(s); no execution performed.",
             planned
@@ -786,733 +243,9 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     }
 
     info!("{}", "=".repeat(60));
-    info!("Executing models...");
-    info!("{}", "=".repeat(60));
-
-    let mut results: Vec<(smelt_backend::ExecutionResult, PhysicalStrategy)> = Vec::new();
-
-    // When --select is used, filter physical nodes to only those whose target
-    // has a backend available. Upstream models on other engines (e.g., Spark)
-    // may be in the physical graph but shouldn't be executed.
-    let selected_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
-    for phys_node in physical_graph.iter_in_order().filter(|n| {
-        selected_set.contains(n.name.as_str())
-            || n.logical_origins
-                .iter()
-                .any(|o| selected_set.contains(o.as_str()))
-    }) {
-        let model_name = &phys_node.name;
-        let model = &phys_node.model_file;
-        // `db_table_name` is the qualified table name used for DB operations.
-        // For models in subdirectories, this is `segs.join("_")` (e.g.
-        // `staging_stg_events`), which matches the ref compiled by the SQL
-        // compiler (`main.staging_stg_events`). For flat models it equals
-        // `model_name`.
-        let db_table_name = model.db_name_owned();
-        let backend = registry.get(&phys_node.target);
-        let compiler = compilers.get(&phys_node.target);
-        let schema = &registry.target_config(&phys_node.target).schema;
-        let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
-
-        // Schema evolution check for incremental table models
-        let mut force_full_refresh = false;
-        if let PhysicalStrategy::Incremental { .. } = &phys_node.strategy {
-            // Check if schema evolution is opted out via frontmatter
-            let evolution_strategy = model
-                .metadata
-                .as_ref()
-                .and_then(|m| m.schema_evolution.as_ref())
-                .map(|se| &se.strategy);
-            let use_alter = !matches!(
-                evolution_strategy,
-                Some(SchemaEvolutionStrategy::FullRefresh)
-            );
-
-            if use_alter {
-                if let Ok(true) = backend.table_exists(schema, &db_table_name).await {
-                    let inferred_columns = infer_deployed_columns(&type_db, model);
-                    if !inferred_columns.is_empty() {
-                        let (column_defaults, backfill_exprs) =
-                            migration::extract_evolution_maps(model.metadata.as_deref());
-
-                        // Determine table format: per-model override > target default
-                        let target_config = registry.target_config(&phys_node.target);
-                        let table_format = model
-                            .metadata
-                            .as_ref()
-                            .and_then(|m| m.format.as_ref())
-                            .cloned()
-                            .or_else(|| target_config.table_format());
-                        let ddl_backend = migration::ddl_backend_for_dialect(
-                            backend.dialect(),
-                            table_format,
-                            None,
-                        );
-
-                        match migration::check_and_migrate(
-                            backend,
-                            &file_store,
-                            &db_table_name,
-                            &model.content,
-                            schema,
-                            &inferred_columns,
-                            args.allow_column_removal,
-                            args.allow_full_refresh,
-                            args.dry_run,
-                            &column_defaults,
-                            &backfill_exprs,
-                            Some(&ddl_backend),
-                        )
-                        .await
-                        {
-                            Ok(migration::SchemaEvolutionResult::FirstDeployment) => {}
-                            Ok(migration::SchemaEvolutionResult::NoChange) => {}
-                            Ok(migration::SchemaEvolutionResult::Migrated { statements }) => {
-                                info!("Schema evolved ({} ALTER statement(s)):", statements.len());
-                                for stmt in &statements {
-                                    info!("    {}", stmt);
-                                }
-                            }
-                            Ok(migration::SchemaEvolutionResult::FullRefreshRequired {
-                                reason,
-                            }) => {
-                                info!("Schema change requires full refresh: {}", reason);
-                                force_full_refresh = true;
-                            }
-                            Ok(migration::SchemaEvolutionResult::ColumnRemovalBlocked {
-                                columns,
-                            }) => {
-                                return Err(anyhow::anyhow!(
-                                    "Schema evolution for '{}' would remove columns: {}. \
-                                 Use --allow-column-removal to permit this.",
-                                    model_name,
-                                    columns.join(", ")
-                                ));
-                            }
-                            Ok(migration::SchemaEvolutionResult::FullRefreshBlocked { reason }) => {
-                                return Err(anyhow::anyhow!(
-                                    "Schema evolution for '{}' requires full refresh: {}. \
-                                     Use --allow-full-refresh to permit this.",
-                                    model_name,
-                                    reason
-                                ));
-                            }
-                            Ok(migration::SchemaEvolutionResult::TableRewrite { description }) => {
-                                info!("Schema change requires table rewrite: {}", description);
-                                // Table rewrite (e.g., Spark nested type widening) —
-                                // fall back to full refresh for now.
-                                force_full_refresh = true;
-                            }
-                            Err(e) => {
-                                warn!(
-                                "Schema evolution check failed: {}. Continuing with incremental.",
-                                e
-                            );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If schema evolution requires full refresh, override the strategy
-        let effective_strategy = if force_full_refresh {
-            &PhysicalStrategy::FullRefresh
-        } else {
-            &phys_node.strategy
-        };
-
-        // `cumulative_aggregate` is dispatched outside the PhysicalStrategy
-        // match: the rule has its own per-partition merge loop. It still needs
-        // a `[start, end)` run window, so we require an incremental-style time
-        // range on the CLI invocation. The driving source's timeseries: comes
-        // from the upstream model's metadata, gathered from the logical graph.
-        if phys_node.materialization == Materialization::CumulativeAggregate {
-            // Build the source_timeseries map from the logical graph: every
-            // dependency whose declared `timeseries:` block is non-None. Built
-            // up-front so the classifier can run on BOTH the windowed and the
-            // no-window full-refresh path.
-            let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
-            if let Ok(node) = graph.get_node(model_name) {
-                for dep_name in &node.dependencies {
-                    if let Ok(dep_node) = graph.get_node(dep_name) {
-                        if let Some(ts) = &dep_node.timeseries {
-                            // Key by the smelt.<path> reference as it appears
-                            // in the model SQL — the dep_node carries
-                            // address_segments.
-                            let smelt_key =
-                                format!("smelt.{}", dep_node.model_file.address_segments.join("."));
-                            source_timeseries.insert(smelt_key, ts.clone());
-                        }
-                    }
-                }
-            }
-
-            // Without a time range, fall back to single-shot full refresh: the
-            // SELECT is run once, with no per-partition source filter, and the
-            // result is CREATE TABLE AS'd. This makes `smelt build` work
-            // without requiring `--event-time-start`/`--event-time-end` while
-            // an explicit run window still drives the per-partition merge loop.
-            let cumulative_time_range = match time_range.clone() {
-                Some(r) => r,
-                None => {
-                    info!(
-                        "Running model: {} (cumulative_aggregate, full refresh — no run window)",
-                        model_name
-                    );
-                    let clean_sql = smelt_parser::strip_frontmatter(&model.content);
-                    // Classify even on the no-window full-refresh path: a
-                    // classifier rejection must REFUSE the model
-                    // (cumulative_aggregate.md Constraint #10 — "No silent
-                    // downgrade. … No fallback to full-refresh"), never silently
-                    // materialise forbidden cumulative SQL as a plain table.
-                    smelt_runtime::classify_cumulative_sql(
-                        model_name,
-                        &clean_sql,
-                        &source_timeseries,
-                    )
-                    .with_context(|| {
-                        format!("Failed to execute cumulative model: {}", model_name)
-                    })?;
-                    let compiled = compiler
-                        .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
-                        .with_context(|| format!("Failed to compile model: {}", model_name))?;
-                    backend
-                        .drop_table_if_exists(schema, &db_table_name)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to drop {}: {}", db_table_name, e))?;
-                    backend
-                        .create_table_as(schema, &db_table_name, &compiled.sql)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to create cumulative model {}: {}",
-                                model_name,
-                                e
-                            )
-                        })?;
-                    let row_count = backend
-                        .get_row_count(schema, &db_table_name)
-                        .await
-                        .unwrap_or(0);
-                    let result = smelt_backend::ExecutionResult {
-                        model_name: model_name.to_string(),
-                        duration: std::time::Duration::from_millis(0),
-                        row_count,
-                        preview: None,
-                    };
-                    info!(
-                        "{} done ({} rows, full refresh)",
-                        result.model_name, result.row_count
-                    );
-                    results.push((result, phys_node.strategy.clone()));
-                    continue;
-                }
-            };
-
-            let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
-            let result = smelt_runtime::execute_cumulative_aggregate(
-                backend,
-                model,
-                &compilers,
-                resolver,
-                &phys_node.target,
-                schema,
-                &db_table_name,
-                &cumulative_time_range,
-                &source_timeseries,
-                args.verbose,
-            )
-            .await
-            .with_context(|| format!("Failed to execute cumulative model: {}", model_name))?;
-
-            info!(
-                "{} done ({} rows, {:?})",
-                result.model_name, result.row_count, result.duration
-            );
-
-            results.push((result, phys_node.strategy.clone()));
-            continue;
-        }
-
-        let result = match effective_strategy {
-            PhysicalStrategy::Incremental {
-                config: inc_config,
-                timeseries: inc_ts,
-                time_range: range,
-                plan_steps: Some(steps),
-            } => {
-                let resolved_strategy = backend.resolve_strategy(inc_config);
-                info!(
-                    "Running model: {} (cube split + incremental/{})",
-                    model_name,
-                    strategy_label(&resolved_strategy),
-                );
-
-                // Compute temporal windows (lookback/lookahead from AST + data latency)
-                let model_latency = model
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.columns.get(&inc_ts.event_time_column))
-                    .and_then(|c| c.data_latency.as_ref());
-                let windows = compute_incremental_windows(
-                    &model.content,
-                    inc_config,
-                    inc_ts,
-                    sources.as_ref(),
-                    model_latency,
-                    range,
-                );
-
-                if windows.effective_window.lookback_days > 0
-                    || windows.effective_window.lookahead_days > 0
-                {
-                    debug!("Temporal window: {}", windows.effective_window.explanation);
-                }
-
-                // DELETE must cover the same partitions the INSERT writes, which
-                // execute_plan_incremental clamps to `filter_range` (run window +
-                // derived lookback/lookahead). Using `partition_range` would miss
-                // lookback partitions for write-rebasing models and accumulate
-                // duplicates across runs. See the batched path below for detail.
-                let partition = PartitionRange {
-                    column: inc_ts.partition_column.clone(),
-                    start: windows.filter_range.start.clone(),
-                    end: windows.filter_range.end.clone(),
-                };
-
-                executor::execute_plan_incremental(
-                    backend,
-                    &db_table_name,
-                    steps,
-                    schema,
-                    partition,
-                    &inc_ts.event_time_column,
-                    &windows.filter_range,
-                    resolved_strategy,
-                    inc_config.unique_key.clone(),
-                    args.show_results,
-                )
-                .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?
-            }
-            PhysicalStrategy::CubeSplit { steps } => {
-                // Cube split only (full refresh)
-                info!("Running model: {} (cube split)", model_name);
-
-                executor::execute_plan(backend, &db_table_name, steps, schema, args.show_results)
-                    .await
-                    .with_context(|| format!("Failed to execute model: {}", model_name))?
-            }
-            PhysicalStrategy::Incremental {
-                config: inc_config,
-                timeseries: inc_ts,
-                time_range: range,
-                plan_steps: None,
-            } => {
-                let resolved_strategy = backend.resolve_strategy(inc_config);
-
-                // Compute temporal windows (lookback/lookahead from AST + data latency)
-                let model_latency = model
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.columns.get(&inc_ts.event_time_column))
-                    .and_then(|c| c.data_latency.as_ref());
-                let windows = compute_incremental_windows(
-                    &model.content,
-                    inc_config,
-                    inc_ts,
-                    sources.as_ref(),
-                    model_latency,
-                    range,
-                );
-
-                // Validate run-window alignment against the model's granularity.
-                // The window [start, end) must be a positive integer multiple of
-                // `granularity` aligned to granularity boundaries.
-                {
-                    use chrono::NaiveDate;
-                    let start_date = NaiveDate::parse_from_str(&range.start, "%Y-%m-%d")
-                        .with_context(|| format!("Invalid start date: {}", range.start))?;
-                    let end_date = NaiveDate::parse_from_str(&range.end, "%Y-%m-%d")
-                        .with_context(|| format!("Invalid end date: {}", range.end))?;
-                    smelt_cli::validate_run_window_alignment(
-                        start_date,
-                        end_date,
-                        &inc_ts.granularity,
-                    )
-                    .map_err(|msg| {
-                        anyhow::anyhow!(
-                            "Run window not aligned for model '{}' (granularity: {:?}): {}",
-                            model_name,
-                            inc_ts.granularity,
-                            msg
-                        )
-                    })?;
-                }
-
-                // Compute smart batching based on batch safety analysis. Classify
-                // on the *expanded* SQL so a lookback declared inside a
-                // `smelt.define` body is reflected in the chunk sizing — parity
-                // with the source-bound derivation below and the explain path.
-                let expanded_for_safety = compiler.expand_function_calls(&model.content);
-                let (batch_safety, batches) = compute_batches_for_model(
-                    &expanded_for_safety,
-                    inc_config,
-                    inc_ts,
-                    range,
-                    &windows.filter_range,
-                    &backfill_options,
-                )
-                .with_context(|| format!("Failed to compute batches for model: {}", model_name))?;
-
-                let batch_count = batches.len().max(1);
-                let safety_label = match &batch_safety {
-                    smelt_planner::BatchSafety::FullyBatchSafe => "batch-safe".to_string(),
-                    smelt_planner::BatchSafety::BoundedSafe {
-                        max_chunk_days,
-                        context_days,
-                        ..
-                    } => format!(
-                        "bounded {}d chunks/{}d context",
-                        max_chunk_days, context_days
-                    ),
-                    smelt_planner::BatchSafety::PerPartitionOnly { .. } => {
-                        "per-partition".to_string()
-                    }
-                };
-
-                info!(
-                    "Running model: {} (incremental/{}, {} batch(es), {})",
-                    model_name,
-                    strategy_label(&resolved_strategy),
-                    batch_count,
-                    safety_label,
-                );
-
-                if windows.effective_window.lookback_days > 0
-                    || windows.effective_window.lookahead_days > 0
-                {
-                    debug!("Temporal window: {}", windows.effective_window.explanation);
-                }
-
-                // Use computed batches, or fall back to single batch for the full range
-                let effective_batches: Vec<smelt_cli::BackfillBatch> = if batches.is_empty() {
-                    vec![smelt_cli::BackfillBatch {
-                        partition_range: windows.partition_range.clone(),
-                        filter_range: windows.filter_range.clone(),
-                    }]
-                } else {
-                    batches
-                };
-
-                let mut last_result = None;
-                for (i, batch) in effective_batches.iter().enumerate() {
-                    if effective_batches.len() > 1 {
-                        debug!(
-                            "Batch {}/{}: [{}, {})",
-                            i + 1,
-                            effective_batches.len(),
-                            batch.partition_range.start,
-                            batch.partition_range.end,
-                        );
-                    }
-
-                    let clean_sql = smelt_parser::strip_frontmatter(&model.content);
-
-                    // Phase 5: Source-filter pushdown.
-                    // Inject per-reference WHERE filters for each bounded timeseries source
-                    // *before* the outer model WHERE (inject_time_filter below).
-                    // This constrains each source scan to `[run_start - before, run_end + after)`.
-                    // Constraint 5: outer-model WHERE and source-filter pushdown are independent.
-                    let source_pushed_sql = {
-                        let mut dep_timeseries: HashMap<String, (Vec<String>, String)> =
-                            HashMap::new();
-                        if let Ok(node) = graph.get_node(model_name) {
-                            for dep_name in &node.dependencies {
-                                if let Ok(dep_node) = graph.get_node(dep_name) {
-                                    if let Some(ts) = &dep_node.timeseries {
-                                        dep_timeseries.insert(
-                                            dep_name.clone(),
-                                            (
-                                                dep_node.model_file.address_segments.clone(),
-                                                ts.partition_column.clone(),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Derive bounds from the *expanded* SQL so a `RANGE
-                        // BETWEEN INTERVAL` (or a bare window) declared inside a
-                        // `smelt.define` body is visible — see
-                        // `SqlCompiler::expand_function_calls`. The filters are
-                        // injected into the unexpanded `clean_sql` so the
-                        // function call survives to `compile_with_sql_and_ephemerals`.
-                        let expanded_sql = compiler.expand_function_calls(&clean_sql);
-                        let bound_map = build_source_bound_map(&expanded_sql, &dep_timeseries);
-                        inject_source_filters(&clean_sql, &bound_map, &batch.filter_range)
-                    };
-
-                    let transformed_sql = inject_time_filter(
-                        &source_pushed_sql,
-                        &inc_ts.event_time_column,
-                        &batch.filter_range,
-                    )
-                    .with_context(|| {
-                        format!("Failed to transform SQL for model: {}", model_name)
-                    })?;
-
-                    let compiled = compiler
-                        .compile_with_sql_and_ephemerals(model, schema, &transformed_sql, resolver)
-                        .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-                    if args.verbose {
-                        // Use println! (not tracing::debug!) so the SQL surfaces
-                        // without requiring RUST_LOG=debug. Stdout matches the
-                        // tracing formatter's default channel; the spec
-                        // (`docs/specs/cli.md` §"`--verbose`") fixes per-model
-                        // emission immediately before execution.
-                        println!("-- {}", model_name);
-                        println!("{}", compiled.sql);
-                    }
-
-                    // The DELETE must cover the same partitions the INSERT writes.
-                    // `inject_time_filter` (above) clamps the output on
-                    // event_time_column to `filter_range` — the run window widened
-                    // by the derived lookback/lookahead. A model whose write window
-                    // spans more than the run window (Form B output rebasing, e.g. a
-                    // session that started on D-1 updated by events on D) writes the
-                    // lookback partition too; deleting only `partition_range` would
-                    // leave that partition's prior rows in place and accumulate
-                    // duplicates across consecutive runs. Delete `filter_range` so the
-                    // DELETE+INSERT contract stays idempotent for any write width.
-                    let partition = PartitionRange {
-                        column: inc_ts.partition_column.clone(),
-                        start: batch.filter_range.start.clone(),
-                        end: batch.filter_range.end.clone(),
-                    };
-
-                    if effective_batches.len() == 1 {
-                        debug!(
-                            "Partition window: [{}, {}) ({})",
-                            partition.start,
-                            partition.end,
-                            granularity_label(&inc_ts.granularity),
-                        );
-                    }
-
-                    let result = executor::execute_model_incremental(
-                        backend,
-                        &compiled,
-                        schema,
-                        partition,
-                        resolved_strategy.clone(),
-                        inc_config.unique_key.clone(),
-                        args.show_results,
-                    )
-                    .await
-                    .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-                    if effective_batches.len() > 1 {
-                        debug!("batch {} rows ({:?})", result.row_count, result.duration);
-                    }
-
-                    last_result = Some(result);
-                }
-
-                last_result.expect("at least one batch must have been processed")
-            }
-            PhysicalStrategy::FullRefresh => {
-                if time_range.is_some() {
-                    info!(
-                        "Running model: {} (full refresh - not configured for incremental)",
-                        model_name
-                    );
-                } else {
-                    info!("Running model: {}", model_name);
-                }
-
-                let compiled = compiler
-                    .compile_with_ephemerals(model, schema, resolver)
-                    .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-                if args.verbose {
-                    // See the incremental path above: println! is required so
-                    // --verbose emits without a RUST_LOG override.
-                    println!("-- {}", model_name);
-                    println!("{}", compiled.sql);
-                }
-
-                executor::execute_model(backend, &compiled, schema, args.show_results)
-                    .await
-                    .with_context(|| format!("Failed to execute model: {}", model_name))?
-            }
-        };
-
-        info!(
-            "{} done ({} rows, {:?})",
-            result.model_name, result.row_count, result.duration
-        );
-
-        if let Some(ref batches) = result.preview {
-            println!("\n  Preview:");
-            pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
-            println!();
-        }
-
-        // Save deployed schema after successful execution (best-effort)
-        if !args.dry_run {
-            let inferred_columns = infer_deployed_columns(&type_db, model);
-            if !inferred_columns.is_empty() {
-                let existing_version = file_store
-                    .load_schema(&db_table_name)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.version);
-                if let Err(e) = migration::save_deployed_schema(
-                    &file_store,
-                    &db_table_name,
-                    &model.content,
-                    &inferred_columns,
-                    existing_version,
-                ) {
-                    warn!("Failed to save deployed schema: {}", e);
-                }
-            }
-        }
-
-        results.push((result, phys_node.strategy.clone()));
-    }
-
-    // 9. Save run manifest and update intervals
-    let run_id = generate_run_id();
-    let mut manifest = RunManifest {
-        run_id: run_id.clone(),
-        started_at: run_start,
-        completed_at: Some(Utc::now()),
-        models: HashMap::new(),
-    };
-
-    let mut interval_store = file_store.load_intervals().unwrap_or_default();
-
-    for (result, strategy) in &results {
-        let (strategy_name, tr, partitions, batch_safety_label) = match strategy {
-            PhysicalStrategy::Incremental {
-                config: inc,
-                timeseries: inc_ts,
-                time_range: range,
-                ..
-            } => {
-                let phys_node = physical_graph.get_node(&result.model_name);
-                let model_target = phys_node.map(|n| n.target.as_str()).unwrap_or(&args.target);
-                let backend_strategy = registry.get(model_target).resolve_strategy(inc);
-                (
-                    strategy_label(&backend_strategy).to_string(),
-                    Some(TimeRangeRecord {
-                        start: range.start.clone(),
-                        end: range.end.clone(),
-                    }),
-                    generate_partition_values(
-                        &range.start,
-                        &range.end,
-                        &inc_ts.granularity,
-                        inc_ts.week_start.as_ref(),
-                    )
-                    .unwrap_or_default(),
-                    Some("incremental".to_string()),
-                )
-            }
-            PhysicalStrategy::CubeSplit { .. } => ("cube_split".to_string(), None, vec![], None),
-            PhysicalStrategy::FullRefresh => ("full_refresh".to_string(), None, vec![], None),
-        };
-
-        manifest.models.insert(
-            result.model_name.clone(),
-            ModelRunRecord {
-                strategy: strategy_name,
-                time_range: tr.clone(),
-                partitions_updated: partitions,
-                row_count: result.row_count,
-                duration_ms: result.duration.as_millis() as u64,
-                batch_safety: batch_safety_label,
-            },
-        );
-
-        // Update interval tracking for incremental models.
-        //
-        // `result.model_name` is the db-form (e.g. "silver_events_parsed") from
-        // CompiledModel.name (which uses db_name_owned()). LogicalGraph keys by
-        // canonical path (e.g. "silver.events_parsed"), so we must resolve via
-        // db_name_owned() scan. Flat-layout models hit the fast path because
-        // their canonical path == db_name.
-        if let Some(ref range) = tr {
-            // Try canonical path as key first (flat models: "events" == db_name).
-            let model = graph.get_model(&result.model_name).or_else(|_| {
-                graph
-                    .iter_models()
-                    .find(|(_, m)| m.db_name_owned() == result.model_name)
-                    .map(|(_, m)| m)
-                    .ok_or_else(|| anyhow::anyhow!("Model not found: {}", result.model_name))
-            })?;
-            let model_hash = compute_model_hash(&model.content);
-            let intervals = interval_store.get_or_create(&result.model_name, &model_hash);
-            intervals.record_interval(&range.start, &range.end);
-        }
-    }
-
-    // Save state (best-effort — don't fail the run if state can't be saved)
-    if let Err(e) = file_store.save_run(&manifest) {
-        warn!("Failed to save run manifest: {}", e);
-    }
-    if let Err(e) = file_store.save_intervals(&interval_store) {
-        warn!("Failed to save interval store: {}", e);
-    }
-
-    // Stale schema cleanup: remove .smelt/schemas/<name>.json entries for models
-    // that no longer exist in the project. Compares against ALL discovered models
-    // (not just selected ones) so a deleted model's schema is cleaned up even if
-    // the run was selective (spec: schema_evolution.md §"Stale schema cleanup").
-    if !args.dry_run {
-        // Stored schemas are keyed by the db-name (`db_name_owned()`, e.g.
-        // `staging_stg_orders`), matching the save + migration paths. Compare
-        // against db-names — not canonical paths (`all_model_names()`) — or a
-        // sub-directory model's just-saved schema would be deleted every run.
-        let current_names: HashSet<String> = graph
-            .iter_models()
-            .map(|(_, m)| m.db_name_owned())
-            .collect();
-        for orphan in file_store
-            .list_deployed_model_names()
-            .into_iter()
-            .filter(|n| !current_names.contains(n))
-        {
-            if let Err(e) = file_store.delete_schema(&orphan) {
-                warn!("Failed to delete stale schema for '{}': {}", orphan, e);
-            } else {
-                debug!("Removed stale schema for deleted model '{}'", orphan);
-            }
-        }
-    }
-
-    // 10. Summary
-    info!("{}", "=".repeat(60));
     info!("Summary (run: {})", run_id);
     info!("{}", "=".repeat(60));
-    info!("Executed {} models successfully", results.len());
-
-    let total_duration: std::time::Duration = results.iter().map(|(r, _)| r.duration).sum();
-    info!("Total time: {:?}", total_duration);
-
-    // Mirror a one-line summary to stderr unconditionally so users without
-    // `RUST_LOG` configured see something on success. Previously the only
-    // visible output was an empty stdout — making it indistinguishable from
-    // "did nothing", "hung", or "succeeded".
-    eprintln!(
-        "smelt: built {} model(s) in {:.2}s",
-        results.len(),
-        total_duration.as_secs_f64(),
-    );
-
+    info!("Executed {} models successfully", outcome.models.len());
+    let _ = (run_start, std::time::Instant::now().elapsed());
     Ok(())
 }

@@ -1708,6 +1708,22 @@ fn meta_config_broken_config_loader_null_coercion() {
     );
 }
 
+/// BUG-014 P4 TDD: A schema-violating overlay file surfaces
+/// `ConfigLoaderUnknownField` anchored at the generator call site.
+///
+/// `examples/meta_config_overlay_probe_invalid/` has `target: prod` in
+/// `smelt.yml` so the overlay `cohorts.prod.yaml` is always active.  That
+/// overlay contains `extra_field` (not in the schema) → exactly one
+/// `ConfigLoaderUnknownField` must fire for `models/cohorts.gen.sql`.
+#[test]
+fn overlay_probe_invalid_overlay_emits_unknown_field() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_overlay_probe_invalid",
+        "models/cohorts.gen.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderUnknownField,
+    );
+}
+
 // ===== Phase E2 (multi-model production) TDD tests =====
 //
 // Layout:
@@ -1921,6 +1937,15 @@ fn per_cohort_union_orders_has_concrete_typed_schema() {
 #[test]
 fn staging_from_sources_example_has_zero_diagnostics() {
     check_workspace_no_diagnostics("examples/staging_from_sources");
+}
+
+/// D5 probe (clean path): `seed_source_type_join` joins a seed (inferred types
+/// via CSV + sidecar using aliases INT/BOOL/DECIMAL) with a source (declared
+/// aliases INT8/TIMESTAMPTZ/TEXT). All type aliases must resolve to recognised
+/// smelt DataTypes; no LSP diagnostics must fire.
+#[test]
+fn seed_source_type_join_has_zero_diagnostics() {
+    check_workspace_no_diagnostics("examples/seed_source_type_join");
 }
 
 /// Non-ASCII fixture: `examples/non_ascii_columns/` has Greek-letter column
@@ -2230,6 +2255,168 @@ fn timeseries_broken_incremental_without_timeseries() {
         "examples/timeseries_broken_incremental_without_timeseries",
         "models/incremental_without_timeseries.sql",
         smelt_db::DiagnosticCode::TimeseriesRequiredForIncremental,
+    );
+}
+
+// ===== BUG-006: CumulativeForbidsTimeseries / CumulativeForbidsIncremental regression =====
+//
+// Before the fix, `validate_timeseries` returned these errors but `file_diagnostics`
+// silently dropped them via the `_ => None` catch-all in the match block.
+//
+// Fixtures:
+//   - `examples/timeseries_broken_cumulative_with_timeseries/`   — CumulativeForbidsTimeseries
+//   - `examples/timeseries_broken_cumulative_with_incremental/`  — CumulativeForbidsIncremental
+
+/// Helper: loads `example_dir` as a workspace and asserts that exactly one
+/// `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` diagnostic fires
+/// for the file ending in `expected_file`, and no such diagnostic fires in any other
+/// file in the workspace.
+fn check_workspace_emits_cumulative_frontmatter_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    const CUMULATIVE_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
+        smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
+        smelt_db::DiagnosticCode::CumulativeForbidsIncremental,
+    ];
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_cumulative = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| CUMULATIVE_FRONTMATTER_CODES.contains(c))
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_cumulative(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.clone());
+            } else {
+                other_diags.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_cumulative(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_diags.push(d.0.clone());
+            } else {
+                other_diags.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_diags.is_empty(),
+        "expected zero cumulative frontmatter diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_diags.len(),
+        other_diags
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags.len(),
+        1,
+        "expected exactly 1 cumulative frontmatter diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_diags.len(),
+        target_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags[0].code,
+        Some(expected_code),
+        "expected cumulative frontmatter diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_diags[0].code,
+        target_diags[0].message
+    );
+}
+
+/// BUG-006 regression: `examples/timeseries_broken_cumulative_with_timeseries/` produces
+/// exactly one `CumulativeForbidsTimeseries` diagnostic from
+/// `models/cumulative_with_timeseries.sql`.
+///
+/// Before the fix, `validate_timeseries` returned `CumulativeForbidsTimeseries`
+/// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
+/// so the LSP showed no error even though cumulative models must not declare
+/// `timeseries:` (cumulative_aggregate.md §"Output shape").
+#[test]
+fn timeseries_broken_cumulative_with_timeseries() {
+    check_workspace_emits_cumulative_frontmatter_diagnostic(
+        "examples/timeseries_broken_cumulative_with_timeseries",
+        "models/cumulative_with_timeseries.sql",
+        smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
+    );
+}
+
+/// BUG-006 regression: `examples/timeseries_broken_cumulative_with_incremental/` produces
+/// exactly one `CumulativeForbidsIncremental` diagnostic from
+/// `models/cumulative_with_incremental.sql`.
+///
+/// Before the fix, `validate_timeseries` returned `CumulativeForbidsIncremental`
+/// but `file_diagnostics` silently dropped it, so the LSP showed no error even
+/// though cumulative models must not declare `incremental:` (cumulative_aggregate.md
+/// §"Constraints & Invariants" #2).
+#[test]
+fn timeseries_broken_cumulative_with_incremental() {
+    check_workspace_emits_cumulative_frontmatter_diagnostic(
+        "examples/timeseries_broken_cumulative_with_incremental",
+        "models/cumulative_with_incremental.sql",
+        smelt_db::DiagnosticCode::CumulativeForbidsIncremental,
     );
 }
 
@@ -3282,4 +3469,16 @@ fn types_broken_crossfamily_add_emits_type_mismatch() {
         smelt_db::DiagnosticSeverity::Error,
         "TypeMismatch for cross-family arithmetic must be Error severity"
     );
+}
+
+/// BUG-066 regression: a generator file whose filename does NOT end with
+/// `.gen.sql` must be discovered as a generator (no parse errors) and must
+/// emit models on `smelt build`.
+///
+/// Spec: meta_language.md §"Multi-model production" — "The `.gen.sql` extension
+/// is a recommended convention; it is **not load-bearing**. The compiler
+/// determines a file's status from the frontmatter alone."
+#[test]
+fn d3_meta_fn_config_generator_without_gen_suffix_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/d3_meta_fn_config");
 }

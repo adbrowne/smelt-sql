@@ -1,10 +1,10 @@
 use anyhow::Result;
 use serde::Serialize;
+use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelOriginKind;
 use smelt_db::ColumnSource;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::logical_graph::LogicalGraph;
 use crate::Config;
 
 /// A reference to a test model that targets a given model.
@@ -96,28 +96,28 @@ pub struct CatalogIncremental {
     pub unique_key: Vec<String>,
 }
 
-/// Build a complete catalog from the logical graph and Salsa DB.
+/// Build a complete catalog from the dependency graph, config, and Salsa DB.
 ///
+/// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
 /// `test_targets` maps each model name to the list of test models targeting it.
-/// Pass an empty map when no test-model information is available.
+/// Pass empty maps when that information is not available.
 pub fn build_catalog(
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
     config: &Config,
     db: &smelt_db::Database,
+    origins: &HashMap<String, (String, String)>,
     test_targets: &HashMap<String, Vec<TestRef>>,
 ) -> Result<Catalog> {
     let execution_order = graph.execution_order()?;
 
-    // Build dependents (downstream) map by inverting dependencies (deduplicated)
+    // Build dependents (downstream) map by inverting dependencies (deduplicated).
     let mut dependents_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for node in graph.iter_nodes() {
-        for dep in &node.dependencies {
-            if graph.get_node(dep).is_ok() {
-                dependents_map
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(node.name.clone());
-            }
+    for (model_name, _model) in graph.iter_models() {
+        for dep in graph.get_upstream(model_name) {
+            dependents_map
+                .entry(dep)
+                .or_default()
+                .insert(model_name.to_string());
         }
     }
 
@@ -126,21 +126,24 @@ pub fn build_catalog(
 
     let ws = smelt_db::Workspace::try_get(db);
 
-    for node in graph.iter_nodes() {
+    for (model_name, model_file) in graph.iter_models() {
+        let metadata = model_file.metadata.as_deref();
+        let frontmatter = smelt_planner::Frontmatter::parse(&model_file.content);
+
+        let materialization_enum = config.get_materialization_with_metadata(model_name, metadata);
+        let materialization = serde_json::to_value(&materialization_enum)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+
         // Get typed schema from Salsa DB
-        let schema = match (ws, db.source_file(&node.model_file.path)) {
+        let schema = match (ws, db.source_file(&model_file.path)) {
             (Some(w), Some(f)) => smelt_db::typed_model_schema(db, w, f),
             _ => std::sync::Arc::new(smelt_db::ModelSchema::empty()),
         };
 
         // Get frontmatter column metadata for enrichment
-        let frontmatter_columns = node
-            .model_file
-            .metadata
-            .as_ref()
-            .map(|m| &m.columns)
-            .cloned()
-            .unwrap_or_default();
+        let frontmatter_columns = metadata.map(|m| m.columns.clone()).unwrap_or_default();
 
         let columns: Vec<CatalogColumn> = schema
             .columns
@@ -201,26 +204,30 @@ pub fn build_catalog(
             })
             .collect();
 
-        let materialization = serde_json::to_value(&node.materialization)
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "unknown".to_string());
-
         let upstream: Vec<String> = {
             let mut seen = BTreeSet::new();
-            node.dependencies
-                .iter()
-                .filter(|dep| graph.get_node(dep).is_ok() && seen.insert((*dep).clone()))
-                .cloned()
+            graph
+                .get_upstream(model_name)
+                .into_iter()
+                .filter(|dep| seen.insert(dep.clone()))
                 .collect()
         };
 
         let downstream: Vec<String> = dependents_map
-            .get(&node.name)
+            .get(model_name)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
 
-        let incremental = match (&node.incremental, &node.timeseries) {
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+
+        let incremental = match (inc_config, ts_config) {
             (Some(inc), Some(ts)) => Some(CatalogIncremental {
                 granularity: serde_json::to_value(&ts.granularity)
                     .ok()
@@ -233,46 +240,37 @@ pub fn build_catalog(
             _ => None,
         };
 
+        let tags = config.get_tags(model_name, metadata);
         // Build tag index
-        for tag in &node.tags {
+        for tag in &tags {
             tag_index
                 .entry(tag.clone())
                 .or_default()
-                .push(node.name.clone());
+                .push(model_name.to_string());
         }
 
-        let description = node
-            .model_file
-            .metadata
-            .as_ref()
-            .and_then(|m| m.description.clone());
+        let description = metadata.and_then(|m| m.description.clone());
+        let owner = metadata.and_then(|m| m.owner.clone());
 
-        let owner = node
-            .model_file
-            .metadata
-            .as_ref()
-            .and_then(|m| m.owner.clone());
-
-        // Build origin for generator-emitted models.
-        let origin = match (&node.generator_file, &node.generator_name) {
-            (Some(gf), Some(gn)) => Some(ModelOriginKind::Generated {
+        // Build origin for generator-emitted models from the provenance map.
+        let origin = origins
+            .get(model_name)
+            .map(|(gf, gn)| ModelOriginKind::Generated {
                 generator_file: gf.clone(),
                 generator_name: gn.clone(),
-            }),
-            _ => None,
-        };
+            });
 
-        let tests_targeting = test_targets.get(&node.name).cloned().unwrap_or_default();
+        let tests_targeting = test_targets.get(model_name).cloned().unwrap_or_default();
 
         models.insert(
-            node.name.clone(),
+            model_name.to_string(),
             CatalogModel {
-                name: node.name.clone(),
+                name: model_name.to_string(),
                 description,
                 owner,
-                tags: node.tags.clone(),
+                tags,
                 materialization,
-                path: node.model_file.path.display().to_string(),
+                path: model_file.path.display().to_string(),
                 columns,
                 upstream,
                 downstream,

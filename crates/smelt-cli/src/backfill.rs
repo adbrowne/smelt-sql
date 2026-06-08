@@ -14,8 +14,9 @@ use smelt_planner::{
 };
 use tracing::warn;
 
-use crate::logical_graph::LogicalGraph;
-use crate::temporal::compute_incremental_windows;
+use crate::temporal::compute_single_window;
+use smelt_core::config::Config;
+use smelt_core::graph::DependencyGraph;
 use smelt_runtime::TimeRange;
 
 /// A computed execution plan for one model during a backfill/backbuild.
@@ -59,7 +60,8 @@ pub struct BackfillOptions {
 /// Each model's batch strategy is determined by its batch safety analysis.
 pub fn compute_range_run_plans(
     execution_order: &[String],
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
+    config: &Config,
     sources: Option<&smelt_core::SourcesConfig>,
     requested_range: &TimeRange,
     options: &BackfillOptions,
@@ -68,13 +70,20 @@ pub fn compute_range_run_plans(
     let mut plans = Vec::new();
 
     for model_name in execution_order {
-        let node = graph.get_node(model_name)?;
-        let model = &node.model_file;
+        let model = graph.get_model(model_name)?;
+        let metadata = model.metadata.as_deref();
+        let frontmatter = smelt_planner::Frontmatter::parse(&model.content);
 
-        let inc_config = node.incremental.clone();
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
         let refs = graph.get_upstream(model_name);
-        let ts_config = node.timeseries.clone();
         let plan = match (inc_config, ts_config) {
             (Some(ref inc), Some(ref ts)) => {
                 // Constraint 10: derive per-source bounds; refuse on NotDerivable.
@@ -83,6 +92,7 @@ pub fn compute_range_run_plans(
                     &model.content,
                     &refs,
                     graph,
+                    config,
                     allow_downgrade,
                 )?;
                 compute_model_backfill_plan(
@@ -92,7 +102,7 @@ pub fn compute_range_run_plans(
                     inc,
                     ts,
                     sources,
-                    model.metadata.as_ref().map(|b| b.as_ref()),
+                    metadata,
                     requested_range,
                     options,
                 )?
@@ -117,10 +127,12 @@ pub fn compute_range_run_plans(
 ///
 /// Walks the DAG backwards from the target model, expanding ranges
 /// based on each model's temporal dependencies and data latency.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_backbuild_plans(
     target_model: &str,
     execution_order: &[String],
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
+    config: &Config,
     sources: Option<&smelt_core::SourcesConfig>,
     requested_range: &TimeRange,
     options: &BackfillOptions,
@@ -140,27 +152,27 @@ pub fn compute_backbuild_plans(
             None => continue,
         };
 
-        let node = graph.get_node(model_name)?;
-        let model = &node.model_file;
+        let model = graph.get_model(model_name)?;
+        let metadata = model.metadata.as_deref();
+        let frontmatter = smelt_planner::Frontmatter::parse(&model.content);
 
-        let inc_config = node.incremental.clone();
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
-        if let (Some(inc), Some(ts)) = (inc_config.as_ref(), node.timeseries.as_ref()) {
+        if let (Some(inc), Some(ts)) = (inc_config.as_ref(), ts_config.as_ref()) {
             // Compute the effective window for this model
-            let model_latency = model
-                .metadata
-                .as_ref()
+            let model_latency = metadata
                 .and_then(|m| m.columns.get(&ts.event_time_column))
                 .and_then(|c| c.data_latency.as_ref());
 
-            let windows = compute_incremental_windows(
-                &model.content,
-                inc,
-                ts,
-                sources,
-                model_latency,
-                &range,
-            );
+            let windows =
+                compute_single_window(&model.content, inc, ts, sources, model_latency, &range);
 
             // Each upstream must provide data for this model's filter range
             let upstream_range = &windows.filter_range;
@@ -191,13 +203,20 @@ pub fn compute_backbuild_plans(
             None => continue,
         };
 
-        let node = graph.get_node(model_name)?;
-        let model = &node.model_file;
+        let model = graph.get_model(model_name)?;
+        let metadata = model.metadata.as_deref();
+        let frontmatter = smelt_planner::Frontmatter::parse(&model.content);
 
-        let inc_config = node.incremental.clone();
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
         let refs = graph.get_upstream(model_name);
-        let ts_config = node.timeseries.clone();
         let plan = match (inc_config, ts_config) {
             (Some(ref inc), Some(ref ts)) => {
                 // Constraint 10: derive per-source bounds; refuse on NotDerivable.
@@ -206,6 +225,7 @@ pub fn compute_backbuild_plans(
                     &model.content,
                     &refs,
                     graph,
+                    config,
                     allow_downgrade,
                 )?;
                 compute_model_backfill_plan(
@@ -215,7 +235,7 @@ pub fn compute_backbuild_plans(
                     inc,
                     ts,
                     sources,
-                    model.metadata.as_ref().map(|b| b.as_ref()),
+                    metadata,
                     range,
                     options,
                 )?
@@ -237,13 +257,14 @@ pub fn compute_backbuild_plans(
 }
 
 /// Build a `ModelGraph` containing the given model and its direct upstream refs
-/// (with timeseries configs pulled from the `LogicalGraph`). Used to call
+/// (with timeseries configs pulled from the `DependencyGraph` + `Config`). Used to call
 /// `derive_model_source_bounds` without requiring a full planner graph.
 fn build_model_graph_for_bounds(
     model_name: &str,
     sql: &str,
     refs: &[String],
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
+    config: &Config,
 ) -> ModelGraph {
     let mut opt_graph = ModelGraph::new();
 
@@ -259,14 +280,24 @@ fn build_model_graph_for_bounds(
 
     // Add each upstream ref so derive_model_source_bounds can read their timeseries config.
     for ref_name in refs {
-        if let Ok(upstream_node) = graph.get_node(ref_name) {
-            let upstream_fm = smelt_planner::Frontmatter::parse(&upstream_node.model_file.content);
+        if let Ok(upstream_model) = graph.get_model(ref_name) {
+            let upstream_metadata = upstream_model.metadata.as_deref();
+            let upstream_fm = smelt_planner::Frontmatter::parse(&upstream_model.content);
+            let ts_config = config
+                .get_timeseries_with_metadata(ref_name, upstream_metadata)
+                .cloned()
+                .or_else(|| upstream_metadata.and_then(|m| m.timeseries.clone()))
+                .or_else(|| upstream_fm.as_ref().and_then(|f| f.timeseries.clone()));
+            let inc_config = config
+                .get_incremental_with_metadata(ref_name, upstream_metadata)
+                .cloned()
+                .or_else(|| upstream_fm.as_ref().and_then(|f| f.incremental.clone()));
             opt_graph.add_model(ModelInfo {
                 name: ref_name.clone(),
-                sql: upstream_node.model_file.content.clone(),
+                sql: upstream_model.content.clone(),
                 refs: graph.get_upstream(ref_name),
-                timeseries_config: upstream_fm.as_ref().and_then(|f| f.timeseries.clone()),
-                incremental_config: upstream_fm.as_ref().and_then(|f| f.incremental.clone()),
+                timeseries_config: ts_config,
+                incremental_config: inc_config,
             });
         }
     }
@@ -280,10 +311,11 @@ fn check_model_source_bounds(
     model_name: &str,
     sql: &str,
     refs: &[String],
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
+    config: &Config,
     allow_downgrade: bool,
 ) -> Result<()> {
-    let opt_graph = build_model_graph_for_bounds(model_name, sql, refs, graph);
+    let opt_graph = build_model_graph_for_bounds(model_name, sql, refs, graph, config);
     let model_info = match opt_graph.get(model_name) {
         Some(m) => m,
         None => return Ok(()),
@@ -340,7 +372,7 @@ fn compute_model_backfill_plan(
     let model_latency = model_metadata
         .and_then(|m| m.columns.get(&ts_config.event_time_column))
         .and_then(|c| c.data_latency.as_ref());
-    let windows = compute_incremental_windows(
+    let windows = compute_single_window(
         sql,
         inc_config,
         ts_config,

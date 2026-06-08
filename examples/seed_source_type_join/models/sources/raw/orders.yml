@@ -1,0 +1,19 @@
+# External orders table. Uses type aliases (INT8 → BIGINT, TIMESTAMPTZ → Timestamp WITH TZ)
+# to verify the source YAML parser handles the full alias set from types.md.
+description: Raw order records from the OLTP database
+columns:
+  - name: order_id
+    type: INT8
+    nullable: false
+  - name: category_id
+    type: INT
+    nullable: false
+  - name: amount
+    type: DECIMAL(10,2)
+    nullable: false
+  - name: ordered_at
+    type: TIMESTAMPTZ
+    nullable: false
+  - name: status
+    type: TEXT
+    nullable: true

@@ -601,13 +601,26 @@ pub fn loader_call_diagnostics_for_file(
         input_by_path.insert(input.path(db).clone(), *input);
     }
 
-    // Use the _with_content variant, providing a closure that looks up text
-    // from the registered Salsa inputs.
-    loader_call_diagnostics_for_file_with_content(db, workspace, file, &|path| {
+    // Base file diagnostics: content-validation via the registered Salsa inputs.
+    let mut diags = loader_call_diagnostics_for_file_with_content(db, workspace, file, &|path| {
         input_by_path
             .get(path)
             .map(|inp| (inp.text(db).clone(), inp.exists(db)))
-    })
+    });
+
+    // Overlay diagnostics (BUG-014 P4): when a build target is active and a
+    // matching `<basename>.<target>.<ext>` overlay is registered, validate it via
+    // `loader_resolved_value_with_overlay` and surface any schema violations at
+    // the call site in the SQL file — same diagnostic family as a base-file
+    // mismatch (§"Per-target overlay" final clause).
+    diags.extend(loader_overlay_diagnostics_for_file(
+        db,
+        workspace,
+        file,
+        &input_by_path,
+    ));
+
+    diags
 }
 
 /// Callback type for `loader_call_diagnostics_for_file_with_content`.
@@ -815,6 +828,138 @@ pub fn loader_call_diagnostics_for_syntax(
                 diag.range.start() + range_offset,
                 diag.range.end() + range_offset,
             );
+        }
+    }
+
+    diags
+}
+
+/// Collect overlay validation diagnostics for all `smelt.config.load_yaml` /
+/// `smelt.config.load_json` calls in `file` when a build target is active.
+///
+/// For each call site:
+/// 1. The `<basename>.<target>.<ext>` overlay path is computed via
+///    [`crate::workspace_ingest::overlay_path_for`].
+/// 2. If the overlay file is registered as a Salsa input in `input_by_path`,
+///    [`loader_resolved_value_with_overlay`] is called to validate base + overlay.
+/// 3. Any validation diagnostics are converted to [`Diagnostic`] objects anchored
+///    at the SQL call site and returned.
+///
+/// When no target is active or no overlay file exists for a call site, the
+/// function is a no-op for that site.  The caller is responsible for deduplication
+/// if the base file also has errors (both sets are informative).
+fn loader_overlay_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+    input_by_path: &std::collections::HashMap<Arc<str>, LoaderFileInput>,
+) -> Vec<Diagnostic> {
+    // Only active when a build target is set.
+    let target: Arc<str> = match workspace.active_target(db) {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+
+    // Record registry for schema-admissibility checks.
+    let decls = smelt_record_declarations(db, workspace);
+    let (registry, _sentinels) = type_inference::record_registry_for_workspace(&decls);
+
+    // Workspace-relative path of the SQL file — used as part of the Salsa call-site key.
+    let file_path_str: Arc<str> = Arc::from(
+        file.path(db)
+            .strip_prefix(file.project_root(db))
+            .unwrap_or(file.path(db).as_path())
+            .to_string_lossy()
+            .replace('\\', "/")
+            .as_str(),
+    );
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+    for node in syntax.descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let call = match SmeltPathCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+        let segs = call.segments();
+        if segs.len() != 2 || segs[0].to_lowercase() != "config" {
+            continue;
+        }
+        let loader_name = segs[1].to_lowercase();
+        if loader_name != "load_yaml" && loader_name != "load_json" {
+            continue;
+        }
+
+        let positional_args: Vec<_> = call
+            .arg_list()
+            .map(|args| args.positional_args().into_iter().collect())
+            .unwrap_or_default();
+
+        let path_arg = match positional_args.first() {
+            Some(a) => a,
+            None => continue,
+        };
+        let schema_arg = match positional_args.get(1) {
+            Some(a) => a,
+            None => continue,
+        };
+
+        if !crate::config_vars::is_string_literal_expr(path_arg) {
+            continue;
+        }
+        let path_value = match crate::config_vars::extract_string_literal_value(path_arg) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let schema_text = schema_arg.syntax().text().to_string();
+        if !type_inference::schema_arg_text_is_admissible(&schema_text, &registry) {
+            continue;
+        }
+
+        // Look up the base loader input.
+        let base_input = match input_by_path.get(path_value.as_str()) {
+            Some(&i) => i,
+            None => continue,
+        };
+
+        // Compute and look up the overlay input.
+        let overlay_path = crate::workspace_ingest::overlay_path_for(&path_value, &target);
+        let overlay_input = match input_by_path.get(overlay_path.as_str()) {
+            Some(&i) => i,
+            None => continue,
+        };
+
+        let call_range = node.text_range();
+        let call_site = LoaderCallSiteId {
+            file_path: file_path_str.clone(),
+            byte_offset: u32::from(call_range.start()),
+            loader_path: Arc::from(path_value.as_str()),
+            schema_text: Arc::from(schema_text.as_str()),
+        };
+
+        let resolved = loader_resolved_value_with_overlay(db, base_input, overlay_input, call_site);
+
+        for loader_diag in &resolved.diagnostics {
+            let severity = match loader_diag.severity {
+                crate::loader::LoaderDiagnosticSeverity::Error => DiagnosticSeverity::Error,
+                crate::loader::LoaderDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
+            };
+            diags.push(Diagnostic {
+                severity,
+                message: loader_diag.message.clone(),
+                range: call_range,
+                code: Some(loader_diag.code),
+                data: None,
+            });
         }
     }
 

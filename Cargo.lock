@@ -4137,6 +4137,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "walkdir",
@@ -4201,8 +4202,8 @@ dependencies = [
  "serde_yaml",
  "smelt-core",
  "smelt-dialect",
+ "smelt-logical",
  "smelt-parser",
- "smelt-planner",
  "smelt-types",
  "tempfile",
  "walkdir",
@@ -4228,6 +4229,17 @@ dependencies = [
  "smelt-db",
  "smelt-parser",
  "smelt-runtime",
+ "smelt-types",
+]
+
+[[package]]
+name = "smelt-logical"
+version = "0.3.2"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "smelt-core",
+ "smelt-parser",
  "smelt-types",
 ]
 
@@ -4288,6 +4300,7 @@ dependencies = [
  "serde_yaml",
  "smelt-core",
  "smelt-db",
+ "smelt-logical",
  "smelt-parser",
  "smelt-types",
  "tempfile",
@@ -4303,6 +4316,7 @@ dependencies = [
  "rowan",
  "serde",
  "smelt-backend",
+ "smelt-backend-duckdb",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
@@ -4310,6 +4324,7 @@ dependencies = [
  "smelt-planner",
  "smelt-state",
  "smelt-types",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

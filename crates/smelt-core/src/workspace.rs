@@ -88,6 +88,7 @@ pub fn load_workspace(project_root: &Path) -> LoadedWorkspace {
         default_materialization: Materialization::View,
         models: std::collections::HashMap::new(),
         python: None,
+        target: None,
     });
 
     // Sources: read sources.yml / sources.yaml if present.

@@ -5,6 +5,7 @@ pub mod docs;
 pub mod explain;
 pub mod history;
 pub mod run;
+mod run_setup;
 pub mod seed;
 pub mod status;
 pub mod table;

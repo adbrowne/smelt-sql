@@ -1,0 +1,6 @@
+source: gps_readings
+columns:
+  - name: reading_id
+    type: INTEGER
+  - name: raw_coords
+    type: TEXT

@@ -2,7 +2,7 @@
 //! `CompilerRegistry` so that `smelt build` / `smelt run` actually expands
 //! call sites instead of emitting verbatim `smelt.fn.*` text.
 //!
-//! These tests cover the orchestration helper [`smelt_cli::build_fn_body_map`]
+//! These tests cover the orchestration helper [`smelt_runtime::build_fn_body_map`]
 //! and the registry-level setter [`CompilerRegistry::set_function_bodies_all`]
 //! that the production codepaths now invoke. They do not execute SQL — they
 //! only assert on emitted text, so no `bundled-duckdb` feature is required.
@@ -10,7 +10,7 @@
 use smelt_cli::config::{Config, Materialization, Target};
 use smelt_cli::discovery::ModelDiscovery;
 use smelt_cli::init_db;
-use smelt_runtime::{build_fn_body_map, CompilerRegistry, SqlCompiler};
+use smelt_runtime::{build_fn_body_map, CompilerRegistry};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -63,6 +63,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        target: None,
     }
 }
 
@@ -305,10 +306,16 @@ fn legacy_project_without_functions_directory_compiles_unchanged() {
         .unwrap()
         .sql;
 
-    // Compile path B: a fresh SqlCompiler that never had any fn-body
-    // configuration touched.
-    let plain_compiler = SqlCompiler::new(config, &duckdb_target("main"));
-    let plain_sql = plain_compiler.compile(model, "main").unwrap().sql;
+    // Compile path B: a fresh registry that never had any fn-body configuration touched.
+    let mut plain_targets = HashMap::new();
+    plain_targets.insert("default".to_string(), duckdb_target("main"));
+    let plain_config = config_with_targets(plain_targets.clone());
+    let plain_registry = CompilerRegistry::new(&plain_config, &plain_targets);
+    let plain_sql = plain_registry
+        .get("default")
+        .compile(model, "main")
+        .unwrap()
+        .sql;
 
     assert_eq!(
         wired_sql, plain_sql,

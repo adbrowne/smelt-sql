@@ -454,6 +454,42 @@ pub fn run_property_test(
     }
 }
 
+/// Dispatch a CTE test as a property-based test when input columns are omitted.
+///
+/// Returns `Some(PropertyTestResult)` when `target_cte` is specified and
+/// the target CTE body references columns absent from `inputs` — the
+/// omitted-column signal that marks a property-based test per testing.md
+/// §Semantics. Runs `test_config.cases.unwrap_or(10)` iterations.
+///
+/// Returns `None` when all referenced columns are provided (or `target_cte`
+/// is `None`), signalling the caller to fall through to one-shot `run_test`.
+/// Whole-model tests (no `target_cte`) always return `None`; the `cases`
+/// field has no effect for them (see testing.md Known Divergences).
+#[cfg(feature = "duckdb")]
+pub fn try_dispatch_property_test(
+    test_name: &str,
+    model_name: &str,
+    target_cte: Option<&str>,
+    model_sql: &str,
+    test_config: &smelt_core::metadata::TestConfig,
+) -> Option<PropertyTestResult> {
+    let cte = target_cte?;
+    let missing = find_missing_columns(model_sql, cte, &test_config.inputs);
+    if missing.is_empty() {
+        return None;
+    }
+    let cases = test_config.cases.unwrap_or(10);
+    Some(run_property_test(
+        test_name,
+        model_name,
+        Some(cte),
+        model_sql,
+        test_config,
+        cases,
+        None,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +708,115 @@ SELECT * FROM formatted
                 .is_some_and(|cols| cols.contains(&"last_name".to_string())),
             "last_name should be in missing columns, got: {:?}",
             missing
+        );
+    }
+
+    // --- dispatch tests ---
+
+    #[cfg(feature = "duckdb")]
+    #[test]
+    fn dispatch_cte_with_omitted_col_runs_n_iterations() {
+        use smelt_core::metadata::TestConfig;
+
+        // Model: `result` CTE uses both `amount` (provided) and `flag` (omitted).
+        // SUM(amount) is invariant to `flag`; expect only checks `total`.
+        let model_sql = r#"
+WITH base AS (
+    SELECT amount, flag FROM orders
+),
+result AS (
+    SELECT SUM(amount) as total, MAX(flag) as max_flag FROM base
+)
+SELECT * FROM result
+"#;
+
+        let mut base_row = BTreeMap::new();
+        base_row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+        let mut inputs = BTreeMap::new();
+        inputs.insert("base".to_string(), vec![base_row]);
+
+        let mut expect_row = BTreeMap::new();
+        expect_row.insert(
+            "total".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+
+        let test_config = TestConfig {
+            model: "test_model".to_string(),
+            target_cte: Some("result".to_string()),
+            inputs,
+            expect: vec![expect_row],
+            cases: Some(3),
+            check_order: None,
+        };
+
+        let result = try_dispatch_property_test(
+            "test_dispatch",
+            "test_model",
+            Some("result"),
+            model_sql,
+            &test_config,
+        );
+
+        assert!(
+            result.is_some(),
+            "flag is missing from inputs: should dispatch to property test"
+        );
+        let r = result.unwrap();
+        assert_eq!(r.iterations, 3, "should run exactly 3 (cases) iterations");
+        assert!(r.passed, "property test should pass: {:?}", r.inner_result);
+    }
+
+    #[cfg(feature = "duckdb")]
+    #[test]
+    fn dispatch_fully_specified_cte_returns_none() {
+        use smelt_core::metadata::TestConfig;
+
+        let model_sql = r#"
+WITH base AS (
+    SELECT amount, flag FROM orders
+),
+result AS (
+    SELECT SUM(amount) as total, MAX(flag) as max_flag FROM base
+)
+SELECT * FROM result
+"#;
+
+        let mut base_row = BTreeMap::new();
+        base_row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+        base_row.insert(
+            "flag".to_string(),
+            serde_yaml::Value::String("active".to_string()),
+        );
+        let mut inputs = BTreeMap::new();
+        inputs.insert("base".to_string(), vec![base_row]);
+
+        let test_config = TestConfig {
+            model: "test_model".to_string(),
+            target_cte: Some("result".to_string()),
+            inputs,
+            expect: vec![],
+            cases: Some(3),
+            check_order: None,
+        };
+
+        let result = try_dispatch_property_test(
+            "test_dispatch",
+            "test_model",
+            Some("result"),
+            model_sql,
+            &test_config,
+        );
+
+        assert!(
+            result.is_none(),
+            "all columns provided: should NOT dispatch to property test"
         );
     }
 

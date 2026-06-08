@@ -40,9 +40,10 @@ This sweep is the **master plan**: its probe phases (S0–D1) are done and the r
 | `docs/plans/20260605-smelt-yml-surface-alignment.md` | "smelt.yml & CLI surface alignment" — spec-vs-code drift in the smelt.yml / model-selection surface — BUG-046, 059, 060, 061 | done (2026-06-05) |
 | `docs/plans/20260605-function-default-self-containment.md` | "functions: self-contained defaults" — Semantics #9 unenforced; a default referencing a sibling parameter is silently accepted — BUG-003 | done (2026-06-06) |
 | `docs/plans/20260605-cross-family-arithmetic-strictness.md` | "types: strict family rejection" — cross-family binary arithmetic (`42 + '3'`) silently casts instead of `Unknown` + `TypeMismatch` — BUG-017 | done (2026-06-06) |
-| `docs/plans/20260605-per-target-overlay-wiring.md` | "meta_config_loading: per-target overlay" — overlay merge implemented + tested but unwired in production (`smelt build --target` ignores it) — BUG-014 | pending (P1–P5) |
-| `docs/plans/20260605-property-test-dispatch-and-week-start.md` | "testing + timeseries small fixes" — property-based `cases` never dispatched; `week_start` value-domain unvalidated — BUG-042, 026 | pending (P1–P4) |
-| `docs/plans/20260606-smelt-logical-extraction.md` | "logical-model crate extraction" — remove the `smelt-db → smelt-planner` production edge by hosting the logical `Plan` model + rule interface in a new `smelt-logical` crate below both — BUG-064 | pending (P1–P5; **sequenced last** — structural refactor, run after the smelt-db-touching bug-fix plans to avoid merge churn) |
+| `docs/plans/20260605-per-target-overlay-wiring.md` | "meta_config_loading: per-target overlay" — overlay merge implemented + tested but unwired in production (`smelt build --target` ignores it) — BUG-014 | done (2026-06-06) |
+| `docs/plans/20260605-property-test-dispatch-and-week-start.md` | "testing + timeseries small fixes" — property-based `cases` never dispatched; `week_start` value-domain unvalidated — BUG-042, 026 | done (2026-06-06) |
+| `docs/plans/20260524-cli-runtime-migration.md` | "CLI ↔ runtime execute-loop unification" (roadmap §What's Next #1) — finishes the Run-Pipeline-Parity refactor: moves the remaining CLI execute loop (incremental windows, planner safety gate, temporal bounds, schema-evolution checks, `LogicalGraph`/`PhysicalGraph`) into `smelt-runtime`, migrates `commands/run.rs` to `execute_project`, then lands the deferred `execute_parity` CI gate + `pub(crate)` compile-internals lockdown — closing the "Divergent / duplicate implementations" front (roadmap #3) so future CLI↔UI divergence is a compile error, not a review catch | done (2026-06-07) |
+| `docs/plans/20260606-smelt-logical-extraction.md` | "logical-model crate extraction" — remove the `smelt-db → smelt-planner` production edge by hosting the logical `Plan` model + rule interface in a new `smelt-logical` crate below both — BUG-064 | done (2026-06-08) |
 
 Remaining ledger clusters without a sub-plan yet (each a candidate for a future human-scaffolded sub-plan) live in `docs/bug-hunt/2026-05-30-findings.md` under their `needs-review` entries.
 
@@ -79,13 +80,13 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | C13 | data_catalog | done | 3 fixed (BUG-053/054/055: Tests section missing from model pages + 2 stale KDs removed) | — | 2026-06-05 |
 | C14 | smelt_yml | done | 2 fixed (BUG-056/057: timeseries fields in wrong docs key; version required=yes), 1 deferred (BUG-058), 3 needs-review (BUG-059/060/061) | — | 2026-06-05 |
 | D1 | functions × incremental × timeseries | done | 0 fixed, 1 deferred docs-gap (BUG-062) | — | 2026-06-05 |
-| D2 | functions × schema_inference × types | pending | | | |
-| D3 | meta_language × functions × config_loading | pending | | | |
-| D4 | incremental × cumulative_aggregate × timeseries | pending | | | |
-| D5 | seeds × sources × types | pending | | | |
-| D6 | model_selection × generators × cli | pending | | | |
-| D7 | project isolation × lsp | pending | | | |
-| D8 | run-pipeline parity (cli ↔ ui) | pending | | | |
+| D2 | functions × schema_inference × types | done | 1 fixed (BUG-065: struct `.*` spread inside CTE body infers Unknown — `SMELT_PATH_CALL_STAR` unhandled in `infer_select_output_schema` + fn sigs not seeded before CTE processing; fixed red-green) | — | 2026-06-08 |
+| D3 | meta_language × functions × config_loading | done | 1 fixed (BUG-066: generator files without `.gen.sql` suffix failed to build — frontmatter-only detection not implemented), 2 needs-review (BUG-067: smelt.config.var in smelt.define body; BUG-068: List<T> not admissible as smelt.define parameter type) | — | 2026-06-08 |
+| D4 | incremental × cumulative_aggregate × timeseries | done | 1 fixed (BUG-069: CumulativeForbidsTimeseries/Incremental not surfaced in LSP — `_ => None` in `file_diagnostics` dropped both; added DiagnosticCode entries + wiring), 2 needs-review (BUG-070: backbuild with cumulative uses legacy path → full-refresh, not merge loop; BUG-071: cumulative Known Divergences missing Month/Quarter/Year limitation) | — | 2026-06-08 |
+| D5 | seeds × sources × types | done | 0 fixed, 2 needs-review (BUG-072: source timeseries silently ignored — SourceInfo has no timeseries field; BUG-073: inject_source_filters not wired into incremental execute path); SourceTypeError test fixture added (code was correct, untested) | — | 2026-06-08 |
+| D6 | model_selection × generators × cli | done | 1 fixed (BUG-074: generator_file: selector broken post CLI-runtime migration — returned empty; fixed in DependencyGraph::select_models via virtual-path ::‐suffix matching) | — | 2026-06-08 |
+| D7 | project isolation × lsp | done | 2 fixed (BUG-075: DuplicateAddress cross-project isolation gate missing; BUG-076: goto-def project isolation gate missing — both added to example_workspaces.rs) | — | 2026-06-08 |
+| D8 | run-pipeline parity (cli ↔ ui) | done | 1 fixed (BUG-077: UI startup omits generator expansion — silent absence of emitted models from all UI runs); 1 docs-gap fixed (smelt-runtime CLAUDE.md stale "execute_parity not yet implemented" note) | — | 2026-06-08 |
 
 **Status values**: `pending` → `done`. A phase is `done` even if it logged `needs-review` findings (those are deliberately deferred, not blocking). Record the count of findings logged in that phase in the Findings column (e.g. `2 fixed, 1 needs-review`).
 

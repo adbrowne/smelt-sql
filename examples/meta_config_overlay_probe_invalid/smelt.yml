@@ -1,0 +1,22 @@
+name: meta_config_overlay_probe_invalid
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+  prod:
+    type: duckdb
+    database: target/prod.duckdb
+    schema: main
+
+# Default target is prod so the overlay is always active in this fixture.
+# The prod overlay (cohorts.prod.yaml) contains an unknown field to trigger
+# ConfigLoaderUnknownField via the overlay validation path.
+target: prod
+
+default_materialization: table

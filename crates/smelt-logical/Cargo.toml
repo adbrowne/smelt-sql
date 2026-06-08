@@ -1,0 +1,17 @@
+[package]
+name = "smelt-logical"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Logical model and planner-rule interface for smelt"
+repository = "https://github.com/adbrowne/smelt-sql"
+
+[dependencies]
+smelt-core = { path = "../smelt-core" }
+smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]

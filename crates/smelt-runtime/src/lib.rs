@@ -23,14 +23,17 @@ pub mod fn_bodies;
 pub mod gate;
 pub mod meta_eval;
 pub mod reporter;
+pub mod safety;
+pub mod schema_evolution;
 pub mod select;
 pub mod transformer;
 pub mod types;
+pub mod windowing;
 
 pub use compile::{
-    bind_named_args, build_source_bound_map, expand_function_calls, prepend_ephemeral_ctes,
-    resolve_refs_in_sql, substitute_params_with_named, CompiledModel, CompilerRegistry,
-    EphemeralResolver, SqlCompiler, UpstreamSchemas,
+    build_source_bound_map, expand_function_calls, resolve_refs_in_sql,
+    substitute_params_with_named, CompiledModel, CompilerRegistry, EphemeralResolver, SqlCompiler,
+    UpstreamSchemas,
 };
 pub use cumulative::{
     build_cumulative_merge_sql, classify_cumulative_sql, execute_cumulative_aggregate,
@@ -43,7 +46,7 @@ pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{
     inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
 };
-pub use types::{ExecuteRequest, RunOutcome};
+pub use types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 
 #[cfg(test)]
 mod tests {

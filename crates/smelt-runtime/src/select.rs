@@ -111,6 +111,16 @@ pub fn select_executable_models(
             if is_generator_file(&model.name, &model.path.to_string_lossy()) {
                 return false;
             }
+            // Drop ephemeral models: they are inlined as CTEs into downstream
+            // models, never materialized directly. Their SQL is absorbed by
+            // `build_ephemeral_resolver` during compile-context construction.
+            let mat = config.get_materialization_with_metadata(
+                name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
+            );
+            if mat == smelt_core::config::Materialization::Ephemeral {
+                return false;
+            }
             true
         })
         .collect();
@@ -135,7 +145,14 @@ pub fn select_executable_models(
 ///
 /// Matches what `smelt-cli/src/commands/run.rs` historically filtered:
 /// either the model name ends with `.gen` (frontmatter-named generator)
-/// or the path contains `.gen.` (filename-based detection).
+/// or the path ends with `.gen.sql` (filename-based detection).
+///
+/// NOTE: emitted model virtual paths look like `…/foo.gen.sql::cohorts.us_west`.
+/// These must NOT be treated as generator files — they are valid executable
+/// models whose paths happen to reference the generator that produced them.
+/// We match only paths that END with `.gen.sql` (the raw generator file),
+/// not paths that merely CONTAIN `.gen.` (which would also match emitted
+/// model virtual paths).
 fn is_generator_file(name: &str, path: &str) -> bool {
-    name.ends_with(".gen") || path.contains(".gen.")
+    name.ends_with(".gen") || path.ends_with(".gen.sql")
 }

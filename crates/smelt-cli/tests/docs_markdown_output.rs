@@ -60,10 +60,11 @@ fn model_page_lists_targeting_test_models() {
     }
 
     // Build catalog via the non-test model path (same as the CLI command).
-    let (graph, db) = smelt_cli::build_logical_graph(&project_dir, &config, None, &[], "dev")
-        .expect("build logical graph");
-    let catalog =
-        smelt_cli::docs::build_catalog(&graph, &config, &db, &test_targets).expect("build catalog");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets)
+        .expect("build catalog");
 
     // "orders" should be in the catalog.
     let orders = catalog
@@ -164,7 +165,7 @@ fn stage_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
 /// the real `build_catalog()` + `render_model_page()` pipeline) surfaces a
 /// Source line that identifies the generator file and the `ModelDef.name`.
 ///
-/// Uses `build_logical_graph` so that discovery, generator-file filtering, and
+/// Uses `build_dependency_graph` so that discovery, generator-file filtering, and
 /// provenance annotation are all handled by the same helper the CLI command
 /// handler uses — the test never calls `discover_emitted_model_files` or
 /// `annotate_emitted_models` directly.
@@ -181,19 +182,25 @@ fn emitted_model_has_source_line_in_real_docs_markdown_pipeline() {
     ]);
     let project_dir = tmp.path().to_path_buf();
 
-    // `build_logical_graph` runs the full pipeline: discover SQL files, init the
+    // `build_dependency_graph` runs the full pipeline: discover SQL files, init the
     // Salsa DB, run the emitted-models generator pipeline, filter generator files
     // from the hand-authored set, build the LogicalGraph, and annotate provenance.
     // The test relies on this helper — it does NOT call discover_emitted_model_files
     // or annotate_emitted_models directly.
     let config = smelt_cli::Config::load(&project_dir).expect("load config");
-    let (graph, db) = smelt_cli::build_logical_graph(&project_dir, &config, None, &[], "dev")
-        .expect("build logical graph");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
 
     // Build catalog.
-    let catalog =
-        smelt_cli::docs::build_catalog(&graph, &config, &db, &std::collections::HashMap::new())
-            .expect("build catalog");
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+    )
+    .expect("build catalog");
 
     // Find the emitted model ("regions.west") and render its Markdown page.
     let (_, emitted) = catalog

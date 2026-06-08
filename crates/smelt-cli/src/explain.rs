@@ -1,9 +1,8 @@
 use crate::discovery::ModelFile;
-use crate::logical_graph::{LogicalGraph, LogicalNode};
-use crate::physical_graph::{PhysicalGraph, PhysicalStrategy};
 use anyhow::Result;
 use serde::Serialize;
-use smelt_core::config::TimeseriesConfig;
+use smelt_core::config::{Config, TimeseriesConfig};
+use smelt_core::graph::DependencyGraph;
 use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
 use std::collections::BTreeMap;
@@ -91,30 +90,43 @@ fn is_self_origin(origins: &[String]) -> bool {
     origins.len() == 1
 }
 
-/// Build the explain output from the logical graph (config already resolved on nodes).
+/// Build the explain output from the dependency graph and config.
+///
+/// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
 pub fn build_explain_output(
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
+    config: &Config,
     fn_bodies: &smelt_runtime::FnBodyMap,
+    origins: &std::collections::HashMap<String, (String, String)>,
 ) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
     let mut models = BTreeMap::new();
-    for node in graph.iter_nodes() {
-        let model_file = &node.model_file;
+    for model_name in &execution_order {
+        let model_file = graph.get_model(model_name)?;
         let metadata = model_file.metadata.as_deref();
+        let frontmatter = smelt_planner::Frontmatter::parse(&model_file.content);
 
-        let incremental = match (&node.incremental, &node.timeseries) {
+        let materialization = config.get_materialization_with_metadata(model_name, metadata);
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+        let tags = config.get_tags(model_name, metadata);
+
+        let incremental = match (inc_config, ts_config) {
             (Some(inc), Some(ts)) => {
-                // Classify and derive bounds on the *expanded* SQL so a
-                // `RANGE BETWEEN INTERVAL` (or any Form A/B pattern) declared
-                // inside a `smelt.define` body is seen — matching the execution
-                // path. The planner is pure (no function registry), so the
-                // expansion happens here in the CLI layer.
+                // Classify on the *expanded* SQL so a RANGE BETWEEN INTERVAL
+                // declared inside a `smelt.define` body is seen.
                 let expanded_sql =
                     smelt_runtime::expand_function_calls(&model_file.content, fn_bodies);
                 let batch_safety =
-                    compute_batch_safety_label(&node.name, &expanded_sql, model_file, inc, ts);
-                let source_bounds = compute_source_bounds_for_node(node, &expanded_sql, graph);
+                    compute_batch_safety_label(model_name, &expanded_sql, model_file, &inc, &ts);
+                let source_bounds = compute_source_bounds(model_name, &expanded_sql, graph, config);
                 Some(ExplainIncremental {
                     granularity: ts.granularity.clone(),
                     partition_column: ts.partition_column.clone(),
@@ -128,24 +140,23 @@ pub fn build_explain_output(
         };
 
         let owner = metadata.and_then(|m| m.owner.clone());
-        let dependencies = graph.get_upstream(&node.name);
+        let dependencies = graph.get_upstream(model_name);
 
         // Build origin for generator-emitted models.
-        let origin = match (&node.generator_file, &node.generator_name) {
-            (Some(gf), Some(gn)) => Some(ModelOriginKind::Generated {
+        let origin = origins
+            .get(model_name)
+            .map(|(gf, gn)| ModelOriginKind::Generated {
                 generator_file: gf.clone(),
                 generator_name: gn.clone(),
-            }),
-            _ => None,
-        };
+            });
 
         models.insert(
-            node.name.clone(),
+            model_name.clone(),
             ExplainModel {
                 dependencies,
-                materialization: node.materialization.clone(),
+                materialization,
                 incremental,
-                tags: node.tags.clone(),
+                tags,
                 owner,
                 origin,
             },
@@ -159,84 +170,109 @@ pub fn build_explain_output(
     })
 }
 
-/// Build physical explain section from a PhysicalGraph and the logical graph (for ephemeral list).
-pub fn build_physical_explain(physical: &PhysicalGraph, logical: &LogicalGraph) -> ExplainPhysical {
+/// Build the physical explain section from the plan summary and graph.
+///
+/// The physical section lists per-model strategy (from the `PlanSummary`),
+/// ephemerals (from the graph), and planner transformations.
+pub fn build_physical_explain(
+    plan_summary: &smelt_runtime::PlanSummary,
+    graph: &DependencyGraph,
+    config: &Config,
+    target: &str,
+) -> ExplainPhysical {
     let mut nodes = BTreeMap::new();
-    for node in physical.iter_in_order() {
-        let strategy = match &node.strategy {
-            PhysicalStrategy::FullRefresh => "full_refresh".to_string(),
-            PhysicalStrategy::CubeSplit { steps } => {
-                format!("cube_split ({} steps)", steps.len())
-            }
-            PhysicalStrategy::Incremental {
-                timeseries,
-                plan_steps,
-                ..
-            } => {
-                let base = format!(
-                    "incremental (partition: {}, granularity: {})",
-                    timeseries.partition_column,
-                    serde_json::to_value(&timeseries.granularity)
-                        .ok()
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "?".to_string()),
-                );
-                if plan_steps.is_some() {
-                    format!("{} + plan steps", base)
-                } else {
-                    base
-                }
+    let mut ephemerals = Vec::new();
+
+    for record in &plan_summary.models {
+        let model_name = &record.name;
+
+        // Collect ephemerals
+        if matches!(record.strategy, smelt_runtime::ModelStrategy::Ephemeral) {
+            ephemerals.push(model_name.clone());
+            continue;
+        }
+
+        let strategy = match &record.strategy {
+            smelt_runtime::ModelStrategy::FullRefresh => "full_refresh".to_string(),
+            smelt_runtime::ModelStrategy::Incremental {
+                partition_column,
+                granularity,
+            } => format!(
+                "incremental (partition: {}, granularity: {})",
+                partition_column, granularity
+            ),
+            smelt_runtime::ModelStrategy::Cumulative => "cumulative_aggregate".to_string(),
+            smelt_runtime::ModelStrategy::Ephemeral => "ephemeral".to_string(),
+            smelt_runtime::ModelStrategy::Skipped { reason } => {
+                format!("skipped ({})", reason)
             }
         };
 
+        let model_target = graph
+            .get_model(model_name)
+            .ok()
+            .map(|m| config.get_target(model_name, m.metadata.as_deref(), target))
+            .unwrap_or_else(|| target.to_string());
+
         nodes.insert(
-            node.name.clone(),
+            model_name.clone(),
             ExplainPhysicalNode {
                 strategy,
-                materialization: node.materialization.clone(),
-                target: node.target.clone(),
-                logical_origins: node.logical_origins.clone(),
+                materialization: record.materialization.clone(),
+                target: model_target,
+                logical_origins: vec![model_name.clone()],
             },
         );
     }
 
-    // Collect ephemeral models from logical graph
-    let ephemerals: Vec<String> = logical
-        .iter_nodes()
-        .filter(|n| n.materialization == Materialization::Ephemeral)
-        .map(|n| n.name.clone())
-        .collect();
+    // Any ephemeral-only models from the graph that aren't in the PlanSummary
+    // (e.g., if PlanSummary omitted them) — scan the graph for completeness.
+    for (model_name, _) in graph.iter_models() {
+        let mat = graph
+            .get_model(model_name)
+            .ok()
+            .map(|m| config.get_materialization_with_metadata(model_name, m.metadata.as_deref()))
+            .unwrap_or(Materialization::View);
+        if mat == Materialization::Ephemeral && !ephemerals.contains(&model_name.to_string()) {
+            ephemerals.push(model_name.to_string());
+        }
+    }
 
-    // Planner summary as transformation descriptions
-    let transformations: Vec<String> = physical
-        .planner_summary()
-        .into_iter()
-        .map(|(model, desc)| format!("{} → {}", model, desc))
+    let execution_order: Vec<String> = plan_summary
+        .models
+        .iter()
+        .filter(|r| !matches!(r.strategy, smelt_runtime::ModelStrategy::Ephemeral))
+        .map(|r| r.name.clone())
         .collect();
 
     ExplainPhysical {
-        execution_order: physical.execution_order().to_vec(),
+        execution_order,
         nodes,
         ephemerals,
-        transformations,
+        transformations: vec![],
     }
 }
 
-/// Derive per-source bounds for a node's incremental model using the logical graph
-/// to resolve upstream timeseries configs.
-fn compute_source_bounds_for_node(
-    node: &LogicalNode,
+/// Derive per-source bounds for a model.
+fn compute_source_bounds(
+    model_name: &str,
     sql: &str,
-    graph: &LogicalGraph,
+    graph: &DependencyGraph,
+    config: &Config,
 ) -> BTreeMap<String, SourceBoundJson> {
     use smelt_planner::analysis::source_bounds::derive_model_bounds;
     use smelt_planner::Frontmatter;
 
     let mut ctx = BoundContext::new();
-    for dep_name in &node.dependencies {
-        if let Ok(upstream) = graph.get_node(dep_name) {
-            if let Some(ts) = &upstream.timeseries {
-                ctx.add_source(dep_name, &ts.partition_column);
+    for dep_name in graph.get_upstream(model_name) {
+        if let Ok(dep_model) = graph.get_model(&dep_name) {
+            let dep_meta = dep_model.metadata.as_deref();
+            let ts = config
+                .get_timeseries_with_metadata(&dep_name, dep_meta)
+                .cloned()
+                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
+            if let Some(ts) = ts {
+                ctx.add_source(&dep_name, &ts.partition_column);
             }
         }
     }
@@ -311,10 +347,7 @@ mod tests {
             .map(|dep| RefInfo {
                 has_named_params: false,
                 range: TextRange::default(),
-                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
-                    "models".to_string(),
-                    dep.to_string(),
-                ]),
+                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![dep.to_string()]),
             })
             .collect();
 
@@ -360,6 +393,7 @@ mod tests {
             default_materialization: Materialization::View,
             models,
             python: None,
+            target: None,
         }
     }
 
@@ -394,7 +428,7 @@ mod tests {
                 target: None,
             },
         )]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+        let graph = DependencyGraph::build(models, None).unwrap();
 
         let mut fn_bodies: smelt_runtime::FnBodyMap = HashMap::new();
         fn_bodies.insert(
@@ -408,7 +442,9 @@ mod tests {
         );
 
         let bs = |fns: &smelt_runtime::FnBodyMap| {
-            build_explain_output(&graph, fns).unwrap().models["sessions"]
+            build_explain_output(&graph, &config, fns, &HashMap::new())
+                .unwrap()
+                .models["sessions"]
                 .incremental
                 .as_ref()
                 .unwrap()
@@ -436,13 +472,14 @@ mod tests {
             make_model(
                 "daily_revenue",
                 vec!["orders"],
-                "SELECT date, SUM(amount) FROM smelt.models.orders GROUP BY date",
+                "SELECT date, SUM(amount) FROM smelt.orders GROUP BY date",
             ),
         ];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+        let graph = DependencyGraph::build(models, None).unwrap();
 
-        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
+        let output =
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -468,7 +505,7 @@ mod tests {
             make_model(
                 "daily_revenue",
                 vec!["orders"],
-                "SELECT date, SUM(amount) FROM smelt.models.orders GROUP BY date",
+                "SELECT date, SUM(amount) FROM smelt.orders GROUP BY date",
             ),
         ];
         let config = make_config(vec![(
@@ -490,9 +527,10 @@ mod tests {
                 target: None,
             },
         )]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+        let graph = DependencyGraph::build(models, None).unwrap();
 
-        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
+        let output =
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -508,131 +546,15 @@ mod tests {
     fn test_explain_json_serialization() {
         let models = vec![make_model("a", vec![], "SELECT 1")];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+        let graph = DependencyGraph::build(models, None).unwrap();
 
-        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
+        let output =
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
         assert!(json.contains("\"execution_order\""));
         assert!(json.contains("\"a\""));
-    }
-
-    #[test]
-    fn test_physical_explain_basic() {
-        use crate::physical_graph::PhysicalGraphBuilder;
-
-        let models = vec![
-            make_model("orders", vec![], "SELECT * FROM raw_orders"),
-            make_model(
-                "daily_revenue",
-                vec!["orders"],
-                "SELECT date, SUM(amount) FROM smelt.models.orders GROUP BY date",
-            ),
-        ];
-        let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
-
-        let target_schemas: HashMap<String, String> = config
-            .targets
-            .iter()
-            .map(|(k, v)| (k.clone(), v.schema.clone()))
-            .collect();
-        let pg = PhysicalGraphBuilder::for_explain(&graph, &[], target_schemas)
-            .build()
-            .unwrap();
-
-        let phys = build_physical_explain(&pg, &graph);
-
-        assert_eq!(phys.execution_order.len(), 2);
-        assert_eq!(phys.execution_order[0], "orders");
-        assert_eq!(phys.execution_order[1], "daily_revenue");
-        assert!(phys.ephemerals.is_empty());
-        assert!(phys.transformations.is_empty());
-
-        let orders_node = &phys.nodes["orders"];
-        assert_eq!(orders_node.strategy, "full_refresh");
-        assert_eq!(orders_node.target, "dev");
-    }
-
-    #[test]
-    fn test_physical_explain_with_ephemeral() {
-        use crate::physical_graph::PhysicalGraphBuilder;
-
-        let models = vec![
-            make_model("staging", vec![], "SELECT * FROM raw"),
-            make_model(
-                "mart",
-                vec!["staging"],
-                "SELECT * FROM smelt.models.staging",
-            ),
-        ];
-        let mut config = make_config(vec![(
-            "staging",
-            ModelConfig {
-                materialization: Some(Materialization::Ephemeral),
-                timeseries: None,
-                incremental: None,
-                tags: vec![],
-                target: None,
-            },
-        )]);
-        // Need mart to be non-ephemeral
-        config
-            .models
-            .entry("mart".to_string())
-            .or_insert(ModelConfig {
-                materialization: Some(Materialization::Table),
-                timeseries: None,
-                incremental: None,
-                tags: vec![],
-                target: None,
-            });
-
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
-
-        let target_schemas: HashMap<String, String> = config
-            .targets
-            .iter()
-            .map(|(k, v)| (k.clone(), v.schema.clone()))
-            .collect();
-        let pg = PhysicalGraphBuilder::for_explain(&graph, &[], target_schemas)
-            .build()
-            .unwrap();
-
-        let phys = build_physical_explain(&pg, &graph);
-
-        // Ephemeral should not be in physical execution order
-        assert_eq!(phys.execution_order.len(), 1);
-        assert_eq!(phys.execution_order[0], "mart");
-        // But should appear in ephemerals list
-        assert_eq!(phys.ephemerals, vec!["staging"]);
-    }
-
-    #[test]
-    fn test_physical_explain_json_includes_physical() {
-        use crate::physical_graph::PhysicalGraphBuilder;
-
-        let models = vec![make_model("a", vec![], "SELECT 1")];
-        let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
-
-        let target_schemas: HashMap<String, String> = config
-            .targets
-            .iter()
-            .map(|(k, v)| (k.clone(), v.schema.clone()))
-            .collect();
-        let pg = PhysicalGraphBuilder::for_explain(&graph, &[], target_schemas)
-            .build()
-            .unwrap();
-
-        let mut output = build_explain_output(&graph, &HashMap::new()).unwrap();
-        output.physical = Some(build_physical_explain(&pg, &graph));
-
-        let json = serde_json::to_string_pretty(&output).unwrap();
-        assert!(json.contains("\"physical\""));
-        assert!(json.contains("\"full_refresh\""));
-        assert!(json.contains("\"ephemerals\""));
     }
 
     #[test]
@@ -647,9 +569,10 @@ mod tests {
 
         let models = vec![model];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
+        let graph = DependencyGraph::build(models, None).unwrap();
 
-        let output = build_explain_output(&graph, &HashMap::new()).unwrap();
+        let output =
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")

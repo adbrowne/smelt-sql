@@ -1,0 +1,15 @@
+name: d3_meta_fn_config
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+target: dev
+
+default_materialization: view

@@ -376,6 +376,19 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         });
     }
 
+    // Rule: week_start must be monday or sunday (spec timeseries.md §Surface)
+    if let Some(ws) = &ts.week_start {
+        use crate::config::Weekday;
+        if !matches!(ws, Weekday::Monday | Weekday::Sunday) {
+            return Err(MetadataError::MalformedTimeseries {
+                message: format!(
+                    "week_start must be 'monday' or 'sunday'; got '{}'",
+                    serde_yaml::to_string(ws).unwrap_or_default().trim()
+                ),
+            });
+        }
+    }
+
     // Rule: partition_column must appear in the model's SELECT output (projection check)
     // Only check when there is actual SQL body content.
     if !sql_body.trim().is_empty() {
@@ -1549,5 +1562,69 @@ SELECT * FROM users"#;
             }
             _ => panic!("Expected Single variant"),
         }
+    }
+
+    // ── BUG-026: week_start value-domain validation ──────────────────────────
+
+    /// `week_start: wednesday` (invalid domain) on `granularity: week` must
+    /// emit `MalformedTimeseries`.
+    #[test]
+    fn test_week_start_invalid_value_rejected() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Week,
+                week_start: Some(crate::config::Weekday::Wednesday),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt, ts FROM foo")
+            .expect_err("week_start: wednesday must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("week_start"),
+            "Error must mention week_start, got: {}",
+            err
+        );
+    }
+
+    /// `week_start: monday` is valid — no error.
+    #[test]
+    fn test_week_start_monday_accepted() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Week,
+                week_start: Some(crate::config::Weekday::Monday),
+            }),
+            ..Default::default()
+        };
+        validate_timeseries(&metadata, "SELECT dt, ts FROM foo")
+            .expect("week_start: monday must be accepted");
+    }
+
+    /// `week_start: sunday` is valid — no error.
+    #[test]
+    fn test_week_start_sunday_accepted() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Week,
+                week_start: Some(crate::config::Weekday::Sunday),
+            }),
+            ..Default::default()
+        };
+        validate_timeseries(&metadata, "SELECT dt, ts FROM foo")
+            .expect("week_start: sunday must be accepted");
     }
 }

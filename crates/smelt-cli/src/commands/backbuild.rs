@@ -3,12 +3,12 @@ use chrono::NaiveDate;
 use smelt_backend::PartitionRange;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_argument},
-    compiler::UpstreamSchemas,
     compute_backbuild_plans, discover_python_models, executor, find_project_root,
     format_plan_summary, init_db, inject_time_filter, parse_selector, BackendRegistry,
-    BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery,
-    PhysicalGraphBuilder, SourcesConfig, TimeRange,
+    BackfillOptions, CompilerRegistry, Config, Materialization, ModelDiscovery, SourcesConfig,
+    TimeRange, UpstreamSchemas,
 };
+use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -61,7 +61,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     // Function files (smelt.define / smelt.extern) must be registered with
     // the Salsa DB so `build_fn_body_map` can extract bodies for
     // `smelt.fn.*` expansion. They are NOT materialisable models so they
-    // stay out of `models` and the LogicalGraph.
+    // stay out of `models` and the dependency graph.
     let function_files = discovery
         .discover_function_files()
         .with_context(|| "Failed to discover function files")?;
@@ -97,9 +97,10 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         .project_input(&project_dir)
         .expect("project not initialized");
 
-    // 4. Build logical graph
-    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
-        .with_context(|| "Failed to build logical graph")?;
+    // 4. Build dependency graph
+    let mut graph = DependencyGraph::build(models, sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+    graph.add_seeds(&seeds);
 
     graph
         .validate()
@@ -127,7 +128,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     }];
 
     let selected = graph
-        .select_models(&selectors)
+        .select_models(&selectors, &config)
         .with_context(|| "Failed to select models")?;
 
     if selected.is_empty() {
@@ -177,6 +178,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         target_model,
         &execution_order,
         &graph,
+        &config,
         sources.as_ref(),
         &requested_range,
         &backfill_options,
@@ -194,30 +196,35 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     }
 
     // 9. Compute needed targets and create backends
-    let cross_edges = graph.find_cross_backend_edges();
+    // Compute target assignments from config for each model in execution order.
+    let target_assignments: HashMap<String, String> = execution_order
+        .iter()
+        .map(|name| {
+            let model = graph
+                .get_model(name)
+                .expect("execution_order only contains valid model names");
+            let target = config.get_target(name, model.metadata.as_deref(), &args.target);
+            (name.clone(), target)
+        })
+        .collect();
+
+    let cross_edges_raw = graph.find_cross_backend_edges(&target_assignments);
+    // Convert raw tuples to named structs for logging.
+    let cross_edges: Vec<(String, String, String, String)> = cross_edges_raw;
     if !cross_edges.is_empty() {
         info!(
             "Cross-engine references detected ({} transfer(s) via Parquet):",
             cross_edges.len()
         );
-        for edge in &cross_edges {
+        for (downstream, upstream, downstream_target, upstream_target) in &cross_edges {
             info!(
                 "  {} ({}) -> {} ({})",
-                edge.upstream, edge.upstream_target, edge.downstream, edge.downstream_target
+                upstream, upstream_target, downstream, downstream_target
             );
         }
     }
 
-    let needed_targets: HashSet<String> = execution_order
-        .iter()
-        .map(|name| {
-            graph
-                .get_node(name)
-                .expect("execution_order only contains valid node names")
-                .target
-                .clone()
-        })
-        .collect();
+    let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
     let registry = BackendRegistry::new(
         &config.targets,
         &needed_targets,
@@ -237,18 +244,18 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     // the upstream backend to be instantiated.
     if !cross_edges.is_empty() {
         let mut refs_by_target: HashMap<String, HashMap<String, String>> = HashMap::new();
-        for edge in &cross_edges {
-            let upstream_target_config = &config.targets[&edge.upstream_target];
+        for (_downstream, upstream, downstream_target, upstream_target) in &cross_edges {
+            let upstream_target_config = &config.targets[upstream_target];
             let upstream_schema = &upstream_target_config.schema;
             let rel_path = if let Some(ref warehouse) = upstream_target_config.warehouse {
                 Some(std::path::PathBuf::from(format!(
                     "{}/{}/{}",
-                    warehouse, upstream_schema, edge.upstream
+                    warehouse, upstream_schema, upstream
                 )))
-            } else if needed_targets.contains(&edge.upstream_target) {
+            } else if needed_targets.contains(upstream_target) {
                 registry
-                    .get(&edge.upstream_target)
-                    .materialized_path(upstream_schema, &edge.upstream)
+                    .get(upstream_target)
+                    .materialized_path(upstream_schema, upstream)
             } else {
                 None
             };
@@ -259,9 +266,9 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
                     abs_path.display()
                 );
                 refs_by_target
-                    .entry(edge.downstream_target.clone())
+                    .entry(downstream_target.clone())
                     .or_default()
-                    .insert(edge.upstream.clone(), parquet_expr);
+                    .insert(upstream.clone(), parquet_expr);
             }
         }
         for (target, refs) in refs_by_target {
@@ -275,32 +282,12 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
             .with_context(|| "Source validation failed")?;
     }
 
-    // Build physical graph for ephemeral resolver construction
-    let target_schemas: HashMap<String, String> = needed_targets
-        .iter()
-        .map(|name| (name.clone(), registry.target_config(name).schema.clone()))
-        .collect();
-    let physical_graph = PhysicalGraphBuilder::new(
-        &graph,
-        &[],
-        Some(requested_range.clone()),
-        &compilers,
-        target_schemas,
-    )
-    .build()
-    .with_context(|| "Failed to build physical graph for backbuild")?;
+    // Build all non-ephemeral models list for UpstreamSchemas construction.
+    let all_models: Vec<smelt_core::ModelFile> =
+        graph.iter_models().map(|(_, m)| m.clone()).collect();
 
-    // Build a populated TypeContext for `apply_type_casts` so SUM/COUNT/AVG
-    // over `smelt.ref()` columns don't silently narrow to BIGINT (bug #3).
+    // Build a populated TypeContext for `apply_type_casts`.
     {
-        let all_models: Vec<_> = physical_graph
-            .iter_in_order()
-            .map(|node| node.model_file.clone())
-            .collect();
-        // Register function files alongside models so `parse_file` can
-        // resolve `smelt.define` bodies for `build_fn_body_map`. They are
-        // intentionally excluded from `all_models` since they aren't
-        // materialisable models.
         let mut db_files: Vec<_> = all_models.clone();
         db_files.extend(function_files.iter().cloned());
         let type_db = init_db(&project_dir, &db_files);
@@ -311,9 +298,6 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         )?);
         compilers.set_upstream_schemas_all(upstream_schemas);
 
-        // Wire `smelt.fn.*` function bodies through every compiler. Skipped
-        // when the project has no functions so legacy projects compile
-        // byte-for-byte identically to the pre-Phase-56 codepath.
         let workspace =
             smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
         let fn_bodies = smelt_runtime::build_fn_body_map(&type_db, workspace);
@@ -322,26 +306,53 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         }
     }
 
+    // Build ephemeral resolvers per target by collecting ephemeral models.
+    let mut ephemeral_resolvers: HashMap<String, smelt_runtime::EphemeralResolver> = HashMap::new();
+    for target_name in &needed_targets {
+        let schema = &config.targets[target_name].schema;
+        let ephemeral_models: Vec<(String, String)> = graph
+            .iter_models()
+            .filter(|(model_name, model_file)| {
+                let metadata = model_file.metadata.as_deref();
+                let mat = config.get_materialization_with_metadata(model_name, metadata);
+                mat == smelt_core::config::Materialization::Ephemeral
+                    && config.get_target(model_name, metadata, &args.target) == *target_name
+            })
+            .map(|(model_name, model_file)| (model_name.to_string(), model_file.content.clone()))
+            .collect();
+        let compiler = compilers.get(target_name);
+        let resolver = compiler.build_ephemeral_resolver(&ephemeral_models, schema);
+        ephemeral_resolvers.insert(target_name.clone(), resolver);
+    }
+
     info!("{}", "=".repeat(60));
     info!("Executing backbuild...");
     info!("{}", "=".repeat(60));
 
     let mut total_results = Vec::new();
 
+    // Static empty resolver fallback.
+    static EMPTY_RESOLVER: std::sync::OnceLock<smelt_runtime::EphemeralResolver> =
+        std::sync::OnceLock::new();
+
     for plan in &plans {
-        // Skip ephemeral models (absorbed into physical graph's resolvers)
-        let node = graph.get_node(&plan.model_name)?;
-        if node.materialization == Materialization::Ephemeral {
+        let model = graph.get_model(&plan.model_name)?;
+        let metadata = model.metadata.as_deref();
+
+        // Skip ephemeral models (absorbed into resolvers)
+        let mat = config.get_materialization_with_metadata(&plan.model_name, metadata);
+        if mat == Materialization::Ephemeral {
             debug!("{} (ephemeral - inlined as CTE)", plan.model_name);
             continue;
         }
 
-        let model = graph.get_model(&plan.model_name)?;
-        let model_target = &node.target;
-        let backend = registry.get(model_target);
-        let compiler = compilers.get(model_target);
-        let schema = &registry.target_config(model_target).schema;
-        let resolver = physical_graph.ephemeral_resolver(model_target);
+        let model_target = config.get_target(&plan.model_name, metadata, &args.target);
+        let backend = registry.get(&model_target);
+        let compiler = compilers.get(&model_target);
+        let schema = &registry.target_config(&model_target).schema;
+        let resolver = ephemeral_resolvers
+            .get(&model_target)
+            .unwrap_or_else(|| EMPTY_RESOLVER.get_or_init(smelt_runtime::EphemeralResolver::empty));
 
         if !plan.is_incremental {
             info!("{} (full refresh)", plan.model_name);
@@ -363,20 +374,14 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
 
         let frontmatter = Frontmatter::parse(&model.content);
         let inc_config = config
-            .get_incremental_with_metadata(
-                &plan.model_name,
-                model.metadata.as_ref().map(|b| b.as_ref()),
-            )
+            .get_incremental_with_metadata(&plan.model_name, metadata)
             .cloned()
             .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
         let ts_config = config
-            .get_timeseries_with_metadata(
-                &plan.model_name,
-                model.metadata.as_ref().map(|b| b.as_ref()),
-            )
+            .get_timeseries_with_metadata(&plan.model_name, metadata)
             .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.timeseries.clone()));
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
         let (inc_config, ts_config) = match (inc_config, ts_config) {
             (Some(i), Some(t)) => (i, t),

@@ -166,6 +166,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          (upstream source tables not seeded in the standalone build env)",
     ),
     (
+        "seed_source_type_join",
+        "Catalog Error: Table with name sources_raw_orders does not exist \
+         (D5 probe fixture: seeds+sources type-alias coverage; the seed loads \
+         but the model joins an external source that is not seeded in the \
+         standalone build env; LSP + source-diagnostics coverage verified)",
+    ),
+    (
         "cumulative_classifier_gate",
         "Error: Failed to execute cumulative model: edges_bad_aggregator \
          (probe fixture: intentionally exercises a cumulative aggregator gate; \
@@ -177,6 +184,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          (D1 probe fixture: function expansion inside incremental model works correctly; \
          source table `main.sources_events` not seeded in standalone build env; \
          verified e2e via fn_incremental_ts_e2e.rs)",
+    ),
+    (
+        "fn_struct_spread_cte",
+        "Catalog Error: Table with name sources_gps_readings does not exist \
+         (D2 probe fixture: struct spread inside CTE body schema propagation; \
+         source table not seeded in standalone build env; \
+         verified via type_command_function_returns::struct_spread_inside_cte_body_propagates_field_types)",
     ),
     (
         "demo_workspace",

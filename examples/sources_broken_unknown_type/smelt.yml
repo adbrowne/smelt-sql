@@ -1,0 +1,17 @@
+name: sources_broken_unknown_type
+version: 1
+
+# D5 probe fixture: a source with an unrecognised column type must surface as
+# a `SourceTypeError` diagnostic (sources.md §"Diagnostic codes"), not silently
+# drop the source from discovery.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

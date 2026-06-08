@@ -266,6 +266,7 @@ mod tests {
                 default_materialization: Materialization::View,
                 models: HashMap::new(),
                 python: None,
+                target: None,
             }),
             sources: Arc::new(None),
             graph: Arc::new(tokio::sync::Mutex::new(graph)),

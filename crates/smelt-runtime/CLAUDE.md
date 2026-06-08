@@ -8,7 +8,7 @@ Compile and execute driver — the single shared pipeline consumed by both `smel
 cargo test -p smelt-runtime
 ```
 
-Integration tests in `tests/compile_parity.rs` (SQL compilation equivalence across models) and `tests/select_parity.rs` (selection/filtering logic) live here. A cross-consumer equivalence gate (`execute_parity`) that drives both CLI and UI entry points is named in the architecture spec but not yet implemented.
+Integration tests in `tests/compile_parity.rs` (SQL compilation equivalence across models), `tests/select_parity.rs` (selection/filtering logic), and `tests/execute_parity.rs` (dual-consumer fixture: same project through CLI-style and UI-style reporters, identical `RunOutcome`) live here. The `surface_audit` test verifies the `pub(crate)` structural enforcement clause.
 
 ## Gotchas
 

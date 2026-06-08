@@ -15,6 +15,7 @@ use smelt_backend_duckdb::DuckDbBackend;
 #[cfg(feature = "spark")]
 use smelt_backend_spark::SparkBackend;
 
+#[allow(dead_code)]
 pub fn granularity_label(g: &Granularity) -> &'static str {
     match g {
         Granularity::Hour => "hours",
@@ -67,6 +68,7 @@ pub fn infer_deployed_columns(
 ///
 /// `week_start` is the first day of the week for weekly partitions.
 /// Only relevant when `granularity` is `Week`. When `None`, defaults to Monday.
+#[allow(dead_code)]
 pub fn generate_partition_values(
     start: &str,
     end: &str,
@@ -169,6 +171,7 @@ pub fn generate_partition_values(
 }
 
 /// Convert smelt `Weekday` to `chrono::Weekday`.
+#[allow(dead_code)]
 fn weekday_to_chrono(day: &Weekday) -> ChronoWeekday {
     match day {
         Weekday::Monday => ChronoWeekday::Mon,
@@ -328,6 +331,54 @@ pub fn print_json(schema: &ModelSchema, model_name: &str) {
         "{}",
         to_string_pretty(&output).expect("JSON serialization of schema should not fail")
     );
+}
+
+pub fn print_property_test_result(
+    result: &smelt_cli::test_property::PropertyTestResult,
+    verbose: bool,
+    show_all: bool,
+) {
+    let cte_suffix = result
+        .target_cte
+        .as_ref()
+        .map(|c| format!("::{}", c))
+        .unwrap_or_default();
+    let iter_tag = format!("[{} iter]", result.iterations);
+    let name_width = result.name.len() + result.model.len() + cte_suffix.len() + iter_tag.len();
+
+    if result.passed {
+        if show_all {
+            println!(
+                "  PASS {} ({}{}) {}{:>width$}",
+                result.name,
+                result.model,
+                cte_suffix,
+                iter_tag,
+                format!("{:.2}s", result.duration.as_secs_f64()),
+                width = 40usize.saturating_sub(name_width),
+            );
+        }
+    } else {
+        println!(
+            "  FAIL {} ({}{}) {}{:>width$}",
+            result.name,
+            result.model,
+            cte_suffix,
+            iter_tag,
+            format!("{:.2}s", result.duration.as_secs_f64()),
+            width = 40usize.saturating_sub(name_width),
+        );
+        if let Some(ref inner) = result.inner_result {
+            if let Some(ref error) = inner.error {
+                println!("\n{}", error);
+                if verbose && !inner.compiled_sql.is_empty() {
+                    println!("  Compiled SQL:");
+                    println!("    {}", inner.compiled_sql.replace('\n', "\n    "));
+                }
+            }
+            println!();
+        }
+    }
 }
 
 pub fn print_test_result(
