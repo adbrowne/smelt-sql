@@ -85,7 +85,7 @@ Remaining ledger clusters without a sub-plan yet (each a candidate for a future 
 | D4 | incremental × cumulative_aggregate × timeseries | done | 1 fixed (BUG-069: CumulativeForbidsTimeseries/Incremental not surfaced in LSP — `_ => None` in `file_diagnostics` dropped both; added DiagnosticCode entries + wiring), 2 needs-review (BUG-070: backbuild with cumulative uses legacy path → full-refresh, not merge loop; BUG-071: cumulative Known Divergences missing Month/Quarter/Year limitation) | — | 2026-06-08 |
 | D5 | seeds × sources × types | done | 0 fixed, 2 needs-review (BUG-072: source timeseries silently ignored — SourceInfo has no timeseries field; BUG-073: inject_source_filters not wired into incremental execute path); SourceTypeError test fixture added (code was correct, untested) | — | 2026-06-08 |
 | D6 | model_selection × generators × cli | done | 1 fixed (BUG-074: generator_file: selector broken post CLI-runtime migration — returned empty; fixed in DependencyGraph::select_models via virtual-path ::‐suffix matching) | — | 2026-06-08 |
-| D7 | project isolation × lsp | pending | | | |
+| D7 | project isolation × lsp | done | 2 fixed (BUG-075: DuplicateAddress cross-project isolation gate missing; BUG-076: goto-def project isolation gate missing — both added to example_workspaces.rs) | — | 2026-06-08 |
 | D8 | run-pipeline parity (cli ↔ ui) | pending | | | |
 
 **Status values**: `pending` → `done`. A phase is `done` even if it logged `needs-review` findings (those are deliberately deferred, not blocking). Record the count of findings logged in that phase in the Findings column (e.g. `2 fixed, 1 needs-review`).

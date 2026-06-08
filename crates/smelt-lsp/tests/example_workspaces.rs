@@ -235,6 +235,35 @@ impl TestClient {
         serde_json::from_value(result).unwrap_or_default()
     }
 
+    async fn goto_definition(
+        &mut self,
+        file_uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Vec<lsp_types::Location> {
+        let result = self
+            .send_request(
+                "textDocument/definition",
+                json!({
+                    "textDocument": { "uri": file_uri },
+                    "position": { "line": line, "character": character }
+                }),
+            )
+            .await;
+        if result.is_null() {
+            return Vec::new();
+        }
+        // LSP `textDocument/definition` returns Location | Location[] | null.
+        // Try array first; fall back to single Location.
+        if let Ok(v) = serde_json::from_value::<Vec<lsp_types::Location>>(result.clone()) {
+            v
+        } else if let Ok(loc) = serde_json::from_value::<lsp_types::Location>(result) {
+            vec![loc]
+        } else {
+            Vec::new()
+        }
+    }
+
     async fn hover(&mut self, file_uri: &str, line: u32, character: u32) -> Option<String> {
         let result = self
             .send_request(
@@ -1110,5 +1139,152 @@ async fn types_broken_crossfamily_add_emits_type_mismatch() {
             .iter()
             .map(|d| format!("{:?}: {}", d.code, d.message))
             .collect::<Vec<_>>()
+    );
+}
+
+/// Project-isolation CI gate: `DuplicateAddress` is project-scoped.
+///
+/// `examples/web_analytics` and `examples/timeseries` both declare a source at
+/// `models/sources/raw/events.yml`, so both expose a `smelt.sources.raw.events`
+/// address. Opening the entire `examples/` directory as one workspace folder
+/// must NOT emit a `duplicate-address` diagnostic for that shared leaf name —
+/// the rule is "one path → one entity within a project", and the same address
+/// in two different projects is independent.
+///
+/// Failure here means `project_address_collisions` is inadvertently crossing
+/// project boundaries, violating `docs/specs/architecture.md` §"Project
+/// isolation rule".
+#[tokio::test]
+async fn no_duplicate_address_across_projects_in_multi_project_workspace() {
+    let examples = examples_root();
+    let mut client = TestClient::open_workspace(&examples).await;
+
+    // Open both files that share the same `smelt.sources.raw.events` address
+    // but belong to different projects.
+    let wa_events = examples
+        .join("web_analytics")
+        .join("models")
+        .join("sources")
+        .join("raw")
+        .join("events.yml");
+    let ts_events = examples
+        .join("timeseries")
+        .join("models")
+        .join("sources")
+        .join("raw")
+        .join("events.yml");
+    for f in [&wa_events, &ts_events] {
+        if f.exists() {
+            if let Err(e) = client.open_file(f).await {
+                eprintln!("skipping {}: {}", f.display(), e);
+            }
+        }
+    }
+
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    // Collect any duplicate-address diagnostic published on the events.yml source
+    // files from either web_analytics or timeseries. A within-project collision
+    // (e.g. architecture_broken_path_collision) is expected and deliberately left
+    // in the workspace — we only care that the cross-project case is clean.
+    let dup_on_events: Vec<_> = diags
+        .iter()
+        .filter(|(uri, _)| {
+            (uri.contains("web_analytics") || uri.contains("timeseries"))
+                && uri.contains("events.yml")
+        })
+        .flat_map(|(uri, ds)| {
+            ds.iter()
+                .filter(|d| {
+                    d.code.as_ref().is_some_and(|c| {
+                        matches!(c, lsp_types::NumberOrString::String(s) if s == "duplicate-address")
+                    })
+                })
+                .map(move |d| format!("{}: {}", uri, d.message))
+        })
+        .collect();
+
+    assert!(
+        dup_on_events.is_empty(),
+        "project isolation violated: duplicate-address diagnostic fired on events.yml \
+         across project boundaries when examples/ was opened as a multi-project workspace. \
+         The `smelt.sources.raw.events` address appears in both web_analytics and \
+         timeseries — same-name addresses across projects must be independent, not \
+         a collision. Got: {:?}",
+        dup_on_events,
+    );
+}
+
+/// Project-isolation CI gate: goto-def on a function call resolves to the
+/// definition in the **same project**, not to a same-named function in another
+/// project.
+///
+/// `examples/web_analytics/functions/sessionize.sql` and
+/// `examples/functions_demo/functions/sessionize.sql` both declare a function
+/// named `sessionize` with different parameter signatures. When the cursor is
+/// on the `sessionize` token inside
+/// `web_analytics/models/silver/sessions.sql` and goto-def is invoked in a
+/// workspace that contains both projects (the whole `examples/` folder), the
+/// returned location must point into `web_analytics/`, never into
+/// `functions_demo/`.
+///
+/// Failure here means `resolve_function_path` (used by the goto-def handler)
+/// is not correctly scoped to the calling file's project, violating
+/// `docs/specs/architecture.md` §"Project isolation rule".
+#[tokio::test]
+async fn goto_def_on_function_call_stays_in_same_project() {
+    let examples = examples_root();
+    let target_file = examples
+        .join("web_analytics")
+        .join("models")
+        .join("silver")
+        .join("sessions.sql");
+    assert!(
+        target_file.exists(),
+        "fixture not found: {}",
+        target_file.display()
+    );
+
+    let mut client = TestClient::open_workspace(&examples).await;
+    client
+        .open_file(&target_file)
+        .await
+        .expect("open sessions.sql");
+    let _ = client.collect_diagnostics(1000).await;
+
+    // sessions.sql line 32 (1-indexed) = line 31 (0-indexed):
+    //   `    FROM smelt.functions.sessionize(`
+    // The `sessionize` token starts at character 25 (0-indexed).
+    let file_uri = format!("file://{}", target_file.display());
+    let locations = client.goto_definition(&file_uri, 31, 25).await;
+    client.shutdown().await;
+
+    assert!(
+        !locations.is_empty(),
+        "expected goto-def to resolve smelt.functions.sessionize in sessions.sql, got 0 locations"
+    );
+
+    // Every resolved location must be inside web_analytics — never in functions_demo.
+    let cross_project: Vec<&lsp_types::Location> = locations
+        .iter()
+        .filter(|loc| loc.uri.as_str().contains("functions_demo"))
+        .collect();
+    assert!(
+        cross_project.is_empty(),
+        "project isolation violated: goto-def on smelt.functions.sessionize in \
+         web_analytics resolved into functions_demo when examples/ was opened as \
+         a multi-project workspace. Got: {:?}",
+        cross_project,
+    );
+
+    let in_web_analytics = locations
+        .iter()
+        .any(|loc| loc.uri.as_str().contains("web_analytics"));
+    assert!(
+        in_web_analytics,
+        "expected goto-def to resolve into web_analytics/functions/sessionize.sql; \
+         got locations: {:?}",
+        locations,
     );
 }
