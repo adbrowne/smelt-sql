@@ -32,6 +32,8 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 
 A fifth, lighter front — **surfacing deferred work that was never tracked** — lives in the [Deferred-Work Backlog](#deferred-work-backlog-untracked-follow-ups) section below: follow-ups left in `docs/plans/` that never reached the roadmap. The task there is to keep that catalogue current and triage items into the queue, not to resolve them here.
 
+**Plan**: [`docs/plans/20260608-silent-failures-hardening.md`](plans/20260608-silent-failures-hardening.md) — an 11-phase plan covering all four fronts: ratchet-first (freeze the `unwrap`/`println`/silent-`Unknown` debt at a CI baseline), then burn down the highest-value silent-`Unknown` sites with real diagnostics, swallowed errors, recoverable panics, and the `build_fn_body_map` single-source straggler.
+
 ### 2. Type-System Axes — Decimal, Nullability, Collation, Timezone
 
 smelt's type system tracks base types and NULL propagation structurally, but four axes are coarse or untracked. They are simultaneously (a) real-world correctness gaps and (b) the precision blocker for virtual environments — `output_fingerprint.md` lists decimal/collation/nullability among the untracked axes that force conservative rebuild. Covering them sharpens both, which is why they are sequenced immediately before Virtual Environments.
