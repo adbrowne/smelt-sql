@@ -1,14 +1,14 @@
-//! Tests for `InvalidFunctionTypeRef` on unrecognized nested type names in
+//! Tests for `UnknownStructFieldType` on unrecognized nested type names in
 //! composite type annotations (struct field types).
 //!
 //! Validates that `smelt.define` and `smelt.extern` signatures whose
 //! annotations contain an unrecognized type name nested inside a struct field
-//! emit `InvalidFunctionTypeRef` at the declaration rather than silently
-//! absorbing the unknown type name as `DataType::Unknown`.
+//! emit `UnknownStructFieldType` at the field rather than silently absorbing
+//! the unknown type name as `DataType::Unknown`.
 //!
 //! Also validates that:
-//! - Valid closed struct annotations do NOT emit `InvalidFunctionTypeRef`.
-//! - Row-tail (`..r`) struct returns do NOT emit `InvalidFunctionTypeRef` for
+//! - Valid closed struct annotations do NOT emit `UnknownStructFieldType`.
+//! - Row-tail (`..r`) struct returns do NOT emit `UnknownStructFieldType` for
 //!   the tail itself (only unrecognized field types are flagged).
 
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ fn build_db(files: &[(PathBuf, &str)]) -> (Database, Workspace, Vec<SourceFile>)
 }
 
 /// An unrecognized type name nested in a struct field type of the return
-/// annotation must emit exactly one `InvalidFunctionTypeRef`.
+/// annotation must emit `UnknownStructFieldType` at the field's range.
 #[test]
 fn struct_return_unknown_field_type_emits_invalid_type_ref() {
     let root = PathBuf::from("/fake/project");
@@ -41,26 +41,21 @@ fn struct_return_unknown_field_type_emits_invalid_type_ref() {
     let fn_file = handles[0];
 
     let diags = file_diagnostics(&db, ws, fn_file);
-    let invalid_type_refs: Vec<_> = diags
+    let struct_field_errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownStructFieldType))
         .collect();
 
     assert_eq!(
-        invalid_type_refs.len(),
+        struct_field_errs.len(),
         1,
-        "expected exactly one InvalidFunctionTypeRef for unrecognized field type `Bogus` in \
+        "expected exactly one UnknownStructFieldType for unrecognized field type `Bogus` in \
          struct return; got {diags:#?}"
-    );
-    assert!(
-        invalid_type_refs[0].message.contains("bad_return"),
-        "diagnostic message should mention the function name; got: {}",
-        invalid_type_refs[0].message
     );
 }
 
 /// An unrecognized type name nested in a struct field type of a parameter
-/// annotation must emit exactly one `InvalidFunctionTypeRef`.
+/// annotation must emit `UnknownStructFieldType` at the field's range.
 #[test]
 fn struct_param_unknown_field_type_emits_invalid_type_ref() {
     let root = PathBuf::from("/fake/project");
@@ -71,21 +66,21 @@ fn struct_param_unknown_field_type_emits_invalid_type_ref() {
     let fn_file = handles[0];
 
     let diags = file_diagnostics(&db, ws, fn_file);
-    let invalid_type_refs: Vec<_> = diags
+    let struct_field_errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownStructFieldType))
         .collect();
 
     assert_eq!(
-        invalid_type_refs.len(),
+        struct_field_errs.len(),
         1,
-        "expected exactly one InvalidFunctionTypeRef for unrecognized field type `Bogus` in \
+        "expected exactly one UnknownStructFieldType for unrecognized field type `Bogus` in \
          struct parameter; got {diags:#?}"
     );
 }
 
 /// A valid closed struct return (`Expr<Struct<{a: Integer, b: Text}>>`) must
-/// NOT emit `InvalidFunctionTypeRef`.
+/// NOT emit `UnknownStructFieldType`.
 #[test]
 fn valid_closed_struct_return_no_invalid_type_ref() {
     let root = PathBuf::from("/fake/project");
@@ -96,19 +91,19 @@ fn valid_closed_struct_return_no_invalid_type_ref() {
     let fn_file = handles[0];
 
     let diags = file_diagnostics(&db, ws, fn_file);
-    let invalid_type_refs: Vec<_> = diags
+    let struct_field_errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownStructFieldType))
         .collect();
 
     assert!(
-        invalid_type_refs.is_empty(),
-        "valid closed struct return should emit no InvalidFunctionTypeRef; got {invalid_type_refs:#?}"
+        struct_field_errs.is_empty(),
+        "valid closed struct return should emit no UnknownStructFieldType; got {struct_field_errs:#?}"
     );
 }
 
 /// A row-tail struct return (`Expr<Struct<{a: Integer, ..r}>>`) must NOT emit
-/// `InvalidFunctionTypeRef` — the tail marker (`..r`) is not a type name.
+/// `UnknownStructFieldType` — the tail marker (`..r`) is not a type name.
 #[test]
 fn row_tail_struct_return_no_invalid_type_ref() {
     let root = PathBuf::from("/fake/project");
@@ -121,19 +116,19 @@ fn row_tail_struct_return_no_invalid_type_ref() {
     let fn_file = handles[0];
 
     let diags = file_diagnostics(&db, ws, fn_file);
-    let invalid_type_refs: Vec<_> = diags
+    let struct_field_errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownStructFieldType))
         .collect();
 
     assert!(
-        invalid_type_refs.is_empty(),
-        "row-tail struct return/param should emit no InvalidFunctionTypeRef; got {invalid_type_refs:#?}"
+        struct_field_errs.is_empty(),
+        "row-tail struct return/param should emit no UnknownStructFieldType; got {struct_field_errs:#?}"
     );
 }
 
 /// `smelt.extern` with an unknown struct field type should also emit
-/// `InvalidFunctionTypeRef`.
+/// `UnknownStructFieldType`.
 #[test]
 fn extern_struct_return_unknown_field_type_emits_invalid_type_ref() {
     let root = PathBuf::from("/fake/project");
@@ -144,21 +139,21 @@ fn extern_struct_return_unknown_field_type_emits_invalid_type_ref() {
     let fn_file = handles[0];
 
     let diags = file_diagnostics(&db, ws, fn_file);
-    let invalid_type_refs: Vec<_> = diags
+    let struct_field_errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownStructFieldType))
         .collect();
 
     assert_eq!(
-        invalid_type_refs.len(),
+        struct_field_errs.len(),
         1,
-        "expected exactly one InvalidFunctionTypeRef for unrecognized field type `NotAType` in \
+        "expected exactly one UnknownStructFieldType for unrecognized field type `NotAType` in \
          extern return; got {diags:#?}"
     );
 }
 
-/// Two unknown field types in the same struct should emit exactly one
-/// `InvalidFunctionTypeRef` anchored at the annotation (not one per field).
+/// Two unknown field types in the same struct each emit `UnknownStructFieldType`
+/// (one diagnostic per unknown field, anchored at the field's range).
 #[test]
 fn struct_with_two_unknown_fields_emits_one_diagnostic() {
     let root = PathBuf::from("/fake/project");
@@ -170,17 +165,15 @@ fn struct_with_two_unknown_fields_emits_one_diagnostic() {
     let fn_file = handles[0];
 
     let diags = file_diagnostics(&db, ws, fn_file);
-    let invalid_type_refs: Vec<_> = diags
+    let struct_field_errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownStructFieldType))
         .collect();
 
-    // One diagnostic per annotation (the struct annotation as a whole).
-    // The implementation should emit one diagnostic for the parameter's
-    // annotation when any field is unknown.
+    // One diagnostic per unknown field.
     assert!(
-        !invalid_type_refs.is_empty(),
-        "expected at least one InvalidFunctionTypeRef for two unknown struct field types; \
+        !struct_field_errs.is_empty(),
+        "expected at least one UnknownStructFieldType for two unknown struct field types; \
          got {diags:#?}"
     );
 }

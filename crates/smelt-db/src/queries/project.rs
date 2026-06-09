@@ -64,6 +64,8 @@ pub fn sources_config(db: &dyn salsa::Database, project: ProjectInput) -> Arc<So
     }
     match serde_yaml::from_str::<SourcesConfig>(yaml) {
         Ok(config) => Arc::new(config),
+        // intentionally ignored: sources_yaml_error() emits YamlParseError through
+        // file_diagnostics — the fallback here just keeps type inference operational.
         Err(_) => Arc::new(SourcesConfig::default()),
     }
 }
@@ -438,6 +440,8 @@ pub fn sources_type_errors(
 
     let config: RawSourcesConfig = match serde_yaml::from_str(yaml) {
         Ok(c) => c,
+        // intentionally ignored: a YAML parse error here means the aggregate
+        // sources.yml is malformed; sources_yaml_error() reports it separately.
         Err(_) => return Arc::new(Vec::new()),
     };
 
@@ -1590,6 +1594,8 @@ fn collect_loader_values(
             // validation. Since `loader_resolved_value` already did that and
             // stored it in `merged = None` (no overlay), re-use the
             // diagnostics-free path: treat the first non-error result.
+            // intentionally ignored: `parsed_ref` holds the raw parsed file;
+            // the merged/validated value is computed below via validate_against_schema.
             let _ = parsed_ref;
             // Use the loader_resolved_value result's value via validation_result.value.
             // This requires calling validate_against_schema again here.

@@ -264,47 +264,47 @@ reason = "resolve_struct_return_type: qualifier has no columns — struct return
 classification = "legitimate"
 reason = "resolve_struct_return_type: can't extract struct param fields — conservative fallback"
 
-["crates/smelt-db/src/type_inference/function_call.rs:208"]
+["crates/smelt-db/src/type_inference/function_call.rs:211"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: row-var unification error — conservative fallback"
 
-["crates/smelt-db/src/type_inference/function_call.rs:217"]
+["crates/smelt-db/src/type_inference/function_call.rs:220"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: row-var name mismatch between param and return — unresolvable"
 
-["crates/smelt-db/src/type_inference/function_call.rs:458"]
+["crates/smelt-db/src/type_inference/function_call.rs:462"]
 classification = "legitimate"
 reason = "Min/Max: first_arg_type_or fallback — type depends on argument; Unknown when arg type is unresolved"
 
-["crates/smelt-db/src/type_inference/function_call.rs:479"]
+["crates/smelt-db/src/type_inference/function_call.rs:483"]
 classification = "legitimate"
 reason = "Coalesce: all args Unknown/Null — result type genuinely unknown; Unknown is correct"
 
-["crates/smelt-db/src/type_inference/function_call.rs:486"]
+["crates/smelt-db/src/type_inference/function_call.rs:490"]
 classification = "legitimate"
 reason = "Nullif: first_arg_type_or fallback — type mirrors first arg; Unknown when arg type unresolved"
 
-["crates/smelt-db/src/type_inference/function_call.rs:499"]
+["crates/smelt-db/src/type_inference/function_call.rs:503"]
 classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 
-["crates/smelt-db/src/type_inference/function_call.rs:525"]
+["crates/smelt-db/src/type_inference/function_call.rs:529"]
 classification = "legitimate"
 reason = "Lag/Lead/FirstValue/NthValue: first_arg_type_or — type mirrors first arg; Unknown when unresolved"
 
-["crates/smelt-db/src/type_inference/function_call.rs:738"]
+["crates/smelt-db/src/type_inference/function_call.rs:742"]
 classification = "legitimate"
 reason = "first_arg_type_or fallback for aggregate functions — Unknown when arg type unresolved"
 
-["crates/smelt-db/src/type_inference/function_call.rs:751"]
+["crates/smelt-db/src/type_inference/function_call.rs:755"]
 classification = "legitimate"
 reason = "ListAgg/ArrayAgg: Array<Unknown> when element type can't be inferred — correct inference"
 
-["crates/smelt-db/src/type_inference/function_call.rs:802"]
+["crates/smelt-db/src/type_inference/function_call.rs:806"]
 classification = "legitimate"
 reason = "Mode: first_arg_type_or fallback — type mirrors first arg; Unknown when arg type unresolved"
 
-["crates/smelt-db/src/type_inference/function_call.rs:815"]
+["crates/smelt-db/src/type_inference/function_call.rs:819"]
 classification = "legitimate"
 reason = "window/analytic functions: first_arg_type_or fallback — Unknown when arg type unresolved"
 

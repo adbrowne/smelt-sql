@@ -65,7 +65,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 | 3 — Front 1: struct-field parse failure diagnostic       | done     | (below) | 2026-06-10 |
 | 4 — Front 1: db-query inference paths                    | done     | (below) | 2026-06-10 |
 | 5 — Front 1: types / dialect / runtime / state paths     | done     | (below) | 2026-06-10 |
-| 6 — Front 2: swallowed errors (type-inference + LSP)     | pending  |        |      |
+| 6 — Front 2: swallowed errors (type-inference + LSP)     | done     | (below) | 2026-06-10 |
 | 7 — Front 3: datagen panics → typed errors; annotate invariant panics | pending  |        |      |
 | 8 — Front 3: zero-`println!` gate for library crates     | pending  |        |      |
 | 9 — Front 3: production `unwrap` down-payment            | pending  |        |      |
