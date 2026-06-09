@@ -7,6 +7,7 @@ target/
 !.claude/scripts/
 !.claude/active-plan
 !.claude/hardening-baseline.txt
+!.claude/unknown-census.toml
 /.vscode/
 datagen.duckdb
 output/
