@@ -347,7 +347,7 @@ fn test_pool_snapshot_anonymous_fraction_and_determinism() {
     };
 
     // Build the pool once and measure the anonymous fraction.
-    let pool1 = LinkedPool::new(seed, pool_cfg, &fk_counts);
+    let pool1 = LinkedPool::new(seed, pool_cfg, &fk_counts).unwrap();
     let pool_size = pool1.rows.len();
     assert_eq!(
         pool_size, pool_cfg.pool_size,
@@ -372,7 +372,7 @@ fn test_pool_snapshot_anonymous_fraction_and_determinism() {
     );
 
     // Build the pool a second time with the same seed to verify determinism.
-    let pool2 = LinkedPool::new(seed, pool_cfg, &fk_counts);
+    let pool2 = LinkedPool::new(seed, pool_cfg, &fk_counts).unwrap();
     let null_count2 = count_nulls(&pool2);
 
     assert_eq!(
