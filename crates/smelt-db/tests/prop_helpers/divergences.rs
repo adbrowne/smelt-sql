@@ -211,6 +211,18 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::KnownBug,
         },
+        TypeDivergence {
+            id: "round_integer",
+            description: "ROUND(INTEGER) — smelt's ROUND signature is Double→Double only; \
+                integer inputs are upcast to Double before rounding, so smelt infers Double \
+                while DuckDB preserves the integer type. Propagates to downstream arithmetic \
+                on ROUND outputs (Double+Double in smelt vs Integer+Integer in DuckDB). \
+                Fixing requires a polymorphic ROUND signature.",
+            smelt_type: DataType::Double,
+            duckdb_type: Some(DataType::Integer),
+            spark_type: None,
+            status: DivergenceStatus::KnownBug,
+        },
     ]
 }
 
