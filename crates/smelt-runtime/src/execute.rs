@@ -20,6 +20,7 @@ use std::time::{Duration as StdDuration, Instant};
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, Utc};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
 use smelt_core::config::Config;
@@ -459,8 +460,8 @@ pub async fn execute_project(
                 });
             }
             (Some(_inc), None, _, _) => {
-                eprintln!(
-                    "warning: model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
+                warn!(
+                    "model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
                 );
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),

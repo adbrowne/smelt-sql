@@ -6,6 +6,7 @@ pub use crate::refs::RefInfo;
 use anyhow::{anyhow, Context, Result};
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 use walkdir::WalkDir;
 
 /// A query recorded during Python model execution.
@@ -264,7 +265,7 @@ pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<Model
     let file_metadata = match extract_file_metadata(&content) {
         Ok(fm) => Some(fm),
         Err(e) => {
-            eprintln!("Warning: {}: {}", path.display(), e);
+            warn!("frontmatter parse error in {}: {}", path.display(), e);
             None
         }
     };

@@ -8,7 +8,7 @@ smelt-backend-duckdb expect 15
 smelt-backend-duckdb println 0
 smelt-backend-duckdb unwrap 0
 smelt-backend expect 0
-smelt-backend println 2
+smelt-backend println 0
 smelt-backend-spark expect 0
 smelt-backend-spark println 0
 smelt-backend-spark unwrap 0
@@ -20,7 +20,7 @@ smelt-cli expect 37
 smelt-cli println 106
 smelt-cli unwrap 0
 smelt-core expect 9
-smelt-core println 6
+smelt-core println 0
 smelt-core unwrap 2
 smelt-datagen expect 2
 smelt-datagen println 12
@@ -35,7 +35,7 @@ smelt-fingerprint expect 0
 smelt-fingerprint println 0
 smelt-fingerprint unwrap 1
 smelt-logical expect 1
-smelt-logical println 1
+smelt-logical println 0
 smelt-logical unwrap 1
 smelt-lsp expect 1
 smelt-lsp println 0
@@ -50,10 +50,10 @@ smelt-planner expect 0
 smelt-planner println 0
 smelt-planner unwrap 17
 smelt-runtime expect 7
-smelt-runtime println 3
+smelt-runtime println 0
 smelt-runtime unwrap 0
 smelt-state expect 0
-smelt-state println 4
+smelt-state println 0
 smelt-state unwrap 0
 smelt-types expect 7
 smelt-types println 0

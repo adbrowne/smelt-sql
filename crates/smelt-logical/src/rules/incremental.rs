@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use tracing::info;
 
 use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
@@ -98,9 +99,9 @@ pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety {
         let max_chunk_days = min_chunk.clamp(7, 90);
 
         if min_chunk > 90 {
-            eprintln!(
-                "Note: ideal chunk size ({} days, 3x context of {} days) exceeds 90-day cap. \
-                 Using 90-day chunks. Override with --batch-size if needed.",
+            info!(
+                "ideal chunk size ({} days, 3x context of {} days) exceeds 90-day cap; \
+                 using 90-day chunks — override with --batch-size if needed",
                 min_chunk, context_days
             );
         }

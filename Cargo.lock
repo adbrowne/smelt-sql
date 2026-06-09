@@ -4052,6 +4052,7 @@ dependencies = [
  "smelt-dialect",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4160,6 +4161,7 @@ dependencies = [
  "smelt-types",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "walkdir",
 ]
 
@@ -4241,6 +4243,7 @@ dependencies = [
  "smelt-core",
  "smelt-parser",
  "smelt-types",
+ "tracing",
 ]
 
 [[package]]
@@ -4344,6 +4347,7 @@ dependencies = [
  "smelt-types",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

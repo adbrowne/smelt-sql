@@ -20,6 +20,7 @@ serde_yaml = "0.9"
 thiserror.workspace = true
 anyhow.workspace = true
 walkdir = "2.4"
+tracing.workspace = true
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]

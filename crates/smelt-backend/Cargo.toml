@@ -26,3 +26,6 @@ thiserror.workspace = true
 
 # Async trait support
 async-trait = "0.1"
+
+# Structured logging
+tracing.workspace = true

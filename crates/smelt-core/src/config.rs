@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use tracing::warn;
 
 use crate::metadata::ModelMetadata;
 
@@ -433,7 +434,7 @@ impl Config {
                 source: e.into(),
             })?;
         for w in &warnings {
-            eprintln!("{}", w);
+            warn!("{}", w);
         }
         Ok(config)
     }
@@ -706,8 +707,8 @@ impl Config {
                 Materialization::View => {
                     if let Some(inc) = incremental {
                         if inc.enabled {
-                            eprintln!(
-                                "  Warning: model '{}' is a view but has incremental config — incremental only applies to tables",
+                            warn!(
+                                "model '{}' is a view but has incremental config — incremental only applies to tables",
                                 name
                             );
                         }
@@ -716,8 +717,8 @@ impl Config {
                 Materialization::MaterializedView => {
                     if let Some(inc) = incremental {
                         if inc.enabled {
-                            eprintln!(
-                                "  Warning: model '{}' is a materialized view but has incremental config — materialized views are refreshed atomically",
+                            warn!(
+                                "model '{}' is a materialized view but has incremental config — materialized views are refreshed atomically",
                                 name
                             );
                         }

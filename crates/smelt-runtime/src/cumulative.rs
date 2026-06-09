@@ -137,8 +137,10 @@ pub async fn execute_cumulative_aggregate(
             .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
         if verbose {
-            println!("-- {} (partition {})", model_name, partition_value);
-            println!("{}", compiled.sql);
+            debug!(
+                "-- {} (partition {})\n{}",
+                model_name, partition_value, compiled.sql
+            );
         }
 
         // First partition (table doesn't yet exist): CREATE TABLE AS the
