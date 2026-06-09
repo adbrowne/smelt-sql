@@ -68,7 +68,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 | 6 — Front 2: swallowed errors (type-inference + LSP)     | done     | (below) | 2026-06-10 |
 | 7 — Front 3: datagen panics → typed errors; annotate invariant panics | done     | (below) | 2026-06-10 |
 | 8 — Front 3: zero-`println!` gate for library crates     | done     | (below) | 2026-06-10 |
-| 9 — Front 3: production `unwrap` down-payment            | pending  |        |      |
+| 9 — Front 3: production `unwrap` down-payment            | done     | (below) | 2026-06-10 |
 | 10 — Front 4: single-source `build_fn_body_map`          | pending  |        |      |
 | 11 — Tighten ratchets + land invariants + verify         | pending  |        |      |
 

@@ -48,7 +48,7 @@ smelt-parser println 0
 smelt-parser unwrap 2
 smelt-planner expect 0
 smelt-planner println 0
-smelt-planner unwrap 17
+smelt-planner unwrap 2
 smelt-runtime expect 7
 smelt-runtime println 0
 smelt-runtime unwrap 0

@@ -77,10 +77,7 @@ fn missing_pool_ref_returns_err() {
     };
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     let result = apply_spec(&mut rng, &spec, &ctx);
-    assert!(
-        result.is_err(),
-        "expected Err for missing pool ref, got Ok"
-    );
+    assert!(result.is_err(), "expected Err for missing pool ref, got Ok");
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("my_pool"),

@@ -95,6 +95,8 @@ impl DuckDbBackend {
         let table_name = table_name.to_string();
 
         tokio::task::spawn_blocking(move || {
+            // invariant: mutex is poisoned only when a spawn_blocking task panics; that
+            // terminates the task and propagates JoinError — normal operation never poisons it.
             let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.query_row(query, [&schema, &table_name], |row| row.get(0))
                 .unwrap_or(false)
@@ -124,6 +126,7 @@ impl DuckDbBackend {
         let name = name.to_string();
 
         tokio::task::spawn_blocking(move || {
+            // invariant: see table_exists_sync for rationale; same mutex.
             let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             match conn.query_row(query, [&schema, &name], |row| row.get::<_, String>(0)) {
                 Ok(kind) => Ok(Some(kind)),

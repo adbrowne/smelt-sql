@@ -5,6 +5,7 @@ use crate::gen::Gen;
 use crate::generators::{
     bool_with_prob, geometric, log_normal, one_of, uniform, uuid_gen, weighted_choice,
 };
+use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use indexmap::IndexMap;
 use rand::distributions::{Distribution, WeightedIndex};
@@ -12,7 +13,6 @@ use rand::RngCore;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
-use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 /// Row-scoped state passed into `apply_spec` and `generate_row`.
@@ -273,7 +273,11 @@ pub fn generate_row(
 }
 
 /// Build an EntityPool and return a closure that samples from it.
-pub fn make_entity_pool(seed: u64, num_rows: usize, entity_cfg: &EntityConfig) -> Result<EntityPool> {
+pub fn make_entity_pool(
+    seed: u64,
+    num_rows: usize,
+    entity_cfg: &EntityConfig,
+) -> Result<EntityPool> {
     let count = ((num_rows as f64) * entity_cfg.pool_ratio).max(1.0) as usize;
     EntityPool::new(seed, count, &entity_cfg.columns)
 }
@@ -374,7 +378,9 @@ pub fn apply_spec(
             let secs_range = (end_dt - start_dt).num_seconds().max(1) as u64;
             let offset = (rng.next_u64() % secs_range) as i64;
             let ts = start_dt + chrono::Duration::seconds(offset);
-            Ok(GenericValue::Str(ts.format("%Y-%m-%dT%H:%M:%S").to_string()))
+            Ok(GenericValue::Str(
+                ts.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            ))
         }
         GeneratorSpec::StringPattern { template } => {
             let result = apply_string_pattern(rng, template, ctx.row_index);
