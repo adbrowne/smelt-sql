@@ -70,7 +70,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 | 8 — Front 3: zero-`println!` gate for library crates     | done     | (below) | 2026-06-10 |
 | 9 — Front 3: production `unwrap` down-payment            | done     | (below) | 2026-06-10 |
 | 10 — Front 4: single-source `build_fn_body_map`          | done     | (below) | 2026-06-10 |
-| 11 — Tighten ratchets + land invariants + verify         | pending  |        |      |
+| 11 — Tighten ratchets + land invariants + verify         | done     | (below) | 2026-06-10 |
 
 ---
 
