@@ -37,7 +37,9 @@ You are executing this plan from the start of a new session. Drive it to complet
 
 ## Context
 
-A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rather than surfaced (roadmap [What's Next #1](../ROADMAP.md#1-silent-failures--code-health-hardening)). The March 28 hardening sweep was one-shot and has regressed. This plan makes "fail loud, or handle it" a **tracked, ratcheted discipline**: it freezes the current debt with CI gates so it cannot grow, then pays down the highest-value cases. The four fronts are silent `Unknown`/fallback-without-diagnostic (166 sites), swallowed errors, panic/`unwrap` debt (~1,957 `unwrap`/`expect`, 206 `println!`), and divergent duplicate implementations (the `build_fn_body_map` straggler — the large CLI↔runtime case was already closed by the runtime migration).
+A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rather than surfaced (roadmap [What's Next #1](../ROADMAP.md#1-silent-failures--code-health-hardening)). The March 28 hardening sweep was one-shot and has regressed. This plan makes "fail loud, or handle it" a **tracked, ratcheted discipline**: it freezes the current debt with CI gates so it cannot grow, then pays down the highest-value cases. The four fronts are silent `Unknown`/fallback-without-diagnostic, swallowed errors, panic/`unwrap`/`println!` debt, and divergent duplicate implementations (the `build_fn_body_map` straggler — the large CLI↔runtime case was already closed by the runtime migration).
+
+**Counting rule (applies to every number in this plan).** Debt is counted in *production code only*: test code (`#[cfg(test)]` modules, `tests.rs` files, `tests/` directories) is excluded — `unwrap`/`panic!`/`println!` are idiomatic in tests. Match `Result::expect` as `.expect("` (string-literal argument), **not** bare `.expect(` — the parser's own `self.expect(TOKEN)` token-expectation method otherwise dominates the count with false positives. Under this rule the production debt is modest and spread out: the worst single-file `unwrap`/`expect` sites are `crates/smelt-planner/src/plan_printer.rs` (15), `crates/smelt-backend-duckdb/src/lib.rs` (15), and `crates/smelt-db/src/lib.rs` (10); production `panic!`s are confined to `crates/smelt-datagen/src/generic.rs` (3, input-driven) and `crates/smelt-db/src/diagnostics_types.rs` (7, internal invariant guards); production library-crate `println!` is near zero (the raw 206 figure is dominated by `smelt-cli` user-facing output and test code). The raw all-code greps (~2,000 `unwrap`/`expect`) are not the worklist — the ratchet freezes production counts, and the paydown phases target the production sites above.
 
 ## Scope
 
@@ -45,12 +47,12 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 - **Ratchets first.** CI gates that freeze `unwrap`/`expect`, `println!`, and silent-`Unknown` counts at a committed baseline so new code cannot add to the debt.
 - **Front 1 (highest value).** Split *legitimate* `Unknown` (meta-language `Any`, deliberate conservatism) from *error* `Unknown` (parse failure, missing annotation, unresolved ref) on the inference + resolution paths, and emit a diagnostic for the latter. New diagnostic codes documented in a new `docs/specs/diagnostics.md`.
 - **Front 2.** Swallowed errors (`let _ =`, `.ok()`, `Err(_) =>`) in the type-inference + LSP layers that hide a reportable failure.
-- **Front 3.** Convert recoverable `panic!`s (datagen / `ddl_spark` input validation) to typed errors; migrate library-crate `println!` to `tracing`; a concrete `unwrap` down-payment in the worst hotspot.
+- **Front 3.** Convert the input-driven `panic!`s in datagen to typed errors (and annotate the internal-invariant panics in `smelt-db`); migrate the residual production library-crate `println!` to `tracing` and gate it at zero; a concrete `unwrap` down-payment in the worst production hotspots (`plan_printer.rs`, `smelt-backend-duckdb`, `smelt-db/src/lib.rs`).
 - **Front 4.** Single-source `build_fn_body_map` vs `build_fn_body_map_from_model_files`.
 - Land the new ratchet invariants in `CLAUDE.md` + `architecture.md`.
 
 ### Explicitly deferred
-- **Mass `unwrap` conversion.** Converting all ~1,957 `unwrap`/`expect` is multi-plan work; this plan installs the ratchet (no growth) and pays down only the single worst hotspot (`smelt-cli/src/python.rs`). The rest is tracked by the ratchet's baseline.
+- **Mass `unwrap` conversion.** Converting every production `unwrap`/`expect` is multi-plan work; this plan installs the ratchet (no growth) and pays down only the worst production hotspots (Phase 9). The rest is tracked by the ratchet's baseline. (Note: `smelt-cli/src/python.rs`, previously named here as the worst hotspot, has only **1** production unwrap — its ~145 others are in its `#[cfg(test)]` module. The raw all-code count misidentified it.)
 - **Full diagnostic catalogue.** Documenting all ~70 existing codes (BUG-052) is its own docs task; this plan creates `diagnostics.md` and documents the codes it adds, leaving the back-catalogue as a tracked Deferred-Work item.
 - The other sweep `needs-review` leftovers (BUG-067/068/070/071) — unrelated fronts, tracked in the Deferred-Work Backlog.
 
@@ -64,9 +66,9 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 | 4 — Front 1: db-query inference paths                    | pending  |        |      |
 | 5 — Front 1: types / dialect / runtime / state paths     | pending  |        |      |
 | 6 — Front 2: swallowed errors (type-inference + LSP)     | pending  |        |      |
-| 7 — Front 3: recoverable panics → typed errors           | pending  |        |      |
-| 8 — Front 3: `println!` → `tracing` in library crates    | pending  |        |      |
-| 9 — Front 3: `python.rs` `unwrap` down-payment           | pending  |        |      |
+| 7 — Front 3: datagen panics → typed errors; annotate invariant panics | pending  |        |      |
+| 8 — Front 3: zero-`println!` gate for library crates     | pending  |        |      |
+| 9 — Front 3: production `unwrap` down-payment            | pending  |        |      |
 | 10 — Front 4: single-source `build_fn_body_map`          | pending  |        |      |
 | 11 — Tighten ratchets + land invariants + verify         | pending  |        |      |
 
@@ -82,7 +84,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 - `.claude/scripts/hardening-budget.sh` is exercised by a self-test fixture: `crates/smelt-core/tests/hardening_budget.rs::gate_detects_regression` — runs the script against a temp tree with one injected `.unwrap()` over baseline and asserts non-zero exit; runs it against the committed tree and asserts zero exit.
 - The script writes per-crate counts to `.claude/hardening-baseline.txt`; the test asserts the committed baseline matches the current tree (so a drop without updating the baseline also fails — ratchet is two-sided).
 
-**Implementation shape.** A `rg`-based counter (`unwrap()`+`expect(` and `println!` per `crates/*/src`), compared to `.claude/hardening-baseline.txt`. New `Run hardening budget` step in `.github/workflows/test.yml` after the clippy step. Counts exclude `#[cfg(test)]` modules where feasible (match `mod tests` boundaries) — document the known over-count in the script header.
+**Implementation shape.** A `rg`-based counter per `crates/*/src`, compared to `.claude/hardening-baseline.txt`. New `Run hardening budget` step in `.github/workflows/test.yml` after the clippy step (install `rg` on the runner or fall back to plain `grep` — ubuntu runners don't ship ripgrep). The counter **must** apply the plan's counting rule: match `.unwrap()` and `.expect("` (string-literal arg — bare `.expect(` false-positives on the parser's `self.expect(TOKEN)` method), and exclude test code (everything after a file's first `#[cfg(test)]`, plus `tests.rs` files and `tests/` dirs). The exclusion is line-boundary-based and approximate for files with interleaved test/prod code — document that caveat in the script header, but production-only counting is mandatory, not best-effort: the raw all-code counts misidentified the paydown targets this plan originally named.
 
 **Critical files.**
 - `.claude/scripts/hardening-budget.sh` — the gate.
@@ -94,32 +96,35 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 
 **Review checklist:**
 - [ ] Self-test asserts both directions (over-baseline fails; under-baseline-without-update fails)
-- [ ] CI step runs on the same job as clippy, non-flaky
-- [ ] Script header documents the `#[cfg(test)]` over-count caveat
+- [ ] CI step runs on the same job as clippy, non-flaky; `rg` (or fallback) available on the runner
+- [ ] Counter matches `.expect("` not bare `.expect(` (no parser `self.expect(TOKEN)` false positives), and excludes test code; script header documents the line-boundary approximation
 - [ ] No scope creep into actual `unwrap` reduction (Phase 9)
 
 **Commit.** `ci(hardening): freeze unwrap/expect + println debt at a baseline gate`
 
 ### Phase 2: `Unknown`-emission census + guard
 
-**Goal.** Make silent `Unknown` *measurable*: enumerate every `DataType::Unknown` construction site, classify each as `legitimate` (meta-language `Any`, deliberate conservatism) or `error` (must eventually emit a diagnostic), and gate new unclassified sites.
+**Goal.** Make silent `Unknown` *measurable*: enumerate every `DataType::Unknown` **construction** site in production code, classify each as `legitimate` (meta-language `Any`, deliberate conservatism) or `error` (must eventually emit a diagnostic), and gate new unclassified sites.
+
+**What counts as a construction site.** A line that *produces* the value — `DataType::Unknown` as an expression result, function return, struct/enum field value, `unwrap_or`/`map_or` fallback, etc. **Excluded:** pattern-match arms (`DataType::Unknown =>`), comparisons (`== DataType::Unknown`, `matches!(…)`), and test code per the plan's counting rule. The raw grep shows 166 lines mentioning `DataType::Unknown`, but ~29 are match/compare uses and ~28 are test code — expect roughly **110** production construction sites in the census. The census script must apply these exclusions; the allowlist covers exactly what the script finds.
 
 **Pre-conditions.** Phase 1 (gate harness pattern established).
 
 **TDD tests to write first.**
 - `crates/smelt-types/tests/unknown_census.rs::every_unknown_site_is_classified` — parses an allowlist `.claude/unknown-census.toml` (site → `legitimate`/`error` + one-line reason) and asserts it covers exactly the `DataType::Unknown` sites the census script finds; an unclassified new site fails the test.
 
-**Implementation shape.** A census script (`grep`-driven, like Phase 1) lists `DataType::Unknown` construction sites with `file:line`. The allowlist records the current 166 sites with a classification + reason. The test is the guard. This produces the worklist Phases 3–5 burn down (the `error`-classified entries).
+**Implementation shape.** A census script (`grep`-driven, like Phase 1) lists production `DataType::Unknown` construction sites with `file:line`, applying the construction-vs-match and test-code exclusions above. The allowlist records every found site (~110 expected) with a classification + reason. The test is the guard. This produces the worklist Phases 3–5 burn down (the `error`-classified entries). Note the test lives in `crates/smelt-types/tests/` but scans the whole workspace — resolve the repo root via `CARGO_MANIFEST_DIR/../..`.
 
 **Critical files.**
 - `.claude/scripts/unknown-census.sh`
-- `.claude/unknown-census.toml` — classified site list (166 entries).
+- `.claude/unknown-census.toml` — classified site list.
 - `crates/smelt-types/tests/unknown_census.rs`
 
 **Docs touched.** Internal hardening — no user-visible surface.
 
 **Review checklist:**
-- [ ] All 166 current sites classified with a real reason, not a rubber-stamp
+- [ ] Every census site classified with a real reason, not a rubber-stamp
+- [ ] Census excludes match/compare uses and test code (spot-check a handful of entries are genuine constructions)
 - [ ] Worst case `crates/smelt-types/src/signatures.rs` struct-field site classified `error` (fixed in Phase 3)
 - [ ] Guard fails on a synthetic new unclassified site
 
@@ -236,41 +241,40 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 
 **Commit.** `fix(hardening): surface swallowed errors on inference + LSP paths`
 
-### Phase 7: Front 3 — recoverable panics → typed errors
+### Phase 7: Front 3 — datagen panics → typed errors; annotate invariant panics
 
-**Goal.** Convert input-driven `panic!`s to recoverable errors: the config-driven cases in `crates/smelt-datagen/src/generic.rs` (e.g. `linked_choice` field missing in pool) and the `ddl_spark` validation panics in `crates/smelt-state/src`. Leave genuine internal-invariant panics (unreachable given validated input) as-is with a justifying comment.
+**Goal.** Convert the input-driven `panic!`s to recoverable errors. The workspace's only production panics are: the three config-driven `linked_choice` cases in `crates/smelt-datagen/src/generic.rs` (lines ~401–414: pool not sampled / pool not built / field missing in pool) — convert these; and the seven message-formatter guard panics in `crates/smelt-db/src/diagnostics_types.rs` (`*_diagnostic_message called with non-… code`) — these guard an internal invariant reachable only by programmer error, so annotate with a justifying comment, don't convert. (An earlier draft targeted `ddl_spark` validation panics in `crates/smelt-state/src`; those all turned out to be `#[cfg(test)]` assertion arms — there is no production panic in `smelt-state`.)
 
 **Pre-conditions.** Phase 1 (so the count drop is reflected in the baseline at Phase 11).
 
 **TDD tests to write first.**
-- `crates/smelt-datagen/tests/invalid_config.rs::missing_linked_choice_field_returns_err` — malformed datagen config returns `Err`, not a panic.
-- `crates/smelt-state/tests/ddl_spark_validation.rs::invalid_ddl_returns_err` — analogous.
+- `crates/smelt-datagen/tests/invalid_config.rs::missing_linked_choice_field_returns_err` — malformed datagen config returns `Err`, not a panic (one test per converted panic cause).
 
-**Implementation shape.** Thread `Result` through the affected datagen/state entry points. Distinguish input-validation panics (recoverable) from `expected X variant` extraction panics that guard a post-validation invariant (annotate, don't convert).
+**Implementation shape.** Thread `Result` through the affected datagen entry points. The `diagnostics_types.rs` guards stay panics with a `// invariant:` comment explaining why they're unreachable from user input.
 
 **Critical files.**
 - `crates/smelt-datagen/src/generic.rs`
-- `crates/smelt-state/src/**` (`ddl_spark`)
+- `crates/smelt-db/src/diagnostics_types.rs` (annotations only)
 
 **Docs touched.** Internal hardening — no user-visible surface.
 
 **Review checklist:**
-- [ ] Recoverable panics now return typed errors; invariant panics annotated
-- [ ] Error messages name the offending input
+- [ ] The three datagen panics now return typed errors naming the offending config input
+- [ ] The seven `diagnostics_types.rs` invariant panics carry justifying comments, unconverted
 - [ ] No behavior change on valid input
 
-**Commit.** `fix(hardening): convert recoverable datagen/ddl_spark panics to typed errors`
+**Commit.** `fix(hardening): convert input-driven datagen panics to typed errors`
 
-### Phase 8: Front 3 — `println!` → `tracing` in library crates
+### Phase 8: Front 3 — zero-`println!` gate for library crates
 
-**Goal.** Migrate the 206 production `println!` in **library** crates to `tracing`. Legitimate CLI user-facing stdout (`smelt-cli` command output, `smelt-ui`) stays — those are intentional output, not logging.
+**Goal.** Gate library-crate production `println!` at **zero** and migrate the residual handful to `tracing`. The raw 206 workspace count is dominated by `smelt-cli` user-facing stdout (~106) and test code (e.g. all of `smelt-parser`'s and `smelt-db`'s are in test modules) — the actual production library debt is a small residual (survey `smelt-datagen`, `smelt-core`, `smelt-state`, `smelt-runtime`, `smelt-backend-*`, `smelt-logical`, `smelt-parser-compat` at implementation time). The durable value of this phase is the zero-gate, not the migration volume. Legitimate CLI user-facing stdout (`smelt-cli` command output, `smelt-ui`) stays — that's intentional output, not logging.
 
 **Pre-conditions.** Phase 1 baseline.
 
 **TDD tests to write first.**
-- `crates/smelt-core/tests/hardening_budget.rs::no_println_in_libraries` — asserts zero `println!` in the designated library crates (`smelt-db`, `smelt-types`, `smelt-parser`, `smelt-planner`, `smelt-logical`, `smelt-runtime`, `smelt-dialect`, `smelt-state`, `smelt-backend-duckdb`).
+- `crates/smelt-core/tests/hardening_budget.rs::no_println_in_libraries` — asserts zero production `println!` (per the plan's counting rule) in the designated library crates (`smelt-db`, `smelt-types`, `smelt-parser`, `smelt-planner`, `smelt-logical`, `smelt-runtime`, `smelt-dialect`, `smelt-state`, `smelt-datagen`, `smelt-core`, `smelt-backend-duckdb`, `smelt-backend-spark`, `smelt-backend`, `smelt-parser-compat`).
 
-**Implementation shape.** Replace with `tracing::{debug,info,warn}` at the appropriate level. Lower the `println!` library budget in `.claude/hardening-baseline.txt` to 0 for those crates (CLI/UI budgets unchanged).
+**Implementation shape.** Replace the residual production sites with `tracing::{debug,info,warn}` at the appropriate level. Lower the `println!` library budget in `.claude/hardening-baseline.txt` to 0 for those crates (CLI/UI budgets unchanged).
 
 **Critical files.**
 - The library crates above.
@@ -279,35 +283,37 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 **Docs touched.** Internal hardening — no user-visible surface.
 
 **Review checklist:**
-- [ ] Zero `println!` in library crates; CLI/UI output untouched
+- [ ] Zero production `println!` in library crates; CLI/UI output and test code untouched
 - [ ] Levels are sensible (no `info!` spam in hot paths)
 - [ ] Baseline lowered so it cannot regress
 
-**Commit.** `refactor(hardening): migrate library-crate println! to tracing`
+**Commit.** `refactor(hardening): gate library-crate println! at zero, migrate residual to tracing`
 
-### Phase 9: Front 3 — `python.rs` `unwrap` down-payment
+### Phase 9: Front 3 — production `unwrap` down-payment
 
-**Goal.** A concrete reduction in the worst single hotspot — `crates/smelt-cli/src/python.rs` (~125 `unwrap`) — converting the recoverable ones to `?`/typed errors, then ratcheting the baseline down so they cannot return.
+**Goal.** A concrete reduction in the worst *production* hotspots: `crates/smelt-planner/src/plan_printer.rs` (15), `crates/smelt-backend-duckdb/src/lib.rs` (15), `crates/smelt-db/src/lib.rs` (10). For each site, classify: **input-driven** (reachable from user data / DB results — convert to `?`/typed error, with a red-green test) vs **infallible-by-construction** (e.g. `write!` into a `String` — annotate or switch to a non-panicking form, no test needed). Then ratchet the baseline down so they cannot return. (An earlier draft targeted `smelt-cli/src/python.rs` "~125 unwraps" — all but one are in its `#[cfg(test)]` module; the raw count misidentified it.)
 
 **Pre-conditions.** Phase 1 baseline.
 
 **TDD tests to write first.**
-- `crates/smelt-cli/tests/python_errors.rs::malformed_python_artifact_returns_err` — a malformed Python model artifact surfaces a typed error instead of panicking.
+- One red-green test per *input-driven* conversion, e.g. `crates/smelt-backend-duckdb/tests/unwrap_errors.rs::malformed_db_result_returns_err` — a failure on the DB boundary surfaces a typed error instead of panicking. (Exact tests depend on the per-site classification; infallible sites get annotations, not tests.)
 
-**Implementation shape.** Convert the input-driven `unwrap`s on the Python bridge boundary to `Result`. Update `.claude/hardening-baseline.txt` to the new lower `smelt-cli` count.
+**Implementation shape.** Survey the three files first; convert the input-driven `unwrap`s to `Result`, annotate the rest. Update `.claude/hardening-baseline.txt` to the new lower per-crate counts.
 
 **Critical files.**
-- `crates/smelt-cli/src/python.rs`
+- `crates/smelt-planner/src/plan_printer.rs`
+- `crates/smelt-backend-duckdb/src/lib.rs`
+- `crates/smelt-db/src/lib.rs`
 - `.claude/hardening-baseline.txt`
 
 **Docs touched.** Internal hardening — no user-visible surface.
 
 **Review checklist:**
-- [ ] Recoverable `unwrap`s on the Python boundary now return errors
+- [ ] Every site in the three files classified input-driven vs infallible; conversions tested, the rest annotated
 - [ ] Baseline lowered by the count removed
-- [ ] No behavior change on valid artifacts
+- [ ] No behavior change on valid input
 
-**Commit.** `fix(hardening): convert recoverable python.rs unwraps to typed errors`
+**Commit.** `fix(hardening): convert recoverable unwraps in planner/duckdb/db production hotspots`
 
 ### Phase 10: Front 4 — single-source `build_fn_body_map`
 
@@ -364,7 +370,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 
 (Append-only. Items surfaced during the work that we chose not to handle here.)
 
-- Mass `unwrap`/`expect` conversion beyond `python.rs` — the ratchet prevents growth; bulk paydown is future per-crate work.
+- Mass `unwrap`/`expect` conversion beyond the Phase 9 hotspots (`plan_printer.rs`, `smelt-backend-duckdb/src/lib.rs`, `smelt-db/src/lib.rs`) — the ratchet prevents growth; bulk paydown is future per-crate work.
 - Full diagnostic catalogue in `diagnostics.md` (all ~70 existing codes — BUG-052).
 
 ## Verification
