@@ -347,53 +347,44 @@ classification = "legitimate"
 reason = "compile step model column type fallback — col.data_type unwrap_or; column type may be unresolved"
 
 # ── smelt-state ───────────────────────────────────────────────────────────────
-# All schema_tracking.rs sites are `error`: stored type strings from disk are
-# parsed; parse failures silently fall back to Unknown instead of surfacing a
-# diagnostic.  Phase 5 of 20260608-silent-failures-hardening.md remediates these.
+# Type-comparison sites: parse_type failure → Unknown → is_safe_type_widening(Unknown, *) = false
+# (catch-all `_ => false` arm) → full_refresh_reasons path taken.
+# Unknown is never stored in SchemaOperation::WidenColumnType or WidenNestedType.
+# Phase 5 of 20260608-silent-failures-hardening.md fixed the AddColumn and
+# StructFieldAdded sites (which DID propagate Unknown to operations); these
+# type-comparison sites are safe and classified legitimate.
 
-["crates/smelt-state/src/schema_tracking.rs:886"]
-classification = "error"
-reason = "parse_type fallback — stored column type string failed to parse; diagnostic suppressed (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:922"]
+classification = "legitimate"
+reason = "ChangeType from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:913"]
-classification = "error"
-reason = "parse_type fallback — stored from-type string in schema diff failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:923"]
+classification = "legitimate"
+reason = "ChangeType to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:914"]
-classification = "error"
-reason = "parse_type fallback — stored to-type string in schema diff failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:967"]
+classification = "legitimate"
+reason = "ArrayElementTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:958"]
-classification = "error"
-reason = "parse_type fallback — stored from-type in ALTER path failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:968"]
+classification = "legitimate"
+reason = "ArrayElementTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:959"]
-classification = "error"
-reason = "parse_type fallback — stored to-type in ALTER path failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:996"]
+classification = "legitimate"
+reason = "MapValueTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:987"]
-classification = "error"
-reason = "parse_type fallback — stored from-type in schema comparison failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:997"]
+classification = "legitimate"
+reason = "MapValueTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:988"]
-classification = "error"
-reason = "parse_type fallback — stored to-type in schema comparison failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:1051"]
+classification = "legitimate"
+reason = "NestedTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:1042"]
-classification = "error"
-reason = "parse_type fallback — stored from-type in nested struct diff failed to parse (Phase 5)"
-
-["crates/smelt-state/src/schema_tracking.rs:1043"]
-classification = "error"
-reason = "parse_type fallback — stored to-type in nested struct diff failed to parse (Phase 5)"
-
-["crates/smelt-state/src/schema_tracking.rs:1067"]
-classification = "error"
-reason = "parse_type fallback — stored struct field type in schema tracking failed to parse (Phase 5)"
-
-["crates/smelt-state/src/schema_tracking.rs:1106"]
-classification = "error"
-reason = "parse_type fallback — stored struct field type in schema comparison failed to parse (Phase 5)"
+["crates/smelt-state/src/schema_tracking.rs:1052"]
+classification = "legitimate"
+reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
 # ── smelt-types / lib ─────────────────────────────────────────────────────────
 

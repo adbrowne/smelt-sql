@@ -883,7 +883,16 @@ pub fn plan_schema_operations(
                 data_type,
                 nullable,
             } => {
-                let parsed_type = parse_type(data_type).unwrap_or(DataType::Unknown);
+                let parsed_type = match parse_type(data_type) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        full_refresh_reasons.push(format!(
+                            "could not parse type '{}' for added column '{}' — forcing full refresh",
+                            data_type, name
+                        ));
+                        continue;
+                    }
+                };
                 let default_expr = defaults.get(name.as_str()).cloned();
 
                 if !nullable && default_expr.is_none() {
@@ -1064,7 +1073,16 @@ pub fn plan_schema_operations(
                         field_type,
                         ..
                     } => {
-                        let parsed_type = parse_type(field_type).unwrap_or(DataType::Unknown);
+                        let parsed_type = match parse_type(field_type) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                full_refresh_reasons.push(format!(
+                                    "could not parse type '{}' for added struct field '{}' — forcing full refresh",
+                                    field_type, field_name
+                                ));
+                                continue;
+                            }
+                        };
                         operations.push(SchemaOperation::AddStructField {
                             column: column.clone(),
                             path: path.clone(),
@@ -1103,7 +1121,16 @@ pub fn plan_schema_operations(
                         field_type,
                         ..
                     } => {
-                        let parsed_type = parse_type(field_type).unwrap_or(DataType::Unknown);
+                        let parsed_type = match parse_type(field_type) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                full_refresh_reasons.push(format!(
+                                    "could not parse type '{}' for added struct field '{}' — forcing full refresh",
+                                    field_type, field_name
+                                ));
+                                continue;
+                            }
+                        };
                         operations.push(SchemaOperation::AddStructField {
                             column: column.clone(),
                             path: path.clone(),
@@ -3535,5 +3562,71 @@ mod tests {
         let diff = diff_schemas(&deployed, &inferred);
         assert!(diff.warnings.is_empty());
         assert_eq!(diff.changes.len(), 1);
+    }
+
+    #[test]
+    fn test_add_column_unparseable_type_triggers_full_refresh() {
+        // An unparseable stored type string must NOT produce AddColumn{Unknown}
+        // (which would generate invalid DDL). It must trigger a full refresh.
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "mystery_col".to_string(),
+                data_type: "MYSTERY_TYPE_CANNOT_BE_PARSED".to_string(),
+                nullable: true,
+            }],
+            warnings: vec![],
+        };
+        let plan = plan_schema_operations(&diff, &no_defaults(), &no_defaults());
+        assert!(
+            plan.requires_full_refresh,
+            "unparseable column type must trigger full refresh"
+        );
+        let has_unknown_add = plan.operations.iter().any(|op| {
+            matches!(
+                op,
+                SchemaOperation::AddColumn {
+                    data_type: DataType::Unknown,
+                    ..
+                }
+            )
+        });
+        assert!(
+            !has_unknown_add,
+            "AddColumn with Unknown type must not be emitted for unparseable type string"
+        );
+    }
+
+    #[test]
+    fn test_struct_field_added_unparseable_type_triggers_full_refresh() {
+        // Same guard for struct field additions: unparseable field type must
+        // trigger full refresh, not AddStructField{field_type: Unknown}.
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::StructFieldAdded {
+                column: "info".to_string(),
+                path: vec![],
+                field_name: "secret".to_string(),
+                field_type: "MYSTERY_STRUCT_FIELD_TYPE".to_string(),
+                nullable: true,
+            }],
+            warnings: vec![],
+        };
+        let plan = plan_schema_operations(&diff, &no_defaults(), &no_defaults());
+        assert!(
+            plan.requires_full_refresh,
+            "unparseable struct field type must trigger full refresh"
+        );
+        let has_unknown_field = plan.operations.iter().any(|op| {
+            matches!(
+                op,
+                SchemaOperation::AddStructField {
+                    field_type: DataType::Unknown,
+                    ..
+                }
+            )
+        });
+        assert!(
+            !has_unknown_field,
+            "AddStructField with Unknown type must not be emitted for unparseable field type string"
+        );
     }
 }
