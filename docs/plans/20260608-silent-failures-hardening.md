@@ -60,7 +60,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1 — `unwrap`/`println` baseline ratchet (CI gate)        | pending  |        |      |
+| 1 — `unwrap`/`println` baseline ratchet (CI gate)        | done     | (below) | 2026-06-10 |
 | 2 — `Unknown`-emission census + guard                    | pending  |        |      |
 | 3 — Front 1: struct-field parse failure diagnostic       | pending  |        |      |
 | 4 — Front 1: db-query inference paths                    | pending  |        |      |

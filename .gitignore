@@ -6,6 +6,7 @@ target/
 !.claude/skills/
 !.claude/scripts/
 !.claude/active-plan
+!.claude/hardening-baseline.txt
 /.vscode/
 datagen.duckdb
 output/
