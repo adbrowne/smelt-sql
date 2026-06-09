@@ -403,22 +403,22 @@ reason = "TypedColumn::unknown() constructor — this IS the definition of the U
 
 # ── smelt-types / signatures ──────────────────────────────────────────────────
 
-["crates/smelt-types/src/signatures.rs:2233"]
+["crates/smelt-types/src/signatures.rs:2230"]
 classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 
-["crates/smelt-types/src/signatures.rs:3042"]
+["crates/smelt-types/src/signatures.rs:3039"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 
-["crates/smelt-types/src/signatures.rs:3043"]
+["crates/smelt-types/src/signatures.rs:3040"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 
-["crates/smelt-types/src/signatures.rs:3851"]
+["crates/smelt-types/src/signatures.rs:3848"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 
-["crates/smelt-types/src/signatures.rs:4350"]
+["crates/smelt-types/src/signatures.rs:4347"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
