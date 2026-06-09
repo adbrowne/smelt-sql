@@ -201,8 +201,8 @@ pub use queries::function_diagnostics::{
     function_backends, function_body_diagnostics_for_file,
     invalid_function_type_ref_diagnostics_for_file, missing_provenance_advisory_for_file,
     provenance_unstable_diagnostics_for_file, smelt_fn_call_diagnostics_for_ast,
-    smelt_fn_call_diagnostics_for_file, unknown_context_diagnostics_for_file,
-    workspace_function_diagnostics,
+    smelt_fn_call_diagnostics_for_file, struct_field_type_unknown_diagnostics_for_file,
+    unknown_context_diagnostics_for_file, workspace_function_diagnostics,
 };
 pub use queries::functions::{
     file_signature_inputs, function_body, function_signature, functions_in_file, resolve_function,
@@ -1377,6 +1377,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Invalid-type-ref diagnostics (Phase 4): emitted at each malformed
     // `Expr<T>` / unsupported-sort annotation on parameters or return types.
     for diag in invalid_function_type_ref_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Struct-field-unknown diagnostics (hardening Phase 3): emitted at each
+    // struct field whose type text is not a recognised concrete DataType.
+    for diag in struct_field_type_unknown_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

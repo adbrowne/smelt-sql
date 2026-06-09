@@ -387,6 +387,7 @@ impl Backend {
                 DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
                 DbCode::DuplicateAddress => "duplicate-address",
                 DbCode::DefaultReferencesParameter => "default-references-parameter",
+                DbCode::UnknownStructFieldType => "unknown-struct-field-type",
             };
             NumberOrString::String(code_str.to_string())
         });

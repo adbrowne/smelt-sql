@@ -62,7 +62,7 @@ A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rathe
 |-------|----------|--------|------|
 | 1 — `unwrap`/`println` baseline ratchet (CI gate)        | done     | (below) | 2026-06-10 |
 | 2 — `Unknown`-emission census + guard                    | done     | (below) | 2026-06-10 |
-| 3 — Front 1: struct-field parse failure diagnostic       | pending  |        |      |
+| 3 — Front 1: struct-field parse failure diagnostic       | done     | (below) | 2026-06-10 |
 | 4 — Front 1: db-query inference paths                    | pending  |        |      |
 | 5 — Front 1: types / dialect / runtime / state paths     | pending  |        |      |
 | 6 — Front 2: swallowed errors (type-inference + LSP)     | pending  |        |      |

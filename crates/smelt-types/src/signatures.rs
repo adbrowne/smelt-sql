@@ -2180,6 +2180,36 @@ fn tableexpr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
 /// nested `Struct<{…}>` form).
 ///
 /// Pure — walks only the CST node.
+/// Returns the `TextRange` of each struct field whose type text cannot be
+/// parsed as a recognised concrete `DataType`. Used by the diagnostic layer to
+/// emit `UnknownStructFieldType` at the individual field's span.
+///
+/// Returns an empty `Vec` when the `TypeRef` is not an `Expr<Struct<{…}>>` shape,
+/// or when all field types are valid.
+///
+/// Pure — walks only the CST node, no Salsa dependency.
+pub fn struct_field_unknown_ranges(tr: &TypeRef) -> Vec<TextRange> {
+    use smelt_parser::ast::{StructType, TypeRefHead};
+    if tr.kind() != TypeRefHead::Expr {
+        return vec![];
+    }
+    let struct_node = match tr.syntax().descendants().find_map(StructType::cast) {
+        Some(n) => n,
+        None => return vec![],
+    };
+    let mut errors = Vec::new();
+    for sf in struct_node.fields() {
+        let type_ref_node = sf.type_ref();
+        let inner_text = type_ref_node.as_ref().map(|t| t.text()).unwrap_or_default();
+        if crate::parse_type(inner_text.trim()).is_err() {
+            if let Some(field_tr) = type_ref_node {
+                errors.push(field_tr.syntax().text_range());
+            }
+        }
+    }
+    errors
+}
+
 fn struct_expr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
     use smelt_parser::ast::{StructType, TypeRefHead};
 

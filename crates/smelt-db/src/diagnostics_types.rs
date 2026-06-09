@@ -686,6 +686,13 @@ pub enum DiagnosticCode {
     /// expression must not reference other parameters"). Anchored at the
     /// default expression's range. Error severity.
     DefaultReferencesParameter,
+    /// Emitted when a `smelt.define` or `smelt.extern` parameter or return-type
+    /// annotation has a `Struct<{…}>` shape whose field type text cannot be
+    /// parsed as a concrete `DataType` — e.g. `{a: Integer, b: Bogus}` where
+    /// `Bogus` is unrecognised. Anchored at the **individual field's** `TYPE_REF`
+    /// span (more precise than `InvalidFunctionTypeRef` which covers the whole
+    /// annotation). Error severity.
+    UnknownStructFieldType,
 }
 
 /// Structured metadata attached to diagnostics for code actions

@@ -2424,19 +2424,20 @@ fn timeseries_broken_cumulative_with_incremental() {
 //
 // `examples/functions_broken_struct_field_type/` contains a function whose
 // struct return type declares an unrecognized field type (`Bogus`). The
-// workspace must emit exactly one `InvalidFunctionTypeRef` anchored at the
-// function declaration, and no other files in the workspace may emit that code.
+// workspace must emit exactly one `UnknownStructFieldType` anchored at the
+// individual struct field's type-ref span; no other files in the workspace
+// may emit that code.
 
 /// Verifies that an unrecognized type name nested in a struct field position in
-/// a function's return or parameter annotation emits `InvalidFunctionTypeRef`
-/// at the declaration.
+/// a function's return or parameter annotation emits `UnknownStructFieldType`
+/// at the individual field's type-ref span (not the whole annotation).
 ///
 /// The broken workspace `examples/functions_broken_struct_field_type/` contains
 /// a `smelt.define` with `-> Expr<Struct<{a: Integer, b: Bogus}>>` where `Bogus`
 /// is not a known DataType. The declaration must be flagged; no other file in
 /// the workspace may produce this code.
 #[test]
-fn functions_broken_struct_field_type_emits_invalid_type_ref() {
+fn functions_broken_struct_field_type_emits_unknown_struct_field_type() {
     use smelt_cli::{init_db, Config, ModelDiscovery};
     use smelt_db::{DiagnosticAcc, Workspace};
     use std::path::Path;
@@ -2463,7 +2464,7 @@ fn functions_broken_struct_field_type_emits_invalid_type_ref() {
     let ws = Workspace::try_get(&db).expect("workspace not initialized");
 
     let is_target_code = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
-        code == Some(&smelt_db::DiagnosticCode::InvalidFunctionTypeRef)
+        code == Some(&smelt_db::DiagnosticCode::UnknownStructFieldType)
     };
 
     let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
@@ -2508,7 +2509,7 @@ fn functions_broken_struct_field_type_emits_invalid_type_ref() {
 
     assert!(
         other_diags.is_empty(),
-        "expected zero InvalidFunctionTypeRef diagnostics from files other than '{}' in {}, \
+        "expected zero UnknownStructFieldType diagnostics from files other than '{}' in {}, \
          got {}:\n  {}",
         expected_file,
         example_dir,
@@ -2523,7 +2524,7 @@ fn functions_broken_struct_field_type_emits_invalid_type_ref() {
     assert_eq!(
         target_diags.len(),
         1,
-        "expected exactly 1 InvalidFunctionTypeRef from '{}' in {}, got {}:\n  {}",
+        "expected exactly 1 UnknownStructFieldType from '{}' in {}, got {}:\n  {}",
         expected_file,
         example_dir,
         target_diags.len(),
@@ -2536,8 +2537,8 @@ fn functions_broken_struct_field_type_emits_invalid_type_ref() {
 
     assert_eq!(
         target_diags[0].code,
-        Some(smelt_db::DiagnosticCode::InvalidFunctionTypeRef),
-        "expected InvalidFunctionTypeRef from '{}' in {}, got {:?}: {}",
+        Some(smelt_db::DiagnosticCode::UnknownStructFieldType),
+        "expected UnknownStructFieldType from '{}' in {}, got {:?}: {}",
         expected_file,
         example_dir,
         target_diags[0].code,
