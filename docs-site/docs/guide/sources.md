@@ -60,6 +60,26 @@ Declaring columns serves two purposes:
 !!! tip
     Even though smelt cannot verify the source exists in the database, adding column declarations lets it catch typos and type mismatches before you run a query.
 
+## Declaring a time dimension
+
+A source can declare a time dimension with the `timeseries:` key. Doing so makes the source a pushdown target for downstream incremental models: when an incremental model reads from this source, smelt injects a `WHERE` clause narrowing the source read to the batch window, reducing the data the source must scan.
+
+```yaml
+# models/sources/raw/events.yml
+description: Raw events feed; partitioned daily by event_date.
+columns:
+  - { name: event_id, type: BIGINT, nullable: false }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+  - { name: user_id, type: INTEGER, nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+```
+
+The `timeseries:` shape is the same as `timeseries:` on a model — see [timeseries reference](../reference/timeseries.md). Declaring `timeseries:` does not affect how the source is loaded; sources are always externally managed. It only describes the partition shape that downstream consumers may rely on.
+
 ## Loading source data
 
 smelt does not load source data. You are responsible for ensuring the source tables exist in your target database before running models that depend on them.
