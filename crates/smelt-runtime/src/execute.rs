@@ -486,10 +486,6 @@ pub async fn execute_project(
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
     let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    // Project-wide `smelt.<path> → timeseries` map. Cumulative dispatch
-    // looks up its driving source's ts here; the classifier resolves the
-    // smelt.<path> key against this map (per cumulative_aggregate.md).
-    let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
     {
         let exec_order = graph_lock.execution_order()?;
         for model_name in &exec_order {
@@ -505,12 +501,13 @@ pub async fn execute_project(
                     .or_default()
                     .push((model_name.clone(), model.content.clone()));
             }
-            if let Some(ts) = metadata.and_then(|m| m.timeseries.clone()) {
-                let smelt_key = format!("smelt.{}", model.address_segments.join("."));
-                source_timeseries.insert(smelt_key, ts);
-            }
         }
     }
+    // Project-wide `smelt.<path> → timeseries` map. Merges model-frontmatter
+    // timeseries with per-entity source YAML timeseries declarations (BUG-072).
+    // Cumulative dispatch and incremental pushdown (Phase 3) both use this map.
+    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
+    let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
     drop(graph_lock);
 
     // ── Compile context (UpstreamSchemas + FnBodyMap from Salsa) ────────
@@ -1066,4 +1063,51 @@ fn build_outcome(
         total_rows,
         plan_summary: None,
     }
+}
+
+/// Build the project-wide `smelt.<path> → timeseries` lookup map used by
+/// the planner (cumulative classification) and the incremental execute path
+/// (source-filter pushdown, Phase 3).
+///
+/// Merges two sources of timeseries declarations:
+/// 1. **Model-frontmatter** — an incremental model whose output partitions by
+///    a time column is itself a timeseries source for downstream consumers.
+/// 2. **Source YAML** — per-entity sources declaring a `timeseries:` block
+///    become pushdown candidates for incremental models reading them (BUG-072).
+///
+/// In valid workspaces a model and a source cannot share the same `smelt.<path>`
+/// address (address-uniqueness constraint). If they did, the source YAML entry
+/// wins (it is inserted last); that is documented here as a design decision
+/// pending a normative spec ruling.
+pub fn build_source_timeseries_map(
+    graph: &smelt_core::graph::DependencyGraph,
+    source_infos: &[smelt_core::SourceInfo],
+) -> smelt_planner::SourceTimeseriesMap {
+    let mut map = smelt_planner::SourceTimeseriesMap::new();
+
+    // Model-frontmatter entries. `unwrap_or_default`: if the graph is cyclic,
+    // `execution_order` would fail, but the caller's planner-safety gate already
+    // catches cycles before this function is reached, so the fallback is a
+    // degenerate safety net.
+    let exec_order = graph.execution_order().unwrap_or_default();
+    for model_name in &exec_order {
+        let Ok(model) = graph.get_model(model_name) else {
+            continue;
+        };
+        if let Some(ts) = model.metadata.as_deref().and_then(|m| m.timeseries.clone()) {
+            map.insert(format!("smelt.{}", model.address_segments.join(".")), ts);
+        }
+    }
+
+    // Source YAML entries (BUG-072 / Phase 2).
+    for source in source_infos {
+        if let Some(ts) = &source.timeseries {
+            map.insert(
+                format!("smelt.{}", source.address_segments.join(".")),
+                ts.clone(),
+            );
+        }
+    }
+
+    map
 }
