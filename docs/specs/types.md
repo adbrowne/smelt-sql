@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-05-27
+last_reviewed: 2026-06-10
 owners: [andrew]
 ---
 
@@ -226,10 +226,16 @@ Trailing `...` marks the final argument position as variadic. Variadics expand t
 
 ### 11. Nullability
 
-Columns carry `nullable: bool` in `TypedColumn`. Inference rules:
+Columns carry `nullable: bool` in `TypedColumn`.
 
-- Non-nullable: `COALESCE(…)` with at least one non-null argument; `CASE … ELSE …` when all branches are non-null; `CAST` preserves the input's nullability; struct/array literals (the container itself); `EXISTS`; `COUNT(*)` and `COUNT(expr)`.
-- Always nullable: `SUM`, `AVG`, `MIN`, `MAX` (empty groups → NULL); scalar subqueries; `IN (subquery)`; array subscript (out-of-bounds → NULL); struct field access (conservative).
+**Sound-upper-bound contract.** `nullable: false` is a guarantee: the column cannot contain `NULL` in any row, for any input data satisfying the declared source schemas. `nullable: true` means only "may contain NULL". When inference cannot establish the guarantee, it must answer `nullable: true`. Claiming `nullable: false` for a column that can hold NULL is a soundness defect; claiming `nullable: true` for a column that provably cannot is acceptable imprecision. Because the contract is one-sided, the rules below enumerate the **only** ways an inferred column or expression may be non-nullable; anything not covered defaults to nullable.
+
+- **Non-nullable origins:** non-NULL literals; source/seed columns declared `nullable: false`; `COUNT(*)` and `COUNT(expr)`; `EXISTS`; struct/array literals (the container itself); `COALESCE(…)` with at least one non-nullable argument; `CASE … ELSE …` when all result branches are non-nullable; `CAST` preserves the input's nullability. Scalar operators and functions that are NULL-propagating may claim non-nullable only when every operand is non-nullable.
+- **Always nullable (overrides non-nullable inputs):** `SUM`, `AVG`, `MIN`, `MAX` (empty groups → NULL); scalar subqueries; `IN (subquery)`; array subscript (out-of-bounds → NULL); struct field access (conservative); `TRY_CAST`; `NULLIF`; `CASE` without `ELSE`; `LAG`/`LEAD` without an explicit default.
+- **Outer joins.** Columns sourced from the null-supplying side(s) of an outer join are nullable in the join's output scope, regardless of declared or upstream-inferred nullability: `LEFT JOIN` — all right-side columns; `RIGHT JOIN` — all left-side columns; `FULL JOIN` — both sides. `INNER` and `CROSS` joins preserve input nullability.
+- **Set operations.** A `UNION` / `INTERSECT` / `EXCEPT` output column is non-nullable only if the corresponding column is non-nullable in **every** branch.
+
+**Verification gate.** The contract is verified against engines by a value-based property test: generated queries over generated data (every nullable input column actually populated with NULLs) execute on DuckDB, and no output column smelt infers as `nullable: false` may contain a NULL in any result row. The check must be value-based, not schema-based — DuckDB/Arrow result schemas mark columns nullable indiscriminately, so schema comparison carries no information. Conservative answers need no divergence registry: over-claiming nullable is free under the contract; only a non-nullable claim contradicted by data is a defect.
 
 **Parameter-type nullability is not part of the v1 annotation surface** (research §16 #10). All `Expr<T>` parameters and returns are implicitly nullable; the column-level `nullable` flag flows through model-body inference but does not appear in `smelt.define` signatures.
 
@@ -278,6 +284,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - `crates/smelt-db/src/type_inference.rs` and `crates/smelt-types/src/signatures.rs` contain pure functions (no Salsa imports). Salsa queries are thin wrappers — see CLAUDE.md "Pure Function Rule".
 - Function call inference is **local**: row-variable unification, generic binding, and constraint discharge all happen at the call site without cross-module constraint solving.
 - **No silent `Unknown`.** Every `Unknown` with reason `Unresolved` surfacing in a resolved schema or expression type is accompanied by an origin diagnostic. `Dynamic` and `Propagated` unknowns are diagnostic-free by construction. The set of `Unknown` reasons (`Unresolved`, `Dynamic`, `Propagated`) is closed; adding a reason requires a spec edit.
+- **Nullability is a sound upper bound.** No inference rule may produce `nullable: false` outside the enumerated non-nullable origins in §11; the default for any uncovered construct is `nullable: true`. Standing gate (once landed — see Known Divergences): the value-based nullability soundness property test in `crates/smelt-db/tests/`.
 - `Numeric ⊂ Ordered` is structural — callers do not need to restate constraints.
 - Adding a type to `Ordered` is non-breaking; removing one is breaking.
 - Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record lifting rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain subtyping rules; no further branching is permitted without a spec edit. `ModelDef` participates in no subtyping rule — it is neither a subtype nor a supertype of any other sort.
@@ -289,6 +296,10 @@ This section captures the load-bearing rationale behind the type system's shape 
 - **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double` (with the integer/Decimal mixing rule producing `Decimal(38,10)`). `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (§16 #9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. Implementation conformance is a follow-up plan.
 - **Decimal arithmetic v1 fallback.** Decimal arithmetic in v1 produces `Decimal(38,10)` regardless of operand precision (e.g. `Decimal(19,2) + Decimal(19,2) → Decimal(38,10)`), where DuckDB native produces `Decimal(19,2)`. The fallback is conservative and avoids precision-loss; precision-aware inference is open. (See `architecture.md` §"Specs not yet authored".)
 - **Nullability scope mismatch.** The column-level `nullable: bool` flag is implemented and load-bearing in inference, but it does not appear in `smelt.define` parameter types (§16 #10). This spec scopes nullability to the column form only.
+- **Outer-join nullability is unsound today.** Inference does not apply §11's null-supplying-side rule: a column declared `nullable: false` in a source retains `nullable: false` after appearing on the right side of a `LEFT JOIN`, violating the sound-upper-bound contract. The full audit of every non-nullable-claiming rule against the §11 enumeration (including `TRY_CAST`, `NULLIF`, `CASE` without `ELSE`, `LAG`/`LEAD`, set operations) is also pending — the §11 lists are normative, not yet verified against the implementation. Tracked in `docs/plans/20260610-nullability-soundness.md`.
+- **Nullability verification gate not yet landed.** The value-based DuckDB oracle property test described in §11 does not exist yet; the existing `type_property_tests.rs` oracle compares types only, not nullability. Tracked in `docs/plans/20260610-nullability-soundness.md`.
+- **Nullability is not yet folded into the output fingerprint.** `output_fingerprint.md` treats nullability as breaking-by-default (conservative rebuild). Folding the tracked axis into the fingerprint is deferred until the fingerprint is wired into the runtime (see `docs/ROADMAP.md` item 5); the soundness contract here is the precondition for that fold.
+- **Nullability precision is deliberately coarse.** `WHERE x IS NOT NULL` narrowing, join-key non-null reasoning, and other flow-sensitive refinements are out of scope; the contract permits them later as pure precision improvements (flipping `nullable: true → false` where provable) without a contract change.
 - **Fragment sort coverage.** `Expr<T>`, `TableExpr`, and `TableExpr<{…}>` are landed. `AggExpr<T>` and `WindowExpr<T>` are partially landed: the `ExprKind` axis enforces the kind ceiling at splice points (`WindowInScalarContext`), but type-annotation parsing for `AggExpr<T>` / `WindowExpr<T>` may still be in flight (tracked in `docs/plans/20260422-smelt-functions.md`). Validate against the live `crates/smelt-types/src/signatures.rs::SmeltType` enum.
 - **`Float` as a distinct DataType.** `DataType::Float` exists in code; research treats Float as Double. This spec aligns with research and lists `Float` collapsing into `Double` as the normative rule. `Float` may be removed from the enum in a future plan.
 - **`docs/type_semantics.md` overlap.** The legacy quasi-spec contains backend-divergence material that is still useful (DuckDB/Spark divergence registry). Recommendation: keep it as a backend-divergence appendix referenced from this spec; over time, fold or trim.
