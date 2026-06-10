@@ -27,6 +27,7 @@ pub fn granularity_label(g: &Granularity) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub fn strategy_label(s: &IncrementalStrategy) -> &'static str {
     match s {
         IncrementalStrategy::DeleteInsert => "delete+insert",

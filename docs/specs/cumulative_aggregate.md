@@ -49,11 +49,11 @@ Frontmatter wins over `smelt.yml` when both set `materialization`. The same forb
 
 ### CLI
 
-`cumulative_aggregate` consumes the same `--event-time-start`/`--event-time-end` flags as incremental execution — the run window names the source partitions that will be merged in. Format and alignment rules follow `incremental_models.md` §"CLI". The flags apply to the driving source's `partition_column` / `granularity` (Semantics §"Driving source"), not to any column on the cumulative output.
+`cumulative_aggregate` consumes the same `--start`/`--end` flags as incremental execution — the run window names the source partitions that will be merged in. Format and alignment rules follow `incremental_models.md` §"CLI". The flags apply to the driving source's `partition_column` / `granularity` (Semantics §"Driving source"), not to any column on the cumulative output.
 
 ```
-smelt run --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]
-smelt backbuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]
+smelt run --start <ISO-8601> --end <ISO-8601> [selectors]
+smelt backbuild --start <ISO-8601> --end <ISO-8601> [selectors]
 ```
 
 ### Aggregator allowlist
