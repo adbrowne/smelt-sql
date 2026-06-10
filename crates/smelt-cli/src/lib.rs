@@ -1,7 +1,6 @@
 pub mod argument_resolution;
 pub mod backend_factory;
 pub mod backend_registry;
-pub mod backfill;
 pub mod config;
 pub mod diagnostics_terminal;
 pub mod discovery;
@@ -22,10 +21,6 @@ pub mod test_property;
 pub mod test_runner;
 
 pub use backend_registry::BackendRegistry;
-pub use backfill::{
-    compute_backbuild_plans, compute_batches_for_model, compute_range_run_plans,
-    format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
-};
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
 };

@@ -58,7 +58,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 16a8e484 | 2026-06-10 |
-| 2     | pending  |        |      |
+| 2     | done     | (see below) | 2026-06-11 |
 
 ### Phase 1: Backbuild through `execute_project`
 

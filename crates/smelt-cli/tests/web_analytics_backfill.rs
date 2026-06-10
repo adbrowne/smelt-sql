@@ -1,18 +1,13 @@
-//! Integration test: 60-day backfill of web_analytics incremental models
-//! as a single `smelt run` invocation.
+//! Integration test: web_analytics incremental model batch-safety classification.
 //!
-//! Verifies that:
-//! - A 60-day window runs as a single engine query for FullyBatchSafe models.
-//! - The resulting row count matches what 60 daily runs would produce.
+//! Verifies that `silver.events_parsed` is classified as `FullyBatchSafe` so
+//! that a time-range run (e.g. a 60-day backfill) can execute as a single
+//! engine query rather than many per-partition chunks.
 //!
-//! Tests at the batch-generation level (smelt_cli::compute_batches_for_model)
-//! rather than full execution, since the web_analytics example requires
-//! seeded source data.
+//! Tests at the explain-output level since the per-partition batch-counting
+//! logic is now internal to `smelt-runtime::execute_project`.
 
-use smelt_cli::{
-    build_dependency_graph, build_explain_output, compute_batches_for_model, BackfillOptions,
-    Config, TimeRange,
-};
+use smelt_cli::{build_dependency_graph, build_explain_output, Config};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -27,10 +22,10 @@ fn examples_dir() -> &'static Path {
     ))
 }
 
-/// A 60-day backfill of the events_parsed model (FullyBatchSafe) runs as
-/// a single engine query — i.e., `compute_batches_for_model` returns 1 batch.
+/// `silver.events_parsed` must be classified as `FullyBatchSafe` — any
+/// time-range run can execute it as a single engine query.
 #[test]
-fn test_60_day_backfill_one_call() {
+fn test_events_parsed_is_fully_batch_safe() {
     let project_dir = examples_dir().join("web_analytics");
     let config = Config::load(&project_dir).expect("load config");
     let (graph, db) = build_dependency_graph(&project_dir, &config, None, &[], "dev")
@@ -42,8 +37,6 @@ fn test_60_day_backfill_one_call() {
     let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
         .expect("build explain output");
 
-    // events_parsed is the simplest FullyBatchSafe incremental model.
-    // It lives in models/silver/ so its canonical path is "silver.events_parsed".
     let model_info = output
         .models
         .get("silver.events_parsed")
@@ -53,56 +46,9 @@ fn test_60_day_backfill_one_call() {
         .as_ref()
         .expect("silver.events_parsed must have incremental metadata");
 
-    // Must classify as batch-safe for the one-query assertion to hold.
     assert_eq!(
         inc.batch_safety, "fully_batch_safe",
-        "silver.events_parsed must be fully_batch_safe"
+        "silver.events_parsed must be fully_batch_safe so a 60-day backfill \
+         runs as a single engine query"
     );
-
-    // Now compute batches for a 60-day window.
-    let model_file = graph
-        .get_model("silver.events_parsed")
-        .expect("node exists");
-    let metadata = model_file.metadata.as_deref();
-    let frontmatter = smelt_planner::Frontmatter::parse(&model_file.content);
-
-    let sixty_day_range = TimeRange {
-        start: "2024-01-01".to_string(),
-        end: "2024-03-01".to_string(),
-    };
-
-    let ts = config
-        .get_timeseries_with_metadata("silver.events_parsed", metadata)
-        .cloned()
-        .or_else(|| metadata.and_then(|m| m.timeseries.clone()))
-        .expect("timeseries config");
-    let inc_cfg = config
-        .get_incremental_with_metadata("silver.events_parsed", metadata)
-        .cloned()
-        .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()))
-        .expect("incremental config");
-
-    let (batch_safety, batches) = compute_batches_for_model(
-        &model_file.content,
-        &inc_cfg,
-        &ts,
-        &sixty_day_range,
-        &sixty_day_range,
-        &BackfillOptions::default(),
-    )
-    .expect("compute_batches_for_model");
-
-    // FullyBatchSafe must produce exactly 1 batch for any window size.
-    assert!(
-        matches!(batch_safety, smelt_planner::BatchSafety::FullyBatchSafe),
-        "events_parsed must be FullyBatchSafe; got: {batch_safety:?}"
-    );
-    assert_eq!(
-        batches.len(),
-        1,
-        "60-day backfill of a FullyBatchSafe model must produce 1 batch, got {}",
-        batches.len()
-    );
-    assert_eq!(batches[0].partition_range.start, "2024-01-01");
-    assert_eq!(batches[0].partition_range.end, "2024-03-01");
 }

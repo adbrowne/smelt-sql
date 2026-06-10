@@ -216,6 +216,105 @@ default_materialization: table
     );
 }
 
+/// `smelt backbuild --dry-run` must exit 0 and not materialise any tables.
+///
+/// Behavioural guard for the Phase 2 executor-path deletion: the legacy path
+/// owned dry-run printing, so its removal needs proof that `execute_project`'s
+/// dry-run branch is the active code path and writes nothing to the database.
+#[test]
+fn backbuild_dry_run_reports_plan_without_executing() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let events_sql = r#"---
+materialization: table
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT * FROM (VALUES (DATE '2026-01-01', 1)) AS t(event_date, device_id)
+"#;
+
+    let device_stats_sql = r#"---
+materialization: cumulative_aggregate
+---
+SELECT device_id, COUNT(*) AS event_count
+FROM smelt.events
+GROUP BY device_id
+"#;
+
+    let smelt_yml = format!(
+        r#"name: backbuild_dry_run_e2e
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: {}
+    schema: main
+default_materialization: table
+"#,
+        db_path.display()
+    );
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", &smelt_yml),
+            ("models/events.sql", events_sql),
+            ("models/device_stats.sql", device_stats_sql),
+        ],
+    );
+
+    let output = Command::new(smelt_bin())
+        .args([
+            "backbuild",
+            "--project-dir",
+            proj.to_str().unwrap(),
+            "--database",
+            db_path.to_str().unwrap(),
+            "--dry-run",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-02",
+            "device_stats",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("spawn smelt backbuild --dry-run");
+
+    let combined = {
+        let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
+        s.push_str(&String::from_utf8_lossy(&output.stderr));
+        s
+    };
+
+    assert!(
+        output.status.success(),
+        "backbuild --dry-run must exit 0; output:\n{}",
+        combined
+    );
+
+    // Dry-run must not materialise any tables.
+    let conn = duckdb::Connection::open(&db_path).expect("open duckdb after dry-run");
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM information_schema.tables \
+             WHERE table_schema = 'main' AND table_name = 'device_stats'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    assert!(
+        !table_exists,
+        "dry-run must not create device_stats table; found it in main schema"
+    );
+}
+
 /// `smelt backbuild` targeting a downstream model must also rebuild upstream
 /// models — the upstream-closure selector rewrite must be applied.
 ///
