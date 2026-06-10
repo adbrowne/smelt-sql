@@ -46,7 +46,7 @@ This sweep is the **master plan**: its probe phases (S0–D1) are done and the r
 | `docs/plans/20260608-silent-failures-hardening.md` | "silent failures & code-health hardening" (roadmap §What's Next #1) — fail-loud ratchet gates (`unwrap`/`println!`/silent-`Unknown` frozen at a production-only baseline), error-`Unknown` diagnostics on inference/resolution paths, swallowed errors, datagen panic conversion, single-source `build_fn_body_map` | done (2026-06-10) |
 | `docs/plans/20260606-smelt-logical-extraction.md` | "logical-model crate extraction" — remove the `smelt-db → smelt-planner` production edge by hosting the logical `Plan` model + rule interface in a new `smelt-logical` crate below both — BUG-064 | done (2026-06-08) |
 | `docs/plans/20260610-backbuild-runtime-migration.md` | "backbuild parity" — `smelt backbuild` still uses the legacy CLI executor, so a cumulative_aggregate model silently full-refreshes instead of per-partition merging; migrate to `execute_project` + retire the legacy path — BUG-070 | done (2026-06-11) |
-| `docs/plans/20260610-source-timeseries-pushdown.md` | "source timeseries + pushdown" — source YAML `timeseries:` silently dropped by serde (fail-loud violation) and `inject_source_filters` unwired in the incremental execute path — BUG-072, 073 | pending |
+| `docs/plans/20260610-source-timeseries-pushdown.md` | "source timeseries + pushdown" — source YAML `timeseries:` silently dropped by serde (fail-loud violation) and `inject_source_filters` unwired in the incremental execute path — BUG-072, 073 | done (2026-06-11) |
 
 Remaining ledger clusters without a sub-plan yet (each a candidate for a future human-scaffolded sub-plan) live in `docs/bug-hunt/2026-05-30-findings.md` under their `needs-review` entries.
 
