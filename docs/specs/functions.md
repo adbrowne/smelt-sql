@@ -233,6 +233,8 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 **`smelt.metric()` is explicitly out of scope here.** Metrics are a semantic-layer concept whose lifecycle is planner-driven aggregation expansion, not signature-driven splicing. Folding them into this spec would conflate two evolution paths. Metrics live in their own future spec; this spec governs only the function-shaped surface (research §16 #6).
 
+**Data-World parameters only — meta types are not in the `smelt.define` signature vocabulary.** A `smelt.define` parameter cannot be annotated with a meta-language type (`List<T>`, `Map<K, V>`, `Lambda<…>`); the signature vocabulary is exactly the fragment-sort vocabulary above, and a meta-type annotation is rejected with `InvalidFunctionTypeRef`. Functions are Data-World fragment templates; meta values — a loader result (`smelt.config.load_yaml(...)` returning `List<S>`), a list literal, a reflection result — are consumed at model scope with the meta-language's own operators (spread, `map`/`filter`, `reduce`), and the resulting Data-World fragments are what get passed to functions. Admitting meta-typed parameters was considered and rejected: it would make `smelt.define` a second meta-language entry point with its own compile-time evaluation-order rules (when a callee's `map` runs relative to its caller's), while the same composition is already expressible at model scope where evaluation order is defined (`meta_language.md`). The exclusion is additive to revisit if a motivating use case emerges.
+
 ## Constraints & Invariants
 
 1. The `smelt.define` body is parenthesised. The closing `)` of the body terminates the declaration without lookahead into SQL.

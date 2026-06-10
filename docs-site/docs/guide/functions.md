@@ -310,6 +310,9 @@ The type language for parameter and return annotations:
 | `SelectItems<K>` | A SELECT-list fragment with kind ceiling `K` (`Scalar`, `Agg`, `Window`) |
 | `SelectItems<K, ctx>` | As above, but columns must belong to context `ctx` |
 
+!!! note "Meta-language types are not parameter types"
+    Function parameters are Data-World only: meta-language types like `List<Text>` or `Map<K, V>` are not valid annotations and are rejected with `InvalidFunctionTypeRef`. To drive a function from config data (for example a `smelt.config.load_yaml(...)` result), consume the list at model scope first — spread it (`...items`), or transform it with `map`/`filter`/`reduce` — and pass the resulting SQL fragments to the function. See the [meta-language guide](../meta-language/reference.md).
+
 ## Fragment parameters — TableExpr and SelectItems
 
 Fragment sorts are the key to composable pipelines. They let you pass table-valued arguments and SELECT-list fragments to functions.
