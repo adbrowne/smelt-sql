@@ -67,7 +67,7 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-06-11 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |

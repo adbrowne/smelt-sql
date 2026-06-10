@@ -101,11 +101,21 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             nullable: true, // NOT NULL = NULL
         }),
 
-        // Comparison operators - always return Boolean
-        "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "IS" => Some(TypedColumn {
-            data_type: DataType::Boolean,
-            nullable: false, // Comparisons always return true/false
-        }),
+        // Comparison operators — NULL-propagating: result is non-nullable only if
+        // both operands are non-nullable (spec §11 sound-upper-bound contract).
+        // Exception: `IS [NOT] NULL` is handled by the IS operator arm below and
+        // via unary IS NULL dispatch; the `IS` case here is `col IS DISTINCT FROM val`
+        // which also propagates NULLs.
+        "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "IS" => {
+            let left = infer_binary_operand(binary, 0, ctx);
+            let right = infer_binary_operand(binary, 1, ctx);
+            let left_nullable = left.as_ref().map(|t| t.nullable).unwrap_or(true);
+            let right_nullable = right.as_ref().map(|t| t.nullable).unwrap_or(true);
+            Some(TypedColumn {
+                data_type: DataType::Boolean,
+                nullable: left_nullable || right_nullable,
+            })
+        }
 
         // Pattern matching operators - always return Boolean
         "LIKE" | "ILIKE" | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
