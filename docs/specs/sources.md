@@ -128,6 +128,7 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 
 ## Known Divergences / Open Questions
 
+- **Aggregate `sources.yml` presence is not yet a migration error (Constraint 6).** A present aggregate `sources.yml` is still parsed and consumed as a legacy type-information fallback when a project declares no per-entity sources. A malformed aggregate file surfaces a `YamlParseError` (Warning) diagnostic, but the presence-is-an-error rule awaits removal of the legacy fallback. Tracked as BUG-078 in `docs/bug-hunt/2026-05-30-findings.md`.
 - **Source-existence verification.** A future `smelt verify` pass could check that every declared source exists in the target database with the declared columns. Out of scope here.
 - **Column-level tests on sources.** Same status as for seeds — column-level tests on the shared YAML grammar are not yet defined; `testing.md` covers `materialization: test` models but not per-column assertions on a source's sidecar. The shared YAML grammar will grow uniformly when that surface is added.
 - **Co-location with seeds.** Worth noting: a `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems), since kind-by-content makes the directory layout independent of kind. Style guides may discourage mixing for readability; the resolver does not.

@@ -1756,19 +1756,26 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // BUG-078: checked whenever the project carries aggregate `sources.yml`
+    // text — NOT gated on `sources` (legacy `smelt.source()` call sites, which
+    // are always empty since the per-entity migration made `smelt.source()` a
+    // parse error). Gating here made a YAML-broken aggregate file silently
+    // fall back to `SourcesConfig::default()` with no diagnostic.
+    if let Some(p) = project {
+        if let Some(yaml_error) = sources_yaml_error(db, p) {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!("sources.yml parse error: {}", yaml_error.message),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::YamlParseError),
+                data: None,
+            })
+            .accumulate(db);
+        }
+    }
+
     if !sources.is_empty() {
         if let Some(p) = project {
-            if let Some(yaml_error) = sources_yaml_error(db, p) {
-                DiagnosticAcc(Diagnostic {
-                    severity: DiagnosticSeverity::Warning,
-                    message: format!("sources.yml parse error: {}", yaml_error.message),
-                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
-                    code: Some(DiagnosticCode::YamlParseError),
-                    data: None,
-                })
-                .accumulate(db);
-            }
-
             let type_errors = sources_type_errors(db, p);
             for error in type_errors.iter() {
                 let source_qualified = format!("{}.{}", error.source_name, error.table_name);
