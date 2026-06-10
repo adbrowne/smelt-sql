@@ -472,6 +472,8 @@ impl Config {
                 // (they already got the targeted message above).
                 // `unstable_schema` is consumed by `parse_unstable_schema_flag` and is not
                 // a `Config` struct field — allow-list it to avoid false positives.
+                // `vars` is consumed by `smelt-db::config_vars::parse_vars_from_yaml`
+                // (compile-time `smelt.config.var` variables), also not a `Config` field.
                 const KNOWN_KEYS: &[&str] = &[
                     "name",
                     "version",
@@ -484,6 +486,7 @@ impl Config {
                     "model_paths",
                     "seed_paths",
                     "unstable_schema",
+                    "vars",
                 ];
                 for (key, _) in map {
                     if let Some(key_str) = key.as_str() {
@@ -1445,6 +1448,8 @@ default_materialization: table
 models: {}
 python: ~
 unstable_schema: true
+vars:
+  env: dev
 "#;
         let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
         assert!(
