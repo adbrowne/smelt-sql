@@ -59,7 +59,7 @@ A `timeseries:` block on a per-entity source YAML is silently dropped: `RawSourc
 |-------|----------|--------|------|
 | 1     | done     | 99278422 | 2026-06-11 |
 | 2     | done     |          | 2026-06-11 |
-| 3     | pending  |        |      |
+| 3     | done     | aab0fa83 | 2026-06-11 |
 
 ### Phase 1: Parse `timeseries:` on source YAML, loudly
 
