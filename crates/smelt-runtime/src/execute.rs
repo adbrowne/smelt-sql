@@ -30,6 +30,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
+use crate::compile::build_source_bound_map;
 use crate::compile::CompilerRegistry;
 use crate::reporter::RunReporter;
 use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
@@ -37,7 +38,7 @@ use crate::schema_evolution::{
     check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
 };
 use crate::select::{select_executable_models, SelectionRequest};
-use crate::transformer::{inject_time_filter, TimeRange};
+use crate::transformer::{inject_source_filters, inject_time_filter, TimeRange};
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::windowing::{compute_incremental_windows, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
@@ -794,6 +795,25 @@ pub async fn execute_project(
             Some(inc_plan) => {
                 let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
 
+                // Build source bound map once per model for source-filter pushdown (BUG-073).
+                // The model SQL is the same for every batch — compute once and reuse.
+                // `source_timeseries` is the project-wide smelt-ref → TimeseriesConfig map
+                // (built from model frontmatter + source YAML declarations in Phase 2).
+                // We convert it to the dep_timeseries shape that `build_source_bound_map`
+                // expects: smelt_ref → (address_segments, partition_column).
+                let sql_for_bounds = smelt_parser::strip_frontmatter(&plan.sql);
+                let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
+                    source_timeseries
+                        .iter()
+                        .filter_map(|(smelt_ref, ts)| {
+                            // Strip the leading "smelt." prefix to get the path segments.
+                            let path = smelt_ref.strip_prefix("smelt.")?;
+                            let segs: Vec<String> = path.split('.').map(String::from).collect();
+                            Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
+                        })
+                        .collect();
+                let per_model_source_bounds = build_source_bound_map(&sql_for_bounds, &dep_ts);
+
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
                         reporter.run_cancelled(&run_id);
@@ -818,6 +838,20 @@ pub async fn execute_project(
                         &inc_plan.timeseries.event_time_column,
                         &time_range,
                     )?;
+
+                    // Source-filter pushdown: narrow each source read to the run window
+                    // (partition_start / partition_end) plus per-source bounds derived from
+                    // the model SQL's INTERVAL patterns. The run window is the unwidened
+                    // partition range — `inject_time_filter` above uses filter_start/filter_end
+                    // (the widened write window) for the model's own output constraint; source
+                    // filters derive from the run window so the source scan tracks the
+                    // partition being produced, not the potentially wider DELETE range.
+                    let run_range = TimeRange {
+                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                    };
+                    let filtered_sql =
+                        inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range);
 
                     let compiler = compilers.get(model_target);
                     let resolver = &ephemeral_resolvers[model_target];
