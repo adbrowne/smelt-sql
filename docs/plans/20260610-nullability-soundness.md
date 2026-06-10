@@ -53,12 +53,14 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 - §11 outer-join rule: null-supplying-side columns become nullable (LEFT → right side, RIGHT → left, FULL → both; INNER/CROSS preserve).
 - §11 set-operation rule: output column non-nullable only if non-nullable in every branch.
 - §11 verification gate: value-based DuckDB nullability property test as a standing CI gate.
+- §11 signature nullability: the `NOT NULL` qualifier in `smelt.define` parameter/return types and `TableExpr` rows, with call-site/return/row checking and non-nullable parameter binding.
+- Surface §Hover: `NOT NULL` suffix display via one canonical type renderer shared by hover + diagnostics.
 - ROADMAP item 4 sequencing (nullability → decimal → timezone → collation) and item 5 fingerprint-fold follow-up.
 
 ### Explicitly deferred
-- **Fingerprint folding** — `output_fingerprint.md` keeps nullability breaking-by-default until the fingerprint is wired into the runtime (ROADMAP item 5; Phase 5 records the follow-up there).
+- **Fingerprint folding** — `output_fingerprint.md` keeps nullability breaking-by-default until the fingerprint is wired into the runtime (ROADMAP item 5; Phase 7 records the follow-up there). The fold must hash structured `TypedColumn`, not display strings (spec Known Divergences).
 - **Precision improvements** — `WHERE x IS NOT NULL` narrowing, join-key non-null reasoning, flow-sensitive refinement. Pure precision wins permitted later without a contract change (spec Known Divergences).
-- **Parameter-type nullability in `smelt.define` signatures** — out of v1 surface per spec §11.
+- **Nested composite nullability** — struct fields and array elements stay conservatively nullable; the cross-engine intersection (only Spark tracks nested). Extension point is the composite `DataType` variants (spec Design §"Axis placement"); `NOT NULL` is rejected on struct-field/array-element annotation positions.
 - **Spark oracle for nullability** — the gate is DuckDB-only for now, matching the existing type property tests' primary oracle.
 
 ## Progress tracking
@@ -70,6 +72,8 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
+| 6     | pending  |        |      |
+| 7     | pending  |        |      |
 
 ---
 
@@ -211,11 +215,82 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 
 ---
 
-### Phase 5: Roadmap sequencing + closure
+### Phase 5: Signature nullability (`NOT NULL` qualifier)
+
+**Goal.** Implement spec §11 "Signature nullability": the `NOT NULL` qualifier on `smelt.define` parameter/return types and `TableExpr` row columns, with one-way subtyping (non-nullable <: nullable), call-site/return/row checking, and non-nullable parameter binding in function bodies.
+
+**Pre-conditions.** Phase 4 done — the qualifier's checking is only honest once the `nullable` flags it compares against are sound.
+
+**TDD tests to write first.**
+- `crates/smelt-parser/...::parses_not_null_qualifier_on_expr_param` — `Expr<Integer NOT NULL>` parses in parameter and return positions; `TableExpr<{id: Integer NOT NULL}>` parses in row positions.
+- `crates/smelt-parser/...::rejects_not_null_on_struct_field` — `Expr<Struct<{a: Integer NOT NULL}>>` is a parse/check error (nested positions excluded per spec §11).
+- `crates/smelt-db/tests/function_body_check.rs::not_null_param_rejects_nullable_argument` — passing a nullable column to an `Expr<T NOT NULL>` parameter emits `ArgTypeMismatch` with a nullability-aware message.
+- `crates/smelt-db/tests/function_body_check.rs::not_null_param_accepts_non_nullable_argument` — and the parameter binds non-nullable inside the body (a body returning the param satisfies a `NOT NULL` return).
+- `crates/smelt-db/tests/function_body_check.rs::not_null_return_rejects_nullable_body` — body synthesising nullable against a `NOT NULL` return emits `ReturnTypeMismatch`.
+- `crates/smelt-db/tests/tableexpr_arg_shapes.rs::not_null_row_column_requires_non_nullable_caller` — `TableExpr<{id: Integer NOT NULL}>` vs a nullable caller column emits `RowRequirementUnsatisfied`.
+- Real fixture: a function in `examples/test_workspace/` declaring a `NOT NULL` parameter, called with a `nullable: false` source column — diagnostic-clean via `example_diagnostics`.
+
+**Implementation shape.** Parser: accept the `NOT NULL` qualifier in type-annotation positions (lexer already knows the keywords; the annotation grammar gains an optional trailing qualifier). Representation: signature types carry the flag — extend where `SmeltType`/`FunctionSig` parameter entries hold the data type (likely a `nullable: bool` alongside, mirroring `TypedColumn`). Checking: `unify_call` / body-check paths compare argument `TypedColumn.nullable` against the declared flag with the one-way rule; parameter seeding (`add_function_param`) honors the flag. Bare annotations default nullable — zero behaviour change for existing signatures.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-parser/src/` — annotation grammar
+- `crates/smelt-types/src/signatures.rs` — signature representation + `unify_call`
+- `crates/smelt-db/src/type_inference/type_context.rs`, `function_body_check.rs` — binding + checking
+- `crates/smelt-db/tests/`, `examples/test_workspace/` — tests + fixture
+
+**Docs touched.**
+- `docs/specs/types.md` — Known Divergences: narrow the "signature nullability not yet implemented" entry to the hover/renderer remainder (Phase 6).
+- `docs-site/docs/guide/functions.md` (and reference page if signatures are documented there) — document the `NOT NULL` qualifier with an example, written timelessly.
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] One-way subtyping only — no nullable-to-non-nullable acceptance anywhere
+- [ ] Existing unqualified signatures behave identically (no default flip)
+- [ ] Nested positions reject the qualifier
+- [ ] Reused diagnostic codes, no new ones (spec §11)
+- [ ] Docs-site edits are timeless
+
+**Commit.** `feat(types): NOT NULL qualifier in smelt.define signatures`
+
+---
+
+### Phase 6: Canonical type renderer + hover display
+
+**Goal.** One canonical type renderer shared by hover and diagnostics; non-nullable columns display as `T NOT NULL`, nullable as bare `T` (spec Surface §Hover).
+
+**Pre-conditions.** Phase 4 done (never display an unsound claim); Phase 5 done (display notation matches writable syntax).
+
+**TDD tests to write first.**
+- `crates/smelt-db/tests/...::hover_shows_not_null_for_non_nullable_column` — hovering a `nullable: false` source column renders `Integer NOT NULL`.
+- `crates/smelt-db/tests/...::hover_bare_type_for_nullable_column` — nullable column renders bare `Integer`.
+- `crates/smelt-db/tests/...::hover_left_join_column_drops_not_null` — real fixture: the Phase 2 LEFT-JOIN example's null-supplied column hovers without `NOT NULL` (end-to-end: declared non-null source → join → display).
+- Renderer unit test: nullability-aware messages in `ArgTypeMismatch`/`ReturnTypeMismatch` use the same renderer output.
+
+**Implementation shape.** Locate the existing hover type-rendering path (smelt-db hover/LSP layer); extract/confirm a single render function over `TypedColumn` (not `DataType` alone) and route hover + the Phase 5 diagnostic messages through it. Tracked axes appear in one place; future axes (collation) extend the renderer once.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-db/src/` hover/rendering path, `crates/smelt-lsp/src/` if hover formatting lives there
+- `crates/smelt-db/tests/`, `crates/smelt-lsp/tests/` — display tests
+
+**Docs touched.**
+- `docs/specs/types.md` — Known Divergences: remove the signature-nullability/hover entry entirely.
+- `docs-site/docs/` LSP/editor page — hover shows nullability, one line + screenshot-free description.
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Single renderer — no second format string for types anywhere in hover/diagnostics paths
+- [ ] Display matches writable syntax exactly (`NOT NULL` suffix, bare = nullable)
+- [ ] Docs edits are timeless
+
+**Commit.** `feat(lsp): canonical type renderer; hover displays NOT NULL`
+
+---
+
+### Phase 7: Roadmap sequencing + closure
 
 **Goal.** Record the agreed Type-System-Axes execution shape in the roadmap and close out the cycle's documentation.
 
-**Pre-conditions.** Phases 1–4 done; `cargo test -p smelt-db --test nullability_property_tests` green.
+**Pre-conditions.** Phases 1–6 done; `cargo test -p smelt-db --test nullability_property_tests` green.
 
 **TDD tests to write first.** None (docs-only phase).
 
