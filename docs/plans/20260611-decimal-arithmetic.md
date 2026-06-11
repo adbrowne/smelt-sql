@@ -66,7 +66,7 @@ The type system tracked `Decimal` arithmetic with a fixed `Decimal(38, 10)` plac
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-06-11 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
