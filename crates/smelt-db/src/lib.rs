@@ -1923,6 +1923,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // Spec §15 — decimal precision overflow → `DecimalPrecisionOverflow`.
+            //
+            // Walks every `+`, `-`, `*`, `%` BINARY_EXPR and emits exactly one
+            // `DecimalPrecisionOverflow` Error at the operator span when the
+            // Spark-style growth formula yields `p' > 38`. Division is excluded
+            // (handled in Phase 3). The result type in such expressions is already
+            // `DataType::Unknown` as computed by `promote_numeric_operands_for_op`.
+            {
+                let overflow_diags = type_inference::check_decimal_precision_overflow_diagnostics(
+                    &select_stmt,
+                    &kind_ctx,
+                );
+                for diag in overflow_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
             // Meta-language (P6) — `MetaListInScalarPosition`.
             //
             // A `List<T>`-typed expression that reaches a Data-World scalar /
