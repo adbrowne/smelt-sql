@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-06-10
+last_reviewed: 2026-06-11
 owners: [andrew]
 ---
 
@@ -92,7 +92,9 @@ Trailing variadic `...` on the final argument is allowed in built-ins / `smelt.e
 
 Type-related codes from `crates/smelt-db/src/lib.rs::DiagnosticCode`. These are the spec's checkable anchor points:
 
-`TypeMismatch`, `CannotInferType`, `UnknownCastType`, `UnrecognizedFunction`, `SourceTypeError`, `WindowInScalarContext`, `AmbiguousColumn`, `UndeclaredColumn`, `ColumnTypeUnresolved`, `ArgTypeMismatch`, `FunctionBodyTypeMismatch`, `ReturnTypeMismatch`, `InvalidFunctionTypeRef`, `MissingArgument`, `RowRequirementUnsatisfied`, `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `ParameterShadowsColumn` (warning), `AliasColumnArityMismatch`, `EmptyValuesClause`.
+`TypeMismatch`, `CannotInferType`, `UnknownCastType`, `UnrecognizedFunction`, `SourceTypeError`, `WindowInScalarContext`, `AmbiguousColumn`, `UndeclaredColumn`, `ColumnTypeUnresolved`, `ArgTypeMismatch`, `FunctionBodyTypeMismatch`, `ReturnTypeMismatch`, `InvalidFunctionTypeRef`, `MissingArgument`, `RowRequirementUnsatisfied`, `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `ParameterShadowsColumn` (warning), `AliasColumnArityMismatch`, `EmptyValuesClause`, `DecimalPrecisionOverflow`.
+
+`DecimalPrecisionOverflow` — emitted when a decimal arithmetic expression or UNION coercion computes a result precision `p' > 38`. Anchored at the operator token (arithmetic) or UNION keyword span (UNION coercion). Recovery: the result degrades to `Unknown` (reason `Unresolved`). The user must cast one or both inputs to a narrower `Decimal(p, s)` before the operation.
 
 `AliasColumnArityMismatch` — emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or `WITH cte(c₁, c₂, …) AS (SELECT …)` has a different length from the underlying relation's actual column count. Anchored at the `ALIAS_COLUMN_LIST` span (the parenthesised name list). Recovery: applies alias names positionally up to whichever list is shorter; any remaining columns retain their inferred names (CTEs over a SELECT body) or fallback `colN` names (VALUES derived tables).
 
@@ -134,7 +136,7 @@ The least-upper-bound (LUB) for promotion (in expressions, UNION, generic argume
 SmallInt < Integer < BigInt < Decimal < Double
 ```
 
-`Float` collapses into `Double` for promotion purposes. When the LUB is `Decimal` and the inputs include any integer family member, the result must be `Decimal(38, 10)` (Decimal precision/scale arithmetic is deferred — see Known Divergences).
+`Float` collapses into `Double` for promotion purposes. When the LUB involves `Decimal`, the specific `(p, s)` is governed by §15 "Decimal arithmetic" — integer-family members are lifted to their natural decimal equivalents there, and the growth formula or UNION coercion rule determines the result `(p, s)`.
 
 ### 3. Integer division is truncating
 
@@ -150,13 +152,14 @@ Built-in SQL function return types are taken from the canonical registry in `cra
 
 - `SUM(Integer | BigInt | SmallInt) → BigInt`
 - `SUM(Double | Float) → Double`
-- `SUM(Decimal(p, s)) → Decimal(38, s)` (canonical widening; precision arithmetic deferred — see Known Divergences)
+- `SUM(Decimal(p, s)) → Decimal(38, s)` — scale preserved; precision widened to the maximum within the 38-digit limit. ByDesign divergence from Spark (see §15).
 - `AVG(any numeric) → Double`
 - `MIN(T) → T`, `MAX(T) → T` for any `T: Ordered` (input type preserved; nullability §11 applies — empty group returns `NULL`).
 - `COUNT(*) → BigInt` (non-nullable — guaranteed by SQL semantics).
 - `COUNT(expr) → BigInt` (non-nullable).
 - `CEIL(Double) → Double`, `CEIL(Decimal(p,_)) → Decimal(p, 0)`
 - `SIGN(any numeric) → SmallInt`
+- `ABS(Decimal(p, s)) → Decimal(p, s)` — preserves precision and scale. `ABS(other numeric T) → T`.
 
 Engine-native precision is opt-in via the backend namespace (`postgres.sum(...)`); using it marks the model as non-portable.
 
@@ -271,6 +274,40 @@ A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.defi
 | `SELECT 1 UNION SELECT 'a'` | `Unknown` per column | `TypeMismatch` |
 | Window function in `WHERE` | flagged | `WindowInScalarContext` |
 
+### 15. Decimal arithmetic
+
+**Portable surface.** `+`, `-`, `*`, and `%` on `Decimal` operands are in the portable surface. Division (`/`) is not — it emits `TypeMismatch` at the operator span (see "Division rejection" below). Unary minus preserves the operand's `(p, s)`.
+
+**Integer lifting.** When an integer-family operand appears in a decimal arithmetic expression, it is lifted to its natural decimal equivalent before the growth formula applies:
+
+| Integer type | Lifted as |
+|---|---|
+| `SmallInt` | `Decimal(5, 0)` |
+| `Integer` | `Decimal(10, 0)` |
+| `BigInt` | `Decimal(19, 0)` |
+
+**Arithmetic growth formulas.** Applied after integer lifting; both operands are decimal-family at this point.
+
+| Operator | Result precision `p'` | Result scale `s'` |
+|---|---|---|
+| `a + b`, `a - b`, `a % b` | `max(p₁ − s₁, p₂ − s₂) + max(s₁, s₂) + 1` | `max(s₁, s₂)` |
+| `a * b` | `p₁ + p₂ + 1` | `s₁ + s₂` |
+
+**Decimal LUB (UNION and generic inference).** When two `Decimal(p₁, s₁)` and `Decimal(p₂, s₂)` values are combined via UNION branch coercion or generic-parameter inference (not binary arithmetic), the result is `Decimal(max(p₁-s₁, p₂-s₂) + max(s₁, s₂), max(s₁, s₂))` — the narrowest type that can represent values from either operand without overflow. There is no `+1` carry term; coercion introduces no new digits.
+
+**Compile-time overflow check.** If `p'` computed by either formula (arithmetic or coercion) exceeds 38, the operation emits `DecimalPrecisionOverflow` anchored at the operator token (or UNION keyword) span; the result type degrades to `Unknown` (reason `Unresolved`). The user must cast inputs to narrower decimals before the operation.
+
+**Division rejection.** `Decimal / T` for any numeric `T` is not in the portable surface. The expression emits `TypeMismatch` anchored at the `/` operator. The diagnostic message directs the user to:
+
+1. Cast inputs to `Double` or `Float` for floating-point division (always portable): `CAST(a AS DOUBLE) / CAST(b AS DOUBLE)`.
+2. Engine-bound decimal division: not yet available; see Known Divergences.
+
+**Aggregate and unary decimal returns.** These entries own the §5 canonical returns for decimal-typed inputs:
+
+- `SUM(Decimal(p, s))` → `Decimal(38, s)` — summation preserves scale (no new decimal digits), but precision grows; `38` is the maximum within the engine intersection. ByDesign divergence from Spark (`DECIMAL(min(p+10, 38), s)`).
+- `AVG(Decimal)` → `Double` — implicit division-by-count can produce fractional digits that cannot be expressed in the input's `(p, s)` portably. ByDesign divergence from Spark (stays in `Decimal`); DuckDB agrees on `Double`.
+- `ABS(Decimal(p, s))` → `Decimal(p, s)` — absolute value preserves precision and scale.
+
 ## Design
 
 This section captures the load-bearing rationale behind the type system's shape and the alternatives that were considered and rejected.
@@ -282,6 +319,8 @@ This section captures the load-bearing rationale behind the type system's shape 
 **Single `DataType` vocabulary across all backends.** `DataType` is one enum in one crate (`smelt-types`); backend-specific names (`HUGEINT`, `STRING`, `TIMESTAMPTZ`) parse into the enum on input, and `to_backend_sql()` is the only path that emits an engine-specific name. *Per-backend type vocabularies* (one `DataType` for DuckDB, another for Spark, another for Postgres) was rejected because cross-backend reasoning — incremental models that read DuckDB and write Spark, function signatures portable across engines, type-aware diagnostics in the LSP — would require a translation layer at every boundary, and translation layers are where correctness goes to die. The trade-off is that adding an engine-native type that no other backend supports requires either a new `DataType` variant (semi-permanent) or a `<backend>.<type>(...)` opt-in (the `postgres.sum(...)` shape from §"Canonical built-in returns"). That cost is paid by the few projects that need it, not by the ecosystem as a whole.
 
 **Axis placement: value-domain axes live in `DataType`; column-population axes live in `TypedColumn`.** Axes that change what values can exist — decimal precision/scale, timezone-awareness, varchar length — are part of the type proper and participate in promotion, unification, and `CAST`. Axes that describe properties of a column's data over an unchanged value domain — nullability today, collation prospectively — live beside the type in `TypedColumn`. This matches SQL's own model (`NOT NULL` is a column constraint, not a type) and keeps nullability out of every type-equality and promotion rule. *`Nullable<T>` in the `DataType` enum* was rejected: it forces every `match` on `DataType` and every unification/promotion rule to answer "what about the wrapper?", an invasive change buying little since `TypedColumn` already flows everywhere inference goes. The accepted cost is that **composite types erase the column channel**: `Struct` fields and `Array` elements carry only a `DataType`, so nested nullability is untracked and nested access is conservatively nullable (§11). This is also the cross-engine intersection — DuckDB and Postgres provide no syntax to declare or enforce `NOT NULL` on struct fields or array elements, so nested positions are always-nullable there; only Spark tracks the nested axis (`StructField.nullable`, `ArrayType.containsNull`, `MapType.valueContainsNull`). If Spark-grade nested precision is ever wanted, the extension point is the composite `DataType` variants themselves (per-field/element nullability flags, Spark's shape), not a relocation of the column-level flag. Collation's placement is tentative until its own design cycle; its SQL coercibility rules suggest the column channel, like nullability.
+
+**Decimal arithmetic: growth formula choice, division exclusion, and AVG→Double.** `+`, `-`, `*`, `%` use Spark's Hive-derived growth formulas — the portable intersection between Spark (exact, 38-capped) and DuckDB (same formulas for non-division ops). Postgres's unbounded exact arithmetic is not reachable within the 38-digit limit; the compile-time overflow check (`p' > 38`) makes precision exhaustion a compile error rather than a runtime surprise. *Division is excluded* because the three engines disagree on the result type family: DuckDB promotes `Decimal / Decimal` to `Double` to avoid infinite-precision growth; Spark stays in `Decimal` with a Hive formula; Postgres returns unbounded `NUMERIC`. No cast sequence produces bit-identical results across all three, so the portable surface refuses the operation. The two current remedies are cast-to-Double (always portable) and engine-bound models (future). A `smelt.divide(a, b, scale => N)`-style stdlib polyfill — the long-term ergonomic answer — requires engine-dispatched function bodies, which are not yet designed; the research doc (`docs/research/20260516-decimal-type-system.md` §7) sketches the shape. *AVG returning `Double`* follows from division: count-based averaging involves implicit division by the row count, which can produce fractional digits that cannot be expressed in the input's `(p, s)` portably across engines; `Double` is the universally-safe answer (DuckDB agrees; Spark diverges). *SUM returning `Decimal(38, s)`* retains scale because summation never introduces new decimal digits — the scale of a sum equals the addends' scale — while the integer part can grow unboundedly; `38` is the maximum within the engine intersection, and DuckDB agrees.
 
 **Engine-alias normalisation is a parser concern, not an inference concern.** The aliases `INT`, `INT4`, `STRING`, `BOOL`, `BYTEA`, `TIMESTAMPTZ` are normalised on input by `crates/smelt-types/src/parse.rs`; type inference operates only on canonical `DataType` values. *Carrying alias spellings through inference* was rejected because it doubles the surface every inference rule has to handle ("does `Integer + Int` unify? does `Text + String` round-trip?") with no semantic value — every such pair is the same type. Normalising at the boundary keeps the inference rules clean and means the test surface for type inference doesn't have to enumerate alias permutations.
 
@@ -298,12 +337,15 @@ This section captures the load-bearing rationale behind the type system's shape 
 - Adding a type to `Ordered` is non-breaking; removing one is breaking.
 - Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record lifting rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain subtyping rules; no further branching is permitted without a spec edit. `ModelDef` participates in no subtyping rule — it is neither a subtype nor a supertype of any other sort.
 - One canonical built-in registry (per `signatures.rs::BuiltinRegistry`); per-dialect registries are out of scope. Backend availability is a per-function `backends:` property, not a registry split.
-- **Out of scope for v1**: nested composite nullability (struct fields, array elements — conservatively nullable); `Decimal(p,s)` precision arithmetic; multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`.
+- **Out of scope for v1**: nested composite nullability (struct fields, array elements — conservatively nullable); multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`; engine-bound decimal division (the `/` operator on `Decimal` operands is rejected in portable code — see §15).
+- **Standing decimal gates.** `cargo test -p smelt-db --test nullability_property_tests` must stay green (no change from §11 gate). The decimal arithmetic growth formulas and division rejection must be covered by the type property oracle (`cargo test -p smelt-db --test type_property_tests`) after the decimal plan lands.
 
 ## Known Divergences / Open Questions
 
 - **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double` (with the integer/Decimal mixing rule producing `Decimal(38,10)`). `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (§16 #9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. Implementation conformance is a follow-up plan.
-- **Decimal arithmetic v1 fallback.** Decimal arithmetic in v1 produces `Decimal(38,10)` regardless of operand precision (e.g. `Decimal(19,2) + Decimal(19,2) → Decimal(38,10)`), where DuckDB native produces `Decimal(19,2)`. The fallback is conservative and avoids precision-loss; precision-aware inference is open. (See `architecture.md` §"Specs not yet authored".)
+- **Engine-bound decimal division is not yet available.** `Decimal / T` is rejected in portable code (§15). The escape hatch of declaring an engine on a model to get native division semantics (`Double` on DuckDB, `Decimal` on Spark, `NUMERIC` on Postgres) is deferred to the engine-declaration feature. Until then, users must cast to `Double` or `Float` explicitly. Tracked in `docs/research/20260516-decimal-type-system.md` §7.
+- **ByDesign aggregate divergences.** `SUM(Decimal(p, s))` returns `Decimal(38, s)` where Spark returns `Decimal(min(p+10, 38), s)` — smelt's result is conservative (wider precision). `AVG(Decimal)` returns `Double` where Spark returns `Decimal` — smelt's result is the portable choice agreed with DuckDB. Both are registered ByDesign in the divergence registry (`crates/smelt-db/tests/prop_helpers/divergences.rs`).
+- **`SIGN(Decimal)` returns `SmallInt`.** DuckDB returns `TINYINT` (same), Spark returns `Decimal`; ByDesign divergence from Spark, registered in the divergence registry.
 - **Nullability is not yet folded into the output fingerprint.** `output_fingerprint.md` treats nullability as breaking-by-default (conservative rebuild). Folding the tracked axis into the fingerprint is deferred until the fingerprint is wired into the runtime (see `docs/ROADMAP.md` item 5); the soundness contract here is the precondition for that fold. The fold must hash the structured `TypedColumn` (type + nullability), never a rendered display string, so display conventions can evolve without invalidating fingerprints.
 - **Nullability precision is deliberately coarse.** `WHERE x IS NOT NULL` narrowing, join-key non-null reasoning, nested composite tracking (struct fields, array elements), and other flow-sensitive refinements are out of scope; the contract permits them later as pure precision improvements (flipping `nullable: true → false` where provable) without a contract change. Nested composite tracking, if ever pursued, extends the composite `DataType` variants (see Design §"Axis placement").
 - **Fragment sort coverage.** `Expr<T>`, `TableExpr`, and `TableExpr<{…}>` are landed. `AggExpr<T>` and `WindowExpr<T>` are partially landed: the `ExprKind` axis enforces the kind ceiling at splice points (`WindowInScalarContext`), but type-annotation parsing for `AggExpr<T>` / `WindowExpr<T>` may still be in flight (tracked in `docs/plans/20260422-smelt-functions.md`). Validate against the live `crates/smelt-types/src/signatures.rs::SmeltType` enum.
@@ -340,6 +382,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - `docs/plans/20260405-schema-evolution-complex-types.md`
 - `docs/plans/20260422-smelt-functions.md`
 - `docs/plans/20260610-nullability-soundness.md`
+- `docs/plans/20260611-decimal-arithmetic.md` (pending)
 
 ### Related specs
 
