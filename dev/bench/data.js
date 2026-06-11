@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781177755399,
+  "lastUpdate": 1781177757506,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24695,6 +24695,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.460247247859556,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "d792d9fb939567d8d441c982c304b697cfbb5668",
+          "message": "feat(vscode): TestController — gutter icons, Test Explorer, keyboard shortcuts\n\nCreates editors/vscode/src/testController.ts with:\n- Subscribes to smelt/publishTests LSP notification to build TestItem tree\n  (no fragile regex scanning — LSP parses frontmatter and pushes authoritative list)\n- Run profile spawns `smelt test --select <name> --json` per project root,\n  parses JSON output, and reports passed/failed with duration to VSCode\n- Discovery chain for the smelt CLI binary: smelt.testPath config → smelt on\n  PATH → cargo run fallback (mirrors the LSP binary discovery chain)\n- Items are grouped by smelt project root so one invocation covers all tests\n  in the same project\n\nWires the controller into extension.ts after client.start() resolves.\nAdds smelt.testPath configuration property to package.json.\n\nStandard VSCode test keyboard shortcuts are registered automatically by the\nTestController API: Ctrl+; Ctrl+R (run nearest), Ctrl+; Ctrl+A (run all),\nCtrl+; Ctrl+F (run in file).\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-11T21:34:09+10:00",
+          "tree_id": "d8b3f0c330c842080fe958d062d4445c51efe4b7",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d792d9fb939567d8d441c982c304b697cfbb5668"
+        },
+        "date": 1781177756968,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.33382865169197,
             "unit": "MB/s"
           }
         ]
