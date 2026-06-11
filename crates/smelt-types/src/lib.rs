@@ -257,6 +257,19 @@ impl std::fmt::Display for TypedColumn {
     }
 }
 
+/// Render a `TypedColumn` for display in hover text and diagnostic messages.
+///
+/// Non-nullable columns show as `T NOT NULL`; nullable columns show as bare `T`.
+/// This is the single canonical renderer — route all hover and diagnostic
+/// column-type display through this function so tracked axes are never silently
+/// dropped from user-facing output.
+///
+/// The `NOT NULL` suffix matches the writable annotation syntax accepted by the
+/// signature parser (`Expr<Integer NOT NULL>`).
+pub fn format_typed_column_display(tc: &TypedColumn) -> String {
+    tc.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

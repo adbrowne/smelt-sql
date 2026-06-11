@@ -48,6 +48,8 @@ Go-to-definition works for:
 
 Hover over any model reference, source, or CTE to see its full schema -- column names, types, and where the data comes from.
 
+Column types include nullability: a non-nullable column shows as `T NOT NULL` (for example `INTEGER NOT NULL`), while a nullable column shows the bare type (for example `INTEGER`). This matches the annotation syntax you write in function signatures, so what you see in hover is always consistent with what you type.
+
 This is particularly useful when writing joins or aggregations: you can quickly check what columns are available without switching files.
 
 ![Model schema on hover](../assets/editor-features/01-model-schema-on-hover-editor.png)

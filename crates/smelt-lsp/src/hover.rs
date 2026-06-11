@@ -614,10 +614,7 @@ pub fn hover_text_for_column_reference(
     source_desc: Option<&str>,
 ) -> String {
     let type_line = match typed_col {
-        Some(tc) => {
-            let nullable_suffix = if tc.nullable { "?" } else { "" };
-            format!("`{}{}`", tc.data_type, nullable_suffix)
-        }
+        Some(tc) => format!("`{}`", smelt_types::format_typed_column_display(tc)),
         None => "*type unknown*".to_string(),
     };
     let mut s = format!("**`{display}`** — {type_line}");
@@ -2961,8 +2958,7 @@ mod phase_f_tests {
 
     // ── SQL column reference hover ──────────────────────────────────────────
 
-    /// Qualified column with a known type and a known source renders type +
-    /// source description on separate lines.
+    /// Non-nullable column renders `T NOT NULL`; source description on separate line.
     #[test]
     fn column_ref_hover_qualified_with_known_type_and_source() {
         let tc = smelt_types::TypedColumn {
@@ -2970,19 +2966,21 @@ mod phase_f_tests {
             nullable: false,
         };
         let text = hover_text_for_column_reference("u.user_id", Some(&tc), Some("CTE `sessions`"));
-        assert_eq!(text, "**`u.user_id`** — `BIGINT`\n\nFrom CTE `sessions`");
+        assert_eq!(
+            text,
+            "**`u.user_id`** — `BIGINT NOT NULL`\n\nFrom CTE `sessions`"
+        );
     }
 
-    /// Nullable type renders a trailing `?` to mirror `format_type` in
-    /// `column_resolution.rs` (the same convention `smelt.models.X` hover uses).
+    /// Nullable column renders bare `T` — no `?` suffix, no `NOT NULL`.
     #[test]
-    fn column_ref_hover_nullable_renders_question_mark() {
+    fn column_ref_hover_nullable_renders_bare_type() {
         let tc = smelt_types::TypedColumn {
             data_type: smelt_types::DataType::Text,
             nullable: true,
         };
         let text = hover_text_for_column_reference("name", Some(&tc), None);
-        assert_eq!(text, "**`name`** — `TEXT?`");
+        assert_eq!(text, "**`name`** — `TEXT`");
     }
 
     /// Unknown type (resolution failed) renders an italic placeholder; no

@@ -72,7 +72,7 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 | 3     | done     | 1788255e | 2026-06-11 |
 | 4     | done     | eb545939 | 2026-06-11 |
 | 5     | done     | b6fa61b6 | 2026-06-11 |
-| 6     | pending  |        |      |
+| 6     | done     |        | 2026-06-11 |
 | 7     | pending  |        |      |
 
 ---

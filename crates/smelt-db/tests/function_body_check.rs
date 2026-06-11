@@ -358,3 +358,53 @@ fn not_null_return_rejects_nullable_body() {
         "nullable body against NOT NULL return should emit ReturnTypeMismatch, got none"
     );
 }
+
+#[test]
+fn arg_type_mismatch_message_contains_not_null_for_non_nullable_arg() {
+    // When a non-nullable arg has the wrong type, the diagnostic message
+    // should include "NOT NULL" in the type display (canonical renderer used).
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("wants_text.sql");
+    let model_path = root.join("models").join("caller.sql");
+    // Function wants Text; we pass a non-nullable Integer literal (42 = INTEGER NOT NULL)
+    let fn_src = "smelt.define wants_text(x: Expr<Text>) AS (x)\n";
+    let model_src = "SELECT smelt.functions.wants_text(42) AS result\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = body_diags(&db, ws, model_file, DiagnosticCode::ArgTypeMismatch);
+    assert!(
+        !diags.is_empty(),
+        "wrong type arg should emit ArgTypeMismatch, got none"
+    );
+    let msg = &diags[0].message;
+    assert!(
+        msg.contains("NOT NULL"),
+        "ArgTypeMismatch message should contain 'NOT NULL' for non-nullable arg; got: {msg}"
+    );
+}
+
+#[test]
+fn return_type_mismatch_message_contains_not_null_for_non_nullable_body() {
+    // When the body returns a wrong type but non-nullable value, the diagnostic
+    // message should include "NOT NULL" in the type display.
+    let root = PathBuf::from("/fake/project");
+    let path = root.join("functions").join("wrong_return.sql");
+    // Body returns 42 (INTEGER NOT NULL) but declared -> Expr<Text>
+    let src = "smelt.define wrong_return() -> Expr<Text> AS (42)\n";
+
+    let (db, ws, files) = build_db(root, &[(path, src)]);
+    let file = files[0];
+
+    let diags = body_diags(&db, ws, file, DiagnosticCode::ReturnTypeMismatch);
+    assert!(
+        !diags.is_empty(),
+        "wrong return type should emit ReturnTypeMismatch, got none"
+    );
+    let msg = &diags[0].message;
+    assert!(
+        msg.contains("NOT NULL"),
+        "ReturnTypeMismatch message should contain 'NOT NULL' for non-nullable body; got: {msg}"
+    );
+}

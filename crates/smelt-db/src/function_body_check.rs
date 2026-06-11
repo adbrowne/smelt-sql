@@ -23,7 +23,7 @@ use smelt_types::signatures::{
     FrameInfo, FunctionSig, ModelOrigin, ParamSpec, SchemaMismatch, SchemaRequirement, Signature,
     SmeltType, SourceOrigin, StructRowTail, Tier, TypeConstraint, UnificationError,
 };
-use smelt_types::{DataType, TypedColumn};
+use smelt_types::{format_typed_column_display, DataType, TypedColumn};
 use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
@@ -1439,12 +1439,16 @@ pub fn check_smelt_path_call(
                         Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => "Numeric".to_string(),
                         _ => "<unknown>".to_string(),
                     };
+                    let arg_display = format_typed_column_display(&TypedColumn {
+                        data_type: arg_type.clone(),
+                        nullable: arg_nullable,
+                    });
                     diagnostics.push(Diagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!(
                             "Argument `{}` has type `{}`, which does not satisfy parameter `{}: {}` of `{}`",
                             arg_expr.text().trim(),
-                            arg_type,
+                            arg_display,
                             param.name,
                             expected_text,
                             sig.name
@@ -2907,7 +2911,8 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr) -> Vec<Diagnostic
             severity: DiagnosticSeverity::Error,
             message: format!(
                 "Return type mismatch: declared `-> {}` but body evaluates to `{}`",
-                declared_text, inferred
+                declared_text,
+                format_typed_column_display(&inferred_col)
             ),
             range: body_range,
             code: Some(DiagnosticCode::ReturnTypeMismatch),
