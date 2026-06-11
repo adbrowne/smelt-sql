@@ -271,4 +271,12 @@ async fn publish_tests_entries_have_required_fields() {
             .ends_with("test_simple.sql"),
         "test uri must point to the test file; got: {entry}"
     );
+
+    // line must be 0 — the `--- name:` delimiter is the first line of the file,
+    // so the gutter icon lands at the declaration, not after the closing `---`.
+    assert_eq!(
+        entry["line"].as_u64(),
+        Some(0),
+        "line must be the delimiter line (0); got: {entry}"
+    );
 }

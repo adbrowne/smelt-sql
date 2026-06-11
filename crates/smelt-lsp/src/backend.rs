@@ -99,8 +99,12 @@ impl InitErrors {
     }
 }
 
-/// (virtual_path, start_line_offset) for each section in a multi-model file.
-pub(crate) type MultiModelEntry = Vec<(PathBuf, u32)>;
+/// `(virtual_path, sql_start_line, delimiter_line)` for each section in a
+/// multi-model file.  `sql_start_line` is the offset of the SQL body (after
+/// the closing `---`) used for diagnostic line adjustment.  `delimiter_line`
+/// is the 0-based line of the `--- name: foo ---` header, used by the VSCode
+/// TestController so the gutter icon lands on the declaration line.
+pub(crate) type MultiModelEntry = Vec<(PathBuf, u32, u32)>;
 
 pub struct Backend {
     client: Client,
@@ -494,15 +498,15 @@ impl Backend {
         let mm = self.multi_model_files.lock().await;
         let entries = mm.get(real_path)?;
 
-        // Find the section that contains this line (last section whose start_line <= line)
-        let mut best: Option<&(PathBuf, u32)> = None;
+        // Find the section that contains this line (last section whose sql_start_line <= line)
+        let mut best: Option<&(PathBuf, u32, u32)> = None;
         for entry in entries {
             if entry.1 <= line {
                 best = Some(entry);
             }
         }
 
-        best.map(|(vp, start_line)| (vp.clone(), line - start_line))
+        best.map(|(vp, sql_start_line, _)| (vp.clone(), line - sql_start_line))
     }
 
     /// Register a SQL file's content in the Salsa database, handling multi-model
@@ -534,11 +538,30 @@ impl Backend {
                     PathBuf::from(format!("{}::{}", real_path.display(), model_name));
                 let sql_content = &content[section.sql_range.clone()];
 
-                // Calculate the starting line of this section's SQL in the original file
-                let start_line = content[..section.sql_range.start]
+                // Calculate the starting line of this section's SQL in the original file.
+                let sql_start_line = content[..section.sql_range.start]
                     .chars()
                     .filter(|&c| c == '\n')
                     .count() as u32;
+
+                // Find the `--- name: foo ---` delimiter line so the VSCode
+                // TestController gutter icon lands on the declaration, not on
+                // the closing `---` of the YAML block.
+                let delimiter_line = content[..section.sql_range.start]
+                    .lines()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, l)| {
+                        let t = l.trim();
+                        if let Some(rest) = t.strip_prefix("--- name:") {
+                            rest.trim_end().trim_end_matches("---").trim()
+                                == model_name.as_str()
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(i, _)| i as u32)
+                    .unwrap_or(0);
 
                 // Upsert the SourceFile input. `set_source_file` only mutates the
                 // underlying text/project_root when they differ, so spurious
@@ -555,7 +578,7 @@ impl Backend {
                     );
                 }
 
-                virtual_entries.push((virtual_path.clone(), start_line));
+                virtual_entries.push((virtual_path.clone(), sql_start_line, delimiter_line));
                 registered.push(virtual_path);
             }
 
@@ -633,14 +656,14 @@ impl Backend {
         let lsp_diagnostics: Vec<lsp_types::Diagnostic> =
             if let Some(virtual_entries) = multi_entries {
                 let mut lsp_diagnostics = Vec::new();
-                for (virtual_path, start_line) in virtual_entries {
+                for (virtual_path, sql_start_line, _) in virtual_entries {
                     let virtual_text = file_text(&db, &virtual_path);
                     let converter = self.boundary_converter(&virtual_text).await;
                     let diagnostics = diagnostics_for(&db, &virtual_path);
                     for d in &diagnostics {
                         let mut lsp_diag = self.to_lsp_diagnostic(d, &converter);
-                        lsp_diag.range.start.line += start_line;
-                        lsp_diag.range.end.line += start_line;
+                        lsp_diag.range.start.line += sql_start_line;
+                        lsp_diag.range.end.line += sql_start_line;
                         lsp_diagnostics.push(lsp_diag);
                     }
                 }
@@ -706,8 +729,8 @@ impl Backend {
         let virtual_to_real_and_line: std::collections::HashMap<PathBuf, (PathBuf, u32)> = mm
             .iter()
             .flat_map(|(real_path, entries)| {
-                entries.iter().map(move |(virtual_path, start_line)| {
-                    (virtual_path.clone(), (real_path.clone(), *start_line))
+                entries.iter().map(move |(virtual_path, _sql_start, delimiter_line)| {
+                    (virtual_path.clone(), (real_path.clone(), *delimiter_line))
                 })
             })
             .collect();
