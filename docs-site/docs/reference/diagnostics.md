@@ -12,7 +12,11 @@ smelt emits named diagnostic codes through its compiler, LSP server, and CLI. Ev
 
 ## Code catalogue
 
-### `UnknownStructFieldType`
+The complete `DiagnosticCode` catalogue — every variant, its severity, and the user-input condition that triggers it — is maintained in
+[`docs/specs/diagnostics.md`](https://github.com/brownie/smelt/blob/main/docs/specs/diagnostics.md).
+Codes are grouped by owning feature: models & core analysis, sources, seeds, timeseries, incremental & cumulative, types, Python models, functions & expansion, meta-language, records/maps/loaders, and multi-model production.
+
+### Example: `UnknownStructFieldType`
 
 **Severity**: Error
 
@@ -27,7 +31,3 @@ smelt.define my_fn(t: Expr<Struct<{a: Integer, b: Bogus}>>) -> Expr<Integer> AS 
 ```
 
 **Fix**: Replace the unrecognised type name with a concrete smelt `DataType` such as `Integer`, `Text`, `Float`, `Boolean`, `Timestamp`, or a nested `Struct<{…}>`.
-
----
-
-For the full internal catalogue see [`crates/smelt-db/src/diagnostics_types.rs`](https://github.com/brownie/smelt/blob/main/crates/smelt-db/src/diagnostics_types.rs).
