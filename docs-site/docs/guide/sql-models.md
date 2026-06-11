@@ -147,9 +147,11 @@ Frontmatter in SQL files overrides project-level `smelt.yml` settings.
 | `incremental.partition_column` | string | Column for partition deletion |
 | `incremental.granularity` | `hour` \| `day` \| `week` \| `month` \| `quarter` \| `year` | Time granularity for partitioning |
 | `incremental.unique_key` | string \| string[] | Columns for row-level merge (optional) |
-
-See [Incremental Models](incremental-models.md) for a complete guide.
-
+| `schema_evolution` | object | Schema-change strategy for incremental models. Controls how smelt handles output schema changes (e.g., `alter_and_backfill` or `full_refresh`). See [Schema Evolution](schema-evolution.md). |
+| `columns` | object/map | Per-column metadata (defaults and backfill expressions) used during schema evolution. See [Schema Evolution](schema-evolution.md). |
+| `format` | `delta` \| `parquet` | Per-model table format override for Spark targets. Affects schema evolution capabilities. See [Schema Evolution — Table format configuration](schema-evolution.md#table-format-configuration). |
 | `tags` | string[] | Organization tags |
 | `owner` | string | Responsible team or person |
 | `description` | string | Model documentation |
+
+See [Incremental Models](incremental-models.md) for a complete guide.

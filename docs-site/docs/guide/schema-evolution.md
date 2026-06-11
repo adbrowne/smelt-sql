@@ -13,7 +13,7 @@ When an incremental model runs, smelt:
 
 ## Configuration
 
-Schema evolution is configured in the model's frontmatter or in `smelt.yml`.
+Schema evolution is configured in the model's **SQL frontmatter**. The `schema_evolution` and `columns` keys are frontmatter-only — they have no effect if placed under `models.<name>:` in `smelt.yml`.
 
 ### Frontmatter example
 
@@ -34,16 +34,6 @@ SELECT
     status,
     metadata
 FROM smelt.upstream_model
-```
-
-### smelt.yml example
-
-```yaml
-models:
-  my_model:
-    materialization: table
-    schema_evolution:
-      strategy: alter_and_backfill
 ```
 
 ### Configuration fields
@@ -260,24 +250,30 @@ Not all backends support the same schema evolution operations. The table below s
 
 ### Table format configuration
 
-Spark targets default to Delta format. You can override per-target or per-model:
+Spark targets default to Delta format. The target-level `format` field is set in `smelt.yml` under the target's config:
 
 ```yaml
-# Per-target
+# smelt.yml — target-level format
 targets:
   spark_prod:
     type: spark
     connect_url: sc://localhost:15002
     schema: main
     format: delta  # or "parquet"
-
-# Per-model override
-models:
-  legacy_table:
-    format: parquet
 ```
 
-See [Project Configuration](../reference/smelt-yml.md) for full details.
+To override the format for an individual model, declare `format` in that model's **SQL frontmatter**:
+
+```sql
+---
+materialization: table
+format: parquet
+---
+
+SELECT ...
+```
+
+See [Project Configuration](../reference/smelt-yml.md) for full target configuration details.
 
 ## The `--allow-full-refresh` flag
 

@@ -119,6 +119,9 @@ models:
 
 **Tags** from `smelt.yml` and SQL frontmatter are merged (union, deduplicated).
 
+!!! note "Layer split: smelt.yml vs SQL frontmatter"
+    The fields listed above are the **complete set** of per-model configuration accepted in `smelt.yml`. Other per-model settings — `schema_evolution` (schema-change strategy), `columns` (per-column defaults and backfills), and per-model table `format` — are declared in the model's **SQL frontmatter**, not in `smelt.yml`. Placing these keys under `models.<name>:` in `smelt.yml` has no effect. See the [SQL Models guide](../guide/sql-models.md#supported-metadata-fields) and the [Schema Evolution guide](../guide/schema-evolution.md) for how to declare them.
+
 ### Timeseries Configuration
 
 Models that process time-partitioned data must declare a `timeseries:` block. This is required for incremental models and cumulative aggregates. The `timeseries:` and `incremental:` keys are siblings, not nested.
@@ -201,35 +204,6 @@ Smelt validates incremental models to ensure they produce the same results wheth
 | `allow_subqueries` | bool | `false` | Allow subqueries which may reference data outside the current partition |
 | `allow_nondeterministic` | bool | `false` | Allow nondeterministic functions (e.g., `RANDOM()`, `NOW()`) |
 | `allow_distinct` | bool | `false` | Allow DISTINCT which may produce different results when data is split across partitions |
-
-### Schema Evolution Configuration
-
-Schema evolution controls how smelt handles changes to an incremental model's output schema. See the [Schema Evolution guide](../guide/schema-evolution.md) for detailed examples.
-
-```yaml
-models:
-  my_model:
-    materialization: table
-    schema_evolution:
-      strategy: alter_and_backfill
-    columns:
-      status:
-        default: "'pending'"
-        backfill: "CASE WHEN status IS NULL THEN 'pending' ELSE status END"
-```
-
-#### Schema Evolution Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `strategy` | string | `alter_and_backfill` | `alter_and_backfill`: use ALTER TABLE when possible. `full_refresh`: always drop and recreate on any schema change. |
-
-#### Column Fields (for schema evolution)
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `default` | string | | SQL expression for the DEFAULT value when adding a column via ALTER TABLE. Must be a valid SQL expression (e.g., `"0"`, `"'unknown'"`, `"NULL"`, `"STRUCT_PACK(a := 0)"`). |
-| `backfill` | string | | SQL expression for UPDATE backfill after a column is added. Used as: `UPDATE table SET column = <backfill_expr>`. |
 
 ---
 
