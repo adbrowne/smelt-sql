@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781164041416,
+  "lastUpdate": 1781164043920,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24326,6 +24326,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.62753102190397,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6ff1f4ba98c5c375476984c2f338998ca55e2e5b",
+          "message": "Merge pull request #134 from adbrowne/worktree-test_features\n\nSilent-failures hardening + backbuild/source-timeseries runtime migration (feature-sweep close-out)",
+          "timestamp": "2026-06-11T17:42:59+10:00",
+          "tree_id": "b10d43d7a5cdfec23451ccfdb60e8220d6658492",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6ff1f4ba98c5c375476984c2f338998ca55e2e5b"
+        },
+        "date": 1781164043187,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.325534935559354,
             "unit": "MB/s"
           }
         ]
