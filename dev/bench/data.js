@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781177757506,
+  "lastUpdate": 1781178252725,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18893,6 +18893,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.252083,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "80c94db5dea844d6f655baa7764adf95287bf3e7",
+          "message": "fix(vscode): place test gutter icon on the --- name: --- line, not after closing ---\n\nMultiModelEntry now stores (virtual_path, sql_start_line, delimiter_line).\nsql_start_line is unchanged (used for diagnostic line adjustment).\ndelimiter_line is the 0-based line of the `--- name: foo ---` header, and\nis what gets sent in smelt/publishTests so the VSCode TestController places\nthe gutter run icon at the declaration, not below the frontmatter block.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-11T21:41:43+10:00",
+          "tree_id": "6ca4cc5a2fbcc052c0d16640e4184c3e8176e190",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/80c94db5dea844d6f655baa7764adf95287bf3e7"
+        },
+        "date": 1781178251326,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 44.52664,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 42.123244,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.103745,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.62979,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.30282600000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 3021.693699,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 6.013932,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 5.597263,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 5.508500000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.976012,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3331.19994,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.15639,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.18595,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.24977,
             "unit": "ms"
           }
         ]
