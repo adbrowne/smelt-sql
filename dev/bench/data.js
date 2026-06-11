@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781178252725,
+  "lastUpdate": 1781178255027,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24818,6 +24818,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.33382865169197,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "80c94db5dea844d6f655baa7764adf95287bf3e7",
+          "message": "fix(vscode): place test gutter icon on the --- name: --- line, not after closing ---\n\nMultiModelEntry now stores (virtual_path, sql_start_line, delimiter_line).\nsql_start_line is unchanged (used for diagnostic line adjustment).\ndelimiter_line is the 0-based line of the `--- name: foo ---` header, and\nis what gets sent in smelt/publishTests so the VSCode TestController places\nthe gutter run icon at the declaration, not below the frontmatter block.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-11T21:41:43+10:00",
+          "tree_id": "6ca4cc5a2fbcc052c0d16640e4184c3e8176e190",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/80c94db5dea844d6f655baa7764adf95287bf3e7"
+        },
+        "date": 1781178254366,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.33825115454834,
             "unit": "MB/s"
           }
         ]
