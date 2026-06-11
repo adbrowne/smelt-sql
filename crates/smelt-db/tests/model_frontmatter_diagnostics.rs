@@ -268,3 +268,75 @@ FROM events
         );
     }
 }
+
+// ── Structural multi-model format errors ─────────────────────────────────────
+
+/// SQL content before the first `--- name: ... ---` section delimiter makes the
+/// file structurally invalid as a multi-model file. The original bug: a model
+/// file with its SQL body followed by an embedded test section (the
+/// `and_all_predicates.sql` pattern) silently loaded as a plain model with no
+/// metadata, so `smelt test` printed "No tests found."
+///
+/// The fix: `MalformedDelimiter` from `extract_file_metadata` must surface as a
+/// `MalformedSectionDelimiter` diagnostic instead of being swallowed.
+#[test]
+fn sql_before_section_delimiter_emits_malformed_section_delimiter() {
+    let root = PathBuf::from("/fake/model_fm_sql_before_delimiter");
+    let path = root.join("models").join("embedded_test.sql");
+    // SQL before the first `--- name: ... ---` line — the pattern that caused
+    // `and_all_predicates.sql` to silently produce no tests.
+    let src = "\
+SELECT reduce([true, false, true], and_all) AS all_true
+
+--- name: reduce_is_false ---
+materialization: test
+test:
+  model: and_all_predicates
+  expect:
+    - {all_true: false}
+---
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedSectionDelimiter);
+    assert!(
+        !diags.is_empty(),
+        "expected MalformedSectionDelimiter diagnostic for SQL-before-section-delimiter pattern; got {:#?}",
+        diags_for(&db, ws, file)
+    );
+    assert_eq!(
+        diags[0].severity,
+        DiagnosticSeverity::Error,
+        "MalformedSectionDelimiter must be Error severity"
+    );
+}
+
+/// A single-model file whose `---` frontmatter is never closed must emit an
+/// `UnclosedFrontmatter` diagnostic rather than silently treating the file as
+/// having no frontmatter.
+#[test]
+fn unclosed_frontmatter_emits_diagnostic() {
+    let root = PathBuf::from("/fake/model_fm_unclosed");
+    let path = root.join("models").join("unclosed.sql");
+    // Opening `---` with no closing `---` — the YAML block runs to EOF.
+    let src = "\
+---
+materialization: table
+SELECT 1 AS val
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::UnclosedFrontmatter);
+    assert!(
+        !diags.is_empty(),
+        "expected UnclosedFrontmatter diagnostic for missing closing ---; got {:#?}",
+        diags_for(&db, ws, file)
+    );
+    assert_eq!(
+        diags[0].severity,
+        DiagnosticSeverity::Error,
+        "UnclosedFrontmatter must be Error severity"
+    );
+}

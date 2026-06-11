@@ -385,6 +385,9 @@ impl Backend {
                 DbCode::CumulativeForbidsTimeseries => "cumulative-forbids-timeseries",
                 DbCode::CumulativeForbidsIncremental => "cumulative-forbids-incremental",
                 DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
+                // Multi-model section structure diagnostic codes.
+                DbCode::MalformedSectionDelimiter => "malformed-section-delimiter",
+                DbCode::UnclosedFrontmatter => "unclosed-frontmatter",
                 DbCode::DuplicateAddress => "duplicate-address",
                 DbCode::DefaultReferencesParameter => "default-references-parameter",
                 DbCode::UnknownStructFieldType => "unknown-struct-field-type",

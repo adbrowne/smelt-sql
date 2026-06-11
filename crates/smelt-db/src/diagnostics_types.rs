@@ -606,6 +606,19 @@ pub enum DiagnosticCode {
     /// Message: "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references"
     GeneratorBodyForbidsModelReflection,
 
+    // ── Multi-model section structure diagnostic codes ───────────────────────
+    /// SQL content (non-comment, non-empty) appears before the first
+    /// `--- name: model_name ---` section delimiter in a multi-model file.
+    /// This makes the file structurally invalid: SQL must be inside a named
+    /// section. Anchored at the top of the file (offset 0). Error severity.
+    /// Message: "malformed multi-model section delimiter at line {n}: SQL content must be inside a '--- name: model_name ---' section; found non-section content before the first delimiter"
+    MalformedSectionDelimiter,
+    /// A `---` frontmatter opening in a single-model or multi-model file has
+    /// no matching closing `---`. Anchored at the top of the file (offset 0).
+    /// Error severity.
+    /// Message: "frontmatter not closed: missing closing '---'"
+    UnclosedFrontmatter,
+
     // ── Timeseries diagnostic codes ──────────────────────────────────────────
     /// A model declares `incremental:` without a sibling `timeseries:` block.
     /// Anchored at the top of the file (line 0, column 0).

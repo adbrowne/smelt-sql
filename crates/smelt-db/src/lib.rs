@@ -62,6 +62,62 @@ use smelt_parser::{self, File as AstFile};
 /// (`meta_config_loading.md` — the loader is governed by the same
 /// lists-must-be-consumed rule). A record-schema loader returns a single record,
 /// not a collection, and is not flagged here.
+/// Map a `MetadataError` to a `Diagnostic`, or `None` when the variant is
+/// handled by a dedicated arm elsewhere in `check_file_diagnostics`.
+///
+/// **This match must remain exhaustive.** Every variant of `MetadataError` is
+/// listed explicitly so the compiler refuses to compile when a new variant is
+/// added without a corresponding handler. `None` arms are intentional: they
+/// document that the variant is handled somewhere else (annotated inline).
+/// This is the compiler-enforced gate for the fail-loud discipline —
+/// `MetadataError` variant exhaustiveness rule (architecture.md §11).
+fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
+    match err {
+        MetadataError::MalformedDelimiter(line) => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "malformed multi-model section delimiter at line {line}: SQL content must be \
+                 inside a '--- name: model_name ---' section; found non-section content before \
+                 the first delimiter"
+            ),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::MalformedSectionDelimiter),
+            data: None,
+        }),
+        MetadataError::UnclosedFrontmatter(_line) => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: "frontmatter not closed: missing closing '---'".to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::UnclosedFrontmatter),
+            data: None,
+        }),
+        MetadataError::MissingModelName(section) => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!("multi-model section {section} is missing a model name"),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::MalformedSectionDelimiter),
+            data: None,
+        }),
+        MetadataError::YamlParseError(e) => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!("YAML parse error in frontmatter: {e}"),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::YamlParseError),
+            data: None,
+        }),
+        // Handled by dedicated arms in check_file_diagnostics (with precise span
+        // anchoring and early returns):
+        MetadataError::GeneratesUnknownValue { .. } => None,
+        MetadataError::GeneratesMixedWithBareModel { .. } => None,
+        // These variants only arise from validate_timeseries on the Ok(Single)
+        // path — they are never returned by extract_file_metadata itself:
+        MetadataError::TimeseriesRequiredForIncremental => None,
+        MetadataError::MalformedTimeseries { .. } => None,
+        MetadataError::CumulativeForbidsTimeseries => None,
+        MetadataError::CumulativeForbidsIncremental => None,
+    }
+}
+
 fn select_item_yields_bare_list(expr: &smelt_parser::ast::Expr) -> bool {
     // Case 1: a bare list literal directly in the select item.
     if expr.as_array_literal().is_some() {
@@ -1099,6 +1155,18 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             })
             .accumulate(db);
             // File cannot be used further; bail.
+            return;
+        }
+        Err(e) => {
+            // All MetadataError variants not handled by the Generates* arms above
+            // go through the exhaustive mapper. The compiler enforces that every
+            // new MetadataError variant is explicitly listed there.
+            if let Some(diag) = map_metadata_error_to_diagnostic(&e) {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+            // A structural metadata error means the file's model shape is unknown;
+            // skip all subsequent semantic checks (refs, types, timeseries, etc.)
+            // to avoid cascading noise from a file the parser couldn't classify.
             return;
         }
         Ok(FileMetadata::Generator { .. }) => {

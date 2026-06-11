@@ -711,12 +711,21 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
 
         current_line = closing_line + 1;
 
-        // Find SQL range (from after closing --- to next section or EOF)
-        let sql_start_byte: usize = source
-            .lines()
-            .take(current_line)
-            .map(|line| line.len() + 1)
-            .sum();
+        // Find SQL range (from after closing --- to next section or EOF).
+        // Guard against files without a trailing newline: summing (len + 1)
+        // for every line overcounts the last line by 1 when it has no \n,
+        // producing an index past source.len().  Capping at source.len() is
+        // always correct because `sql_start_byte` for a section that starts
+        // at EOF must equal `source.len()` (empty SQL body).
+        let sql_start_byte: usize = if current_line >= lines.len() {
+            source.len()
+        } else {
+            source
+                .lines()
+                .take(current_line)
+                .map(|line| line.len() + 1)
+                .sum()
+        };
 
         // Find next section delimiter or EOF
         let sql_end_line = lines[current_line..]
@@ -725,11 +734,15 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
             .map(|pos| current_line + pos)
             .unwrap_or(lines.len());
 
-        let sql_end_byte: usize = source
-            .lines()
-            .take(sql_end_line)
-            .map(|line| line.len() + 1)
-            .sum();
+        let sql_end_byte: usize = if sql_end_line >= lines.len() {
+            source.len()
+        } else {
+            source
+                .lines()
+                .take(sql_end_line)
+                .map(|line| line.len() + 1)
+                .sum()
+        };
 
         models.push(ModelSection {
             metadata,
