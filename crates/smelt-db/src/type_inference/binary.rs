@@ -80,20 +80,31 @@ fn promote_numeric_operands_for_op(
         }
     }
 
-    // Spec §15 division rejection: `Decimal / T` is not in the portable surface.
-    // Return Unknown early so the type is consistent with the TypeMismatch
-    // diagnostic emitted by `check_decimal_division_diagnostics`.
-    // Only the LEFT operand being Decimal triggers rejection — `T / Decimal`
-    // (e.g. Float / decimal_literal) lets the Float promotion path handle it.
-    if op == "/"
-        && left
+    // Spec §15 division rejection: division with a Decimal operand is not in the
+    // portable surface (engines disagree on the result family). Return Unknown
+    // early so the type is consistent with the TypeMismatch diagnostic emitted by
+    // `check_decimal_division_diagnostics`. The carve-out is a Float/Double
+    // counterpart: it promotes the whole expression to a portable floating result
+    // (DuckDB-aligned), so `Float / Decimal` / `Double / Decimal` are NOT rejected
+    // and fall through to the promotion path below. An integer-family numerator
+    // over a Decimal denominator (`Integer / Decimal`) must reject too, rather than
+    // coerce to a spurious `Decimal(38, 10)`.
+    if op == "/" {
+        let left_decimal = left
             .as_ref()
-            .is_some_and(|l| matches!(l, DataType::Decimal { .. }))
-    {
-        return Some(TypedColumn {
-            data_type: DataType::Unknown,
-            nullable: true,
-        });
+            .is_some_and(|l| matches!(l, DataType::Decimal { .. }));
+        let integer_over_decimal = right
+            .as_ref()
+            .is_some_and(|r| matches!(r, DataType::Decimal { .. }))
+            && left
+                .as_ref()
+                .is_some_and(|l| lift_integer_to_decimal(l).is_some());
+        if left_decimal || integer_over_decimal {
+            return Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            });
+        }
     }
 
     // Decimal-family path: if either operand is Decimal or an integer that
@@ -663,8 +674,17 @@ pub fn check_decimal_division_diagnostics(
 
         let left_tc = infer_binary_operand(&binary, 0, ctx);
         let lt = left_tc.as_ref().map(|t| &t.data_type);
+        let right_tc = infer_binary_operand(&binary, 1, ctx);
+        let rt = right_tc.as_ref().map(|t| &t.data_type);
 
-        if !lt.is_some_and(|d| matches!(d, DataType::Decimal { .. })) {
+        // Reject division with a Decimal operand. Mirror the inference rejection
+        // above: a Decimal numerator (any denominator), or an integer-family
+        // numerator over a Decimal denominator. `Float/Double / Decimal` is the
+        // carve-out — it promotes to a portable floating result and is allowed.
+        let left_decimal = lt.is_some_and(|d| matches!(d, DataType::Decimal { .. }));
+        let integer_over_decimal = rt.is_some_and(|d| matches!(d, DataType::Decimal { .. }))
+            && lt.is_some_and(|d| lift_integer_to_decimal(d).is_some());
+        if !(left_decimal || integer_over_decimal) {
             continue;
         }
 

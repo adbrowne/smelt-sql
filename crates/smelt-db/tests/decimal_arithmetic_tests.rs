@@ -239,6 +239,45 @@ fn decimal_integer_division_rejected() {
     );
 }
 
+/// Integer / Decimal must also be rejected: division with a Decimal operand is
+/// non-portable regardless of operand order (spec §15). The integer-family
+/// numerator must not coerce to a spurious `Decimal(38, 10)` — it rejects with
+/// a TypeMismatch and degrades to Unknown, exactly like `Decimal / Integer`.
+#[test]
+fn integer_decimal_division_rejected() {
+    let model_src = "SELECT CAST(1 AS INTEGER) / CAST(1 AS DECIMAL(10,2)) AS result\n";
+    let all_diags = diags_for_model(model_src);
+    let type_mismatch_diags: Vec<_> = all_diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::TypeMismatch))
+        .collect();
+
+    assert_eq!(
+        type_mismatch_diags.len(),
+        1,
+        "expected exactly one TypeMismatch diagnostic for Integer / Decimal; got: {:?}",
+        all_diags
+    );
+    assert!(
+        type_mismatch_diags[0].message.contains("Double"),
+        "TypeMismatch message should mention 'Double' as the cast remedy; got: {}",
+        type_mismatch_diags[0].message
+    );
+
+    // The result type should be Unknown
+    let sql = "SELECT CAST(1 AS INTEGER) / CAST(1 AS DECIMAL(10,2)) AS result";
+    let parse = smelt_parser::parse(sql);
+    let file = File::cast(parse.syntax()).expect("parse File");
+    let select = file.select_stmt().expect("parse SELECT");
+    let types = infer_select_column_types(&select, &TypeContext::new());
+    assert_eq!(types.len(), 1, "expected exactly one output column");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Unknown,
+        "Integer / Decimal result should be Unknown"
+    );
+}
+
 /// Phase 3 TDD test 3: Integer / Integer is still truncating division — no TypeMismatch.
 #[test]
 fn integer_division_still_truncating() {

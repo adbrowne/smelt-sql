@@ -8,7 +8,7 @@ SELECT
     os.is_terminal,
     os.is_successful,
     o.payment_method,
-    o.discount_pct / 100.0 AS discount_rate
+    CAST(o.discount_pct AS DOUBLE) / 100.0 AS discount_rate
 FROM smelt.sources.raw.orders AS o
 LEFT JOIN smelt.order_statuses AS os ON o.status = os.status_code
 
