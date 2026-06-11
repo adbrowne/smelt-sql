@@ -62,7 +62,7 @@ This plan implements `docs/specs/types.md` §16 (Timezone). The `DataType::Times
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-06-12 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -218,6 +218,10 @@ This plan implements `docs/specs/types.md` §16 (Timezone). The `DataType::Times
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Pre-existing baseline repairs (committed before Phase 1, off-plan, user-approved).** The branch base (main) had four standing gates red from the decimal/parser work, unrelated to timezone: malformed `--- name: X` multi-model delimiters in three `test_workspace` decimal models + five inline strings in `decimal_arithmetic_tests.rs` (`example_diagnostics`, `decimal_arithmetic_tests`); pre-existing `cargo fmt` violations in smelt-cli/core/lsp; three uncatalogued `DiagnosticCode` variants in `docs/specs/diagnostics.md` (`diagnostics_catalogue`). Repaired in commit `32b1d0be` so timezone phases verify against a clean baseline.
+- **Pre-existing decimal-division coercion bug (off-plan, user-approved).** `prop_coercion_matrix` was red: `Integer / Decimal` coerced to `Decimal(38, 10)` where DuckDB returns `Double`. Per spec §15 division with any Decimal operand is rejected; the inference + diagnostic only checked the left operand. Fixed to reject integer-family-over-Decimal too (→ Unknown + TypeMismatch), with the `Float/Double / Decimal` promotion carve-out preserved, in commit `feb32e0b` (which also remediated the affected ecommerce staging + multi_engine mart example models — the idiomatic `SUM(cents) / 100.0` pattern — to the portable `CAST(<int> AS DOUBLE) / 100.0`). Spec §15 Known Divergences wording clarified.
+- **Phase 4 follow-up: stale `BuiltinRegistry` tz entries.** Phase 1 removed `NOW`/`CURRENT_TIMESTAMP`/`DATE_TRUNC` from the `REGISTRY_MIGRATED` allowlist so they fall through to the corrected legacy match; the `BuiltinRegistry` signatures in `crates/smelt-types/src/signatures.rs` still carry `with_timezone: false`. No live path surfaces them today (verified by the Phase 1 reviewer), but Phase 4 should update those registry entries to `with_timezone: true` and restore the allowlist entries.
 
 ---
 
