@@ -992,7 +992,11 @@ pub fn generate_expr(
                 .filter(|c| c.data_type.is_numeric())
                 .collect();
 
-            // Rotate through arithmetic operators that share numeric promotion rules
+            // Rotate through arithmetic operators that share numeric promotion rules.
+            // "/" is intentionally absent: Decimal / T is rejected as non-portable
+            // (spec §15 "Division rejection"), so generating it would produce
+            // TypeMismatch diagnostics rather than testing type inference. Integer
+            // and Float division are not generated here to keep the oracle focused.
             let ops = ["+", "-", "*", "%"];
             let op = ops[expr_idx % ops.len()];
 

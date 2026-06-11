@@ -152,18 +152,6 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::ByDesign,
         },
         TypeDivergence {
-            id: "decimal_division",
-            description:
-                "Decimal division — smelt preserves Decimal type, DuckDB returns Double to avoid infinite precision",
-            smelt_type: DataType::Decimal {
-                precision: 38,
-                scale: 10,
-            },
-            duckdb_type: Some(DataType::Double),
-            spark_type: None,
-            status: DivergenceStatus::ByDesign,
-        },
-        TypeDivergence {
             id: "float_division",
             description:
                 "Float division — smelt preserves Float type, DuckDB returns Double for division",

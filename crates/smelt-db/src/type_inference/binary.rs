@@ -80,6 +80,18 @@ fn promote_numeric_operands_for_op(
         }
     }
 
+    // Spec §15 division rejection: `Decimal / T` is not in the portable surface.
+    // Return Unknown early so the type is consistent with the TypeMismatch
+    // diagnostic emitted by `check_decimal_division_diagnostics`.
+    // Only the LEFT operand being Decimal triggers rejection — `T / Decimal`
+    // (e.g. Float / decimal_literal) lets the Float promotion path handle it.
+    if op == "/" && left.as_ref().is_some_and(|l| matches!(l, DataType::Decimal { .. })) {
+        return Some(TypedColumn {
+            data_type: DataType::Unknown,
+            nullable: true,
+        });
+    }
+
     // Decimal-family path: if either operand is Decimal or an integer that
     // would be lifted to Decimal, apply the spec §15 growth formula.
     if let (Some(ref l), Some(ref r)) = (&left, &right) {
@@ -128,9 +140,10 @@ fn promote_numeric_operands_for_op(
         (Some(DataType::Decimal { .. }), Some(_)) | (Some(_), Some(DataType::Decimal { .. })) => {
             // Fallback: one side is Decimal but the other didn't lift via the
             // growth-formula path (e.g. Float + Decimal — Float has no precise
-            // p/s to plug into the formula, so it falls through). Keep the
-            // historical Decimal(38, 10) so existing downstream code is not
-            // disturbed.
+            // p/s to plug into the formula, so it falls through). Division with
+            // a Decimal LEFT operand is already handled by the early return above.
+            // Keep the historical Decimal(38, 10) so existing downstream code is
+            // not disturbed.
             Some(TypedColumn {
                 data_type: DataType::Decimal {
                     precision: 38,
@@ -603,6 +616,67 @@ pub fn check_decimal_precision_overflow_diagnostics(
                 });
             }
         }
+    }
+
+    diags
+}
+
+/// Walk all BINARY_EXPR nodes in a SELECT statement and emit one
+/// `TypeMismatch` Error at the `/` operator span whenever either operand is
+/// Decimal-family (spec §15 "Division rejection").
+///
+/// `Decimal / T` for any numeric `T` is not in the portable surface. The
+/// diagnostic message directs the user to cast operands to Double.
+pub fn check_decimal_division_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::BINARY_EXPR;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != BINARY_EXPR {
+            continue;
+        }
+        let binary = match BinaryExpr::cast(node.clone()) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let op = match binary.operator() {
+            Some(op) => op,
+            None => continue,
+        };
+
+        if op.as_str() != "/" {
+            continue;
+        }
+        if binary.is_unary() {
+            continue;
+        }
+
+        let left_tc = infer_binary_operand(&binary, 0, ctx);
+        let lt = left_tc.as_ref().map(|t| &t.data_type);
+
+        if !lt.is_some_and(|d| matches!(d, DataType::Decimal { .. })) {
+            continue;
+        }
+
+        let range = binary
+            .operator_token_range()
+            .unwrap_or_else(|| node.text_range());
+
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: "Decimal division is not in the portable surface — cast operands to Double: \
+                      CAST(a AS DOUBLE) / CAST(b AS DOUBLE)"
+                .to_string(),
+            range,
+            code: Some(crate::DiagnosticCode::TypeMismatch),
+            data: None,
+        });
     }
 
     diags
