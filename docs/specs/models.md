@@ -205,7 +205,6 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 ## Known Divergences / Open Questions
 
-- **`test` mode missing from materializations user guide.** `docs-site/docs/guide/materializations.md` documents four materialization types; `test` is absent. It is documented only in the testing guide. Should be added to materializations page.
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
@@ -222,7 +221,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
   - `crates/smelt-core/src/config.rs` (inline `#[cfg(test)]`) — materialization validation, tag merging, ephemeral/test constraints
 - **User docs**:
   - `docs-site/docs/guide/sql-models.md`
-  - `docs-site/docs/guide/materializations.md` (missing `test` mode)
+  - `docs-site/docs/guide/materializations.md`
 - **Related specs**:
   - `architecture.md` — `smelt.<path>` addressing scheme and identity-from-structure principle
   - `timeseries.md` — `timeseries:` frontmatter block

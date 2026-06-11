@@ -61,8 +61,8 @@ The 2026-05-30 feature-sweep ledger closed with 70 findings fixed and six delibe
 |-------|----------|--------|------|
 | 1     | done     | d8330311 | 2026-06-11 |
 | 2     | done     | 8e92002f | 2026-06-11 |
-| 3     | done     |        | 2026-06-11 |
-| 4     | pending  |        |      |
+| 3     | done     | 255d6a97 | 2026-06-11 |
+| 4     | done     |        | 2026-06-11 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
