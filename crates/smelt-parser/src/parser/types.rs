@@ -423,6 +423,13 @@ impl<'a> Parser<'a> {
             // TYPE_REF's raw text, so we keep that as a flat run here.
             // Phase 19: also detect optional `, ctx` context binding
             // and emit an `EXPR_CTX` child node.
+            //
+            // Phase 5 (nullability-soundness): `NOT NULL` qualifiers are
+            // NOT consumed inside `parse_type_ref`; they are left for the
+            // enclosing `PARAM` or `ROW_FIELD` context to consume as a
+            // sibling of the `TYPE_REF` node. This keeps `type_ref.text()`
+            // clean (no trailing "NOT NULL") and the string-level
+            // `parse_smelt_type` unaffected.
             Some("Expr") => {
                 self.advance(); // IDENT "Expr"
                 self.emit_expr_kind_marker(EXPR_KIND_SCALAR);
@@ -491,6 +498,11 @@ impl<'a> Parser<'a> {
     /// boundaries. Used for row-field type annotations inside a
     /// `ROW_REQUIREMENT`, where the type is a bare name like `Numeric`
     /// or `Integer` — not an `Expr<...>` sort.
+    ///
+    /// Also stops at a depth-0 `NOT_KW` so that `NOT NULL` qualifiers
+    /// (which appear after the flat type name) are not consumed into the
+    /// TYPE_REF text. The caller is responsible for consuming any trailing
+    /// `NOT NULL` qualifier (or rejecting it for struct fields).
     pub(super) fn parse_flat_type_ref_stopping_on_row_field_boundary(&mut self) {
         self.start_node(TYPE_REF);
         let mut angle_depth: i32 = 0;
@@ -503,6 +515,10 @@ impl<'a> Parser<'a> {
             }
             if angle_depth == 0 && paren_depth == 0 {
                 if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW | RBRACE | GT) {
+                    break;
+                }
+                // Stop before `NOT NULL` so the caller can handle it.
+                if k == NOT_KW && matches!(self.peek_next_non_trivia(), Some(NULL_KW)) {
                     break;
                 }
                 if k == IDENT && (self.at_smelt_define_trigger() || self.at_smelt_extern_trigger())
@@ -520,6 +536,39 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         self.finish_node();
+    }
+
+    /// Emit a zero-width `NOT_NULL_QUALIFIER` marker node (Phase 5,
+    /// nullability-soundness). The marker contains no tokens — it serves
+    /// only as a structured presence indicator that `TypeRef::not_null()`
+    /// can find without reading token text.
+    ///
+    /// Used inside `parse_expr_tail` to mark `Expr<T NOT NULL>` before
+    /// consuming the actual `NOT` / `NULL` tokens.
+    pub(super) fn emit_not_null_qualifier_marker(&mut self) {
+        self.start_node(NOT_NULL_QUALIFIER);
+        self.finish_node();
+    }
+
+    /// If the current token is `NOT` and the next non-trivia token is `NULL`,
+    /// consume both and emit a `NOT_NULL_QUALIFIER` child node (Phase 5
+    /// nullability-soundness). Returns `true` when the qualifier was consumed.
+    ///
+    /// Used outside `TYPE_REF` (in `PARAM` or `ROW_FIELD` context) to place
+    /// the qualifier as a sibling of the `TYPE_REF` node. This variant puts
+    /// the actual `NOT` and `NULL` tokens inside the qualifier node.
+    pub(super) fn try_consume_not_null_qualifier(&mut self) -> bool {
+        self.skip_trivia();
+        if self.at(NOT_KW) && matches!(self.peek_next_non_trivia(), Some(NULL_KW)) {
+            self.start_node(NOT_NULL_QUALIFIER);
+            self.advance(); // NOT_KW
+            self.skip_trivia();
+            self.advance(); // NULL_KW
+            self.finish_node();
+            true
+        } else {
+            false
+        }
     }
 
     /// Flat-consume tokens up to a depth-0 boundary. `<` and `(` open
@@ -620,6 +669,10 @@ impl<'a> Parser<'a> {
             // is a flat type name (e.g. `Numeric`, `Integer`, `Text`) —
             // not an `Expr<...>` sort. Use the flat consumer so bare
             // type names don't trip the sort-head dispatch.
+            //
+            // Phase 5 (nullability-soundness): after the flat type ref,
+            // optionally consume `NOT NULL` into a NOT_NULL_QUALIFIER child
+            // of the ROW_FIELD node (e.g. `id: Integer NOT NULL`).
             if self.at(IDENT) {
                 self.start_node(ROW_FIELD);
                 self.advance(); // IDENT name
@@ -628,6 +681,8 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.skip_trivia();
                     self.parse_flat_type_ref_stopping_on_row_field_boundary();
+                    // Optionally consume `NOT NULL` qualifier on the row field.
+                    self.try_consume_not_null_qualifier();
                 } else {
                     self.error("Expected `:` after row field name".to_string());
                 }
@@ -770,6 +825,16 @@ impl<'a> Parser<'a> {
 
         // Consume flat tokens until we see `,` at depth 0 (ctx follows)
         // or `>` at depth 0 (no ctx).
+        //
+        // Phase 5 (nullability-soundness): `Expr<T NOT NULL>` is the surface
+        // syntax for a non-nullable expression parameter. When `NOT NULL`
+        // appears before the closing `>` at depth 0, we emit a **zero-width**
+        // `NOT_NULL_QUALIFIER` marker (no child tokens) BEFORE consuming the
+        // `NOT` / `NULL` / `>` tokens. This lets `TypeRef::not_null()` detect
+        // the qualifier as a child of `TYPE_REF` without needing to parse the
+        // raw text. The tokens still become children of the TYPE_REF (so the
+        // raw text includes "NOT NULL"), but the CST marker is the authoritative
+        // detection signal used by `extract_param_spec`.
         let mut angle_depth: i32 = 0;
         loop {
             self.skip_trivia();
@@ -780,6 +845,23 @@ impl<'a> Parser<'a> {
             if angle_depth == 0 {
                 if k == GT {
                     self.advance();
+                    return;
+                }
+                // Phase 5: `NOT NULL` inside `Expr<T NOT NULL>` — emit a
+                // zero-width NOT_NULL_QUALIFIER marker (no tokens), then
+                // consume the NOT / NULL / closing `>` tokens.
+                if k == NOT_KW && matches!(self.peek_next_non_trivia(), Some(NULL_KW)) {
+                    self.emit_not_null_qualifier_marker();
+                    // Consume NOT, NULL, and the closing >.
+                    self.advance(); // NOT_KW
+                    self.skip_trivia();
+                    self.advance(); // NULL_KW
+                    self.skip_trivia();
+                    if self.at(GT) {
+                        self.advance();
+                    } else {
+                        self.skip_to_matching_gt();
+                    }
                     return;
                 }
                 if k == COMMA {
@@ -951,6 +1033,17 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.skip_trivia();
                     self.parse_flat_type_ref_stopping_on_row_field_boundary();
+                    // Phase 5 (nullability-soundness): `NOT NULL` is not accepted
+                    // on struct field types — emit a parse error.
+                    self.skip_trivia();
+                    if self.at(NOT_KW) && matches!(self.peek_next_non_trivia(), Some(NULL_KW)) {
+                        self.error(
+                            "`NOT NULL` is not accepted on struct field types; nullability is only tracked at the top-level Expr/TableExpr parameter position".to_string(),
+                        );
+                        self.advance(); // NOT_KW
+                        self.skip_trivia();
+                        self.advance(); // NULL_KW
+                    }
                 } else {
                     self.error("Expected `:` after struct field name".to_string());
                 }

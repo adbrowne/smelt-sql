@@ -781,9 +781,11 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
+        // json_contains is NULL-propagating per spec §11:
+        // json_contains(NULL, ...) = NULL and json_contains(..., NULL) = NULL.
         SqlFunction::JsonContains => Some(TypedColumn {
             data_type: DataType::Boolean,
-            nullable: false,
+            nullable: true,
         }),
 
         // Aggregate functions from optimizer that don't have specialized type inference yet

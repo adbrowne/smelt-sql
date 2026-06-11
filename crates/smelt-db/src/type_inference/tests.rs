@@ -5929,3 +5929,315 @@ fn test_interval_times_numeric_unchanged() {
         types[0].data_type
     );
 }
+
+// ─── Outer-join nullability soundness (spec §11) ─────────────────────────────
+//
+// These tests verify that columns from the null-supplying side of an outer join
+// are marked nullable regardless of their declared/inferred nullability.
+// The `apply_outer_join_nullability` pass is called after all columns are bound
+// (including source declared nullability), so it is the final word.
+
+/// Helper: parse SQL, seed the given columns into the context, apply the outer-join
+/// nullability pass, then run inference and return `(alias, TypedColumn)` pairs.
+fn infer_join_sql(
+    sql: &str,
+    left_entity: &str,
+    left_cols: &[(&str, TypedColumn)],
+    right_entity: &str,
+    right_cols: &[(&str, TypedColumn)],
+) -> Vec<(String, TypedColumn)> {
+    use crate::queries::schema::apply_outer_join_nullability;
+    use smelt_parser::ast::File;
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+
+    // Register left-side columns as model columns
+    for (col_name, typed_col) in left_cols {
+        ctx.add_model_column(left_entity, col_name, typed_col.clone());
+    }
+    ctx.add_alias(left_entity, left_entity);
+
+    // Register right-side columns as model columns
+    for (col_name, typed_col) in right_cols {
+        ctx.add_model_column(right_entity, col_name, typed_col.clone());
+    }
+    ctx.add_alias(right_entity, right_entity);
+
+    // Apply the outer-join nullability pass (the fix)
+    apply_outer_join_nullability(&select_stmt, &mut ctx);
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+
+    let select_list = select_stmt.select_list().expect("no select list");
+    let items: Vec<_> = select_list.items().collect();
+    items
+        .iter()
+        .zip(col_types.iter())
+        .map(|(item, tc)| {
+            let alias = item.alias().unwrap_or_else(|| "?".to_string());
+            (alias, tc.clone())
+        })
+        .collect()
+}
+
+/// Spec §11: a `nullable: false` column on the right side of a LEFT JOIN
+/// must infer as `nullable: true` in the output schema.
+#[test]
+fn left_join_right_side_columns_nullable() {
+    // Both tables have a non-nullable 'id' column.
+    // After LEFT JOIN: left.id stays non-nullable; right.id must become nullable.
+    let sql = "SELECT l.id AS left_id, r.id AS right_id \
+               FROM l LEFT JOIN r ON l.id = r.id";
+
+    let left_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+    let right_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+
+    let result = infer_join_sql(sql, "l", &left_cols, "r", &right_cols);
+    assert_eq!(result.len(), 2, "expected 2 output columns");
+
+    let left_id = result
+        .iter()
+        .find(|(a, _)| a == "left_id")
+        .expect("left_id not found");
+    let right_id = result
+        .iter()
+        .find(|(a, _)| a == "right_id")
+        .expect("right_id not found");
+
+    assert!(
+        !left_id.1.nullable,
+        "LEFT JOIN: left-side column must stay non-nullable, got nullable: {}",
+        left_id.1.nullable
+    );
+    assert!(
+        right_id.1.nullable,
+        "LEFT JOIN: right-side column must be nullable (null-supplying side), got nullable: {}",
+        right_id.1.nullable
+    );
+}
+
+/// Spec §11: a `nullable: false` column on the left side of a RIGHT JOIN
+/// must infer as `nullable: true` in the output schema.
+#[test]
+fn right_join_left_side_columns_nullable() {
+    let sql = "SELECT l.id AS left_id, r.id AS right_id \
+               FROM l RIGHT JOIN r ON l.id = r.id";
+
+    let left_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+    let right_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+
+    let result = infer_join_sql(sql, "l", &left_cols, "r", &right_cols);
+    assert_eq!(result.len(), 2, "expected 2 output columns");
+
+    let left_id = result
+        .iter()
+        .find(|(a, _)| a == "left_id")
+        .expect("left_id not found");
+    let right_id = result
+        .iter()
+        .find(|(a, _)| a == "right_id")
+        .expect("right_id not found");
+
+    assert!(
+        left_id.1.nullable,
+        "RIGHT JOIN: left-side column must be nullable (null-supplying side), got nullable: {}",
+        left_id.1.nullable
+    );
+    assert!(
+        !right_id.1.nullable,
+        "RIGHT JOIN: right-side column must stay non-nullable, got nullable: {}",
+        right_id.1.nullable
+    );
+}
+
+/// Spec §11: under a FULL JOIN both sides are null-supplying, so all
+/// `nullable: false` columns from both sides must infer `nullable: true`.
+#[test]
+fn full_join_both_sides_nullable() {
+    let sql = "SELECT l.id AS left_id, r.id AS right_id \
+               FROM l FULL JOIN r ON l.id = r.id";
+
+    let left_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+    let right_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+
+    let result = infer_join_sql(sql, "l", &left_cols, "r", &right_cols);
+    assert_eq!(result.len(), 2, "expected 2 output columns");
+
+    let left_id = result
+        .iter()
+        .find(|(a, _)| a == "left_id")
+        .expect("left_id not found");
+    let right_id = result
+        .iter()
+        .find(|(a, _)| a == "right_id")
+        .expect("right_id not found");
+
+    assert!(
+        left_id.1.nullable,
+        "FULL JOIN: left-side column must be nullable, got nullable: {}",
+        left_id.1.nullable
+    );
+    assert!(
+        right_id.1.nullable,
+        "FULL JOIN: right-side column must be nullable, got nullable: {}",
+        right_id.1.nullable
+    );
+}
+
+/// `mark_entity_columns_nullable` must mark BOTH the simple-key form
+/// (`entity.col`) AND the full-key form (`source.entity.col`) that
+/// `add_source_column` stores for every column.
+///
+/// Failure mode: the full-key entry retains `nullable: false` after the pass,
+/// so an unqualified lookup that happens to hit the full-key entry returns a
+/// stale non-nullable flag — a soundness defect on the outer-join path.
+#[test]
+fn mark_entity_columns_nullable_covers_both_key_forms() {
+    let mut ctx = TypeContext::new();
+
+    // add_source_column stores BOTH:
+    //   simple key: "events.event_id"
+    //   full key:   "raw.events.event_id"
+    ctx.add_source_column(
+        "raw",
+        "events",
+        "event_id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+
+    // Sanity: both keys exist and start non-nullable.
+    // (We look them up directly via lookup_column.)
+    let before_simple = ctx.lookup_column(Some("events"), "event_id");
+    let before_full = ctx.lookup_column(Some("raw.events"), "event_id");
+    // The full-key lookup goes via the "ends_with" fallback path — ensure it exists.
+    assert!(
+        before_simple.is_some(),
+        "simple key events.event_id should be present before mark"
+    );
+    assert!(
+        before_full.is_some(),
+        "full key raw.events.event_id should be present before mark"
+    );
+    assert!(
+        !before_simple.unwrap().nullable,
+        "simple key should start non-nullable"
+    );
+    assert!(
+        !before_full.unwrap().nullable,
+        "full key should start non-nullable"
+    );
+
+    // Apply the mark operation (simulates the outer-join nullability pass).
+    ctx.mark_entity_columns_nullable("events");
+
+    // Both key forms must now be nullable.
+    let after_simple = ctx.lookup_column(Some("events"), "event_id");
+    let after_full = ctx.lookup_column(Some("raw.events"), "event_id");
+    assert!(
+        after_simple.is_some(),
+        "simple key events.event_id should still be present after mark"
+    );
+    assert!(
+        after_full.is_some(),
+        "full key raw.events.event_id should still be present after mark"
+    );
+    assert!(
+        after_simple.unwrap().nullable,
+        "simple key events.event_id must be nullable after mark_entity_columns_nullable"
+    );
+    assert!(
+        after_full.unwrap().nullable,
+        "full key raw.events.event_id must be nullable after mark_entity_columns_nullable \
+         (previously missed — only the simple key was marked)"
+    );
+}
+
+/// Spec §11: INNER JOIN preserves input nullability — `nullable: false` columns
+/// must stay non-nullable (no precision regression).
+#[test]
+fn inner_join_preserves_nullability() {
+    let sql = "SELECT l.id AS left_id, r.id AS right_id \
+               FROM l INNER JOIN r ON l.id = r.id";
+
+    let left_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+    let right_cols = [(
+        "id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    )];
+
+    let result = infer_join_sql(sql, "l", &left_cols, "r", &right_cols);
+    assert_eq!(result.len(), 2, "expected 2 output columns");
+
+    let left_id = result
+        .iter()
+        .find(|(a, _)| a == "left_id")
+        .expect("left_id not found");
+    let right_id = result
+        .iter()
+        .find(|(a, _)| a == "right_id")
+        .expect("right_id not found");
+
+    assert!(
+        !left_id.1.nullable,
+        "INNER JOIN: left-side column must stay non-nullable, got nullable: {}",
+        left_id.1.nullable
+    );
+    assert!(
+        !right_id.1.nullable,
+        "INNER JOIN: right-side column must stay non-nullable, got nullable: {}",
+        right_id.1.nullable
+    );
+}

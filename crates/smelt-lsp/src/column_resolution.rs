@@ -13,8 +13,7 @@ use smelt_types::TypedColumn;
 use crate::db_helpers::{file_project_root, lookup_file, lookup_project, resolve_ref_leaf};
 
 pub(crate) fn format_type(typed_col: &TypedColumn) -> String {
-    let nullable_suffix = if typed_col.nullable { "?" } else { "" };
-    format!("{}{}", typed_col.data_type, nullable_suffix)
+    smelt_types::format_typed_column_display(typed_col)
 }
 
 /// Find the 0-indexed line number of a table definition inside a sources.yml file.

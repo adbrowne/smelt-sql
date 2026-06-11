@@ -24,18 +24,52 @@ fn infer_binary_operand(binary: &BinaryExpr, nth: usize, ctx: &TypeContext) -> O
     infer_expression_type(&expr, ctx)
 }
 
-/// Promote two numeric operands to their common widest type.
-/// Priority: Double > Float > Decimal > BigInt > Integer > SmallInt
+/// Integer lifting for decimal arithmetic (spec §15 "Integer lifting").
 ///
-/// Cross-family guard: if both operands are known and either is not numeric,
-/// the pair is incompatible — return `Unknown` instead of the left type.
-/// This implements spec §1 "no implicit cross-family cast" and §14
-/// strict-rejection examples (`42 + '3'` → Unknown; `TRUE + 1` → Unknown).
-/// Temporal arithmetic is handled by early-return arms in the callers,
-/// so by the time this function is reached both operands should be numeric.
-fn promote_numeric_operands(
+/// Returns `Some((precision, scale))` if the type is an integer family that
+/// should be lifted to a Decimal for arithmetic purposes. Returns `None` for
+/// non-integer types (Decimal, Float, Double, etc.) — those are handled
+/// directly.
+fn lift_integer_to_decimal(dt: &DataType) -> Option<(u8, u8)> {
+    match dt {
+        DataType::SmallInt => Some((5, 0)),
+        DataType::Integer => Some((10, 0)),
+        DataType::BigInt => Some((19, 0)),
+        _ => None,
+    }
+}
+
+/// Apply Spark-style decimal arithmetic growth formulas (spec §15).
+///
+/// Both operands must already be Decimal-family (either native Decimal or
+/// lifted from integer). Returns `(p', s')` for the result.
+///
+/// The result precision is computed in `u32` to detect overflow (p' > 38)
+/// before truncating to `u8`.
+///
+/// - `+`, `-`, `%`: `p' = max(p1-s1, p2-s2) + max(s1, s2) + 1`, `s' = max(s1, s2)`
+/// - `*`:          `p' = p1 + p2 + 1`, `s' = s1 + s2`
+fn decimal_arithmetic_result(p1: u8, s1: u8, p2: u8, s2: u8, op: &str) -> (u32, u32) {
+    let (p1, s1, p2, s2) = (p1 as u32, s1 as u32, p2 as u32, s2 as u32);
+    match op {
+        "*" => (p1 + p2 + 1, s1 + s2),
+        // + - % all use the same additive formula
+        _ => {
+            let int1 = p1.saturating_sub(s1);
+            let int2 = p2.saturating_sub(s2);
+            let s_prime = s1.max(s2);
+            let p_prime = int1.max(int2) + s_prime + 1;
+            (p_prime, s_prime)
+        }
+    }
+}
+
+/// Operator-aware numeric promotion — used by `infer_binary_expr_type` callers
+/// that need to pass the actual operator to the decimal growth formula.
+fn promote_numeric_operands_for_op(
     left: Option<DataType>,
     right: Option<DataType>,
+    op: &str,
 ) -> Option<TypedColumn> {
     if let (Some(ref l), Some(ref r)) = (&left, &right) {
         if !l.is_numeric() || !r.is_numeric() {
@@ -43,6 +77,58 @@ fn promote_numeric_operands(
                 data_type: DataType::Unknown,
                 nullable: true,
             });
+        }
+    }
+
+    // Spec §15 division rejection: `Decimal / T` is not in the portable surface.
+    // Return Unknown early so the type is consistent with the TypeMismatch
+    // diagnostic emitted by `check_decimal_division_diagnostics`.
+    // Only the LEFT operand being Decimal triggers rejection — `T / Decimal`
+    // (e.g. Float / decimal_literal) lets the Float promotion path handle it.
+    if op == "/"
+        && left
+            .as_ref()
+            .is_some_and(|l| matches!(l, DataType::Decimal { .. }))
+    {
+        return Some(TypedColumn {
+            data_type: DataType::Unknown,
+            nullable: true,
+        });
+    }
+
+    // Decimal-family path: if either operand is Decimal or an integer that
+    // would be lifted to Decimal, apply the spec §15 growth formula.
+    if let (Some(ref l), Some(ref r)) = (&left, &right) {
+        let l_decimal = match l {
+            DataType::Decimal { precision, scale } => Some((*precision, *scale)),
+            _ => lift_integer_to_decimal(l),
+        };
+        let r_decimal = match r {
+            DataType::Decimal { precision, scale } => Some((*precision, *scale)),
+            _ => lift_integer_to_decimal(r),
+        };
+
+        // Only apply the growth formula when at least one operand is truly
+        // Decimal (not just liftable integer — two pure integers stay integer).
+        let either_decimal =
+            matches!(l, DataType::Decimal { .. }) || matches!(r, DataType::Decimal { .. });
+
+        if either_decimal && op != "/" {
+            if let (Some((p1, s1)), Some((p2, s2))) = (l_decimal, r_decimal) {
+                let (p_prime, s_prime) = decimal_arithmetic_result(p1, s1, p2, s2, op);
+                let data_type = if p_prime > 38 {
+                    DataType::Unknown
+                } else {
+                    DataType::Decimal {
+                        precision: p_prime as u8,
+                        scale: s_prime as u8,
+                    }
+                };
+                return Some(TypedColumn {
+                    data_type,
+                    nullable: true,
+                });
+            }
         }
     }
 
@@ -55,7 +141,13 @@ fn promote_numeric_operands(
             data_type: DataType::Float,
             nullable: true,
         }),
-        (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
+        (Some(DataType::Decimal { .. }), Some(_)) | (Some(_), Some(DataType::Decimal { .. })) => {
+            // Fallback: one side is Decimal but the other didn't lift via the
+            // growth-formula path (e.g. Float + Decimal — Float has no precise
+            // p/s to plug into the formula, so it falls through). Division with
+            // a Decimal LEFT operand is already handled by the early return above.
+            // Keep the historical Decimal(38, 10) so existing downstream code is
+            // not disturbed.
             Some(TypedColumn {
                 data_type: DataType::Decimal {
                     precision: 38,
@@ -64,6 +156,10 @@ fn promote_numeric_operands(
                 nullable: true,
             })
         }
+        // One side is Decimal, the other is None (unknown) — can't determine
+        // the result type without both operands. Return None so callers treat
+        // this as unresolved rather than propagating a spurious Decimal(38, 10).
+        (Some(DataType::Decimal { .. }), None) | (None, Some(DataType::Decimal { .. })) => None,
         (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
             data_type: DataType::BigInt,
             nullable: true,
@@ -101,11 +197,21 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             nullable: true, // NOT NULL = NULL
         }),
 
-        // Comparison operators - always return Boolean
-        "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "IS" => Some(TypedColumn {
-            data_type: DataType::Boolean,
-            nullable: false, // Comparisons always return true/false
-        }),
+        // Comparison operators — NULL-propagating: result is non-nullable only if
+        // both operands are non-nullable (spec §11 sound-upper-bound contract).
+        // Exception: `IS [NOT] NULL` is handled by the IS operator arm below and
+        // via unary IS NULL dispatch; the `IS` case here is `col IS DISTINCT FROM val`
+        // which also propagates NULLs.
+        "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "IS" => {
+            let left = infer_binary_operand(binary, 0, ctx);
+            let right = infer_binary_operand(binary, 1, ctx);
+            let left_nullable = left.as_ref().map(|t| t.nullable).unwrap_or(true);
+            let right_nullable = right.as_ref().map(|t| t.nullable).unwrap_or(true);
+            Some(TypedColumn {
+                data_type: DataType::Boolean,
+                nullable: left_nullable || right_nullable,
+            })
+        }
 
         // Pattern matching operators - always return Boolean
         "LIKE" | "ILIKE" | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
@@ -167,9 +273,10 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             }
 
             // Numeric promotion
-            Some(promote_numeric_operands(
+            Some(promote_numeric_operands_for_op(
                 left.map(|t| t.data_type),
                 right.map(|t| t.data_type),
+                "+",
             )?)
         }
 
@@ -198,10 +305,11 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
                 _ => {}
             }
 
-            // Numeric promotion
-            Some(promote_numeric_operands(
+            // Numeric promotion — pass actual operator for decimal growth formula
+            Some(promote_numeric_operands_for_op(
                 left.map(|t| t.data_type),
                 right.map(|t| t.data_type),
+                &op,
             )?)
         }
 
@@ -296,10 +404,11 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
                     _ => {}
                 }
 
-                // Numeric promotion
-                Some(promote_numeric_operands(
+                // Numeric promotion — pass operator for decimal growth formula
+                Some(promote_numeric_operands_for_op(
                     left.map(|t| t.data_type),
                     right.map(|t| t.data_type),
+                    "-",
                 )?)
             }
         }
@@ -316,9 +425,11 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             data_type: DataType::Text,
             nullable: true,
         }),
+        // Array/JSON containment operators — NULL-propagating per spec §11.
+        // These operators return NULL when either operand is NULL.
         "@>" | "<@" => Some(TypedColumn {
             data_type: DataType::Boolean,
-            nullable: false,
+            nullable: true,
         }),
 
         _ => None,
@@ -412,6 +523,160 @@ pub fn check_crossfamily_arithmetic_diagnostics(
                  consider an explicit CAST",
                 lt, rt, op
             ),
+            range,
+            code: Some(crate::DiagnosticCode::TypeMismatch),
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Walk all BINARY_EXPR nodes in a SELECT statement and emit one
+/// `DecimalPrecisionOverflow` Error at the operator span whenever a decimal
+/// arithmetic expression computes a result precision `p' > 38` (spec §15).
+///
+/// Operators covered: `+`, `-`, `*`, `%`. Division is excluded (Phase 3).
+/// The operator token range is used as the anchor (same convention as
+/// `check_crossfamily_arithmetic_diagnostics`).
+pub fn check_decimal_precision_overflow_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::BINARY_EXPR;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != BINARY_EXPR {
+            continue;
+        }
+        let binary = match BinaryExpr::cast(node.clone()) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let op = match binary.operator() {
+            Some(op) => op,
+            None => continue,
+        };
+
+        // Only arithmetic operators covered by the growth formulas.
+        // Division is excluded (Phase 3); skip unary minus (no right operand).
+        if !matches!(op.as_str(), "+" | "-" | "*" | "%") {
+            continue;
+        }
+        if binary.is_unary() {
+            continue;
+        }
+
+        let left_tc = infer_binary_operand(&binary, 0, ctx);
+        let right_tc = infer_binary_operand(&binary, 1, ctx);
+
+        let lt = match left_tc.as_ref().map(|t| &t.data_type) {
+            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            _ => continue,
+        };
+        let rt = match right_tc.as_ref().map(|t| &t.data_type) {
+            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            _ => continue,
+        };
+
+        // Resolve each operand to (precision, scale) — either native Decimal or
+        // integer-lifted. If neither side has a Decimal component, skip.
+        let l_decimal = match lt {
+            DataType::Decimal { precision, scale } => Some((*precision, *scale)),
+            _ => lift_integer_to_decimal(lt),
+        };
+        let r_decimal = match rt {
+            DataType::Decimal { precision, scale } => Some((*precision, *scale)),
+            _ => lift_integer_to_decimal(rt),
+        };
+
+        let either_decimal =
+            matches!(lt, DataType::Decimal { .. }) || matches!(rt, DataType::Decimal { .. });
+
+        if !either_decimal {
+            continue;
+        }
+
+        if let (Some((p1, s1)), Some((p2, s2))) = (l_decimal, r_decimal) {
+            let (p_prime, _s_prime) = decimal_arithmetic_result(p1, s1, p2, s2, &op);
+            if p_prime > 38 {
+                let range = binary
+                    .operator_token_range()
+                    .unwrap_or_else(|| node.text_range());
+                diags.push(crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: format!(
+                        "Decimal precision overflow: result precision {} exceeds maximum 38; \
+                         consider reducing operand precision or using DOUBLE",
+                        p_prime
+                    ),
+                    range,
+                    code: Some(crate::DiagnosticCode::DecimalPrecisionOverflow),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    diags
+}
+
+/// Walk all BINARY_EXPR nodes in a SELECT statement and emit one
+/// `TypeMismatch` Error at the `/` operator span whenever either operand is
+/// Decimal-family (spec §15 "Division rejection").
+///
+/// `Decimal / T` for any numeric `T` is not in the portable surface. The
+/// diagnostic message directs the user to cast operands to Double.
+pub fn check_decimal_division_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::BINARY_EXPR;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != BINARY_EXPR {
+            continue;
+        }
+        let binary = match BinaryExpr::cast(node.clone()) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let op = match binary.operator() {
+            Some(op) => op,
+            None => continue,
+        };
+
+        if op.as_str() != "/" {
+            continue;
+        }
+        if binary.is_unary() {
+            continue;
+        }
+
+        let left_tc = infer_binary_operand(&binary, 0, ctx);
+        let lt = left_tc.as_ref().map(|t| &t.data_type);
+
+        if !lt.is_some_and(|d| matches!(d, DataType::Decimal { .. })) {
+            continue;
+        }
+
+        let range = binary
+            .operator_token_range()
+            .unwrap_or_else(|| node.text_range());
+
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: "Decimal division is not in the portable surface — cast operands to Double: \
+                      CAST(a AS DOUBLE) / CAST(b AS DOUBLE)"
+                .to_string(),
             range,
             code: Some(crate::DiagnosticCode::TypeMismatch),
             data: None,

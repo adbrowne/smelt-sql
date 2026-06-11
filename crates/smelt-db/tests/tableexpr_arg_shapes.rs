@@ -210,3 +210,67 @@ fn tableexpr_arg_from_smelt_ref_still_works() {
         "expected no errors for smelt.ref-style arg (Phase 15 baseline); got {bad:#?}"
     );
 }
+
+// ===== Phase 5 (nullability-soundness): NOT NULL row column check =====
+
+#[test]
+fn not_null_row_column_requires_non_nullable_caller() {
+    // `TableExpr<{id: Integer NOT NULL}>` vs a nullable caller column
+    // (CAST(NULL AS INTEGER)) should emit RowRequirementUnsatisfied.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("nn_row.sql");
+    let model_path = root.join("models").join("nn_caller.sql");
+    let fn_src =
+        "smelt.define nn_row(t: TableExpr<{id: Integer NOT NULL}>) -> TableExpr AS (SELECT t.id FROM t)\n";
+    // The CTE produces a nullable `id` column
+    let model_src = "WITH x AS (SELECT CAST(NULL AS INTEGER) AS id) \
+        SELECT id FROM smelt.functions.nn_row(x)\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[(fn_path, fn_src), (model_path, model_src)],
+    );
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let row_errs: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::RowRequirementUnsatisfied))
+        .collect();
+    assert!(
+        !row_errs.is_empty(),
+        "nullable column for NOT NULL row field should emit RowRequirementUnsatisfied; got none"
+    );
+}
+
+#[test]
+fn not_null_row_column_accepts_non_nullable_caller() {
+    // A non-nullable source column satisfies `TableExpr<{id: Integer NOT NULL}>`.
+    // This should emit zero RowRequirementUnsatisfied diagnostics.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("nn_row.sql");
+    let model_path = root.join("models").join("nn_caller_ok.sql");
+    let fn_src =
+        "smelt.define nn_row(t: TableExpr<{id: Integer NOT NULL}>) -> TableExpr AS (SELECT t.id FROM t)\n";
+    // CAST(42 AS INTEGER) is a non-nullable integer expression
+    let model_src = "WITH x AS (SELECT CAST(42 AS INTEGER) AS id) \
+        SELECT id FROM smelt.functions.nn_row(x)\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[(fn_path, fn_src), (model_path, model_src)],
+    );
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let row_errs: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::RowRequirementUnsatisfied))
+        .collect();
+    assert!(
+        row_errs.is_empty(),
+        "non-nullable column should satisfy NOT NULL row field — got: {row_errs:#?}"
+    );
+}

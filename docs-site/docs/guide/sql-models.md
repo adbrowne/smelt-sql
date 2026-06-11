@@ -130,6 +130,22 @@ CAST(COUNT(*) AS INTEGER) AS order_count
 CAST(COALESCE(SUM(col), 0.0) AS DOUBLE) AS revenue
 ```
 
+## Decimal division
+
+`Decimal / T` (dividing a `DECIMAL` column or literal by any numeric type) is not in the portable surface and produces a `TypeMismatch` diagnostic. The portable remedy is to cast both operands to `DOUBLE` before dividing:
+
+```sql
+-- Not portable — emits TypeMismatch
+SELECT price / 100.0 AS unit_price   -- price is DECIMAL
+
+-- Portable — use DOUBLE arithmetic
+SELECT CAST(price AS DOUBLE) / 100.0 AS unit_price
+-- or cast the denominator too for full clarity
+SELECT CAST(price AS DOUBLE) / CAST(100.0 AS DOUBLE) AS unit_price
+```
+
+Integer-on-integer division (`INTEGER / INTEGER → INTEGER`) and floating-point division (`DOUBLE / DOUBLE → DOUBLE`) are unaffected.
+
 ## Configuration precedence
 
 **SQL frontmatter > smelt.yml > defaults**

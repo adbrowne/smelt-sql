@@ -400,6 +400,7 @@ impl Backend {
                 DbCode::DuplicateAddress => "duplicate-address",
                 DbCode::DefaultReferencesParameter => "default-references-parameter",
                 DbCode::UnknownStructFieldType => "unknown-struct-field-type",
+                DbCode::DecimalPrecisionOverflow => "decimal-precision-overflow",
             };
             NumberOrString::String(code_str.to_string())
         });

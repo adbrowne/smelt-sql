@@ -284,10 +284,11 @@ pub use queries::project::{
     SourceDiagnostic, SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
-    add_source_info_to_type_context, available_columns, build_type_context,
-    columns_of_for_table_expr, columns_to_column_ref_values, model_function_type,
-    model_input_constraints, model_schema, resolved_model_schema, type_context, typed_model_schema,
-    RefSchemaProvider, SalsaRefSchemaProvider, StaticRefSchemaProvider,
+    add_source_info_to_type_context, apply_outer_join_nullability, available_columns,
+    build_type_context, columns_of_for_table_expr, columns_to_column_ref_values,
+    model_function_type, model_input_constraints, model_schema, resolved_model_schema,
+    type_context, typed_model_schema, RefSchemaProvider, SalsaRefSchemaProvider,
+    StaticRefSchemaProvider,
 };
 
 // ============================================================================
@@ -2007,6 +2008,37 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     &kind_ctx,
                 );
                 for diag in xfamily_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
+            // Spec §15 — decimal precision overflow → `DecimalPrecisionOverflow`.
+            //
+            // Walks every `+`, `-`, `*`, `%` BINARY_EXPR and emits exactly one
+            // `DecimalPrecisionOverflow` Error at the operator span when the
+            // Spark-style growth formula yields `p' > 38`. Division is excluded
+            // (handled below). The result type in such expressions is already
+            // `DataType::Unknown` as computed by `promote_numeric_operands_for_op`.
+            {
+                let overflow_diags = type_inference::check_decimal_precision_overflow_diagnostics(
+                    &select_stmt,
+                    &kind_ctx,
+                );
+                for diag in overflow_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
+            // Spec §15 — division rejection → `TypeMismatch`.
+            //
+            // `Decimal / T` for any numeric `T` is not in the portable surface.
+            // Emits one `TypeMismatch` Error at the `/` operator span directing
+            // the user to cast to Double. The inferred result type is already
+            // `DataType::Unknown` (set by `promote_numeric_operands_for_op`).
+            {
+                let div_diags =
+                    type_inference::check_decimal_division_diagnostics(&select_stmt, &kind_ctx);
+                for diag in div_diags {
                     DiagnosticAcc(diag).accumulate(db);
                 }
             }

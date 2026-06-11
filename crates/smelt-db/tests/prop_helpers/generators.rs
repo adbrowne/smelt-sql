@@ -992,7 +992,11 @@ pub fn generate_expr(
                 .filter(|c| c.data_type.is_numeric())
                 .collect();
 
-            // Rotate through arithmetic operators that share numeric promotion rules
+            // Rotate through arithmetic operators that share numeric promotion rules.
+            // "/" is intentionally absent: Decimal / T is rejected as non-portable
+            // (spec §15 "Division rejection"), so generating it would produce
+            // TypeMismatch diagnostics rather than testing type inference. Integer
+            // and Float division are not generated here to keep the oracle focused.
             let ops = ["+", "-", "*", "%"];
             let op = ops[expr_idx % ops.len()];
 
@@ -1414,7 +1418,12 @@ fn smelt_type_to_base(dt: &DataType) -> Option<BaseType> {
 }
 
 /// Check if a SQL expression string is an aggregate function call.
-fn is_aggregate_expr(sql: &str) -> bool {
+///
+/// This is the single source of truth for aggregate detection.  `null_data.rs`
+/// imports and reuses this function so both builders always agree on which
+/// expressions are aggregates — eliminating the positional-alignment hazard that
+/// arises when the two builders produce SELECT lists of different lengths.
+pub(crate) fn is_aggregate_expr(sql: &str) -> bool {
     let upper = sql.to_uppercase();
     if let Some(paren_pos) = upper.find('(') {
         let name = upper[..paren_pos].trim();
@@ -1425,7 +1434,10 @@ fn is_aggregate_expr(sql: &str) -> bool {
 }
 
 /// Check if a SQL expression string is a window function call (contains OVER).
-fn is_window_expr(sql: &str) -> bool {
+///
+/// This is the single source of truth for window-function detection.  `null_data.rs`
+/// imports and reuses this function so both builders always agree.
+pub(crate) fn is_window_expr(sql: &str) -> bool {
     sql.to_uppercase().contains(" OVER ")
 }
 

@@ -197,28 +197,35 @@ impl<'a> super::Parser<'a> {
                 }
                 self.advance();
                 self.skip_trivia();
-                // Allow trailing comma - break if next token ends the SELECT list
-                if self.at_any(&[
-                    FROM_KW,
-                    WHERE_KW,
-                    GROUP_KW,
-                    HAVING_KW,
-                    QUALIFY_KW,
-                    ORDER_KW,
-                    LIMIT_KW,
-                    OFFSET_KW,
-                    EOF,
-                    INNER_KW,
-                    LEFT_KW,
-                    RIGHT_KW,
-                    FULL_KW,
-                    CROSS_KW,
-                    JOIN_KW,
-                    UNION_KW,
-                    INTERSECT_KW,
-                    EXCEPT_KW,
-                    RBRACE,
-                ]) {
+                // Allow trailing comma - break if next token ends the SELECT list.
+                //
+                // Exception: LEFT_KW and RIGHT_KW can be SQL function names (e.g.
+                // `LEFT(str, 3)`, `RIGHT(str, 2)`) when followed by `(`.  Only
+                // treat them as JOIN/SELECT-list terminators when they are NOT
+                // immediately followed by `(` (after trivia).
+                let is_join_keyword = (self.at(LEFT_KW) || self.at(RIGHT_KW))
+                    && !self.is_keyword_followed_by_lparen();
+                if is_join_keyword
+                    || self.at_any(&[
+                        FROM_KW,
+                        WHERE_KW,
+                        GROUP_KW,
+                        HAVING_KW,
+                        QUALIFY_KW,
+                        ORDER_KW,
+                        LIMIT_KW,
+                        OFFSET_KW,
+                        EOF,
+                        INNER_KW,
+                        FULL_KW,
+                        CROSS_KW,
+                        JOIN_KW,
+                        UNION_KW,
+                        INTERSECT_KW,
+                        EXCEPT_KW,
+                        RBRACE,
+                    ])
+                {
                     break;
                 }
             } else {

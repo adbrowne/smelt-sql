@@ -464,3 +464,100 @@ generates: models
         amount_type
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 6: emission body with LEFT JOIN — right-side source columns become nullable
+// ---------------------------------------------------------------------------
+
+/// A generator emits a model whose body LEFT-JOINs two sources.
+/// Both sources declare all columns as `nullable: false`.
+/// After the LEFT JOIN, columns from the right (null-supplying) side must be
+/// inferred as `nullable: true`; the left side must remain `nullable: false`.
+///
+/// Regression guard for the `synthesise_emission_schema` gap identified in the
+/// nullability-soundness plan: `apply_outer_join_nullability` was not called in
+/// the generator code path, leaving the soundness hole open for emitted models.
+#[test]
+fn emission_body_left_join_null_supplying_side_is_nullable() {
+    let tmp = TempDir::new().expect("create tempdir");
+    let root = tmp.path().to_path_buf();
+
+    let smelt_yml = "name: gen_join_nullability_test\n\
+        version: 1\n\
+        paths:\n  - models\n\
+        targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+        default_materialization: view\n";
+
+    // Left side: users — nullable: false declared on all columns.
+    let users_yaml = "description: Users source\n\
+        columns:\n\
+        - name: user_id\n  type: INTEGER\n  nullable: false\n\
+        - name: name\n  type: TEXT\n  nullable: false\n";
+
+    // Right side: events — nullable: false declared on all columns.
+    // After a LEFT JOIN, event_id and event_type must become nullable.
+    let events_yaml = "description: Events source\n\
+        columns:\n\
+        - name: event_id\n  type: INTEGER\n  nullable: false\n\
+        - name: user_id\n  type: INTEGER\n  nullable: false\n\
+        - name: event_type\n  type: TEXT\n  nullable: false\n";
+
+    let gen_src = "---\ngenerates: models\n---\n\
+        [ModelDef {\n  \
+          name: 'user_events',\n  \
+          body: SELECT u.user_id, u.name, e.event_id, e.event_type \
+                FROM smelt.sources.raw.users AS u \
+                LEFT JOIN smelt.sources.raw.events AS e ON u.user_id = e.user_id\n\
+        }]\n";
+
+    fs::write(root.join("smelt.yml"), smelt_yml).expect("write smelt.yml");
+    fs::create_dir_all(root.join("models/sources/raw")).expect("create dirs");
+    fs::write(root.join("models/sources/raw/users.yml"), users_yaml).expect("write users");
+    fs::write(root.join("models/sources/raw/events.yml"), events_yaml).expect("write events");
+    let gen_path = root.join("models/user_events.gen.sql");
+    fs::write(&gen_path, gen_src).expect("write generator");
+
+    let mut db = Database::default();
+    let project = db.set_project_input(root.clone(), String::new());
+    let gen_sf = db.set_source_file(gen_path.clone(), gen_src.to_string(), root.clone());
+    db.set_workspace(vec![gen_sf], vec![project]);
+    let ws = db.workspace();
+
+    let schema = emitted_model_typed_schema(&db, ws, gen_sf, "user_events".to_string());
+
+    let col_map: std::collections::HashMap<_, _> = schema
+        .columns
+        .iter()
+        .filter_map(|c| c.data_type.as_ref().map(|dt| (c.name.as_str(), dt.clone())))
+        .collect();
+
+    assert!(
+        !col_map.is_empty(),
+        "schema returned no typed columns — sources not loaded. Schema: {:#?}",
+        schema.columns
+    );
+
+    // Left side (users) — must remain non-nullable (LEFT JOIN preserves left).
+    let user_id = col_map.get("user_id").expect("user_id column");
+    let name = col_map.get("name").expect("name column");
+    assert!(
+        !user_id.nullable,
+        "user_id (left side) should remain nullable: false after LEFT JOIN, got nullable: true"
+    );
+    assert!(
+        !name.nullable,
+        "name (left side) should remain nullable: false after LEFT JOIN, got nullable: true"
+    );
+
+    // Right side (events) — must become nullable after LEFT JOIN.
+    let event_id = col_map.get("event_id").expect("event_id column");
+    let event_type = col_map.get("event_type").expect("event_type column");
+    assert!(
+        event_id.nullable,
+        "event_id (right side of LEFT JOIN) must be nullable: true, got nullable: false"
+    );
+    assert!(
+        event_type.nullable,
+        "event_type (right side of LEFT JOIN) must be nullable: true, got nullable: false"
+    );
+}

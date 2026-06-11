@@ -1140,8 +1140,8 @@ pub enum RowTail {
 /// Structured row requirement on a `TableExpr<{…}>` parameter
 /// (Phase 16).
 ///
-/// `required` is the ordered list of `(column_name, requirement)`
-/// pairs declared in the signature. `tail` is the trailing marker
+/// `required` is the ordered list of `(column_name, requirement, not_null)`
+/// triples declared in the signature. `tail` is the trailing marker
 /// decision: no tail, anonymous tail, or a named row variable.
 ///
 /// The check at the call site is performed by
@@ -1151,8 +1151,10 @@ pub enum RowTail {
 /// `None` / `Anon`) or a [`SchemaMismatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaRequirement {
-    /// The declared `(column_name, requirement)` pairs in source order.
-    pub required: Vec<(String, DataTypeReq)>,
+    /// The declared `(column_name, requirement, not_null)` triples in source order.
+    /// `not_null` is `true` when the field was declared with a `NOT NULL` qualifier
+    /// (Phase 5, nullability-soundness).
+    pub required: Vec<(String, DataTypeReq, bool)>,
     /// Trailing row-variable behaviour.
     pub tail: RowTail,
 }
@@ -1223,9 +1225,25 @@ pub fn check_schema_requirement(
     req: &SchemaRequirement,
     arg_schema: &[(String, DataType)],
 ) -> Result<Option<RowVarBinding>, SchemaMismatch> {
+    check_schema_requirement_with_nullability(req, arg_schema, &[])
+}
+
+/// Extended variant that also checks nullability when the caller provides
+/// per-column nullable flags (Phase 5, nullability-soundness).
+///
+/// `caller_nullability` maps column names to `true` (nullable) /
+/// `false` (non-nullable). Columns not present in the map are treated as
+/// nullable (conservative). When a required column is declared `NOT NULL`
+/// and the caller's column is nullable, a `NullabilityMismatch` variant
+/// (rendered as `TypeMismatch` in the diagnostic) is returned.
+pub fn check_schema_requirement_with_nullability(
+    req: &SchemaRequirement,
+    arg_schema: &[(String, DataType)],
+    caller_nullability: &[(String, bool)],
+) -> Result<Option<RowVarBinding>, SchemaMismatch> {
     // 1. Every required column must be present and type-compatible.
     //    We report the first structural problem in declaration order.
-    for (col_name, col_req) in &req.required {
+    for (col_name, col_req, col_not_null) in &req.required {
         let Some((_, actual_dt)) = arg_schema.iter().find(|(n, _)| n == col_name) else {
             return Err(SchemaMismatch::MissingColumn {
                 column: col_name.clone(),
@@ -1239,6 +1257,21 @@ pub fn check_schema_requirement(
                 actual: actual_dt.to_string(),
             });
         }
+        // Phase 5: check nullability when the column is declared NOT NULL.
+        if *col_not_null {
+            let caller_is_nullable = caller_nullability
+                .iter()
+                .find(|(n, _)| n == col_name)
+                .map(|(_, nullable)| *nullable)
+                .unwrap_or(true); // unknown → assume nullable (conservative)
+            if caller_is_nullable {
+                return Err(SchemaMismatch::TypeMismatch {
+                    column: col_name.clone(),
+                    required: col_req.clone(),
+                    actual: format!("{} (nullable)", actual_dt),
+                });
+            }
+        }
     }
 
     // 2. Extras handling. Compute the set of required column names
@@ -1246,7 +1279,7 @@ pub fn check_schema_requirement(
     //    this is the row-variable's extras list (or the
     //    "unexpected" list when `RowTail::None`).
     let required_names: std::collections::HashSet<&str> =
-        req.required.iter().map(|(n, _)| n.as_str()).collect();
+        req.required.iter().map(|(n, _, _)| n.as_str()).collect();
     let extras: Vec<(String, DataType)> = arg_schema
         .iter()
         .filter(|(n, _)| !required_names.contains(n.as_str()))
@@ -1587,6 +1620,11 @@ pub struct ParamSpec {
     /// / `WindowExpr<T, ctx>` annotations (Phase 19). `None` when no context
     /// argument is present.
     pub context: Option<ContextRef>,
+    /// `true` when the parameter carries a `NOT NULL` qualifier (Phase 5,
+    /// nullability-soundness). A non-nullable parameter requires a non-nullable
+    /// argument at the call site and binds the parameter as non-nullable in the
+    /// function body. Bare annotations (without `NOT NULL`) are always nullable.
+    pub not_null: bool,
 }
 
 /// A single frame of expansion context attached to a body/call-site
@@ -2059,6 +2097,10 @@ pub struct FunctionSig {
     /// adjacent error (for now we reuse the same code since only that
     /// check is wired in Phase 11).
     pub frontmatter_parse_error: Option<String>,
+    /// `true` when the declared return type carries a `NOT NULL` qualifier
+    /// (Phase 5, nullability-soundness). The body must synthesise a
+    /// non-nullable result when this flag is set.
+    pub return_not_null: bool,
 }
 
 fn type_ref_range(type_ref: &TypeRef, _text: &str) -> TextRange {
@@ -2078,8 +2120,23 @@ fn type_ref_range(type_ref: &TypeRef, _text: &str) -> TextRange {
 fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
     let type_ref_node = param.type_ref();
     let type_ref_text = type_ref_node.as_ref().map(|t| t.text());
+
+    // Phase 5 (nullability-soundness): detect `NOT NULL` qualifier from the
+    // CST marker emitted by the parser. When present, strip "NOT NULL" from
+    // the raw text before passing to the string-level `parse_smelt_type` so
+    // the type parses correctly as if the qualifier were absent.
+    let not_null = type_ref_node
+        .as_ref()
+        .map(|tr| tr.not_null())
+        .unwrap_or(false);
+    let clean_type_ref_text: Option<String> = if not_null {
+        type_ref_text.as_deref().map(strip_not_null_from_type_text)
+    } else {
+        type_ref_text.clone()
+    };
+
     let mut type_ref: Option<Result<SmeltType, SmeltTypeParseError>> =
-        type_ref_text.as_deref().map(parse_smelt_type);
+        clean_type_ref_text.as_deref().map(parse_smelt_type);
 
     // Phase 16 override: replace the string-parser's best guess with
     // a CST-derived structured row-requirement when applicable.
@@ -2109,6 +2166,38 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
         type_ref_range,
         has_default: param.default_value().is_some(),
         context,
+        not_null,
+    }
+}
+
+/// Strip the `NOT NULL` qualifier tokens from a raw type-ref text string
+/// (Phase 5, nullability-soundness).
+///
+/// For `Expr<Integer NOT NULL>` the parser emits the tokens "Integer NOT NULL"
+/// inside the angle brackets. This helper removes the trailing " NOT NULL"
+/// (case-insensitive, with optional leading whitespace) from before the last
+/// `>` so that `parse_smelt_type` can parse just the inner type.
+///
+/// The stripping is done by looking for the rightmost occurrence of " NOT NULL"
+/// (case-insensitive) in the string and removing it along with any leading
+/// whitespace between the type name and `NOT NULL`.
+///
+/// Examples:
+/// - `"Expr<Integer NOT NULL>"` → `"Expr<Integer>"`
+/// - `"Expr<Numeric NOT NULL>"` → `"Expr<Numeric>"`
+///
+/// Returns the original text unchanged if the pattern is not found.
+fn strip_not_null_from_type_text(text: &str) -> String {
+    // Find "NOT NULL" (case-insensitive) in the text.
+    let upper = text.to_uppercase();
+    if let Some(pos) = upper.rfind("NOT NULL") {
+        // Strip from the whitespace before NOT back to the type text,
+        // then re-attach everything after "NULL".
+        let before = text[..pos].trim_end();
+        let after = &text[pos + "NOT NULL".len()..];
+        format!("{}{}", before, after)
+    } else {
+        text.to_string()
     }
 }
 
@@ -2133,9 +2222,9 @@ fn tableexpr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
         return None;
     };
 
-    // Build the ordered `(name, DataTypeReq)` list from the CST's
+    // Build the ordered `(name, DataTypeReq, not_null)` list from the CST's
     // ROW_FIELD children.
-    let mut required: Vec<(String, DataTypeReq)> = Vec::new();
+    let mut required: Vec<(String, DataTypeReq, bool)> = Vec::new();
     for field in req_node.fields() {
         let Some(name) = field.name() else { continue };
         // Inner type is a flat type reference (e.g. `Numeric`,
@@ -2155,7 +2244,10 @@ fn tableexpr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
                 DataTypeReq::Constraint(TypeConstraint::Any)
             }
         };
-        required.push((name, req));
+        // Phase 5: read the NOT NULL qualifier from the ROW_FIELD's
+        // NOT_NULL_QUALIFIER child (placed as a sibling of TYPE_REF).
+        let not_null = field.not_null();
+        required.push((name, req, not_null));
     }
 
     let tail = match req_node.tail() {
@@ -2299,8 +2391,22 @@ pub fn extract_signature_with_raw(
 
     let return_type_node = define.return_type();
     let return_type_text = return_type_node.as_ref().map(|t| t.text());
+
+    // Phase 5 (nullability-soundness): detect NOT NULL on return type.
+    let return_not_null = return_type_node
+        .as_ref()
+        .map(|tr| tr.not_null())
+        .unwrap_or(false);
+    let clean_return_type_text: Option<String> = if return_not_null {
+        return_type_text
+            .as_deref()
+            .map(strip_not_null_from_type_text)
+    } else {
+        return_type_text.clone()
+    };
+
     let mut return_type: Option<Result<SmeltType, SmeltTypeParseError>> =
-        return_type_text.as_deref().map(parse_smelt_type);
+        clean_return_type_text.as_deref().map(parse_smelt_type);
     if let Some(tr) = &return_type_node {
         if let Some(structured) = tableexpr_type_from_cst(tr) {
             return_type = Some(Ok(structured));
@@ -2311,7 +2417,9 @@ pub fn extract_signature_with_raw(
     let return_type_range = return_type_node
         .as_ref()
         .map(|t| type_ref_range(t, stripped_text));
-    let tier = compute_tier(&params, return_type_text.as_deref());
+    // Pass the cleaned text (without NOT NULL) to compute_tier so the tier is
+    // derived from the presence of a return annotation, not the qualifier.
+    let tier = compute_tier(&params, clean_return_type_text.as_deref());
 
     let (declared_backends, frontmatter_parse_error) =
         parse_frontmatter_on_define(define, raw_text);
@@ -2328,6 +2436,7 @@ pub fn extract_signature_with_raw(
         declared_backends,
         emit_name: None,
         frontmatter_parse_error,
+        return_not_null,
     })
 }
 
@@ -2376,8 +2485,19 @@ pub fn extract_extern_signature_with_raw(
 
     let return_type_node = ext.return_type();
     let return_type_text = return_type_node.as_ref().map(|t| t.text());
+    let return_not_null = return_type_node
+        .as_ref()
+        .map(|tr| tr.not_null())
+        .unwrap_or(false);
+    let clean_return_type_text: Option<String> = if return_not_null {
+        return_type_text
+            .as_deref()
+            .map(strip_not_null_from_type_text)
+    } else {
+        return_type_text.clone()
+    };
     let mut return_type: Option<Result<SmeltType, SmeltTypeParseError>> =
-        return_type_text.as_deref().map(parse_smelt_type);
+        clean_return_type_text.as_deref().map(parse_smelt_type);
     if let Some(tr) = &return_type_node {
         if let Some(structured) = tableexpr_type_from_cst(tr) {
             return_type = Some(Ok(structured));
@@ -2388,7 +2508,7 @@ pub fn extract_extern_signature_with_raw(
     let return_type_range = return_type_node
         .as_ref()
         .map(|t| type_ref_range(t, stripped_text));
-    let tier = compute_tier(&params, return_type_text.as_deref());
+    let tier = compute_tier(&params, clean_return_type_text.as_deref());
 
     // Phase 11: frontmatter-declared backends take precedence, but the
     // backend-namespace sugar (`smelt.extern duckdb.foo`) implies a
@@ -2428,6 +2548,7 @@ pub fn extract_extern_signature_with_raw(
         declared_backends,
         emit_name,
         frontmatter_parse_error,
+        return_not_null,
     })
 }
 
@@ -3081,42 +3202,84 @@ pub fn unify_call(
 /// depend on `smelt-db`. Production callers in Phase 9+ will pass
 /// `smelt-db::promote_types` (or a thin adapter) to [`unify_call`] instead.
 pub fn numeric_lub(a: &DataType, b: &DataType) -> DataType {
-    // Exact-match early-out (including Decimal precision/scale — v1 keeps
-    // Decimal opaque here; smelt-db's promote_types has full decimal rules).
-    if std::mem::discriminant(a) == std::mem::discriminant(b) {
-        return a.clone();
-    }
     use DataType::*;
+
+    // Helper: lift an integer type to its Decimal equivalent per §15.
+    // SmallInt → Decimal(5,0), Integer → Decimal(10,0), BigInt → Decimal(19,0).
+    let lift_integer_to_decimal = |d: &DataType| -> Option<(u8, u8)> {
+        match d {
+            SmallInt => Some((5, 0)),
+            Integer => Some((10, 0)),
+            BigInt => Some((19, 0)),
+            _ => None,
+        }
+    };
+
+    // Apply the Decimal LUB formula (§15): given (p1,s1) and (p2,s2),
+    // s' = max(s1,s2), p' = max(p1-s1, p2-s2) + s', saturated at 38.
+    let decimal_lub = |p1: u8, s1: u8, p2: u8, s2: u8| -> DataType {
+        let s = s1.max(s2) as u32;
+        let int_digits1 = (p1 as u32).saturating_sub(s1 as u32);
+        let int_digits2 = (p2 as u32).saturating_sub(s2 as u32);
+        let p = int_digits1.max(int_digits2) + s;
+        Decimal {
+            precision: p.min(38) as u8,
+            scale: s as u8,
+        }
+    };
+
+    // Handle Decimal pairs (same or different params) using the formula.
+    if let (
+        Decimal {
+            precision: p1,
+            scale: s1,
+        },
+        Decimal {
+            precision: p2,
+            scale: s2,
+        },
+    ) = (a, b)
+    {
+        return decimal_lub(*p1, *s1, *p2, *s2);
+    }
+
+    // Handle Decimal + integer: lift the integer, then apply the formula.
+    if let Decimal {
+        precision: pd,
+        scale: sd,
+    } = a
+    {
+        if let Some((pi, si)) = lift_integer_to_decimal(b) {
+            return decimal_lub(*pd, *sd, pi, si);
+        }
+    }
+    if let Decimal {
+        precision: pd,
+        scale: sd,
+    } = b
+    {
+        if let Some((pi, si)) = lift_integer_to_decimal(a) {
+            return decimal_lub(pi, si, *pd, *sd);
+        }
+    }
+
+    // For all other pairs, use the rank-based promotion chain (§16 #9).
     let rank = |d: &DataType| -> u8 {
         match d {
             SmallInt => 1,
             Integer => 2,
             BigInt => 3,
-            // Per §16 #9: Decimal sits between BigInt and Double; since v1
-            // combines Decimal + integer by widening to DECIMAL(38,10),
-            // rank Decimal at 4 and Float/Double at 5/6.
             Decimal { .. } => 4,
             Float => 5,
             Double => 6,
             _ => 0,
         }
     };
-    match (a, b) {
-        // Decimal combined with any integer type widens to DECIMAL(38,10)
-        // (§16 #9 rule for precision/scale preservation).
-        (Decimal { .. }, SmallInt | Integer | BigInt)
-        | (SmallInt | Integer | BigInt, Decimal { .. }) => Decimal {
-            precision: 38,
-            scale: 10,
-        },
-        _ => {
-            let (ra, rb) = (rank(a), rank(b));
-            if ra >= rb {
-                a.clone()
-            } else {
-                b.clone()
-            }
-        }
+    let (ra, rb) = (rank(a), rank(b));
+    if ra >= rb {
+        a.clone()
+    } else {
+        b.clone()
     }
 }
 
@@ -4383,13 +4546,13 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
         SmeltType::TableExpr(None) => "TableExpr".to_string(),
         SmeltType::TableExpr(Some(req)) => {
             let mut s = String::from("TableExpr<{");
-            for (i, (col, req)) in req.required.iter().enumerate() {
+            for (i, (col, col_req, _not_null)) in req.required.iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }
                 s.push_str(col);
                 s.push_str(": ");
-                s.push_str(&req.render());
+                s.push_str(&col_req.render());
             }
             match &req.tail {
                 RowTail::None => {}
@@ -5134,7 +5297,8 @@ mod tests {
             numeric_lub(&DataType::Integer, &DataType::SmallInt),
             DataType::Integer
         );
-        // Decimal + integer widens to DECIMAL(38,10).
+        // Decimal + integer applies the §15 LUB formula:
+        // Integer → Decimal(10,0); s'=max(0,2)=2; p'=max(10,3)+2=12.
         assert_eq!(
             numeric_lub(
                 &DataType::Integer,
@@ -5144,9 +5308,100 @@ mod tests {
                 },
             ),
             DataType::Decimal {
-                precision: 38,
-                scale: 10,
+                precision: 12,
+                scale: 2,
             }
+        );
+    }
+
+    // === Phase 4 TDD tests — Decimal LUB formula (§15) ===
+
+    #[test]
+    fn decimal_decimal_lub_coercion_formula() {
+        // s' = max(2,3) = 3, p' = max(10-2, 8-3) + 3 = max(8,5) + 3 = 11
+        assert_eq!(
+            numeric_lub(
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                &DataType::Decimal {
+                    precision: 8,
+                    scale: 3
+                },
+            ),
+            DataType::Decimal {
+                precision: 11,
+                scale: 3
+            }
+        );
+    }
+
+    #[test]
+    fn decimal_same_params_lub_unchanged() {
+        // Same-params: returns unchanged
+        assert_eq!(
+            numeric_lub(
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+            ),
+            DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn integer_decimal_lub_lifting() {
+        // Integer lifts to Decimal(10,0)
+        // s' = max(0,2) = 2, p' = max(10-0, 10-2) + 2 = 10 + 2 = 12
+        assert_eq!(
+            numeric_lub(
+                &DataType::Integer,
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+            ),
+            DataType::Decimal {
+                precision: 12,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn bigint_decimal_lub_lifting() {
+        // BigInt lifts to Decimal(19,0)
+        // s' = max(0,2) = 2, p' = max(19-0, 5-2) + 2 = 19 + 2 = 21
+        assert_eq!(
+            numeric_lub(
+                &DataType::BigInt,
+                &DataType::Decimal {
+                    precision: 5,
+                    scale: 2
+                },
+            ),
+            DataType::Decimal {
+                precision: 21,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn numeric_lub_chain_unaffected() {
+        // Non-Decimal cases unchanged
+        assert_eq!(
+            numeric_lub(&DataType::Integer, &DataType::Double),
+            DataType::Double
         );
     }
 
@@ -5337,10 +5592,12 @@ mod tests {
                 (
                     "revenue".to_string(),
                     DataTypeReq::Constraint(TypeConstraint::Numeric),
+                    false,
                 ),
                 (
                     "cost".to_string(),
                     DataTypeReq::Constraint(TypeConstraint::Numeric),
+                    false,
                 ),
             ],
             tail,
@@ -5469,7 +5726,11 @@ mod tests {
         // — same family, compatible under our row-requirement rule
         // (Text normalizes to Varchar { max_length: None }).
         let req = SchemaRequirement {
-            required: vec![("notes".to_string(), DataTypeReq::Concrete(DataType::Text))],
+            required: vec![(
+                "notes".to_string(),
+                DataTypeReq::Concrete(DataType::Text),
+                false,
+            )],
             tail: RowTail::Anon,
         };
         let schema = vec![("notes".to_string(), DataType::Varchar { max_length: None })];
@@ -5485,10 +5746,12 @@ mod tests {
                 (
                     "revenue".to_string(),
                     DataTypeReq::Constraint(TypeConstraint::Numeric),
+                    false,
                 ),
                 (
                     "cost".to_string(),
                     DataTypeReq::Constraint(TypeConstraint::Numeric),
+                    false,
                 ),
             ],
             tail: RowTail::None,
@@ -5515,7 +5778,11 @@ mod tests {
     #[test]
     fn lsp_hover_tableexpr_named_tail() {
         let req = SchemaRequirement {
-            required: vec![("id".to_string(), DataTypeReq::Concrete(DataType::BigInt))],
+            required: vec![(
+                "id".to_string(),
+                DataTypeReq::Concrete(DataType::BigInt),
+                false,
+            )],
             tail: RowTail::Named("r".to_string()),
         };
         let hover = format_smelt_type_hover(&SmeltType::TableExpr(Some(req)));

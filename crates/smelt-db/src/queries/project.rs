@@ -22,7 +22,8 @@ use crate::queries::loader::{
 };
 use crate::queries::parse::{parse_file, parse_model};
 use crate::queries::schema::{
-    add_source_info_to_type_context, build_type_context, RefSchemaProvider, SalsaRefSchemaProvider,
+    add_source_info_to_type_context, apply_outer_join_nullability, build_type_context,
+    RefSchemaProvider, SalsaRefSchemaProvider,
 };
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
@@ -1851,6 +1852,11 @@ pub(crate) fn synthesise_emission_schema(
     //   - Per-entity sources/*.yml columns via `add_source_info_to_type_context`.
     let mut ctx = build_type_context(&ast, legacy_sources, refs);
     add_source_info_to_type_context(per_entity_sources, &mut ctx);
+
+    // Apply outer-join nullability rule (spec §11): must be called AFTER
+    // add_source_info_to_type_context so declared source nullability is applied
+    // before outer-join sides are force-marked nullable.
+    apply_outer_join_nullability(&select_stmt, &mut ctx);
 
     // Seed workspace function signatures so any smelt.functions.* call in
     // the body resolves its return type correctly.

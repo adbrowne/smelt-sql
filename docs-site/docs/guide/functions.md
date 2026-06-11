@@ -123,6 +123,33 @@ smelt.define is_shipped_safe(status: Expr<Text>) -> Expr<Boolean> AS (
 )
 ```
 
+### NOT NULL parameters and return types
+
+Add `NOT NULL` to an `Expr<T>` annotation to require a non-nullable value:
+
+```sql
+-- functions/double_id.sql
+smelt.define double_id(id: Expr<Integer NOT NULL>) -> Expr<Integer> AS (id * 2)
+```
+
+Passing a nullable column to `double_id` is a type error — smelt reports `ArgTypeMismatch` at the call site. Passing a column that is declared `nullable: false` in its source schema (or comes from a literal or other provably-non-null expression) is clean.
+
+The same qualifier applies to return types. When declared `-> Expr<T NOT NULL>`, smelt checks that the body synthesises a non-nullable result; a body like `CAST(NULL AS INTEGER)` would be rejected with `ReturnTypeMismatch`.
+
+For `TableExpr` parameters, the qualifier applies to individual row columns:
+
+```sql
+smelt.define process(t: TableExpr<{id: Integer NOT NULL, name: Text}>) -> TableExpr AS (
+  SELECT id * 2 AS doubled_id, name FROM t
+)
+```
+
+A nullable `id` column in the caller emits `RowRequirementUnsatisfied`.
+
+**One-way subtyping.** Non-nullable is a subtype of nullable: you can always pass a `NOT NULL` column to a plain `Expr<Integer>` parameter. The qualifier is never required — omitting it accepts both nullable and non-nullable arguments (the existing default).
+
+**Nested positions.** `NOT NULL` is accepted only at the top-level `Expr<T>` / `AggExpr<T>` / `TableExpr` row column positions. It is not accepted on struct field types or array element types; those positions are conservatively nullable.
+
 ### Calling in boolean positions
 
 A function whose declared return type is `Expr<Boolean>` can be used in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression.

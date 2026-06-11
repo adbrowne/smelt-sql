@@ -24,6 +24,58 @@ impl DuckDbOracle {
             conn: Connection::open_in_memory().expect("failed to open in-memory DuckDB"),
         }
     }
+
+    /// Execute one or more DDL/DML statements (separated by `;`).
+    ///
+    /// Used to set up tables with real NULL-bearing data for value-based nullability tests.
+    pub fn execute_ddl(&self, sql: &str) -> Result<(), String> {
+        // Split on `;` to handle multi-statement setup strings
+        for stmt in sql.split(';') {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.conn
+                .execute_batch(trimmed)
+                .map_err(|e| format!("DDL execute error: {e}\n  statement: {trimmed}"))?;
+        }
+        Ok(())
+    }
+
+    /// Execute a SELECT query and return the null count per column.
+    ///
+    /// Returns `Vec<(column_name, null_count)>` in column order.
+    /// This is a value-based check: it scans actual result rows, not just the schema.
+    ///
+    /// The Arrow `null_count()` on each column array gives the exact count efficiently.
+    pub fn count_nulls_per_column(&self, sql: &str) -> Result<Vec<(String, usize)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("prepare: {e}"))?;
+        let arrow_result = stmt.query_arrow([]).map_err(|e| format!("query: {e}"))?;
+
+        let batches: Vec<_> = arrow_result.collect();
+        if batches.is_empty() {
+            return Err("query returned no batches".into());
+        }
+
+        // Accumulate null counts across all batches
+        let schema = batches[0].schema();
+        let num_cols = schema.fields().len();
+        let mut null_counts: Vec<usize> = vec![0; num_cols];
+
+        for batch in &batches {
+            for (col_idx, array) in batch.columns().iter().enumerate() {
+                // Arrow array `null_count()` is O(1) — computed at batch creation time.
+                null_counts[col_idx] += array.null_count();
+            }
+        }
+
+        let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+
+        Ok(names.into_iter().zip(null_counts).collect())
+    }
 }
 
 impl TypeOracle for DuckDbOracle {

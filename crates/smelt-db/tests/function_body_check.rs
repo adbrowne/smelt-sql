@@ -292,3 +292,119 @@ fn self_contained_default_is_ok() {
         "self-contained default `= 1` should emit no DefaultReferencesParameter, got {diags:?}"
     );
 }
+
+// ===== Phase 5 (nullability-soundness): NOT NULL parameter checking =====
+
+#[test]
+fn not_null_param_rejects_nullable_argument() {
+    // Passing a nullable column to `Expr<T NOT NULL>` should emit ArgTypeMismatch.
+    // The source model has a nullable column `val`; the function requires NOT NULL.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("nn_fn.sql");
+    let model_path = root.join("models").join("caller.sql");
+    let fn_src = "smelt.define nn_fn(x: Expr<Integer NOT NULL>) AS (x + 1)\n";
+    // The source model selects a column that is nullable (CAST(NULL ...))
+    let model_src = "SELECT smelt.functions.nn_fn(val) AS result \
+        FROM (SELECT CAST(NULL AS INTEGER) AS val) AS t\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = body_diags(&db, ws, model_file, DiagnosticCode::ArgTypeMismatch);
+    assert!(
+        !diags.is_empty(),
+        "passing nullable to NOT NULL param should emit ArgTypeMismatch, got none"
+    );
+}
+
+#[test]
+fn not_null_param_accepts_non_nullable_argument() {
+    // Passing a non-nullable column to `Expr<T NOT NULL>` should be clean.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("nn_fn.sql");
+    let model_path = root.join("models").join("caller.sql");
+    let fn_src = "smelt.define nn_fn(x: Expr<Integer NOT NULL>) AS (x + 1)\n";
+    // A literal integer is non-nullable
+    let model_src = "SELECT smelt.functions.nn_fn(42) AS result\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags: Vec<_> = smelt_db::file_diagnostics(&db, ws, model_file)
+        .into_iter()
+        .filter(|d| d.severity == smelt_db::DiagnosticSeverity::Error)
+        .collect();
+    assert!(
+        diags.is_empty(),
+        "non-nullable arg to NOT NULL param should emit no errors; got {diags:#?}"
+    );
+}
+
+#[test]
+fn not_null_return_rejects_nullable_body() {
+    // A body that synthesises nullable against a `NOT NULL` return annotation
+    // should emit ReturnTypeMismatch.
+    let root = PathBuf::from("/fake/project");
+    let path = root.join("functions").join("must_nn.sql");
+    // CAST(NULL AS INTEGER) is nullable; -> Expr<Integer NOT NULL> should reject it.
+    let src = "smelt.define must_nn() -> Expr<Integer NOT NULL> AS (CAST(NULL AS INTEGER))\n";
+
+    let (db, ws, files) = build_db(root, &[(path, src)]);
+    let file = files[0];
+
+    let diags = body_diags(&db, ws, file, DiagnosticCode::ReturnTypeMismatch);
+    assert!(
+        !diags.is_empty(),
+        "nullable body against NOT NULL return should emit ReturnTypeMismatch, got none"
+    );
+}
+
+#[test]
+fn arg_type_mismatch_message_contains_not_null_for_non_nullable_arg() {
+    // When a non-nullable arg has the wrong type, the diagnostic message
+    // should include "NOT NULL" in the type display (canonical renderer used).
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("wants_text.sql");
+    let model_path = root.join("models").join("caller.sql");
+    // Function wants Text; we pass a non-nullable Integer literal (42 = INTEGER NOT NULL)
+    let fn_src = "smelt.define wants_text(x: Expr<Text>) AS (x)\n";
+    let model_src = "SELECT smelt.functions.wants_text(42) AS result\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = body_diags(&db, ws, model_file, DiagnosticCode::ArgTypeMismatch);
+    assert!(
+        !diags.is_empty(),
+        "wrong type arg should emit ArgTypeMismatch, got none"
+    );
+    let msg = &diags[0].message;
+    assert!(
+        msg.contains("NOT NULL"),
+        "ArgTypeMismatch message should contain 'NOT NULL' for non-nullable arg; got: {msg}"
+    );
+}
+
+#[test]
+fn return_type_mismatch_message_contains_not_null_for_non_nullable_body() {
+    // When the body returns a wrong type but non-nullable value, the diagnostic
+    // message should include "NOT NULL" in the type display.
+    let root = PathBuf::from("/fake/project");
+    let path = root.join("functions").join("wrong_return.sql");
+    // Body returns 42 (INTEGER NOT NULL) but declared -> Expr<Text>
+    let src = "smelt.define wrong_return() -> Expr<Text> AS (42)\n";
+
+    let (db, ws, files) = build_db(root, &[(path, src)]);
+    let file = files[0];
+
+    let diags = body_diags(&db, ws, file, DiagnosticCode::ReturnTypeMismatch);
+    assert!(
+        !diags.is_empty(),
+        "wrong return type should emit ReturnTypeMismatch, got none"
+    );
+    let msg = &diags[0].message;
+    assert!(
+        msg.contains("NOT NULL"),
+        "ReturnTypeMismatch message should contain 'NOT NULL' for non-nullable body; got: {msg}"
+    );
+}

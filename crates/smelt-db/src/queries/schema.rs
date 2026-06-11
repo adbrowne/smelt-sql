@@ -1138,6 +1138,144 @@ fn bare_table_name(table_ref: &TableRef) -> Option<String> {
     idents.last().cloned()
 }
 
+/// Pure pass: apply spec §11 outer-join nullability rule to a `TypeContext`.
+///
+/// Walks the FROM clause's join list and, for each outer join, marks every
+/// column belonging to the null-supplying side(s) as `nullable: true`,
+/// regardless of their declared or upstream-inferred nullability.
+///
+/// ## Ordering contract
+///
+/// **Must be called AFTER all columns are bound** — in particular after
+/// `add_source_info_to_type_context` has applied declared source nullability.
+/// If called before that pass, `add_source_info_to_type_context` would
+/// overwrite the forced-nullable flag back to the declared value, silently
+/// undoing the fix for `nullable: false` source columns on the null-supplied
+/// side.
+///
+/// In the Salsa `type_context` wrapper this means: call after
+/// `add_source_info_to_type_context(...)`.
+///
+/// ## Rule (spec §11)
+///
+/// - `LEFT JOIN`  → right side (the joined table_ref) becomes nullable.
+/// - `RIGHT JOIN` → left side (all entities accumulated before this join) becomes nullable.
+/// - `FULL JOIN`  → both sides become nullable.
+/// - `INNER JOIN` / `CROSS JOIN` / bare `JOIN` → no change (preserve input nullability).
+///
+/// ## Multi-join chains
+///
+/// Joins are walked left-to-right. We maintain an accumulator of entity names
+/// that have been seen so far on the left. For a RIGHT or FULL join we mark
+/// every entity in the accumulator (the left side up to that point) as well as
+/// the current join's entity.
+///
+/// Example: `a LEFT JOIN b INNER JOIN c`
+///   - Walk base `a` → accumulate `[a]`.
+///   - Join1 LEFT b → mark b nullable; accumulate `[a, b]`.
+///   - Join2 INNER c → mark nothing; accumulate `[a, b, c]`.
+///     → Result: b is nullable, a and c are non-nullable. ✓
+///
+/// Pure — no Salsa interaction.
+pub fn apply_outer_join_nullability(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &mut TypeContext,
+) {
+    use smelt_parser::ast::JoinType;
+
+    let from_clause = match select_stmt.from_clause() {
+        Some(fc) => fc,
+        None => return,
+    };
+
+    // Collect base table entity names (left-most side).
+    let mut left_entities: Vec<String> = Vec::new();
+    for table_ref in from_clause.table_refs() {
+        if let Some(name) = entity_name_for_table_ref(&table_ref) {
+            left_entities.push(name);
+        }
+    }
+
+    // Walk joins left-to-right.
+    for join in from_clause.joins() {
+        let join_type = join.join_type(); // None → bare JOIN (Inner)
+        let right_entity = join
+            .table_ref()
+            .and_then(|tr| entity_name_for_table_ref(&tr));
+
+        match join_type {
+            Some(JoinType::Left) | None => {
+                // None = bare JOIN = INNER; but LEFT is the outer case.
+                if matches!(join_type, Some(JoinType::Left)) {
+                    // Mark right side nullable.
+                    if let Some(ref name) = right_entity {
+                        ctx.mark_entity_columns_nullable(name);
+                    }
+                }
+                // INNER / bare JOIN: no marking.
+            }
+            Some(JoinType::Right) => {
+                // Mark all left-side entities accumulated so far.
+                for name in &left_entities {
+                    ctx.mark_entity_columns_nullable(name);
+                }
+                // Right side stays as-is.
+            }
+            Some(JoinType::Full) => {
+                // Mark both sides.
+                for name in &left_entities {
+                    ctx.mark_entity_columns_nullable(name);
+                }
+                if let Some(ref name) = right_entity {
+                    ctx.mark_entity_columns_nullable(name);
+                }
+            }
+            Some(JoinType::Inner) | Some(JoinType::Cross) => {
+                // No marking — preserve input nullability.
+            }
+        }
+
+        // Accumulate the right entity into the left side for subsequent joins.
+        if let Some(name) = right_entity {
+            left_entities.push(name);
+        }
+    }
+}
+
+/// Derive the entity name (alias or bare table name) that `process_table_ref_pure`
+/// would bind for a given `TableRef`.
+///
+/// Returns `None` for table refs where no binding is established (e.g. pure
+/// function calls without an alias, subqueries without alias). This mirrors the
+/// alias-resolution logic in `process_table_ref_pure`:
+///   1. If the table ref has an explicit alias, that is the binding name.
+///   2. Otherwise, use the last identifier / last path segment.
+fn entity_name_for_table_ref(table_ref: &TableRef) -> Option<String> {
+    // Explicit alias always wins.
+    if let Some(alias) = table_ref.alias() {
+        return Some(alias);
+    }
+
+    // smelt path call: use last segment as bind name.
+    if let Some(path_call) = table_ref.smelt_path_call() {
+        return path_call.segments().last().cloned();
+    }
+
+    // smelt path ref: use last segment.
+    if let Some(path_ref) = table_ref.smelt_path_ref() {
+        return path_ref.segments().last().cloned();
+    }
+
+    // Bare identifier (possibly `schema.table`): use the last segment.
+    if table_ref.function_call().is_none() && table_ref.subquery().is_none() {
+        if let Some(raw_name) = table_ref.identifier() {
+            return Some(bare_table_name(table_ref).unwrap_or(raw_name));
+        }
+    }
+
+    None
+}
+
 /// Pure function: populate a `TypeContext` with column type information from
 /// Phase 6 per-entity `SourceInfo` records.
 ///
@@ -1206,6 +1344,16 @@ pub fn type_context(
     // Phase 6: add per-entity source columns to the TypeContext.
     // Source address_segments like ["sources", "raw", "users"] → schema="raw", table="users".
     add_source_info_to_type_context(&per_entity_sources, &mut ctx);
+
+    // Apply outer-join nullability rule (spec §11): columns from the null-supplying
+    // side(s) of an outer join are forced nullable regardless of declared nullability.
+    // MUST be called AFTER add_source_info_to_type_context so that the declared
+    // source nullability (which overwrites the initial nullable:true seed) has been
+    // applied before we force-nullable the outer-join sides. Calling before would
+    // allow add_source_info_to_type_context to silently undo the forced flag.
+    if let Some(select_stmt) = ast.select_stmt() {
+        apply_outer_join_nullability(&select_stmt, &mut ctx);
+    }
 
     // Seed the workspace's `smelt.define` signatures so path-call type
     // inference can resolve declared return types when a SELECT projects a

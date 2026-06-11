@@ -706,6 +706,11 @@ pub enum DiagnosticCode {
     /// span (more precise than `InvalidFunctionTypeRef` which covers the whole
     /// annotation). Error severity.
     UnknownStructFieldType,
+    /// Emitted when a decimal arithmetic expression or UNION coercion computes
+    /// a result precision p' > 38. Anchored at the operator token span
+    /// (arithmetic) or UNION keyword span (UNION coercion). The result type
+    /// degrades to Unknown.
+    DecimalPrecisionOverflow,
 }
 
 /// Structured metadata attached to diagnostics for code actions

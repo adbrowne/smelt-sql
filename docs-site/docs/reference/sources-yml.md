@@ -28,7 +28,7 @@ A `smelt.sources.<path>` reference always resolves under the sources namespace; 
 |-----|----------|---------|---------|
 | `name` | yes | — | Column name as it appears in the database. |
 | `type` | yes | — | smelt `DataType` — see [Supported types](#supported-types). |
-| `nullable` | no | `true` | Whether the column may contain NULL. Type-checking respects this. |
+| `nullable` | no | `true` | Whether the column may contain NULL. `nullable: false` is a guarantee that type inference carries downstream. When the column appears on the null-supplying side of an outer join (`LEFT JOIN` right side, `RIGHT JOIN` left side, either side of `FULL JOIN`), inference overrides the declared guarantee and marks the column nullable in the join's output scope. |
 | `description` | no | absent | Free-text description, surfaced in LSP hover. |
 
 ## Complete example

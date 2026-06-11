@@ -385,8 +385,9 @@ User documentation lives under docs-site/. For any user facing feature change co
 
 ## Type Property Tests
 
-Property-based tests in `crates/smelt-db/tests/type_property_tests.rs` verify smelt's type inference against DuckDB:
+Property-based tests verify smelt's type inference against DuckDB:
 
+**Type correctness oracle** (`crates/smelt-db/tests/type_property_tests.rs`):
 ```bash
 # Run all property tests (256 cases + smoke tests)
 cargo test -p smelt-db --test type_property_tests
@@ -398,10 +399,23 @@ cargo test -p smelt-db --test type_property_tests prop_type_inference
 PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference
 ```
 
+**Nullability soundness oracle** (`crates/smelt-db/tests/nullability_property_tests.rs`):
+```bash
+# Run all nullability tests (256 cases + smoke tests)
+cargo test -p smelt-db --test nullability_property_tests
+
+# Run only the property test
+cargo test -p smelt-db --test nullability_property_tests prop_nullability_sound
+
+# Deeper coverage (local only)
+PROPTEST_CASES=1000 cargo test -p smelt-db --test nullability_property_tests prop_nullability_sound
+```
+
 **Structure:**
 - `tests/prop_helpers/generators.rs` — Type-aware SQL expression generators
 - `tests/prop_helpers/arrow_mapping.rs` — Arrow → smelt DataType mapping
-- `tests/prop_helpers/duckdb_oracle.rs` — DuckDB execution oracle (trait-based for future PG/Spark)
+- `tests/prop_helpers/duckdb_oracle.rs` — DuckDB execution oracle (trait-based for future PG/Spark); also provides value-based `count_nulls_per_column` and `execute_ddl` for nullability tests
+- `tests/prop_helpers/null_data.rs` — NULL-bearing data generation for nullability soundness tests
 - `tests/prop_helpers/type_comparison.rs` — Exact/Compatible/Mismatch comparison
 - `tests/prop_helpers/divergences.rs` — Known type divergence registry
 
