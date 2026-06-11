@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781168333192,
+  "lastUpdate": 1781176830341,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18705,6 +18705,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.437644,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "2238f276d24001811e3a2be0f89b3bf7bf96dc7e",
+          "message": "fix(diagnostics): wire MetadataError variants into LSP diagnostic pipeline\n\nRoot cause: `MalformedDelimiter`, `UnclosedFrontmatter`, `MissingModelName`,\nand `YamlParseError` from `extract_file_metadata` fell through a `_ => {}`\ncatch-all in `check_file_diagnostics`, so structurally invalid multi-model\nfiles produced no LSP error.  Symptom: `smelt test` on `meta_hofs` printed\n\"No tests found\" because `and_all_predicates.sql` had SQL before its first\n`--- name:` delimiter.\n\nChanges:\n- Add `map_metadata_error_to_diagnostic` exhaustive match helper in\n  `smelt-db/src/lib.rs`; the Rust compiler now enforces that every new\n  `MetadataError` variant is explicitly handled (None only if covered by a\n  dedicated arm elsewhere).\n- Add `DiagnosticCode::MalformedSectionDelimiter` and `::UnclosedFrontmatter`.\n- Wire the `Err(e)` arm in `check_file_diagnostics` to emit those diagnostics.\n- Add `MalformedSectionDelimiter` and `UnclosedFrontmatter` to the LSP\n  `backend.rs` code-string match (compile-time exhaustiveness enforced).\n- Fix off-by-one in `extract_multi_model` byte-range computation: files\n  without a trailing newline caused `sql_start_byte`/`sql_end_byte` to exceed\n  `source.len()`, panicking the LSP workspace initialisation.\n- Fix `and_all_predicates.sql` format: wrap SQL in `--- name: ---` sections.\n- Extend `docs/specs/architecture.md` §11 and `CLAUDE.md` with the fourth\n  CI gate (MetadataError exhaustiveness).\n- Two new regression tests pin both diagnostic codes (8/8 green).\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-11T19:46:01+10:00",
+          "tree_id": "2b7260f13e011a1f264ce8137fe0f638e699dc19",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/2238f276d24001811e3a2be0f89b3bf7bf96dc7e"
+        },
+        "date": 1781176828850,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 47.729501,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 45.530308,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.923723,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.639473,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.319837,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 2916.9590510000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 5.199622,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 4.027956,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 3.956533,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.7667200000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3222.920716,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.49538,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.71043,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.186282,
             "unit": "ms"
           }
         ]
