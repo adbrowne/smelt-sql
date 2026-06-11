@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781168331134,
+  "lastUpdate": 1781168333192,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24449,6 +24449,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.325534935559354,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "61b82bd549a47a28704e402ee34d04c28669811f",
+          "message": "chore(ledger): close BUG-022/031/052/058/062/071 — docs-gap remediation complete\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-06-11T18:36:27+10:00",
+          "tree_id": "e923a67f9f84163479ed154abd7dcc4af97b5f3d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/61b82bd549a47a28704e402ee34d04c28669811f"
+        },
+        "date": 1781168332671,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.98399272967791,
             "unit": "MB/s"
           }
         ]
