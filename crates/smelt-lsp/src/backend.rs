@@ -130,6 +130,10 @@ pub struct Backend {
     /// The position encoding negotiated with the client during `initialize`.
     /// Defaults to UTF-16 (LSP default when the client advertises no preference).
     negotiated_encoding: Arc<Mutex<PositionEncodingKind>>,
+    /// Test models discovered during workspace init and file-change scans.
+    /// Populated by `publish_tests()`; read by the VSCode TestController via
+    /// the `smelt/publishTests` notification.
+    known_tests: Arc<Mutex<Vec<crate::notifications::TestInfo>>>,
 }
 
 /// Collect every `smelt.functions.<name>(...)` call-site path range across
@@ -167,6 +171,7 @@ impl Backend {
             multi_model_files: Arc::new(Mutex::new(HashMap::new())),
             // Default: UTF-16, as required by LSP spec §3.17 general capabilities.
             negotiated_encoding: Arc::new(Mutex::new(PositionEncodingKind::UTF16)),
+            known_tests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -688,6 +693,78 @@ impl Backend {
         self.publish_source_diagnostics().await;
     }
 
+    /// Collect test entries from sql_files and merge into `known_tests`.
+    ///
+    /// Does NOT send the notification — call `publish_known_tests()` after.
+    async fn collect_tests_into_cache(
+        &self,
+        sql_files: &[smelt_core::discovery::ModelFile],
+    ) {
+        use crate::notifications::TestInfo;
+
+        let mm = self.multi_model_files.lock().await;
+        let virtual_to_real_and_line: std::collections::HashMap<PathBuf, (PathBuf, u32)> = mm
+            .iter()
+            .flat_map(|(real_path, entries)| {
+                entries.iter().map(move |(virtual_path, start_line)| {
+                    (virtual_path.clone(), (real_path.clone(), *start_line))
+                })
+            })
+            .collect();
+        drop(mm);
+
+        let mut tests = self.known_tests.lock().await;
+        for model in sql_files {
+            if !model.is_test() {
+                continue;
+            }
+            let (real_path, line) =
+                if let Some((rp, sl)) = virtual_to_real_and_line.get(&model.path) {
+                    (rp.clone(), *sl)
+                } else {
+                    let source_path = model.model_id.source_path().to_path_buf();
+                    (source_path, 0u32)
+                };
+
+            if let Ok(uri) = Url::from_file_path(&real_path) {
+                // Avoid duplicates (multiple workspace folders may share paths)
+                if !tests.iter().any(|t| t.name == model.name) {
+                    tests.push(TestInfo {
+                        name: model.name.clone(),
+                        uri: uri.to_string(),
+                        line,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Send `smelt/publishTests` with the current `known_tests` cache.
+    async fn publish_known_tests(&self) {
+        use crate::notifications::{PublishTests, PublishTestsParams};
+
+        let tests = self.known_tests.lock().await.clone();
+        self.client
+            .send_notification::<PublishTests>(PublishTestsParams { tests })
+            .await;
+    }
+
+    /// Rebuild the test cache from all project roots and re-publish.
+    ///
+    /// Called after file-change events so the TestController stays up to date.
+    async fn refresh_and_publish_tests(&self) {
+        let project_roots = self.project_roots.lock().await.clone();
+        let mut all_sql_files = Vec::new();
+        for root in &project_roots {
+            let loaded = smelt_core::load_workspace(root);
+            all_sql_files.extend(loaded.sql_files);
+        }
+
+        *self.known_tests.lock().await = Vec::new();
+        self.collect_tests_into_cache(&all_sql_files).await;
+        self.publish_known_tests().await;
+    }
+
     /// Publish per-entity source YAML diagnostics, project-scoped.
     ///
     /// These `.yml` files are not tracked `SourceFile` inputs (they have no SQL
@@ -1079,6 +1156,10 @@ impl LanguageServer for Backend {
                         }
                     }
 
+                    // Collect test models for the VSCode TestController (published
+                    // after `initialized` once the client connection is ready).
+                    self.collect_tests_into_cache(&loaded.sql_files).await;
+
                     // Python discovery — kept inline; runs python_scan with
                     // LSP-specific state (python_cache, python_model_sources)
                     // and emits LSP diagnostics for execution errors. Not yet
@@ -1298,6 +1379,10 @@ impl LanguageServer for Backend {
                     .await;
             }
         }
+        drop(py_diags);
+
+        // Publish test discovery — VSCode TestController subscribes to this.
+        self.publish_known_tests().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -1497,6 +1582,8 @@ impl LanguageServer for Backend {
                     drop(tracked);
                     drop(db);
                     self.publish_all_diagnostics().await;
+                    // Re-scan tests in case a test file was added/modified.
+                    self.refresh_and_publish_tests().await;
                 }
             }
         }

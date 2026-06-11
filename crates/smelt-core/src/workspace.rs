@@ -206,6 +206,40 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_finds_test_models_in_tests_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: test_pub\nversion: 1\npaths:\n  - models\n  - tests\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models/simple.sql"), "SELECT 1 AS x\n").unwrap();
+        let test_content = concat!(
+            "--- name: test_simple ---\n",
+            "materialization: test\n",
+            "test:\n",
+            "  model: simple\n",
+            "  expect:\n",
+            "    - {x: 1}\n",
+            "---\n"
+        );
+        std::fs::write(dir.path().join("tests/test_simple.sql"), test_content).unwrap();
+
+        let loaded = load_workspace(dir.path());
+        let test_models: Vec<&crate::discovery::ModelFile> =
+            loaded.sql_files.iter().filter(|m| m.is_test()).collect();
+        assert_eq!(
+            test_models.len(),
+            1,
+            "expected 1 test model; got: {:?}",
+            loaded.sql_files.iter().map(|m| (&m.name, m.is_test())).collect::<Vec<_>>()
+        );
+        assert_eq!(test_models[0].name, "test_simple");
+    }
+
+    #[test]
     fn load_workspace_reads_sources_yml() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("models")).unwrap();

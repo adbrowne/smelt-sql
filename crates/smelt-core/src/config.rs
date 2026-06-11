@@ -87,6 +87,7 @@ pub struct Config {
     /// not by which directory the file lives in.
     #[serde(default = "default_paths")]
     pub paths: Vec<String>,
+    #[serde(default)]
     pub targets: HashMap<String, Target>,
     #[serde(default = "default_materialization")]
     pub default_materialization: Materialization,

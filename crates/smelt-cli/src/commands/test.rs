@@ -61,7 +61,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("\nsmelt test\n");
+    if !args.json {
+        println!("\nsmelt test\n");
+    }
 
     // 5. Run each test
     let mut passed = 0;
@@ -89,7 +91,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                 error: Some(TestError::CompilationError(err_msg)),
             };
             failed += 1;
-            print_test_result(&result, args.verbose, args.show_all);
+            if !args.json {
+                print_test_result(&result, args.verbose, args.show_all);
+            }
             results.push(result);
             continue;
         }
@@ -113,7 +117,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                     ))),
                 };
                 failed += 1;
+                if !args.json {
                 print_test_result(&result, args.verbose, args.show_all);
+            }
                 results.push(result);
                 continue;
             }
@@ -147,7 +153,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                 } else {
                     failed += 1;
                 }
-                print_property_test_result(&prop_result, args.verbose, args.show_all);
+                if !args.json {
+                    print_property_test_result(&prop_result, args.verbose, args.show_all);
+                }
                 continue;
             }
         }
@@ -173,7 +181,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                         error: Some(TestError::CompilationError(e)),
                     };
                     failed += 1;
-                    print_test_result(&result, args.verbose, args.show_all);
+                    if !args.json {
+                print_test_result(&result, args.verbose, args.show_all);
+            }
                     results.push(result);
                     continue;
                 }
@@ -206,7 +216,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                         error: Some(TestError::CompilationError(e)),
                     };
                     failed += 1;
-                    print_test_result(&result, args.verbose, args.show_all);
+                    if !args.json {
+                print_test_result(&result, args.verbose, args.show_all);
+            }
                     results.push(result);
                     continue;
                 }
@@ -234,11 +246,48 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
             failed += 1;
         }
 
-        print_test_result(&result, args.verbose, args.show_all);
+        if !args.json {
+            print_test_result(&result, args.verbose, args.show_all);
+        }
         results.push(result);
     }
 
-    // 6. Summary
+    // 6. Output results
+    if args.json {
+        #[derive(serde::Serialize)]
+        struct JsonTestResult {
+            name: String,
+            model: String,
+            status: &'static str,
+            duration_ms: u64,
+            message: Option<String>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct JsonOutput {
+            results: Vec<JsonTestResult>,
+        }
+
+        let json_results: Vec<JsonTestResult> = results
+            .into_iter()
+            .map(|r| JsonTestResult {
+                status: if r.passed { "pass" } else { "fail" },
+                duration_ms: r.duration.as_millis() as u64,
+                message: r.error.map(|e| e.to_string()),
+                name: r.name,
+                model: r.model,
+            })
+            .collect();
+
+        let output = JsonOutput {
+            results: json_results,
+        };
+        let json = serde_json::to_string(&output)?;
+        use std::io::Write;
+        writeln!(std::io::stdout(), "{json}")?;
+        return Ok(());
+    }
+
     let total = passed + failed;
     let overall_duration = overall_start.elapsed();
     println!(

@@ -14,6 +14,7 @@ mod completion;
 mod db_helpers;
 pub mod diagnostics_boundary;
 pub mod hover;
+pub mod notifications;
 mod python_scan;
 pub mod rename_lambda;
 

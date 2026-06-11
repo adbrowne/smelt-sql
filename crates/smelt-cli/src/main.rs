@@ -437,6 +437,10 @@ struct TestArgs {
     /// Random seed for property-based tests (for reproducibility)
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Output results as JSON for editor integration (exits 0 regardless of test status)
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]
