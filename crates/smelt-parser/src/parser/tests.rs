@@ -6084,3 +6084,75 @@ fn alias_column_list_leading_comma_cte_no_panic() {
         "leading comma in cte(,a) must produce at least one parse error"
     );
 }
+
+// ===== Phase 5 (nullability-soundness): NOT NULL qualifier tests =====
+
+#[test]
+fn parses_not_null_qualifier_on_expr_param() {
+    // `Expr<Integer NOT NULL>` should parse without errors and the TypeRef
+    // should report `not_null() == true`.
+    let src = "smelt.define f(x: Expr<Integer NOT NULL>) AS (x + 1)\n";
+    let parse = crate::parse(src);
+    assert!(
+        parse.errors.is_empty(),
+        "Expr<Integer NOT NULL> should parse without errors; got: {:?}",
+        parse.errors
+    );
+    // Walk the AST to find the param's TypeRef and verify not_null().
+    use crate::ast::File;
+    let file = File::cast(parse.syntax()).unwrap();
+    let define = file.defines().next().expect("expected a smelt.define");
+    let param = define
+        .param_list()
+        .and_then(|pl| pl.params().next())
+        .expect("expected a parameter");
+    let type_ref = param.type_ref().expect("expected a type_ref");
+    assert!(
+        type_ref.not_null(),
+        "TypeRef for `Expr<Integer NOT NULL>` should report not_null() = true"
+    );
+}
+
+#[test]
+fn not_null_on_tableexpr_row_field() {
+    // `TableExpr<{id: Integer NOT NULL}>` — the row field should expose not_null().
+    let src = "smelt.define f(t: TableExpr<{id: Integer NOT NULL}>) -> TableExpr AS (SELECT t.id FROM t)\n";
+    let parse = crate::parse(src);
+    assert!(
+        parse.errors.is_empty(),
+        "TableExpr<{{id: Integer NOT NULL}}> should parse without errors; got: {:?}",
+        parse.errors
+    );
+    use crate::ast::File;
+    let file = File::cast(parse.syntax()).unwrap();
+    let define = file.defines().next().expect("expected a smelt.define");
+    let param = define
+        .param_list()
+        .and_then(|pl| pl.params().next())
+        .expect("expected a parameter");
+    let type_ref = param.type_ref().expect("expected a type_ref");
+    let req = type_ref
+        .row_requirement()
+        .expect("expected a row requirement");
+    let field = req
+        .fields()
+        .into_iter()
+        .next()
+        .expect("expected a row field");
+    assert!(
+        field.not_null(),
+        "ROW_FIELD for `id: Integer NOT NULL` should report not_null() = true"
+    );
+}
+
+#[test]
+fn rejects_not_null_on_struct_field() {
+    // `Expr<Struct<{a: Integer NOT NULL}>>` — NOT NULL inside a struct field
+    // is not accepted; the parser should emit an error.
+    let src = "smelt.define f(x: Expr<Struct<{a: Integer NOT NULL}>>) AS (x)\n";
+    let parse = crate::parse(src);
+    assert!(
+        !parse.errors.is_empty(),
+        "NOT NULL inside Struct<{{...}}> should produce at least one parse error"
+    );
+}

@@ -19,9 +19,9 @@ use smelt_parser::ast::{
     BinaryExpr, Cte, Expr, FunctionCall, Lambda, SelectStmt, SmeltPathCall, TableRef,
 };
 use smelt_types::signatures::{
-    check_schema_requirement, column_ref_field, unify_call, ContextRef, ExprKind, FrameInfo,
-    FunctionSig, ModelOrigin, ParamSpec, SchemaMismatch, SchemaRequirement, Signature, SmeltType,
-    SourceOrigin, StructRowTail, Tier, TypeConstraint, UnificationError,
+    check_schema_requirement_with_nullability, column_ref_field, unify_call, ContextRef, ExprKind,
+    FrameInfo, FunctionSig, ModelOrigin, ParamSpec, SchemaMismatch, SchemaRequirement, Signature,
+    SmeltType, SourceOrigin, StructRowTail, Tier, TypeConstraint, UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
@@ -463,7 +463,15 @@ pub(crate) fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
             continue;
         }
         let bound_type = param_binding_type(p);
-        ctx.add_function_param(&p.name, TypedColumn::nullable(bound_type));
+        // Phase 5 (nullability-soundness): NOT NULL params bind as non-nullable
+        // in the body so that operations on them don't produce spurious nullable
+        // results.
+        let param_col = if p.not_null {
+            TypedColumn::new(bound_type, false)
+        } else {
+            TypedColumn::nullable(bound_type)
+        };
+        ctx.add_function_param(&p.name, param_col);
         // Phase 44b: record SelectItems<Kind> parameters so that bare
         // references to these params inside PASSING bodies inherit the
         // declared kind (see `infer_expression_kind`'s fragment_param_kinds
@@ -639,7 +647,7 @@ pub(crate) fn struct_param_fields(
 /// - `Err(mismatch)` when a declared field is missing or has an incompatible
 ///   type in the concrete argument.
 ///
-/// Uses the same [`SchemaMismatch`] type as `check_schema_requirement` so
+/// Uses the same [`SchemaMismatch`] type as `check_schema_requirement_with_nullability` so
 /// `row_requirement_diagnostic` can render the error message identically.
 ///
 /// Pure — no Salsa, no I/O.
@@ -1272,7 +1280,15 @@ pub fn check_smelt_path_call(
                         .iter()
                         .map(|(n, tc)| (n.clone(), tc.data_type.clone()))
                         .collect();
-                    match check_schema_requirement(req, &arg_schema) {
+                    let caller_nullability: Vec<(String, bool)> = cols
+                        .iter()
+                        .map(|(name, tc)| (name.clone(), tc.nullable))
+                        .collect();
+                    match check_schema_requirement_with_nullability(
+                        req,
+                        &arg_schema,
+                        &caller_nullability,
+                    ) {
                         Ok(binding) => {
                             body_ctx.add_tableexpr_param(&param.name, &cols);
                             if let Some(b) = binding {
@@ -1400,9 +1416,9 @@ pub fn check_smelt_path_call(
 
         match bindings.get(&param.name) {
             Some((arg_expr, arg_range)) => {
-                let arg_type = infer_expression_type(arg_expr, ctx)
-                    .map(|t| t.data_type)
-                    .unwrap_or(DataType::Unknown);
+                let arg_typed = infer_expression_type(arg_expr, ctx);
+                let arg_nullable = arg_typed.as_ref().map(|t| t.nullable).unwrap_or(true);
+                let arg_type = arg_typed.map(|t| t.data_type).unwrap_or(DataType::Unknown);
 
                 let constraint_violation = match &param.type_ref {
                     Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(expected)))) => {
@@ -1431,6 +1447,30 @@ pub fn check_smelt_path_call(
                             arg_type,
                             param.name,
                             expected_text,
+                            sig.name
+                        ),
+                        range: *arg_range,
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), arg_type.to_string()));
+                    continue;
+                }
+
+                // Phase 5 (nullability-soundness): NOT NULL parameter requires a
+                // non-nullable argument. Skip Unknown/Null-typed args (can't tell).
+                if param.not_null
+                    && arg_nullable
+                    && !matches!(arg_type, DataType::Unknown | DataType::Null)
+                {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument `{}` is nullable but parameter `{}` of `{}` requires `NOT NULL`",
+                            arg_expr.text().trim(),
+                            param.name,
                             sig.name
                         ),
                         range: *arg_range,
@@ -2843,10 +2883,12 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr) -> Vec<Diagnostic
     if let TypeConstraint::Concrete(ref dt) = declared_constraint {
         ctx.expected_return = Some(dt.clone());
     }
-    let inferred = match infer_expression_type(body, &ctx) {
-        Some(tc) => tc.data_type,
+    let inferred_col = match infer_expression_type(body, &ctx) {
+        Some(tc) => tc,
         None => return Vec::new(), // can't infer — skip
     };
+    let inferred = inferred_col.data_type.clone();
+    let inferred_nullable = inferred_col.nullable;
 
     // Unknown / Null bodies can't be verified.
     if matches!(inferred, DataType::Unknown | DataType::Null) {
@@ -2854,26 +2896,46 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr) -> Vec<Diagnostic
     }
 
     // Check whether the inferred type satisfies the declared constraint.
-    if declared_constraint.satisfies(&inferred) {
-        return Vec::new();
+    if !declared_constraint.satisfies(&inferred) {
+        // Type mismatch — anchor at the body expression.
+        let body_range = body.text_range();
+        let declared_text = sig
+            .return_type_text
+            .as_deref()
+            .unwrap_or("<unknown return type>");
+        return vec![Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "Return type mismatch: declared `-> {}` but body evaluates to `{}`",
+                declared_text, inferred
+            ),
+            range: body_range,
+            code: Some(DiagnosticCode::ReturnTypeMismatch),
+            data: None,
+        }];
     }
 
-    // Mismatch — anchor at the body expression.
-    let body_range = body.text_range();
-    let declared_text = sig
-        .return_type_text
-        .as_deref()
-        .unwrap_or("<unknown return type>");
-    vec![Diagnostic {
-        severity: DiagnosticSeverity::Error,
-        message: format!(
-            "Return type mismatch: declared `-> {}` but body evaluates to `{}`",
-            declared_text, inferred
-        ),
-        range: body_range,
-        code: Some(DiagnosticCode::ReturnTypeMismatch),
-        data: None,
-    }]
+    // Phase 5 (nullability-soundness): NOT NULL return requires a non-nullable
+    // body. Skip when the body type is Unknown/Null (already handled above).
+    if sig.return_not_null && inferred_nullable {
+        let body_range = body.text_range();
+        let declared_text = sig
+            .return_type_text
+            .as_deref()
+            .unwrap_or("<unknown return type>");
+        return vec![Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "Return type mismatch: declared `-> {}` but body may be NULL",
+                declared_text
+            ),
+            range: body_range,
+            code: Some(DiagnosticCode::ReturnTypeMismatch),
+            data: None,
+        }];
+    }
+
+    Vec::new()
 }
 
 /// Expand `..spread_name` placeholders inside a brace-struct literal body

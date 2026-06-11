@@ -324,6 +324,11 @@ pub enum SyntaxKind {
     // Error handling
     ERROR, // Invalid syntax
 
+    // Phase 5 (nullability-soundness): NOT NULL qualifier on type references.
+    // Emitted as a structured child node inside a TYPE_REF to mark the presence
+    // of the `NOT NULL` suffix (e.g. `Expr<Integer NOT NULL>`).
+    NOT_NULL_QUALIFIER,
+
     // Special
     EOF, // End of file
 }
