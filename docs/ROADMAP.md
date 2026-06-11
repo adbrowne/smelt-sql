@@ -62,10 +62,12 @@ A fifth, lighter front — **surfacing deferred work that was never tracked** �
 
 smelt's type system tracks base types and NULL propagation structurally, but four axes are coarse or untracked. They are simultaneously (a) real-world correctness gaps and (b) the precision blocker for virtual environments — `output_fingerprint.md` lists decimal/collation/nullability among the untracked axes that force conservative rebuild. Covering them sharpens both, which is why they are sequenced immediately before Virtual Environments.
 
-- **Decimal** — carry precision/scale through inference and arithmetic; widen division results correctly (today DECIMAL inference is too narrow and overflows past 99 — the residual from the smelt_shop validation).
-- **Nullability** — tighten NULL tracking into an exact, fingerprint-grade property rather than an advisory one.
-- **Collation** — model string comparison/sort semantics as a tracked attribute; required before collation-sensitive output can be declared equivalent.
-- **Timezone** — distinguish timestamp-with / -without-timezone and make inference tz-aware.
+Each axis is delivered end-to-end before the next begins: spec contract → soundness oracle → inference fix → signature surface → hover/diagnostics. The delivery order is **nullability → decimal → timezone → collation**, driven by dependency depth and existing research.
+
+- ✅ **Nullability** (2026-06-11) — sound-upper-bound contract in `docs/specs/types.md` §11; outer-join / set-operation rules; value-based DuckDB soundness oracle (`cargo test -p smelt-db --test nullability_property_tests`); non-nullable-claim audit; `NOT NULL` qualifier in `smelt.define` signatures; canonical type renderer shared by hover and diagnostics. See [plan](plans/20260610-nullability-soundness.md).
+- **Decimal** — carry precision/scale through inference and arithmetic; widen division results correctly (today `Decimal(p,s)` arithmetic always produces `Decimal(38,10)` regardless of operand precision). Design input: [`docs/research/20260516-decimal-type-system.md`](research/20260516-decimal-type-system.md). Needs a spec cycle to ratify the portable-surface position (arithmetic widening rules, division semantics, `SUM`/`AVG` precision) before a plan can be written.
+- **Timezone** — distinguish `Timestamp WITH TIME ZONE` from `Timestamp` through inference and arithmetic; make zone-aware functions tz-aware. Blocked on decimal axis landing first (shares the inference fix infrastructure).
+- **Collation** — model string comparison / sort semantics as a tracked attribute on `Text` columns; required before collation-sensitive output can be declared equivalent. Needs a research doc before design begins (no equivalent to the decimal research doc exists yet).
 
 As each axis lands, the fingerprint oracle gains real precision on it instead of falling back to verbatim rebuild.
 
@@ -81,8 +83,9 @@ SQLMesh-style opt-in virtual data environments: cheap isolated environments that
 1. Wire `output_fingerprint` into the runtime (it is a standalone prototype today). Depends on the runtime consolidation in #1.
 2. Snapshot store + `(environment, model) → table` map (`run_state.md`); fingerprint-keyed reuse for a single environment.
 3. `state.mode: environments` addressing, `smelt plan/apply --environment`, `smelt promote`.
-4. **Backbuild change-detection** — the cross-model column-lineage analyser computing the full "eclipse" (downstream models spared by an output-preserving upstream change); the gating new analysis, and the substrate item #6 builds on.
-5. Polish: typed data-diff, GC/retention, forward-only.
+4. **Fold tracked type-system axes into the output fingerprint.** Precondition: `docs/specs/types.md` §11 sound-upper-bound contract (satisfied by ROADMAP item 4, nullability axis ✅). The fold must hash the structured `TypedColumn` (type + nullability — and, as later axes land, decimal precision/scale, timezone-awareness, collation) rather than a rendered display string, so display conventions can evolve without invalidating fingerprints. Verification gate: `cargo test -p smelt-db --test nullability_property_tests` must stay green after the fold, and the fingerprint soundness oracle (`fingerprint-equal ⇒ DuckDB relations identical`) must hold for schemas that differ only in nullability. Each subsequent axis (decimal, timezone, collation) extends this fold when it lands.
+5. **Backbuild change-detection** — the cross-model column-lineage analyser computing the full "eclipse" (downstream models spared by an output-preserving upstream change); the gating new analysis, and the substrate item #6 builds on.
+6. Polish: typed data-diff, GC/retention, forward-only.
 
 Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #4 and unlock fingerprint precision as they land.
 
