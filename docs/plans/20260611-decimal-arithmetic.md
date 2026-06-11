@@ -69,7 +69,7 @@ The type system tracked `Decimal` arithmetic with a fixed `Decimal(38, 10)` plac
 | 1     | done     | 13f1304a | 2026-06-11 |
 | 2     | done     | 63d0cbfb | 2026-06-11 |
 | 3     | done     | 625164b7 | 2026-06-11 |
-| 4     | pending  |        |      |
+| 4     | done     |        | 2026-06-11 |
 | 5     | pending  |        |      |
 
 ---

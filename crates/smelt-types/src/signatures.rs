@@ -3172,42 +3172,84 @@ pub fn unify_call(
 /// depend on `smelt-db`. Production callers in Phase 9+ will pass
 /// `smelt-db::promote_types` (or a thin adapter) to [`unify_call`] instead.
 pub fn numeric_lub(a: &DataType, b: &DataType) -> DataType {
-    // Exact-match early-out (including Decimal precision/scale — v1 keeps
-    // Decimal opaque here; smelt-db's promote_types has full decimal rules).
-    if std::mem::discriminant(a) == std::mem::discriminant(b) {
-        return a.clone();
-    }
     use DataType::*;
+
+    // Helper: lift an integer type to its Decimal equivalent per §15.
+    // SmallInt → Decimal(5,0), Integer → Decimal(10,0), BigInt → Decimal(19,0).
+    let lift_integer_to_decimal = |d: &DataType| -> Option<(u8, u8)> {
+        match d {
+            SmallInt => Some((5, 0)),
+            Integer => Some((10, 0)),
+            BigInt => Some((19, 0)),
+            _ => None,
+        }
+    };
+
+    // Apply the Decimal LUB formula (§15): given (p1,s1) and (p2,s2),
+    // s' = max(s1,s2), p' = max(p1-s1, p2-s2) + s', saturated at 38.
+    let decimal_lub = |p1: u8, s1: u8, p2: u8, s2: u8| -> DataType {
+        let s = s1.max(s2) as u32;
+        let int_digits1 = (p1 as u32).saturating_sub(s1 as u32);
+        let int_digits2 = (p2 as u32).saturating_sub(s2 as u32);
+        let p = int_digits1.max(int_digits2) + s;
+        Decimal {
+            precision: p.min(38) as u8,
+            scale: s as u8,
+        }
+    };
+
+    // Handle Decimal pairs (same or different params) using the formula.
+    if let (
+        Decimal {
+            precision: p1,
+            scale: s1,
+        },
+        Decimal {
+            precision: p2,
+            scale: s2,
+        },
+    ) = (a, b)
+    {
+        return decimal_lub(*p1, *s1, *p2, *s2);
+    }
+
+    // Handle Decimal + integer: lift the integer, then apply the formula.
+    if let Decimal {
+        precision: pd,
+        scale: sd,
+    } = a
+    {
+        if let Some((pi, si)) = lift_integer_to_decimal(b) {
+            return decimal_lub(*pd, *sd, pi, si);
+        }
+    }
+    if let Decimal {
+        precision: pd,
+        scale: sd,
+    } = b
+    {
+        if let Some((pi, si)) = lift_integer_to_decimal(a) {
+            return decimal_lub(pi, si, *pd, *sd);
+        }
+    }
+
+    // For all other pairs, use the rank-based promotion chain (§16 #9).
     let rank = |d: &DataType| -> u8 {
         match d {
             SmallInt => 1,
             Integer => 2,
             BigInt => 3,
-            // Per §16 #9: Decimal sits between BigInt and Double; since v1
-            // combines Decimal + integer by widening to DECIMAL(38,10),
-            // rank Decimal at 4 and Float/Double at 5/6.
             Decimal { .. } => 4,
             Float => 5,
             Double => 6,
             _ => 0,
         }
     };
-    match (a, b) {
-        // Decimal combined with any integer type widens to DECIMAL(38,10)
-        // (§16 #9 rule for precision/scale preservation).
-        (Decimal { .. }, SmallInt | Integer | BigInt)
-        | (SmallInt | Integer | BigInt, Decimal { .. }) => Decimal {
-            precision: 38,
-            scale: 10,
-        },
-        _ => {
-            let (ra, rb) = (rank(a), rank(b));
-            if ra >= rb {
-                a.clone()
-            } else {
-                b.clone()
-            }
-        }
+    let (ra, rb) = (rank(a), rank(b));
+    if ra >= rb {
+        a.clone()
+    } else {
+        b.clone()
     }
 }
 
@@ -5225,7 +5267,8 @@ mod tests {
             numeric_lub(&DataType::Integer, &DataType::SmallInt),
             DataType::Integer
         );
-        // Decimal + integer widens to DECIMAL(38,10).
+        // Decimal + integer applies the §15 LUB formula:
+        // Integer → Decimal(10,0); s'=max(0,2)=2; p'=max(10,3)+2=12.
         assert_eq!(
             numeric_lub(
                 &DataType::Integer,
@@ -5235,9 +5278,100 @@ mod tests {
                 },
             ),
             DataType::Decimal {
-                precision: 38,
-                scale: 10,
+                precision: 12,
+                scale: 2,
             }
+        );
+    }
+
+    // === Phase 4 TDD tests — Decimal LUB formula (§15) ===
+
+    #[test]
+    fn decimal_decimal_lub_coercion_formula() {
+        // s' = max(2,3) = 3, p' = max(10-2, 8-3) + 3 = max(8,5) + 3 = 11
+        assert_eq!(
+            numeric_lub(
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                &DataType::Decimal {
+                    precision: 8,
+                    scale: 3
+                },
+            ),
+            DataType::Decimal {
+                precision: 11,
+                scale: 3
+            }
+        );
+    }
+
+    #[test]
+    fn decimal_same_params_lub_unchanged() {
+        // Same-params: returns unchanged
+        assert_eq!(
+            numeric_lub(
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+            ),
+            DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn integer_decimal_lub_lifting() {
+        // Integer lifts to Decimal(10,0)
+        // s' = max(0,2) = 2, p' = max(10-0, 10-2) + 2 = 10 + 2 = 12
+        assert_eq!(
+            numeric_lub(
+                &DataType::Integer,
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+            ),
+            DataType::Decimal {
+                precision: 12,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn bigint_decimal_lub_lifting() {
+        // BigInt lifts to Decimal(19,0)
+        // s' = max(0,2) = 2, p' = max(19-0, 5-2) + 2 = 19 + 2 = 21
+        assert_eq!(
+            numeric_lub(
+                &DataType::BigInt,
+                &DataType::Decimal {
+                    precision: 5,
+                    scale: 2
+                },
+            ),
+            DataType::Decimal {
+                precision: 21,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn numeric_lub_chain_unaffected() {
+        // Non-Decimal cases unchanged
+        assert_eq!(
+            numeric_lub(&DataType::Integer, &DataType::Double),
+            DataType::Double
         );
     }
 
