@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781176830341,
+  "lastUpdate": 1781176832844,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24572,6 +24572,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.98399272967791,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "2238f276d24001811e3a2be0f89b3bf7bf96dc7e",
+          "message": "fix(diagnostics): wire MetadataError variants into LSP diagnostic pipeline\n\nRoot cause: `MalformedDelimiter`, `UnclosedFrontmatter`, `MissingModelName`,\nand `YamlParseError` from `extract_file_metadata` fell through a `_ => {}`\ncatch-all in `check_file_diagnostics`, so structurally invalid multi-model\nfiles produced no LSP error.  Symptom: `smelt test` on `meta_hofs` printed\n\"No tests found\" because `and_all_predicates.sql` had SQL before its first\n`--- name:` delimiter.\n\nChanges:\n- Add `map_metadata_error_to_diagnostic` exhaustive match helper in\n  `smelt-db/src/lib.rs`; the Rust compiler now enforces that every new\n  `MetadataError` variant is explicitly handled (None only if covered by a\n  dedicated arm elsewhere).\n- Add `DiagnosticCode::MalformedSectionDelimiter` and `::UnclosedFrontmatter`.\n- Wire the `Err(e)` arm in `check_file_diagnostics` to emit those diagnostics.\n- Add `MalformedSectionDelimiter` and `UnclosedFrontmatter` to the LSP\n  `backend.rs` code-string match (compile-time exhaustiveness enforced).\n- Fix off-by-one in `extract_multi_model` byte-range computation: files\n  without a trailing newline caused `sql_start_byte`/`sql_end_byte` to exceed\n  `source.len()`, panicking the LSP workspace initialisation.\n- Fix `and_all_predicates.sql` format: wrap SQL in `--- name: ---` sections.\n- Extend `docs/specs/architecture.md` §11 and `CLAUDE.md` with the fourth\n  CI gate (MetadataError exhaustiveness).\n- Two new regression tests pin both diagnostic codes (8/8 green).\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-11T19:46:01+10:00",
+          "tree_id": "2b7260f13e011a1f264ce8137fe0f638e699dc19",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/2238f276d24001811e3a2be0f89b3bf7bf96dc7e"
+        },
+        "date": 1781176832162,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.460247247859556,
             "unit": "MB/s"
           }
         ]
