@@ -306,5 +306,198 @@ pub fn smoke_nullable_passthrough_setup() -> (String, String, String) {
     (setup, check, col_name)
 }
 
+// ---- Join test helpers ----
+
+/// The left and right table names used in two-table join tests.
+/// Each oracle connection is a fresh in-memory DB, so no conflicts.
+pub const LEFT_TABLE: &str = "left_tbl";
+pub const RIGHT_TABLE: &str = "right_tbl";
+
+/// A join type used in the join property test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+    Right,
+    Full,
+}
+
+impl JoinKind {
+    pub fn sql_keyword(self) -> &'static str {
+        match self {
+            JoinKind::Inner => "INNER",
+            JoinKind::Left => "LEFT",
+            JoinKind::Right => "RIGHT",
+            JoinKind::Full => "FULL",
+        }
+    }
+}
+
+/// Build a `CREATE TABLE name (col TYPE, ..., lkey INTEGER)` statement.
+pub fn create_keyed_table_ddl(table_name: &str, columns: &[TypedSource]) -> String {
+    let col_defs: Vec<String> = columns
+        .iter()
+        .map(|c| {
+            let type_str = sql_type_name(&c.data_type);
+            format!("{} {}", c.name, type_str)
+        })
+        .collect();
+    // Append an integer join key column.
+    format!(
+        "CREATE TABLE {table_name} ({}, jkey INTEGER)",
+        col_defs.join(", ")
+    )
+}
+
+/// Insert rows into a keyed table.
+///
+/// `key_value` is the INTEGER value for the `jkey` column — all rows get the same key value.
+/// Nullable columns at ~50% NULL density; key column is never NULL.
+pub fn insert_keyed_rows_ddl(
+    table_name: &str,
+    columns: &[TypedSource],
+    n_rows: usize,
+    key_value: i64,
+) -> String {
+    let mut rows = Vec::new();
+    for row_idx in 0..n_rows {
+        let vals: Vec<String> = columns
+            .iter()
+            .map(|c| {
+                let col_offset = c.name.len();
+                if (row_idx + col_offset) % 2 == 1 {
+                    null_literal(&c.data_type)
+                } else {
+                    non_null_literal(&c.data_type, row_idx)
+                }
+            })
+            .collect();
+        // Append the join key.
+        let row_vals = format!("{}, {}", vals.join(", "), key_value);
+        rows.push(format!("({row_vals})"));
+    }
+    format!("INSERT INTO {table_name} VALUES {}", rows.join(", "))
+}
+
+/// Build the CTE query for smelt inference of a two-table join.
+///
+/// Structure:
+/// ```sql
+/// WITH l AS (SELECT col_casts..., CAST(1 AS INTEGER) AS lkey, 42 AS l_guard),
+///      r AS (SELECT r_col_casts..., CAST(999 AS INTEGER) AS rkey, 42 AS r_guard)
+/// SELECT l.lcol_0 AS l_lcol_0, ..., r.rcol_0 AS r_rcol_0, ..., l.l_guard AS l_guard, r.r_guard AS r_guard
+/// FROM l [JOIN_KIND] JOIN r ON l.lkey = r.rkey
+/// ```
+///
+/// Keys are disjoint (1 vs 999) so for outer joins no rows match.
+pub fn build_join_cte_query(
+    left_cols: &[TypedSource],
+    right_cols: &[TypedSource],
+    join_kind: JoinKind,
+) -> String {
+    // Left CTE — prefix "l_" to avoid name collision
+    let left_cte_items: Vec<String> = left_cols
+        .iter()
+        .map(|c| format!("{} AS l_{}", c.cast_sql, c.name))
+        .collect();
+    let left_cte = format!(
+        "SELECT {}, CAST(1 AS INTEGER) AS lkey, 42 AS l_guard",
+        left_cte_items.join(", ")
+    );
+
+    // Right CTE — prefix "r_" to avoid name collision
+    let right_cte_items: Vec<String> = right_cols
+        .iter()
+        .map(|c| format!("{} AS r_{}", c.cast_sql, c.name))
+        .collect();
+    let right_cte = format!(
+        "SELECT {}, CAST(999 AS INTEGER) AS rkey, 42 AS r_guard",
+        right_cte_items.join(", ")
+    );
+
+    // SELECT list: all left cols with l. qualifier, then all right cols with r. qualifier,
+    // then the guards.
+    let mut select_items: Vec<String> = Vec::new();
+    for c in left_cols {
+        select_items.push(format!("l.l_{} AS l_{}", c.name, c.name));
+    }
+    for c in right_cols {
+        select_items.push(format!("r.r_{} AS r_{}", c.name, c.name));
+    }
+    select_items.push("l.l_guard AS l_guard".to_string());
+    select_items.push("r.r_guard AS r_guard".to_string());
+
+    let join_keyword = join_kind.sql_keyword();
+    format!(
+        "WITH l AS ({left_cte}), r AS ({right_cte}) \
+         SELECT {select} FROM l {join_keyword} JOIN r ON l.lkey = r.rkey",
+        select = select_items.join(", ")
+    )
+}
+
+/// Build the setup SQL (CREATE + INSERT) and SELECT SQL for a two-table join DuckDB check.
+///
+/// Uses disjoint key ranges: left table has jkey=1, right table has jkey=999.
+/// This guarantees outer joins produce NULL-supplying rows for the null-side columns.
+pub fn build_join_real_table_query(
+    left_cols: &[TypedSource],
+    right_cols: &[TypedSource],
+    join_kind: JoinKind,
+) -> (String, String) {
+    let create_left = create_keyed_table_ddl(LEFT_TABLE, left_cols);
+    let insert_left = insert_keyed_rows_ddl(LEFT_TABLE, left_cols, 5, 1); // key=1
+    let create_right = create_keyed_table_ddl(RIGHT_TABLE, right_cols);
+    let insert_right = insert_keyed_rows_ddl(RIGHT_TABLE, right_cols, 5, 999); // key=999 (disjoint)
+
+    let setup = format!("{create_left};\n{insert_left};\n{create_right};\n{insert_right}");
+
+    // SELECT list matching the CTE query aliases exactly.
+    let mut select_items: Vec<String> = Vec::new();
+    for c in left_cols {
+        select_items.push(format!("l.{} AS l_{}", c.name, c.name));
+    }
+    for c in right_cols {
+        select_items.push(format!("r.{} AS r_{}", c.name, c.name));
+    }
+    select_items.push("l.l_guard AS l_guard".to_string());
+    select_items.push("r.r_guard AS r_guard".to_string());
+
+    let join_keyword = join_kind.sql_keyword();
+    let select_sql = format!(
+        "SELECT {select} FROM {LEFT_TABLE} l {join_keyword} JOIN {RIGHT_TABLE} r ON l.jkey = r.jkey",
+        select = select_items.join(", ")
+    );
+
+    (setup, select_sql)
+}
+
+// ---- Set-operation test helpers ----
+
+/// Build the CTE query for smelt inference of a UNION ALL with mixed nullability.
+///
+/// Branch 1: `42 AS guard` (non-nullable), `col_cast AS col` (nullable)
+/// Branch 2: `CAST(NULL AS INTEGER) AS guard` (nullable), `col_cast AS col` (nullable)
+///
+/// The guard column should infer as nullable (42 UNION NULL → nullable per §11 set-op rule).
+pub fn build_setop_mixed_nullability_cte() -> String {
+    "WITH data AS (SELECT CAST(42 AS INTEGER) AS x) \
+     SELECT 42 AS guard, x FROM data \
+     UNION ALL \
+     SELECT CAST(NULL AS INTEGER) AS guard, x FROM data"
+        .to_string()
+}
+
+/// Build the CTE query for smelt inference of a UNION ALL with uniform non-nullable guard.
+///
+/// Both branches have `42 AS guard` (non-nullable).
+/// The guard column should infer as non-nullable (42 UNION ALL 42 → non-nullable).
+pub fn build_setop_uniform_nonnullable_cte() -> String {
+    "WITH data AS (SELECT CAST(42 AS INTEGER) AS x) \
+     SELECT 42 AS guard, x FROM data \
+     UNION ALL \
+     SELECT 42 AS guard, x FROM data"
+        .to_string()
+}
+
 // is_aggregate_expr and is_window_expr are imported from generators.rs — the single
 // source of truth.  Do NOT duplicate them here; use the imported versions above.

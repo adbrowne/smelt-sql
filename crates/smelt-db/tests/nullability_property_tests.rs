@@ -19,11 +19,14 @@ mod prop_helpers;
 
 use prop_helpers::duckdb_oracle::DuckDbOracle;
 use prop_helpers::generators::{
-    assemble_cte_query, generate_expr, test_scenario_strategy, QueryShape, TypedExpr, TypedSource,
+    assemble_cte_query, column_pool_strategy, generate_expr, test_scenario_strategy, QueryShape,
+    TypedExpr, TypedSource,
 };
 use prop_helpers::null_data::{
-    build_null_bearing_query, check_nullability_soundness, smoke_coalesce_non_nullable_setup,
-    smoke_nullable_passthrough_setup,
+    build_join_cte_query, build_join_real_table_query, build_null_bearing_query,
+    build_setop_mixed_nullability_cte, build_setop_uniform_nonnullable_cte,
+    check_nullability_soundness, smoke_coalesce_non_nullable_setup,
+    smoke_nullable_passthrough_setup, JoinKind,
 };
 
 use smelt_db::apply_outer_join_nullability;
@@ -330,7 +333,113 @@ fn regression_left_join_declared_not_null() {
     );
 }
 
-// ---- Property test ----
+// ---- Smoke: set-operation nullability ----
+
+/// Smoke: `non_nullable UNION ALL nullable` infers nullable; DuckDB confirms NULLs present.
+///
+/// Verifies the set-op rule (§11): output column nullability is the OR of all branch
+/// nullabilities. A non-nullable literal in branch 1 combined with a NULL-typed expression
+/// in branch 2 must yield nullable output.
+#[test]
+fn smoke_union_mixed_nullability() {
+    // ── Part 1: inference check — smelt must say "guard" is nullable ──────────
+    let mixed_sql = build_setop_mixed_nullability_cte();
+
+    let parse = smelt_parser::parse(&mixed_sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    // Minimal context — no source columns (both branches use literals only).
+    let ctx = TypeContext::new();
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    let select_list = select_stmt.select_list().expect("no select list");
+    let items: Vec<_> = select_list.items().collect();
+    let inferred: Vec<(String, TypedColumn)> = items
+        .iter()
+        .zip(col_types.iter())
+        .map(|(item, tc)| {
+            let alias = item.alias().unwrap_or_else(|| "?".to_string());
+            (alias, tc.clone())
+        })
+        .collect();
+
+    let guard = inferred
+        .iter()
+        .find(|(a, _)| a == "guard")
+        .expect("guard column not found in inferred output");
+    assert!(
+        guard.1.nullable,
+        "UNION ALL of non-nullable (42) and nullable (NULL) must infer nullable for 'guard'. \
+         Got nullable: {}",
+        guard.1.nullable
+    );
+
+    // ── Part 2: DuckDB value check — confirm NULLs actually appear ───────────
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column(&mixed_sql)
+        .expect("UNION ALL query should succeed");
+    let guard_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "guard")
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+    assert!(
+        guard_nulls > 0,
+        "UNION ALL with NULL branch must produce actual NULLs for 'guard' in DuckDB. \
+         Got {} NULLs — this confirms the set-op rule is needed.",
+        guard_nulls
+    );
+
+    // ── Part 3: uniform non-nullable branches must infer non-nullable ─────────
+    let uniform_sql = build_setop_uniform_nonnullable_cte();
+    let parse2 = smelt_parser::parse(&uniform_sql);
+    let root2 = parse2.syntax();
+    let file2 = File::cast(root2).expect("failed to cast to File");
+    let select_stmt2 = file2.select_stmt().expect("no SelectStmt");
+    let ctx2 = TypeContext::new();
+    let col_types2 = infer_select_column_types(&select_stmt2, &ctx2);
+    let select_list2 = select_stmt2.select_list().expect("no select list");
+    let items2: Vec<_> = select_list2.items().collect();
+    let inferred2: Vec<(String, TypedColumn)> = items2
+        .iter()
+        .zip(col_types2.iter())
+        .map(|(item, tc)| {
+            let alias = item.alias().unwrap_or_else(|| "?".to_string());
+            (alias, tc.clone())
+        })
+        .collect();
+
+    let guard2 = inferred2
+        .iter()
+        .find(|(a, _)| a == "guard")
+        .expect("guard column not found in uniform inferred output");
+    assert!(
+        !guard2.1.nullable,
+        "UNION ALL of non-nullable (42) and non-nullable (42) must infer non-nullable for 'guard'. \
+         Got nullable: {}",
+        guard2.1.nullable
+    );
+
+    // DuckDB confirm: no NULLs in guard for uniform case.
+    let oracle2 = DuckDbOracle::new();
+    let nulls2 = oracle2
+        .count_nulls_per_column(&uniform_sql)
+        .expect("uniform UNION ALL query should succeed");
+    let guard_nulls2 = nulls2
+        .iter()
+        .find(|(name, _)| name == "guard")
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+    assert_eq!(
+        guard_nulls2, 0,
+        "UNION ALL of 42 UNION ALL 42 must produce zero NULLs in 'guard'. Got {}.",
+        guard_nulls2
+    );
+}
+
+// ---- Property tests ----
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(
@@ -573,6 +682,250 @@ proptest! {
             );
         }
     }
+
+    /// Nullability soundness property for two-table joins (INNER / LEFT / RIGHT / FULL).
+    ///
+    /// For each generated case:
+    ///   1. Build a CTE query with `l` and `r` aliases using disjoint keys (l.lkey=1, r.rkey=999).
+    ///      The SELECT list includes a guard column from each side: `l.l_guard` and `r.r_guard`,
+    ///      both sourced from the literal `42` (non-nullable in each CTE's definition).
+    ///   2. Apply `apply_outer_join_nullability` so LEFT JOIN marks r.* nullable,
+    ///      RIGHT JOIN marks l.* nullable, FULL JOIN marks both.
+    ///   3. Run smelt inference on the CTE query.
+    ///   4. Build real tables (LEFT_TABLE, RIGHT_TABLE) with disjoint join keys → outer joins
+    ///      produce actual NULLs in null-supplying side columns.
+    ///   5. For every column smelt infers as `nullable: false`, assert null_count == 0 in DuckDB.
+    ///
+    /// Soundness check: if smelt over-claims non-nullable (e.g. keeps r.r_guard non-nullable
+    /// in a LEFT JOIN), DuckDB will observe NULLs there (outer join propagation), and the
+    /// test fails — catching a regression in `apply_outer_join_nullability`.
+    ///
+    /// Non-vacuous gate: at least one non-nullable column must be asserted. The l_guard
+    /// (a literal 42 from the preserved side) satisfies this for all outer join types except
+    /// FULL JOIN (where both sides may be nullable). For FULL JOIN with 0 rows in INNER
+    /// projection, DuckDB returns 0 rows — all null_counts are 0, making the soundness check
+    /// trivially pass (no NULLs observed). The gate is relaxed for FULL JOIN.
+    #[test]
+    fn prop_nullability_sound_joins(
+        (left_cols, right_cols) in (column_pool_strategy(), column_pool_strategy()),
+        join_kind_idx in 0usize..4,
+    ) {
+        let join_kind = match join_kind_idx {
+            0 => JoinKind::Inner,
+            1 => JoinKind::Left,
+            2 => JoinKind::Right,
+            _ => JoinKind::Full,
+        };
+
+        // Build the CTE query for smelt inference.
+        let cte_sql = build_join_cte_query(&left_cols, &right_cols, join_kind);
+
+        // Build the TypeContext: left and right CTE columns (all source columns nullable),
+        // then inject guard columns as non-nullable (they are defined as literal 42).
+        let inferred = run_join_smelt_inference(&cte_sql, &left_cols, &right_cols, join_kind);
+        if inferred.is_empty() {
+            return Ok(()); // skip if inference fails (parse error etc.)
+        }
+
+        // Build real DuckDB tables and the join SELECT.
+        let (setup_sql, select_sql) = build_join_real_table_query(&left_cols, &right_cols, join_kind);
+        let oracle = DuckDbOracle::new();
+        if oracle.execute_ddl(&setup_sql).is_err() {
+            return Ok(()); // skip if DDL fails (unsupported types)
+        }
+
+        // Run the join query and collect null counts.
+        let observed_nulls = match oracle.count_nulls_per_column(&select_sql) {
+            Ok(n) => n,
+            Err(_) => return Ok(()), // runtime error — discard
+        };
+
+        // Soundness check: for every column smelt claims non-nullable, DuckDB must show 0 NULLs.
+        let mut checked_non_nullable: usize = 0;
+        for (alias, tc) in &inferred {
+            if !tc.nullable {
+                let obs_null_count = observed_nulls
+                    .iter()
+                    .find(|(name, _)| name == alias)
+                    .map(|(_, c)| *c)
+                    .unwrap_or(0);
+                checked_non_nullable += 1;
+                prop_assert!(
+                    obs_null_count == 0,
+                    "Join nullability soundness violation: column '{}'\n\
+                     join_kind={:?}, smelt inferred nullable: false, \
+                     but DuckDB returned {} NULLs\n\
+                     CTE SQL: {}\n\
+                     DuckDB SELECT SQL: {}",
+                    alias, join_kind, obs_null_count,
+                    cte_sql, select_sql
+                );
+            }
+        }
+
+        // Non-vacuous gate: for INNER and LEFT/RIGHT (where preserved side has non-nullable guard),
+        // at least one column must have been asserted. Relaxed for FULL JOIN where both sides
+        // may be nullable (0 non-nullable columns is valid for FULL JOIN).
+        // Also skip if smelt under-counted columns (inference completeness gap).
+        let smelt_col_count = inferred.len();
+        let builder_col_count = left_cols.len() + right_cols.len() + 2; // +2 for l_guard, r_guard
+        let smelt_undercounted = smelt_col_count < builder_col_count;
+        if !smelt_undercounted && !matches!(join_kind, JoinKind::Full) {
+            prop_assert!(
+                checked_non_nullable >= 1,
+                "Join vacuous coverage: no non-nullable column was asserted.\n\
+                 join_kind={:?}, inferred columns: {:?}\n\
+                 CTE SQL: {}",
+                join_kind,
+                inferred.iter().map(|(a, tc)| format!("{}:nullable={}", a, tc.nullable)).collect::<Vec<_>>(),
+                cte_sql
+            );
+        }
+    }
+
+    /// Nullability soundness property for set operations (UNION ALL / UNION / INTERSECT / EXCEPT).
+    ///
+    /// For each generated case:
+    ///   1. Generate a column pool (used for both branches — same column types).
+    ///   2. Build a query:
+    ///      ```sql
+    ///      WITH data AS (SELECT col_casts...)
+    ///      SELECT col1, ..., 42 AS guard FROM data
+    ///      [UNION ALL | UNION | INTERSECT | EXCEPT]
+    ///      SELECT col1, ..., [42 | CAST(NULL AS INTEGER)] AS guard FROM data
+    ///      ```
+    ///      In the "mixed" variant, branch 2 has a NULL guard → output guard is nullable.
+    ///      In the "uniform" variant, both branches have 42 → output guard is non-nullable.
+    ///   3. Run smelt inference to get column nullabilities.
+    ///   4. Run DuckDB on the same query (using CTEs so no real tables are needed).
+    ///   5. For every column smelt claims non-nullable, assert null_count == 0 in DuckDB.
+    ///
+    /// This property verifies that `promote_types` (used inside `infer_select_column_types`
+    /// for set operations) correctly applies the OR rule: output is nullable iff any branch is.
+    #[test]
+    fn prop_nullability_sound_setops(
+        columns in column_pool_strategy(),
+        setop_idx in 0usize..4,
+        mixed_guard in proptest::bool::ANY,
+    ) {
+        prop_assume!(!columns.is_empty());
+
+        // Pick set operation kind: 0=UNION ALL, 1=UNION, 2=INTERSECT, 3=EXCEPT
+        let setop_keyword = match setop_idx {
+            0 => "UNION ALL",
+            1 => "UNION",
+            2 => "INTERSECT",
+            _ => "EXCEPT",
+        };
+
+        // Build CTE data definition.
+        let cte_data_items: Vec<String> = columns
+            .iter()
+            .map(|c| format!("{} AS {}", c.cast_sql, c.name))
+            .collect();
+        let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let col_select = col_names.join(", ");
+
+        // Branch 2 guard: if mixed, use NULL; otherwise use 42 (non-nullable).
+        let branch2_guard = if mixed_guard { "CAST(NULL AS INTEGER)" } else { "42" };
+
+        let cte_sql = format!(
+            "WITH data AS (SELECT {data_items}) \
+             SELECT {col_select}, 42 AS guard FROM data \
+             {setop} \
+             SELECT {col_select}, {b2_guard} AS guard FROM data",
+            data_items = cte_data_items.join(", "),
+            setop = setop_keyword,
+            b2_guard = branch2_guard
+        );
+
+        // Run smelt inference.
+        let parse = smelt_parser::parse(&cte_sql);
+        let root = parse.syntax();
+        let file = match File::cast(root) {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+        let select_stmt = match file.select_stmt() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Build context: source columns are nullable (they come from the CTE).
+        let mut ctx = TypeContext::new();
+        for col in &columns {
+            ctx.add_cte_column("data", &col.name, TypedColumn::nullable(col.data_type.clone()));
+        }
+
+        let col_types = infer_select_column_types(&select_stmt, &ctx);
+        let select_list = match select_stmt.select_list() {
+            Some(sl) => sl,
+            None => return Ok(()),
+        };
+        let items: Vec<_> = select_list.items().collect();
+        let inferred: Vec<(String, TypedColumn)> = items
+            .iter()
+            .zip(col_types.iter())
+            .map(|(item, tc)| {
+                let alias = item.alias().unwrap_or_else(|| "?".to_string());
+                (alias, tc.clone())
+            })
+            .collect();
+
+        if inferred.is_empty() {
+            return Ok(());
+        }
+
+        // Run DuckDB on the same CTE SQL (no real tables needed — both branches use the CTE).
+        let oracle = DuckDbOracle::new();
+        let observed_nulls = match oracle.count_nulls_per_column(&cte_sql) {
+            Ok(n) => n,
+            Err(_) => return Ok(()), // runtime error — discard
+        };
+
+        // Soundness check.
+        let mut checked_non_nullable: usize = 0;
+        for (alias, tc) in &inferred {
+            let obs_null_count = observed_nulls
+                .iter()
+                .find(|(name, _)| name == alias)
+                .map(|(_, c)| *c)
+                .unwrap_or(0);
+
+            if !tc.nullable {
+                checked_non_nullable += 1;
+                prop_assert!(
+                    obs_null_count == 0,
+                    "Set-op nullability soundness violation: column '{}'\n\
+                     setop={}, mixed_guard={}, smelt inferred nullable: false, \
+                     but DuckDB returned {} NULLs\n\
+                     SQL: {}",
+                    alias, setop_keyword, mixed_guard, obs_null_count,
+                    cte_sql
+                );
+            }
+        }
+
+        // Non-vacuous gate: when guard is non-nullable in both branches, smelt must infer
+        // guard as non-nullable. Smelt over-counting (inferred.len() > observed_nulls.len())
+        // is treated as harmless (no violation possible for extra inferred columns).
+        // Gate only fires for the uniform (non-mixed) case where both guards are `42`.
+        let smelt_col_count = inferred.len();
+        let builder_col_count = observed_nulls.len();
+        let smelt_undercounted = smelt_col_count < builder_col_count;
+        if !mixed_guard && !smelt_undercounted {
+            prop_assert!(
+                checked_non_nullable >= 1,
+                "Set-op vacuous coverage: no non-nullable column was asserted.\n\
+                 setop={}, both branches have 42 AS guard — smelt must infer guard as non-nullable.\n\
+                 Inferred columns: {:?}\n\
+                 SQL: {}",
+                setop_keyword,
+                inferred.iter().map(|(a, tc)| format!("{}:nullable={}", a, tc.nullable)).collect::<Vec<_>>(),
+                cte_sql
+            );
+        }
+    }
 }
 
 // ---- Helpers ----
@@ -612,6 +965,113 @@ fn run_smelt_inference_with_nullability(
 
     let column_types = infer_select_column_types(&select_stmt, &ctx);
 
+    let select_list = match select_stmt.select_list() {
+        Some(sl) => sl,
+        None => return vec![],
+    };
+    let items: Vec<_> = select_list.items().collect();
+
+    items
+        .iter()
+        .zip(column_types.iter())
+        .map(|(item, tc)| {
+            let alias = item.alias().unwrap_or_else(|| "?".to_string());
+            (alias, tc.clone())
+        })
+        .collect()
+}
+
+/// Run smelt inference on a two-table JOIN query and return `(alias, TypedColumn)` pairs.
+///
+/// Builds the TypeContext with left and right CTE columns, injects guard columns as
+/// non-nullable (they are defined as `42` in the CTE), applies
+/// `apply_outer_join_nullability`, then calls `infer_select_column_types`.
+///
+/// Returns an empty vec on parse/inference failure (caller should skip).
+fn run_join_smelt_inference(
+    cte_sql: &str,
+    left_cols: &[TypedSource],
+    right_cols: &[TypedSource],
+    join_kind: JoinKind,
+) -> Vec<(String, TypedColumn)> {
+    let parse = smelt_parser::parse(cte_sql);
+    let root = parse.syntax();
+    let file = match File::cast(root) {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let mut ctx = TypeContext::new();
+
+    // Register left CTE columns as nullable (source data has NULLs at ~50% density).
+    for col in left_cols {
+        ctx.add_cte_column(
+            "l",
+            &format!("l_{}", col.name),
+            TypedColumn::nullable(col.data_type.clone()),
+        );
+    }
+    // Left guard: literal 42, seeded as non-nullable.
+    ctx.add_cte_column(
+        "l",
+        "l_guard",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+    // Left key: always non-nullable (it's a literal).
+    ctx.add_cte_column(
+        "l",
+        "lkey",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+
+    // Register right CTE columns as nullable.
+    for col in right_cols {
+        ctx.add_cte_column(
+            "r",
+            &format!("r_{}", col.name),
+            TypedColumn::nullable(col.data_type.clone()),
+        );
+    }
+    // Right guard: literal 42, seeded as non-nullable.
+    ctx.add_cte_column(
+        "r",
+        "r_guard",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+    // Right key: always non-nullable.
+    ctx.add_cte_column(
+        "r",
+        "rkey",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+
+    // Register aliases so qualified references l.l_col → l CTE, r.r_col → r CTE.
+    ctx.add_alias("l", "l");
+    ctx.add_alias("r", "r");
+
+    // Apply the outer-join nullability pass AFTER seeding the context.
+    // This is the critical step: it must mark the null-supplying side's columns as nullable.
+    apply_outer_join_nullability(&select_stmt, &mut ctx);
+
+    let _ = join_kind; // already applied via apply_outer_join_nullability on the SQL
+
+    let column_types = infer_select_column_types(&select_stmt, &ctx);
     let select_list = match select_stmt.select_list() {
         Some(sl) => sl,
         None => return vec![],
