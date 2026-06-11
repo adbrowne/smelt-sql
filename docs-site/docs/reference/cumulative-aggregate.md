@@ -62,6 +62,9 @@ For a run window `[run_start, run_end)`:
     - Compile the per-partition delta SELECT and run it through the engine.
     - First partition: `CREATE TABLE AS` the delta. Subsequent partitions: emit a `MERGE INTO` with the per-column combiners.
 
+!!! warning "Granularity restriction"
+    The driving source must declare `granularity: day` or `granularity: week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `cumulative_aggregate v1 supports day and week granularity; got <Granularity>`.
+
 Running without a run window (`smelt run` without `--event-time-start`/`--event-time-end`) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.
 
 ## Cross-partition equivalence

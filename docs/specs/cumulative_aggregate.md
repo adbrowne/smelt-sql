@@ -126,6 +126,8 @@ The classifier walks the inlined outer SELECT's FROM clause (after function expa
 | 1 | Accepted. The driving source's `partition_column` and `granularity` parameterise the per-partition step loop and the source-filter pushdown. |
 | ≥ 2 | Rejected: `CumulativeMultipleDrivingSources`. A future plan may add explicit `driven_by:` disambiguation for same-granularity sources (Known Divergences). |
 
+The driving source's `granularity` must be `day` or `week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime by the per-partition step loop (see Known Divergences).
+
 Non-timeseries sources in the FROM clause (lookups) are allowed and are read in full on every partition step.
 
 ### Classifier checks
@@ -240,6 +242,7 @@ This section captures the load-bearing rationale.
 - **Schema evolution.** Adding a new non-key column to a cumulative table requires backfilling the new aggregator over the entire processed source history. v1 does not support this; the model must be rebuilt. Tracked under `schema_evolution.md` future work.
 - **Sibling rules (`scd2`, `latest_value`, `accumulating_snapshot`).** These follow the same derive-from-SQL principle but uphold different contracts. None are speced today; `cumulative_aggregate` is the first member of this family. See `docs/research/20260522-cumulative-as-its-own-rule.md` §"Sibling rules beyond cumulative_aggregate".
 - **External sources without `timeseries:`.** A cumulative model whose only source is a non-timeseries external table has no partition shape to step over and is refused (`CumulativeNoDrivingSource`). The diagnostic suggests declaring `timeseries:` on the source.
+- **Granularity restricted to `day` and `week`.** The v1 per-partition step loop accepts only `day` and `week` as the driving source's granularity. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `cumulative_aggregate v1 supports day and week granularity; got <Granularity>`. This is a not-yet-supported limitation of the step loop arithmetic, not a permanent design boundary. Tracked in `docs/plans/20260611-docs-gap-remediation.md`.
 
 ## References
 
