@@ -1944,6 +1944,8 @@ impl BinaryExpr {
                     JSON_ARROW_TEXT => return Some("->>".to_string()),
                     HASH_ARROW => return Some("#>".to_string()),
                     HASH_ARROW_TEXT => return Some("#>>".to_string()),
+                    AT_GT => return Some("@>".to_string()),
+                    LT_AT => return Some("<@".to_string()),
                     _ => {}
                 }
             }

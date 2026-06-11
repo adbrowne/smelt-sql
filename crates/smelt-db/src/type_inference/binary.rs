@@ -326,9 +326,11 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             data_type: DataType::Text,
             nullable: true,
         }),
+        // Array/JSON containment operators — NULL-propagating per spec §11.
+        // These operators return NULL when either operand is NULL.
         "@>" | "<@" => Some(TypedColumn {
             data_type: DataType::Boolean,
-            nullable: false,
+            nullable: true,
         }),
 
         _ => None,

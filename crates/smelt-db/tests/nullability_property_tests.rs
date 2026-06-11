@@ -439,6 +439,341 @@ fn smoke_union_mixed_nullability() {
     );
 }
 
+// ---- Phase 4 regression tests: spec §11 closed-list audit ----
+
+/// Regression: `CASE WHEN p THEN non_nullable_expr END` (no ELSE) must infer nullable.
+///
+/// Without an ELSE clause, the implicit default is NULL when no branch matches.
+/// Spec §11: CASE without ELSE is always nullable.
+#[test]
+fn regression_case_without_else_nullable() {
+    use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+    use smelt_parser::ast::File;
+
+    // non_nullable_expr = literal 42 (nullable: false per literal inference)
+    // CASE WHEN TRUE THEN 42 END — no ELSE. Must be nullable.
+    let sql = "WITH data AS (SELECT 1 AS x) SELECT CASE WHEN TRUE THEN 42 END AS result FROM data";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let ctx = TypeContext::new();
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    assert_eq!(col_types.len(), 1, "expected 1 output column");
+    assert!(
+        col_types[0].nullable,
+        "CASE WHEN ... THEN non_nullable END (no ELSE) must infer nullable \
+         — implicit default is NULL when no branch matches. Got nullable: false"
+    );
+
+    // DuckDB value check: a CASE with no matching branch returns NULL.
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column(
+            "SELECT CASE WHEN FALSE THEN 42 END AS result FROM (VALUES (1)) t(x)",
+        )
+        .expect("query should succeed");
+    let result_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "result")
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert!(
+        result_nulls > 0,
+        "CASE with no matching branch must produce NULLs in DuckDB. \
+         Got {} NULLs — confirms CASE without ELSE can be NULL.",
+        result_nulls
+    );
+}
+
+/// Regression: `TRY_CAST(non_nullable AS T)` must infer nullable.
+///
+/// TRY_CAST returns NULL when the cast fails (e.g. TRY_CAST('abc' AS INTEGER) = NULL).
+/// Spec §11: TRY_CAST is in the "always nullable" list.
+///
+/// In smelt, TRY_CAST is not a CAST_EXPR (parser doesn't know about TRY_CAST) — it is
+/// parsed as a function call with name `TRY_CAST`. Since it's not in SqlFunction, it
+/// falls through to returning None/Unknown, which defaults to nullable: true.
+#[test]
+fn regression_try_cast_nullable() {
+    use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+    use smelt_parser::ast::File;
+    use smelt_types::TypedColumn;
+
+    // Use a context with a non-nullable column to test TRY_CAST on it.
+    let sql = "WITH data AS (SELECT CAST(42 AS INTEGER) AS nn_col) \
+               SELECT TRY_CAST(nn_col AS VARCHAR) AS result FROM data";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+    // nn_col is non-nullable
+    ctx.add_cte_column(
+        "data",
+        "nn_col",
+        TypedColumn {
+            data_type: smelt_types::DataType::Integer,
+            nullable: false,
+        },
+    );
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    assert_eq!(col_types.len(), 1, "expected 1 output column");
+    assert!(
+        col_types[0].nullable,
+        "TRY_CAST(non_nullable AS T) must infer nullable — TRY_CAST returns NULL on failure. \
+         Got nullable: false"
+    );
+
+    // DuckDB value check: TRY_CAST('abc' AS INTEGER) returns NULL.
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column(
+            "SELECT TRY_CAST('abc' AS INTEGER) AS result FROM (VALUES (1)) t(x)",
+        )
+        .expect("query should succeed");
+    let result_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "result")
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert!(
+        result_nulls > 0,
+        "TRY_CAST('abc' AS INTEGER) must return NULL in DuckDB. \
+         Got {} NULLs — confirms TRY_CAST is nullable.",
+        result_nulls
+    );
+}
+
+/// Regression: `NULLIF(non_nullable, x)` must infer nullable.
+///
+/// NULLIF(a, b) returns NULL when a = b, so it can always be NULL regardless of input nullability.
+/// Spec §11: NULLIF is in the "always nullable" list.
+#[test]
+fn regression_nullif_nullable() {
+    use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+    use smelt_parser::ast::File;
+    use smelt_types::TypedColumn;
+
+    let sql = "WITH data AS (SELECT CAST(42 AS INTEGER) AS nn_col) \
+               SELECT NULLIF(nn_col, 0) AS result FROM data";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "data",
+        "nn_col",
+        TypedColumn {
+            data_type: smelt_types::DataType::Integer,
+            nullable: false,
+        },
+    );
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    assert_eq!(col_types.len(), 1, "expected 1 output column");
+    assert!(
+        col_types[0].nullable,
+        "NULLIF(non_nullable, x) must infer nullable — NULLIF returns NULL when args are equal. \
+         Got nullable: false"
+    );
+
+    // DuckDB value check: NULLIF(42, 42) = NULL.
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column("SELECT NULLIF(42, 42) AS result FROM (VALUES (1)) t(x)")
+        .expect("query should succeed");
+    let result_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "result")
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert!(
+        result_nulls > 0,
+        "NULLIF(42, 42) must return NULL in DuckDB. \
+         Got {} NULLs — confirms NULLIF is nullable.",
+        result_nulls
+    );
+}
+
+/// Regression: `LAG(non_nullable) OVER (...)` (no default) must infer nullable.
+///
+/// LAG without an explicit default returns NULL for the first row (no previous row exists).
+/// Spec §11: LAG/LEAD without an explicit default is in the "always nullable" list.
+#[test]
+fn regression_lag_without_default_nullable() {
+    use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+    use smelt_parser::ast::File;
+    use smelt_types::TypedColumn;
+
+    let sql = "WITH data AS (SELECT CAST(42 AS INTEGER) AS nn_col) \
+               SELECT LAG(nn_col) OVER () AS result FROM data";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "data",
+        "nn_col",
+        TypedColumn {
+            data_type: smelt_types::DataType::Integer,
+            nullable: false,
+        },
+    );
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    assert_eq!(col_types.len(), 1, "expected 1 output column");
+    assert!(
+        col_types[0].nullable,
+        "LAG(non_nullable) OVER (...) (no default) must infer nullable — \
+         LAG returns NULL for the first row. Got nullable: false"
+    );
+
+    // DuckDB value check: LAG on a single row returns NULL.
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column("SELECT LAG(x) OVER () AS result FROM (VALUES (42)) t(x)")
+        .expect("query should succeed");
+    let result_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "result")
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert!(
+        result_nulls > 0,
+        "LAG(x) OVER () on a single-row table must return NULL in DuckDB. \
+         Got {} NULLs — confirms LAG without default is nullable.",
+        result_nulls
+    );
+}
+
+/// Regression: array containment operators `@>` and `<@` with a NULL operand must infer nullable.
+///
+/// `@>` and `<@` are NULL-propagating: when either operand is NULL, the result is NULL.
+/// Spec §11: only non-NULL-propagating operators may claim non-nullable when both operands
+/// are non-nullable; `@>` / `<@` must always produce `nullable: true` since NULL propagates.
+#[test]
+fn regression_json_containment_operators_nullable() {
+    use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+    use smelt_parser::ast::File;
+    use smelt_types::TypedColumn;
+
+    // Use a non-nullable integer column as operand to test that @> still claims nullable.
+    let sql = "WITH data AS (SELECT ARRAY[1, 2, 3] AS nn_arr) \
+               SELECT nn_arr @> ARRAY[1] AS result FROM data";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "data",
+        "nn_arr",
+        TypedColumn {
+            data_type: smelt_types::DataType::Array(Box::new(smelt_types::DataType::Integer)),
+            nullable: false,
+        },
+    );
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    assert_eq!(col_types.len(), 1, "expected 1 output column");
+    assert!(
+        col_types[0].nullable,
+        "@> operator must infer nullable — it is NULL-propagating (NULL @> x = NULL). \
+         Got nullable: false"
+    );
+
+    // DuckDB value check: NULL @> ARRAY[1] returns NULL.
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column(
+            "SELECT (NULL::INTEGER[]) @> ARRAY[1] AS result FROM (VALUES (1)) t(x)",
+        )
+        .expect("query should succeed");
+    let result_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "result")
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert!(
+        result_nulls > 0,
+        "NULL @> ARRAY[1] must return NULL in DuckDB. Got {} NULLs — confirms @> is nullable.",
+        result_nulls
+    );
+}
+
+/// Regression: `json_contains(NULL, ...)` must infer nullable.
+///
+/// `json_contains` is a NULL-propagating function: when either argument is NULL, the result is NULL.
+/// Spec §11: only COUNT(*)/COUNT(expr) and EXISTS may claim non-nullable among aggregate/scalar funcs;
+/// `json_contains` is a regular scalar function that propagates NULLs.
+#[test]
+fn regression_json_contains_nullable() {
+    use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+    use smelt_parser::ast::File;
+    use smelt_types::TypedColumn;
+
+    // Use a non-nullable column to confirm that even with non-nullable input,
+    // json_contains must claim nullable (it propagates NULLs).
+    let sql = "WITH data AS (SELECT CAST('{\"a\":1}' AS VARCHAR) AS nn_json) \
+               SELECT json_contains(nn_json, '{\"a\":1}') AS result FROM data";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "data",
+        "nn_json",
+        TypedColumn {
+            data_type: smelt_types::DataType::Text,
+            nullable: false,
+        },
+    );
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    assert_eq!(col_types.len(), 1, "expected 1 output column");
+    assert!(
+        col_types[0].nullable,
+        "json_contains must infer nullable — it is NULL-propagating (json_contains(NULL, ...) = NULL). \
+         Got nullable: false"
+    );
+
+    // DuckDB value check: json_contains(NULL, ...) returns NULL.
+    let oracle = DuckDbOracle::new();
+    let nulls = oracle
+        .count_nulls_per_column(
+            r#"SELECT json_contains(NULL::JSON, '{"a":1}'::JSON) AS result FROM (VALUES (1)) t(x)"#,
+        )
+        .expect("query should succeed");
+    let result_nulls = nulls
+        .iter()
+        .find(|(name, _)| name == "result")
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    assert!(
+        result_nulls > 0,
+        "json_contains(NULL, ...) must return NULL in DuckDB. \
+         Got {} NULLs — confirms json_contains is nullable.",
+        result_nulls
+    );
+}
+
 // ---- Property tests ----
 
 proptest! {
