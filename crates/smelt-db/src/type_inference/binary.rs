@@ -85,7 +85,11 @@ fn promote_numeric_operands_for_op(
     // diagnostic emitted by `check_decimal_division_diagnostics`.
     // Only the LEFT operand being Decimal triggers rejection — `T / Decimal`
     // (e.g. Float / decimal_literal) lets the Float promotion path handle it.
-    if op == "/" && left.as_ref().is_some_and(|l| matches!(l, DataType::Decimal { .. })) {
+    if op == "/"
+        && left
+            .as_ref()
+            .is_some_and(|l| matches!(l, DataType::Decimal { .. }))
+    {
         return Some(TypedColumn {
             data_type: DataType::Unknown,
             nullable: true,

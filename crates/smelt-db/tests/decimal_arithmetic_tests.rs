@@ -1,9 +1,10 @@
-//! Phase 1+2+3: Decimal arithmetic type inference tests.
+//! Phase 1+2+3+5: Decimal arithmetic type inference tests.
 //!
 //! Phase 1 (already passing): `DecimalPrecisionOverflow` diagnostic code exists.
 //! Phase 2 (TDD): Growth formulas for Decimal arithmetic, integer lifting,
 //! and overflow detection.
 //! Phase 3 (TDD): Decimal division rejection — emits TypeMismatch and returns Unknown.
+//! Phase 5 (TDD): ABS(Decimal(p,s)) → Decimal(p,s) preserves precision and scale.
 
 use smelt_db::diagnostics_types::DiagnosticCode;
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
@@ -298,5 +299,145 @@ fn double_division_still_works() {
         types[0].data_type,
         DataType::Double,
         "Double / Double should yield Double"
+    );
+}
+
+// ─── Phase 5: ABS(Decimal) preserves precision and scale ────────────────────
+
+/// Phase 5 TDD test 1: ABS(Decimal(p,s)) preserves precision and scale.
+///
+/// Per spec §15: `ABS(Decimal(p, s)) → Decimal(p, s)` — absolute value
+/// preserves precision and scale. Previously returned `Unknown` because
+/// the Numeric-generic signature did not thread precision/scale.
+#[test]
+fn abs_decimal_preserves_precision_scale() {
+    let sql = "SELECT ABS(CAST(-1.23 AS DECIMAL(10,2))) AS result";
+    let types = infer(sql);
+    assert_eq!(types.len(), 1, "expected exactly one output column");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        },
+        "ABS(DECIMAL(10,2)) should yield DECIMAL(10,2), preserving precision and scale; got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// Phase 5 TDD test 2: ABS on non-Decimal numeric type is unaffected.
+///
+/// Regression guard: ABS(Integer) must still return Integer (not Decimal).
+#[test]
+fn abs_integer_unaffected() {
+    let sql = "SELECT ABS(CAST(-1 AS INTEGER)) AS result";
+    let types = infer(sql);
+    assert_eq!(types.len(), 1, "expected exactly one output column");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Integer,
+        "ABS(INTEGER) should yield INTEGER, not Decimal; got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// Phase 5 TDD test 3: ABS on a wider Decimal type (DECIMAL(18,2)).
+///
+/// Verifies the general case works beyond the simple (10,2) example.
+#[test]
+fn abs_decimal_wide_preserves_precision_scale() {
+    let sql = "SELECT ABS(CAST(-1 AS DECIMAL(18,2))) AS result";
+    let types = infer(sql);
+    assert_eq!(types.len(), 1, "expected exactly one output column");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Decimal {
+            precision: 18,
+            scale: 2
+        },
+        "ABS(DECIMAL(18,2)) should yield DECIMAL(18,2); got: {:?}",
+        types[0].data_type
+    );
+}
+
+/// Phase 5 TDD test 4: ABS on schema-resolved Decimal column via cross-model reference.
+///
+/// This reproduces the multi-model proptest failure. When dec_col_3 comes from an
+/// upstream model (schema-resolved via Salsa), ABS should return Decimal(10,2) not Double.
+#[test]
+fn abs_decimal_cross_model_schema_resolved() {
+    use smelt_db::{typed_model_schema, Database, Workspace};
+    use std::path::PathBuf;
+
+    // Reproduce the multi-model proptest failure: upstream with multiple columns (including
+    // INTERVAL type), downstream applies ABS to the Decimal column.
+    // Key: the upstream has 4 columns and the downstream uses LEFT() on another column too.
+    let upstream_sql = "WITH data AS (SELECT CAST('hello' AS STRING) AS str_col_1, CAST(99.99 AS DECIMAL(10,2)) AS dec_col_3) SELECT str_col_1, dec_col_3 FROM data";
+    let downstream_sql =
+        "SELECT ABS(dec_col_3) AS expr_0, LEFT(str_col_1, 3) AS expr_1 FROM smelt.models.upstream";
+
+    let mut db = Database::default();
+    let upstream_path = PathBuf::from("models/upstream.sql");
+    let downstream_path = PathBuf::from("models/downstream.sql");
+    let root = PathBuf::from(".");
+
+    let upstream_file = db.set_source_file(
+        upstream_path.clone(),
+        upstream_sql.to_string(),
+        root.clone(),
+    );
+    let downstream_file = db.set_source_file(
+        downstream_path.clone(),
+        downstream_sql.to_string(),
+        root.clone(),
+    );
+    let project = db.set_project_input(root, String::new());
+    db.set_workspace(vec![upstream_file, downstream_file], vec![project]);
+
+    let ws = Workspace::get(&db);
+
+    // First confirm the upstream schema has dec_col_3: Decimal(10,2)
+    let upstream_schema = typed_model_schema(&db, ws, upstream_file);
+    let dec_col = upstream_schema
+        .columns
+        .iter()
+        .find(|c| c.name == "dec_col_3");
+    assert!(
+        dec_col.is_some(),
+        "upstream schema should contain dec_col_3; got: {:?}",
+        upstream_schema
+            .columns
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dec_col.unwrap().data_type.as_ref().map(|tc| &tc.data_type),
+        Some(&DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }),
+        "upstream dec_col_3 should be Decimal(10,2)"
+    );
+
+    // Now check the downstream inference: ABS(dec_col_3) should be Decimal(10,2)
+    let downstream_schema = typed_model_schema(&db, ws, downstream_file);
+    assert!(
+        !downstream_schema.columns.is_empty(),
+        "downstream schema should have columns"
+    );
+    let result_col = downstream_schema
+        .columns
+        .iter()
+        .find(|c| c.name == "expr_0")
+        .expect("should have expr_0 column");
+    assert_eq!(
+        result_col.data_type.as_ref().map(|tc| &tc.data_type),
+        Some(&DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }),
+        "ABS(dec_col_3) from upstream schema should yield Decimal(10,2); got: {:?}",
+        result_col.data_type
     );
 }

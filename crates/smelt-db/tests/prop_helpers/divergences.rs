@@ -169,36 +169,6 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::ByDesign,
         },
-        TypeDivergence {
-            id: "abs_decimal",
-            description: "ABS(Decimal) — DuckDB returns the same Decimal type, but smelt's \
-                Numeric-generic signature returns Unknown for Decimal inputs because smelt v1 \
-                does not thread precision/scale through type variable unification \
-                (Decimal satisfies Numeric but the generic T remains unresolved).",
-            smelt_type: DataType::Unknown,
-            duckdb_type: Some(DataType::Decimal {
-                // Wildcard: Decimal(0,0) matches any Decimal precision/scale
-                precision: 0,
-                scale: 0,
-            }),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "abs_decimal_schema_resolved",
-            description: "ABS(Decimal) with schema-resolved input — when the Decimal input type \
-                is known from upstream schema, smelt infers Double (via the Numeric→Double path \
-                in the ABS registry entry) while DuckDB returns the same Decimal type. \
-                Precision/scale threading through generic T is deferred for smelt v1.",
-            smelt_type: DataType::Double,
-            duckdb_type: Some(DataType::Decimal {
-                // Wildcard: Decimal(0,0) matches any Decimal precision/scale
-                precision: 0,
-                scale: 0,
-            }),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
     ]
 }
 
@@ -305,28 +275,5 @@ mod tests {
         );
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "avg_decimal");
-    }
-
-    // ABS(Decimal) with schema-resolved input: smelt infers Double (Numeric→Double
-    // path in registry), DuckDB returns same Decimal. Captured after
-    // prop_multi_model_type_inference failure.
-    #[test]
-    fn abs_decimal_schema_resolved_divergence_duckdb() {
-        let divs = known_divergences();
-        let found = find_divergence(
-            &DataType::Double,
-            &DataType::Decimal {
-                precision: 10,
-                scale: 2,
-            },
-            "duckdb",
-            &divs,
-        );
-        assert!(
-            found.is_some(),
-            "expected a registered divergence for smelt:Double / duckdb:Decimal when ABS applied \
-             to a schema-resolved Decimal column"
-        );
-        assert_eq!(found.unwrap().id, "abs_decimal_schema_resolved");
     }
 }

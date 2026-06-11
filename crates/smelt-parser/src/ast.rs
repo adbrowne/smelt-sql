@@ -2054,6 +2054,10 @@ impl FunctionCall {
 
     /// Get the function name (e.g., "COUNT", "SUM", "ref")
     /// For namespaced calls like smelt.ref(), returns just "ref"
+    ///
+    /// Keyword tokens that are valid function names (e.g. `LEFT_KW`, `RIGHT_KW`,
+    /// `FILTER_KW` — the same set handled by `at_keyword_as_function_name`) are
+    /// also recognised here so that `LEFT(str, 3)` returns `Some("LEFT")`.
     pub fn name(&self) -> Option<String> {
         let tokens: Vec<_> = self
             .0
@@ -2070,10 +2074,27 @@ impl FunctionCall {
             return Some(tokens[2].text().to_string());
         }
 
-        // Simple call: just IDENT
+        // Simple call: IDENT or a keyword that can be used as a function name.
+        // The parser's `at_keyword_as_function_name()` recognises
+        // `LEFT_KW`, `RIGHT_KW`, `FILTER_KW`, `QUALIFY_KW`, `PIVOT_KW`,
+        // `UNPIVOT_KW`, `VALUES_KW`, and `FN_KW` as valid function-name tokens
+        // when followed by `(`. We mirror that set here so that
+        // e.g. `LEFT(str, 3)` (which has a `LEFT_KW` name token) returns
+        // `Some("LEFT")` instead of `None`.
         tokens
             .iter()
-            .find(|t| t.kind() == IDENT)
+            .find(|t| {
+                let k = t.kind();
+                k == IDENT
+                    || k == LEFT_KW
+                    || k == RIGHT_KW
+                    || k == FILTER_KW
+                    || k == QUALIFY_KW
+                    || k == PIVOT_KW
+                    || k == UNPIVOT_KW
+                    || k == VALUES_KW
+                    || k == FN_KW
+            })
             .map(|t| t.text().to_string())
     }
 
