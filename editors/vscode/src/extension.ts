@@ -8,6 +8,7 @@ import {
     ServerOptions,
     Executable
 } from 'vscode-languageclient/node';
+import { createSmeltTestController } from './testController';
 
 let client: LanguageClient;
 let outputChannel: vscode.OutputChannel;
@@ -142,6 +143,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     client.start().then(() => {
         outputChannel.appendLine('smelt language server started successfully');
+        createSmeltTestController(context, client, workspaceFolder.uri.fsPath, outputChannel);
     }).catch(err => {
         console.error('Failed to start smelt language server:', err);
         vscode.window.showErrorMessage(`smelt: Failed to start language server: ${err.message}`);

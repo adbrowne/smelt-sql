@@ -66,6 +66,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the smelt-lsp server binary. If empty, discovery chain: pip-installed smelt-sql package → smelt-lsp on $PATH → cargo run fallback."
+        },
+        "smelt.testPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the smelt CLI binary for running tests. If empty, uses smelt on $PATH or cargo run fallback."
         }
       }
     }
