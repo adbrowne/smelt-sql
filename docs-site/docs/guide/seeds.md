@@ -80,6 +80,15 @@ Empty cells are always `NULL`, regardless of the column type.
 - Decimal values with precision > 18: falls through to `DOUBLE`
 - Any other value that cannot be parsed as one of the above types
 
+!!! warning "Calendar-invalid dates infer as DATE and fail at load"
+    A column whose every value matches `YYYY-MM-DD` shape but contains a calendar-invalid date (e.g. `2025-02-30`) **infers as DATE** — the inferencer validates shape only, not calendar correctness. At load time, Arrow conversion parses the value to a real calendar date and the coercion fails hard: `smelt seed` aborts with an error. To load such a column as text, pin it to `VARCHAR` in the sidecar `.yml`:
+
+    ```yaml
+    columns:
+      - name: event_date
+        type: VARCHAR
+    ```
+
 If you need a specific type, cast explicitly in the first staging model:
 
 ```sql
