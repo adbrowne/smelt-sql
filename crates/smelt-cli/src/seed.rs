@@ -289,9 +289,11 @@ mod tests {
         fs::create_dir_all(&models_dir).unwrap();
 
         // A minimal per-entity source YAML (no CSV sibling → not a seed).
+        // Only use spec-valid fields: `deny_unknown_fields` on RawSourceYaml rejects
+        // legacy keys like `table:`, `schema:`, `database:`.
         fs::write(
             models_dir.join("customers.yml"),
-            "table: customers\nschema: raw\ndatabase: main\ncolumns:\n  - name: id\n    type: Integer\n",
+            "columns:\n  - name: id\n    type: Integer\n",
         )
         .unwrap();
 
