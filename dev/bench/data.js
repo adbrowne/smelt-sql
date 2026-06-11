@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781208434964,
+  "lastUpdate": 1781208437178,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -24941,6 +24941,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.33825115454834,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a98493153f8a322f331864477c8663ddcd68bd7f",
+          "message": "merge(type-system): decimal axis + nullability soundness (axes 1+2 of 4)\n\nMerges branch worktree-type_system into main.\n\nNullability axis (2026-06-11):\n- Sound-upper-bound contract §11 in docs/specs/types.md\n- Outer-join / set-operation null-propagation rules\n- Value-based DuckDB soundness oracle (nullability_property_tests)\n- Non-nullable-claim audit\n- NOT NULL qualifier on smelt.define signatures\n- Canonical type renderer shared by hover and diagnostics\n\nDecimal axis (2026-06-12):\n- Spark-style growth formulas (+/-*%) with integer lifting\n- DecimalPrecisionOverflow diagnostic when p' > 38\n- Decimal / T rejected as non-portable (TypeMismatch)\n- numeric_lub UNION coercion formula for Decimal pairs\n- ABS(Decimal(p,s)) → Decimal(p,s)\n- Parser fixes: LEFT()/RIGHT() keyword-as-function-name\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-12T06:04:14+10:00",
+          "tree_id": "a38f64998165d26faaf6b43612b9baacbcbe146c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a98493153f8a322f331864477c8663ddcd68bd7f"
+        },
+        "date": 1781208436637,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.44617168233995,
             "unit": "MB/s"
           }
         ]
