@@ -686,6 +686,13 @@ pub enum DiagnosticCode {
     /// expression must not reference other parameters"). Anchored at the
     /// default expression's range. Error severity.
     DefaultReferencesParameter,
+    /// Emitted when a `smelt.define` or `smelt.extern` parameter or return-type
+    /// annotation has a `Struct<{…}>` shape whose field type text cannot be
+    /// parsed as a concrete `DataType` — e.g. `{a: Integer, b: Bogus}` where
+    /// `Bogus` is unrecognised. Anchored at the **individual field's** `TYPE_REF`
+    /// span (more precise than `InvalidFunctionTypeRef` which covers the whole
+    /// annotation). Error severity.
+    UnknownStructFieldType,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -785,6 +792,7 @@ pub fn meta_list_diagnostic_message(
             let actual = other_type.unwrap_or("?");
             format!("spread expects List<T>; found {}", actual)
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-list diagnostic codes
         _ => panic!("meta_list_diagnostic_message called with non-Phase-A code"),
     }
 }
@@ -952,6 +960,7 @@ pub fn meta_hof_diagnostic_message(
                 n
             )
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-HOF diagnostic codes
         _ => panic!("meta_hof_diagnostic_message called with non-Phase-B/F code"),
     }
 }
@@ -1027,6 +1036,7 @@ pub fn meta_reflection_diagnostic_message_with_table_expr(
             let name = field_name.unwrap_or("?");
             format!("SourceRef has no field `{name}`; expected one of: path, name, tags, columns")
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-reflection diagnostic codes
         _ => panic!(
             "meta_reflection_diagnostic_message called with non-Phase-C/D code: {:?}",
             code
@@ -1094,6 +1104,7 @@ pub fn meta_record_diagnostic_message(
         DiagnosticCode::RecordInDataWorld => {
             "record-typed value may not appear in a Data-World (SQL) position; use field projection to produce a spliced value".to_string()
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-record diagnostic codes
         _ => panic!(
             "meta_record_diagnostic_message called with non-record code: {:?}",
             code
@@ -1153,6 +1164,7 @@ pub fn meta_map_diagnostic_message(
             let act = actual.unwrap_or("?");
             format!("Map.{m} expects key of type {exp}; found {act}")
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-map diagnostic codes
         _ => panic!(
             "meta_map_diagnostic_message called with non-map code: {:?}",
             code
@@ -1259,6 +1271,7 @@ pub fn meta_loader_diagnostic_message(
                 "null value at {r} coerced to empty string; declare a default in the source file"
             )
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-loader diagnostic codes
         _ => panic!(
             "meta_loader_diagnostic_message called with non-loader code: {:?}",
             code
@@ -1318,6 +1331,7 @@ pub fn meta_multi_model_diagnostic_message(
         DiagnosticCode::GeneratorBodyForbidsModelReflection => {
             "smelt.models.* is not available inside a generator body; use smelt.sources.* or literal smelt.<path> references".to_string()
         }
+        // invariant: unreachable from user input — caller is dispatched only for meta-multi_model diagnostic codes
         _ => panic!(
             "meta_multi_model_diagnostic_message called with non-E2 code: {:?}",
             code

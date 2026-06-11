@@ -201,8 +201,8 @@ pub use queries::function_diagnostics::{
     function_backends, function_body_diagnostics_for_file,
     invalid_function_type_ref_diagnostics_for_file, missing_provenance_advisory_for_file,
     provenance_unstable_diagnostics_for_file, smelt_fn_call_diagnostics_for_ast,
-    smelt_fn_call_diagnostics_for_file, unknown_context_diagnostics_for_file,
-    workspace_function_diagnostics,
+    smelt_fn_call_diagnostics_for_file, struct_field_type_unknown_diagnostics_for_file,
+    unknown_context_diagnostics_for_file, workspace_function_diagnostics,
 };
 pub use queries::functions::{
     file_signature_inputs, function_body, function_signature, functions_in_file, resolve_function,
@@ -348,6 +348,8 @@ impl Database {
         text: String,
         project_root: PathBuf,
     ) -> SourceFile {
+        // invariant: RwLock is poisoned only on thread panic, which cannot happen in
+        // this single-threaded Salsa mutation context. unwrap() is safe here.
         let existing = self.files.read().unwrap().get(&path).copied();
         match existing {
             Some(file) => {
@@ -371,6 +373,7 @@ impl Database {
     /// `set_project_smelt_yml` later to propagate in-editor edits.
     pub fn set_project_input(&mut self, root: PathBuf, sources_yaml: String) -> ProjectInput {
         let smelt_yml_text = std::fs::read_to_string(root.join("smelt.yml")).unwrap_or_default();
+        // invariant: same RwLock poisoning rationale as set_source_file.
         let existing = self.projects.read().unwrap().get(&root).copied();
         match existing {
             Some(project) => {
@@ -390,6 +393,7 @@ impl Database {
     /// the LSP whenever the file changes on disk; Salsa propagates the
     /// invalidation through `project_unstable_schema` and any query that reads it.
     pub fn set_project_smelt_yml(&mut self, root: &Path, smelt_yml_text: String) {
+        // invariant: same RwLock poisoning rationale as set_source_file.
         let project = self.projects.read().unwrap().get(root).copied();
         if let Some(project) = project {
             project.set_smelt_yml_text(self).to(smelt_yml_text);
@@ -398,11 +402,13 @@ impl Database {
 
     /// Look up an already-registered `SourceFile` by path.
     pub fn source_file(&self, path: &Path) -> Option<SourceFile> {
+        // invariant: same RwLock poisoning rationale as set_source_file.
         self.files.read().unwrap().get(path).copied()
     }
 
     /// Look up an already-registered `ProjectInput` by root path.
     pub fn project_input(&self, root: &Path) -> Option<ProjectInput> {
+        // invariant: same RwLock poisoning rationale as set_source_file.
         self.projects.read().unwrap().get(root).copied()
     }
 
@@ -459,6 +465,7 @@ impl Database {
         exists: bool,
     ) -> LoaderFileInput {
         let path_str = path.to_string();
+        // invariant: same RwLock poisoning rationale as set_source_file.
         let existing = self.loader_files.read().unwrap().get(&path_str).copied();
         match existing {
             Some(input) => {
@@ -486,6 +493,7 @@ impl Database {
 
     /// Look up an already-registered `LoaderFileInput` by workspace-relative path.
     pub fn loader_file(&self, path: &str) -> Option<LoaderFileInput> {
+        // invariant: same RwLock poisoning rationale as set_source_file.
         self.loader_files.read().unwrap().get(path).copied()
     }
 }
@@ -1380,6 +1388,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         DiagnosticAcc(diag).accumulate(db);
     }
 
+    // Struct-field-unknown diagnostics (hardening Phase 3): emitted at each
+    // struct field whose type text is not a recognised concrete DataType.
+    for diag in struct_field_type_unknown_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
     // BUG-003: Semantics #9 — default must not reference sibling parameters.
     for diag in default_references_parameter_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
@@ -1742,19 +1756,26 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // BUG-078: checked whenever the project carries aggregate `sources.yml`
+    // text — NOT gated on `sources` (legacy `smelt.source()` call sites, which
+    // are always empty since the per-entity migration made `smelt.source()` a
+    // parse error). Gating here made a YAML-broken aggregate file silently
+    // fall back to `SourcesConfig::default()` with no diagnostic.
+    if let Some(p) = project {
+        if let Some(yaml_error) = sources_yaml_error(db, p) {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!("sources.yml parse error: {}", yaml_error.message),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::YamlParseError),
+                data: None,
+            })
+            .accumulate(db);
+        }
+    }
+
     if !sources.is_empty() {
         if let Some(p) = project {
-            if let Some(yaml_error) = sources_yaml_error(db, p) {
-                DiagnosticAcc(Diagnostic {
-                    severity: DiagnosticSeverity::Warning,
-                    message: format!("sources.yml parse error: {}", yaml_error.message),
-                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
-                    code: Some(DiagnosticCode::YamlParseError),
-                    data: None,
-                })
-                .accumulate(db);
-            }
-
             let type_errors = sources_type_errors(db, p);
             for error in type_errors.iter() {
                 let source_qualified = format!("{}.{}", error.source_name, error.table_name);

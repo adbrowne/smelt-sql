@@ -25,7 +25,11 @@ pub fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedC
     let type_spec = cast_expr.type_spec()?;
     let type_text = type_spec.full_text();
 
-    // Parse the type specification
+    // Parse the type specification; an unrecognised type returns None here, but
+    // collect_expression_type_diagnostics in check_types.rs independently calls
+    // parse_type and emits UnknownCastType — the error is reported there.
+    // intentionally ignored: returning None propagates Unknown; the diagnostic
+    // path in check_types.rs covers the user-visible error.
     let data_type = parse_type(&type_text).ok()?;
 
     // Normalize FLOAT to DOUBLE: DuckDB treats FLOAT as a 4-byte float but

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use tracing::warn;
 
 use crate::metadata::ModelMetadata;
 
@@ -433,7 +434,7 @@ impl Config {
                 source: e.into(),
             })?;
         for w in &warnings {
-            eprintln!("{}", w);
+            warn!("{}", w);
         }
         Ok(config)
     }
@@ -471,6 +472,8 @@ impl Config {
                 // (they already got the targeted message above).
                 // `unstable_schema` is consumed by `parse_unstable_schema_flag` and is not
                 // a `Config` struct field — allow-list it to avoid false positives.
+                // `vars` is consumed by `smelt-db::config_vars::parse_vars_from_yaml`
+                // (compile-time `smelt.config.var` variables), also not a `Config` field.
                 const KNOWN_KEYS: &[&str] = &[
                     "name",
                     "version",
@@ -483,6 +486,7 @@ impl Config {
                     "model_paths",
                     "seed_paths",
                     "unstable_schema",
+                    "vars",
                 ];
                 for (key, _) in map {
                     if let Some(key_str) = key.as_str() {
@@ -706,8 +710,8 @@ impl Config {
                 Materialization::View => {
                     if let Some(inc) = incremental {
                         if inc.enabled {
-                            eprintln!(
-                                "  Warning: model '{}' is a view but has incremental config — incremental only applies to tables",
+                            warn!(
+                                "model '{}' is a view but has incremental config — incremental only applies to tables",
                                 name
                             );
                         }
@@ -716,8 +720,8 @@ impl Config {
                 Materialization::MaterializedView => {
                     if let Some(inc) = incremental {
                         if inc.enabled {
-                            eprintln!(
-                                "  Warning: model '{}' is a materialized view but has incremental config — materialized views are refreshed atomically",
+                            warn!(
+                                "model '{}' is a materialized view but has incremental config — materialized views are refreshed atomically",
                                 name
                             );
                         }
@@ -1444,6 +1448,8 @@ default_materialization: table
 models: {}
 python: ~
 unstable_schema: true
+vars:
+  env: dev
 "#;
         let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
         assert!(

@@ -19,46 +19,22 @@ The mandatory plan structure (execution prompt, per-phase TDD tests, implementer
 
 The items below are the current priority queue, top to bottom. See completed items in [Recently Completed](#recently-completed) below.
 
-The spine of the near-term roadmap is a single through-thread: **finish the shared runtime and the bug sweep → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority.
+The spine of the near-term roadmap is a single through-thread: **harden against silent failures → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority. The shared-runtime consolidation and the feature-sweep bug ledger that previously headed this queue are now complete — see [Recently Completed](#recently-completed).
 
-### 1. CLI Execute-Loop Migration to `smelt-runtime` (in-flight)
+### 1. Silent Failures & Code-Health Hardening
 
-A two-plan architectural refactor consolidating CLI and UI on a shared compile + execute pipeline (`smelt-runtime`) per the Run Pipeline Parity Rule (`docs/specs/architecture.md`).
-
-**Shipped** ([plan](plans/20260523-smelt-runtime-extraction.md)): `smelt-runtime` crate; `SqlCompiler` + emitters; `select_executable_models`; `execute_project`; cumulative dispatch. UI's `run_manager.rs` shrank 726→317 lines and now correctly expands `smelt.fn.*`, applies type casts, inlines ephemerals, filters tests, and runs cumulative models — closing four silent compile divergences.
-
-**Next** ([plan](plans/20260524-cli-runtime-migration.md)): seven phases that finish the migration:
-
-1. `compute_incremental_windows` + per-source bound machinery into runtime (bound-aware batch planner).
-2. Planner safety check + temporal bound derivation + schema-evolution gate into runtime; `ExecuteRequest` gains the `allow_*` flags.
-3. Eliminate `LogicalGraph` (884 lines) and `PhysicalGraph` (1184 lines); runtime returns `PlanSummary` for `--show-plan`.
-4. CLI `commands/run.rs` migrates to `execute_project`; `StdoutReporter` + `model_compiled` callback for `--verbose`.
-5. End-to-end CLI ↔ UI parity CI gate (`cargo test -p smelt-runtime --test execute_parity`).
-6. `pub(crate)` lockdown of compile internals — half-compile becomes a type error.
-7. Delete `smelt-cli`'s shim modules; spec lands the structural-enforcement clause.
-
-Explicit non-goals: `smelt backbuild` migration (separate command, own plan); `smelt-language-service` extraction (separate plan, awaits UI editor work).
-
-### 2. Finish the Feature Sweep / Bug Ledger
-
-The autonomy loop drives a two-level backlog — a top-level feature-sweep ledger (the master to-do list) and focused remediation sub-plans (see `CLAUDE.md` § Autonomy loop). The recent run of `BUG-*` closures in [Recently Completed](#recently-completed) is its output: property-test dispatch + `week_start` domain enforcement, cross-family arithmetic strictness, function-default self-containment, per-target overlay wiring, address-collision enforcement, codegen soundness, frontmatter parity, and diagnostic parity. Goal: drive the ledger to green — every "LSP-clean but unbuildable" defect and spec-vs-code drift the sweep surfaces is either fixed or recorded as a tracked divergence.
-
-This is the correctness baseline the rest of the queue builds on, so it stays near the top and is finished before the new big-rock features begin.
-
-Open structural residue: all tracked layering inversions are now closed. BUG-064 (`smelt-db → smelt-planner`) was fixed 2026-06-08 — `smelt-logical` crate extracted, `smelt-db` repointed, production edge removed.
-
-### 3. Silent Failures & Code-Health Hardening
-
-A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rather than surfaced. The March 28 hardening pass (`unwrap()` audit, `tracing` migration) was a one-time sweep and has since regressed, so this item makes "fail loud, or handle it" an ongoing tracked discipline — high priority alongside the feature sweep (#2) because it is the same correctness baseline. Four fronts:
+A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rather than surfaced. The March 28 hardening pass (`unwrap()` audit, `tracing` migration) was a one-time sweep and has since regressed, so this item makes "fail loud, or handle it" an ongoing tracked discipline — high priority because it is the same correctness baseline the now-complete feature sweep established. Four fronts:
 
 - **Silent `Unknown` / fallback-without-diagnostic (highest value).** Type inference and resolution collapse to `DataType::Unknown` in ~160 places, many emitting no diagnostic — the user-facing symptom is "inference is silently wrong, with no error." Worst confirmed case: `crates/smelt-types/src/signatures.rs:2200` turns an unparseable struct-field type into `Unknown` with no diagnostic, which then propagates downstream invisibly. The work: audit every `Unknown`/`None`/default sentinel on the inference + resolution paths and split *legitimate* Unknown (meta-language `Any`, deliberate conservatism) from *error* Unknown (parse failure, missing annotation, unresolved ref), emitting a diagnostic for the latter.
 - **Swallowed errors.** `let _ =`, `.ok()`, `.ok()?` chains that drop error context, and no-op `Err(_) =>` arms — concentrated in the type-inference and LSP layers, where a parse/resolution *reason* is lost and the user sees only "type unknown." Triage the cases that hide a real, reportable failure.
 - **Panics & `unwrap()` debt.** ~1,800 `unwrap()`/`expect()` in production project-wide (per the 2026-05-17 codebase review — *up* from the post-March-audit baseline; `crates/smelt-cli/src/python.rs` alone holds ~125), plus genuine input-validation `panic!`s in `smelt-datagen` and `smelt-state/ddl_spark` that should be recoverable errors. Re-run the audit, convert recoverable panics to errors, and add a CI ratchet (e.g. a `clippy::unwrap_used` budget) so the count cannot silently climb again. Also finish the stalled `println!`→`tracing` migration (~237 `println!` remain).
-- **Divergent / duplicate implementations.** Logic implemented twice in parallel paths drifts apart. The largest case — the CLI vs `smelt-runtime` execute loops (schema-evolution checks, planner safety gate, `LogicalGraph`/`PhysicalGraph`) — is already being closed by #1; the *durable* fix is to land that plan's deferred `execute_parity` CI gate and the `pub(crate)` compile-internals lockdown, so future divergence becomes a compile error rather than a review catch. Remaining straggler to single-source: `build_fn_body_map` vs `build_fn_body_map_from_model_files` (default-extraction logic duplicated across the Salsa and non-Salsa paths). The single-source invariants that currently *hold* — workspace loading, frontmatter parsing, seed/function/source discovery, the SQL compiler, the diagnostic gate — should stay that way.
+- **Divergent / duplicate implementations.** Logic implemented twice in parallel paths drifts apart. The largest case — the CLI vs `smelt-runtime` execute loops (schema-evolution checks, planner safety gate, `LogicalGraph`/`PhysicalGraph`) — is now closed by the completed CLI runtime-migration (see [Recently Completed](#recently-completed)): its `execute_parity` CI gate and `pub(crate)` compile-internals lockdown make future divergence a compile error rather than a review catch. Remaining straggler to single-source: `build_fn_body_map` vs `build_fn_body_map_from_model_files` (default-extraction logic duplicated across the Salsa and non-Salsa paths). The single-source invariants that currently *hold* — workspace loading, frontmatter parsing, seed/function/source discovery, the SQL compiler, the diagnostic gate — should stay that way.
 
 A fifth, lighter front — **surfacing deferred work that was never tracked** — lives in the [Deferred-Work Backlog](#deferred-work-backlog-untracked-follow-ups) section below: follow-ups left in `docs/plans/` that never reached the roadmap. The task there is to keep that catalogue current and triage items into the queue, not to resolve them here.
 
-### 4. Type-System Axes — Decimal, Nullability, Collation, Timezone
+**Plan**: [`docs/plans/20260608-silent-failures-hardening.md`](plans/20260608-silent-failures-hardening.md) — an 11-phase plan covering all four fronts: ratchet-first (freeze the `unwrap`/`println`/silent-`Unknown` debt at a CI baseline), then burn down the highest-value silent-`Unknown` sites with real diagnostics, swallowed errors, recoverable panics, and the `build_fn_body_map` single-source straggler.
+
+### 2. Type-System Axes — Decimal, Nullability, Collation, Timezone
 
 smelt's type system tracks base types and NULL propagation structurally, but four axes are coarse or untracked. They are simultaneously (a) real-world correctness gaps and (b) the precision blocker for virtual environments — `output_fingerprint.md` lists decimal/collation/nullability among the untracked axes that force conservative rebuild. Covering them sharpens both, which is why they are sequenced immediately before Virtual Environments.
 
@@ -69,7 +45,7 @@ smelt's type system tracks base types and NULL propagation structurally, but fou
 
 As each axis lands, the fingerprint oracle gains real precision on it instead of falling back to verbatim rebuild.
 
-### 5. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
+### 3. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
 
 SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script. The same machinery powers **backbuild change-detection** — deciding precisely which models a change forces to rebuild versus spares.
 
@@ -78,19 +54,19 @@ SQLMesh-style opt-in virtual data environments: cheap isolated environments that
 **Specced**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative, implemented), [`virtual_environments.md`](specs/virtual_environments.md) (the orchestration layer — `state.mode`, environment addressing, fingerprint-keyed reuse, promotion, override hatches), [`run_state.md`](specs/run_state.md) (`.smelt/` layout + snapshot store).
 
 **Next** (each increment gated by the DuckDB oracle, derived via `/smelt:plan`):
-1. Wire `output_fingerprint` into the runtime (it is a standalone prototype today). Depends on the runtime consolidation in #1.
+1. Wire `output_fingerprint` into the runtime (it is a standalone prototype today). Depends on the now-complete runtime consolidation (see [Recently Completed](#recently-completed)).
 2. Snapshot store + `(environment, model) → table` map (`run_state.md`); fingerprint-keyed reuse for a single environment.
 3. `state.mode: environments` addressing, `smelt plan/apply --environment`, `smelt promote`.
-4. **Backbuild change-detection** — the cross-model column-lineage analyser computing the full "eclipse" (downstream models spared by an output-preserving upstream change); the gating new analysis, and the substrate item #6 builds on.
+4. **Backbuild change-detection** — the cross-model column-lineage analyser computing the full "eclipse" (downstream models spared by an output-preserving upstream change); the gating new analysis, and the substrate item #4 builds on.
 5. Polish: typed data-diff, GC/retention, forward-only.
 
-Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #4 and unlock fingerprint precision as they land.
+Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #2 and unlock fingerprint precision as they land.
 
-### 6. General Schema Migration on the VE Substrate
+### 4. General Schema Migration on the VE Substrate
 
-Generalise schema change management on top of the fingerprint + column-lineage machinery from #5. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
+Generalise schema change management on top of the fingerprint + column-lineage machinery from #3. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
 
-### 7. Spark — Production Hardening
+### 5. Spark — Production Hardening
 
 The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow, Spark Connect / Databricks Connect). Remaining gaps to production-grade:
 
@@ -98,27 +74,37 @@ The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow
 - **JSON incompatibility rewrites** — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY`; emit compile-time warnings where no faithful rewrite exists.
 - **Authentication docs** — tokens, OAuth, and instance profiles for Databricks Connect / EMR / Dataproc.
 
-### 8. `smelt check` — LLM-Optimised Diagnostic CLI
+### 6. `smelt check` — LLM-Optimised Diagnostic CLI
 
 Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
 See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-### 9. Orchestrator Integration
+### 7. Orchestrator Integration
 
 Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
-### 10. PostgreSQL Backend
+### 8. PostgreSQL Backend
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
-### 11. Databricks Support + Metrics-View Compatibility (low priority)
+### 9. Databricks Support + Metrics-View Compatibility (low priority)
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
 ---
 
 ## Recently Completed
+
+### ~~Feature Sweep / Bug Ledger — sweep complete~~ ✅ (June 8, 2026)
+
+The autonomy-loop-driven [feature sweep](plans/20260530-feature-sweep.md) (a two-level backlog: a master feature-sweep ledger plus focused remediation sub-plans) has probed every dimension and landed every remediation cluster. All probe dimensions (S0–D8) are done, all 11 sub-plans landed, and the last structural residue closed — BUG-064 (the `smelt-db → smelt-planner` layering inversion) fixed via a new `smelt-logical` crate. The `BUG-*` closures across May 31–June 8 cover diagnostic parity, frontmatter parity, codegen soundness, address-collision enforcement, smelt.yml/CLI surface alignment, function-default self-containment, cross-family arithmetic strictness, per-target overlay wiring, and property-test dispatch + `week_start` domain enforcement.
+
+**Residual (post-sweep human triage, explicitly scoped out of the loop):** 6 `needs-review` judgment calls from the final D2–D8 wave — BUG-067/068 (meta-language: `smelt.config.var` in `smelt.define` body; `List<T>` as a `smelt.define` parameter type), BUG-070/071 (cumulative: backbuild uses legacy full-refresh path; Known-Divergences gap for Month/Quarter/Year), BUG-072/073 (sources: source `timeseries` silently ignored; `inject_source_filters` not wired into the incremental path) — plus BUG-062 (a deferred docs-gap). The silent-failure-class items (BUG-072/073) feed into [What's Next #1](#1-silent-failures--code-health-hardening); the rest await a human pass over `docs/bug-hunt/2026-05-30-findings.md`.
+
+### ~~CLI Execute-Loop Migration to `smelt-runtime`~~ ✅ (June 7, 2026)
+
+[Seven-phase migration](plans/20260524-cli-runtime-migration.md) finishing the Run-Pipeline-Parity refactor: incremental windows, planner safety gate, temporal bound derivation, and schema-evolution checks moved into `smelt-runtime`; `LogicalGraph` (884 lines) and `PhysicalGraph` (1184 lines) deleted in favour of a `PlanSummary` for `--show-plan`; `smelt-cli`'s `commands/run.rs` migrated to `execute_project` with a `StdoutReporter`; shim modules deleted. The durable enforcement landed too: the `execute_parity` CI gate (`cargo test -p smelt-runtime --test execute_parity`) runs identical fixtures through both the CLI and UI entry points, and `pub(crate)` lockdown of the compile internals makes a half-compile a type error — so future CLI↔UI divergence is a compile error, not a review catch. Completes the predecessor [`smelt-runtime` extraction](plans/20260523-smelt-runtime-extraction.md).
 
 ### ~~Per-Target Config Overlay — production wiring complete~~ ✅ (June 6, 2026)
 
@@ -205,7 +191,7 @@ Proved the core thesis of opt-in virtual data environments — *reuse a physical
 - **Determinism detector**: structural deny-list (non-deterministic built-ins, parenless temporal specials, order-sensitive aggregates) + row-slice-without-total-order check, surfaced as `deterministic` on the result. Gated so anything flagged deterministic reproduces across two independent DuckDB builds. Closes §5.5's value axes; window-function non-determinism is the noted residual.
 - **Specs authored**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative), [`virtual_environments.md`](specs/virtual_environments.md) (staged orchestration design), [`run_state.md`](specs/run_state.md) (`.smelt/` layout); touched `architecture.md`, `incremental_models.md`, `schema_evolution.md`.
 
-Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #5](#5-virtual-environments--backbuild-change-detection-specs-authored-prototype-proven).
+Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #3](#3-virtual-environments--backbuild-change-detection-specs-authored-prototype-proven).
 
 ### ~~Typed Meta-Language — Phase E2: Multi-Model Production~~ ✅ (May 16, 2026)
 
@@ -616,25 +602,27 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 ## Deferred-Work Backlog (untracked follow-ups)
 
-Concrete work deferred during plan implementation (`docs/plans/`) that is not otherwise tracked above. Listed so it is *visible* and can be triaged into the queue — inclusion here is identification, not commitment. Maintained as part of [What's Next #3](#3-silent-failures--code-health-hardening). Grouped by area; each item cites its source plan.
+Concrete work deferred during plan implementation (`docs/plans/`) that is not otherwise tracked above. Listed so it is *visible* and can be triaged into the queue — inclusion here is identification, not commitment. Maintained as part of [What's Next #1](#1-silent-failures--code-health-hardening). Grouped by area; each item cites its source plan.
 
 **Type system / function registry**
 - `to_seconds` returns `Interval` but inference doesn't recognise it — forces `epoch_us()` microsecond-arithmetic workarounds in models (`20260517-web-analytics-4-sessionize.md`).
 - `md5` absent from the function registry — emits a Warning that fails the diagnostics gate; models fall back to `CONCAT` surrogate keys (`20260517-web-analytics-4-sessionize.md`).
 - `arg_min` deliberately unregistered (only `arg_max` shipped), pending a real call site (`20260517-web-analytics-5-forward-only.md`).
 - `ArgTypeMismatch` message format diverges from `functions.md` §8 ("expected X, got Y") (`20260422-smelt-functions.md`).
-- `infer_expression_kind` parallel-walker gap — sub-expression kinds nested in array/struct/`ROW(...)`/`IN`/`EXISTS` silently drop to `Scalar` (overlaps the silent-`Unknown` front in #3) (`20260422-smelt-functions.md`).
+- `infer_expression_kind` parallel-walker gap — sub-expression kinds nested in array/struct/`ROW(...)`/`IN`/`EXISTS` silently drop to `Scalar` (overlaps the silent-`Unknown` front in #1) (`20260422-smelt-functions.md`).
 - Per-arg-type canonical-return resolution — decimal precision is encoded per-signature today, not per-arg-type (`20260422-smelt-functions.md`).
 
 **Functions / TableExpr**
 - `f(x).field` single-field projection + `..r` row-tail struct-spread descoped — no field-postfix on a function call; schema/codegen disagree on row-tail spread (`20260527-function_schema_inference.md`).
-- `build_fn_body_map` vs `build_fn_body_map_from_model_files` duplication (also called out in #3) (`20260519-functions-meta-1-call-expansion.md`).
+- `build_fn_body_map` vs `build_fn_body_map_from_model_files` duplication (also called out in #1) (`20260519-functions-meta-1-call-expansion.md`).
 - Phase 57 deferred function tests: FROM-position aliasing, Spark struct-literal lowering, literal-`VALUES` models (`20260519-functions-meta-gaps.md`).
 
 **Meta-language**
 - `smelt.sources.with_tag |> map(...)` generator driver yields zero emissions at runtime — only `load_yaml`/`load_json` drivers are enumerated; `staging_from_sources` ships a hardcoded `[ModelDef …]` workaround (`20260509-meta-language-E2.md`).
 - `emitted_models` does an O(workspace) re-scan on any single-file edit (Salsa input granularity) (`20260509-meta-language-E2.md`).
 - Unshipped `List<T>` derivations (`flat_map`, `zip_with`, `take`, `drop`, `any`, `all`, `find`, `partition`, …) + user-defined reducers; ship only if examples force them (`20260509-meta-language-overall.md`).
+- `smelt.config.var(...)` rejected inside a `smelt.define` body — compile-time config not resolvable in define scope (BUG-067; sweep needs-review, `2026-05-30` ledger).
+- `List<T>` not admissible as a `smelt.define` parameter type — typed list parameters can't be declared (BUG-068; sweep needs-review, `2026-05-30` ledger).
 
 **VALUES / typing**
 - `LATERAL (VALUES …)`, bare top-level `VALUES`, and `INSERT … VALUES` are untyped (`20260528-values-derived-table-typing.md`).
@@ -653,6 +641,11 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 **Datagen / incremental**
 - Foreign-key resolution inside `JsonObject`/`entity.columns` always resolves to id 1 (`20260517-web-analytics-1-datagen-json-object.md`).
 - Cumulative reprocessing detection has no watermark store — refuses via a heuristic pending a state-tracking spec (`20260523-cumulative-aggregate.md`).
+- Backbuild over a cumulative model takes the legacy full-refresh path instead of the merge loop (BUG-070; sweep needs-review, `2026-05-30` ledger).
+
+**Sources** (from the `2026-05-30` bug ledger — sweep needs-review)
+- Source `timeseries:` is silently ignored — `SourceInfo` carries no `timeseries` field, so a declared source time-window has no effect (BUG-072).
+- `inject_source_filters` is not wired into the incremental execute path — source filters don't constrain incremental reads (BUG-073).
 
 **Cross-engine**
 - Partition-level Parquet reads (only changed partitions vs full glob) + cross-engine schema validation / type coercion (Spark `STRING` vs DuckDB `VARCHAR`) (`20260328-multi-engine-example.md`).
@@ -662,6 +655,7 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - Calendar-invalid seed date (`2025-02-30`) infers DATE then hard-fails at load — undocumented interaction; note in `seeds.md` (BUG-031).
 - ~70 diagnostic codes undocumented — needs a `diagnostics.md` (BUG-052).
 - `incremental_models.md` Known Divergences omits the window-function safety check as a third non-expanding classify site (BUG-062).
+- `cumulative_aggregate.md` Known Divergences omits the Month/Quarter/Year grain limitation (BUG-071).
 - `smelt docs` follow-ons: HTML output, `smelt docs serve`, column-lineage visualization, `smelt docs diff` (`20260329-docs-generate.md`).
 
 ---

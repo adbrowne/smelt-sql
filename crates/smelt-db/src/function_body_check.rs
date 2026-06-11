@@ -1041,6 +1041,19 @@ pub fn check_smelt_path_call(
         }
     }
 
+    // Skip smelt.config.var — a compile-time meta builtin resolved by the
+    // build-path evaluator and validated by `check_config_var_call_diagnostics`;
+    // it has no `FunctionSig` in the registry. Call-site nodes are pre-filtered
+    // upstream, but the define-body re-walk dispatches body calls here directly
+    // (BUG-067: a `config.var` inside a `smelt.define` body was reported as
+    // `UnknownSmeltFn`).
+    if segments.len() == 2
+        && segments[0].eq_ignore_ascii_case("config")
+        && segments[1].eq_ignore_ascii_case("var")
+    {
+        return diagnostics;
+    }
+
     // Build the display path for messages: "smelt.functions.foo"
     let display_path = format!("smelt.{}", segments.join("."));
 

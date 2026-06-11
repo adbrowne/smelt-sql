@@ -387,6 +387,7 @@ impl Backend {
                 DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
                 DbCode::DuplicateAddress => "duplicate-address",
                 DbCode::DefaultReferencesParameter => "default-references-parameter",
+                DbCode::UnknownStructFieldType => "unknown-struct-field-type",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -1254,6 +1255,8 @@ impl LanguageServer for Backend {
                 .unwrap(),
             ),
         };
+        // intentionally ignored: LSP capability registration failure is non-fatal;
+        // the server continues without file-watcher notifications.
         let _ = self.client.register_capability(vec![registration]).await;
 
         // Report any initialization errors
@@ -1445,6 +1448,8 @@ impl LanguageServer for Backend {
         for change in params.changes {
             let path = match change.uri.to_file_path() {
                 Ok(p) => p,
+                // intentionally ignored: non-file URIs (e.g. git:, untitled:)
+                // are not tracked by the smelt workspace.
                 Err(_) => continue,
             };
 
@@ -2088,6 +2093,8 @@ impl LanguageServer for Backend {
             }) => {
                 let target_uri = match Url::from_file_path(&target_file) {
                     Ok(u) => u,
+                    // intentionally ignored: non-absolute or non-file path → no
+                    // goto-def location can be produced; return None to the editor.
                     Err(_) => return Ok(None),
                 };
                 let target_text = std::fs::read_to_string(&target_file).unwrap_or_default();

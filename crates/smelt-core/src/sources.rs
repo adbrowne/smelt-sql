@@ -6,6 +6,7 @@
 //!
 //! References: docs/specs/sources.md §"Source YAML shape" and §"Filesystem layout"
 
+use crate::config::TimeseriesConfig;
 use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
@@ -38,6 +39,9 @@ pub struct SourceInfo {
     /// Tags declared in the source YAML (`tags:` key). Used by wide-reflection
     /// accessors `smelt.sources.with_tag` and `smelt.sources.all`.
     pub tags: Vec<String>,
+    /// Optional time dimension declaration. When present, the source is a
+    /// pushdown target for incremental models that reference it.
+    pub timeseries: Option<TimeseriesConfig>,
 }
 
 impl SourceInfo {
@@ -100,6 +104,7 @@ pub enum SourceError {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSourceYaml {
     /// Optional description.
     #[serde(default)]
@@ -120,6 +125,11 @@ struct RawSourceYaml {
     /// Optional tags for filtering via `smelt.sources.with_tag`.
     #[serde(default)]
     tags: Vec<String>,
+
+    /// Optional time dimension declaration. When present, the source is a
+    /// pushdown target for incremental models.
+    #[serde(default)]
+    timeseries: Option<TimeseriesConfig>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +224,7 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
         description: raw.description,
         name_override: raw.name,
         tags: raw.tags,
+        timeseries: raw.timeseries,
     })
 }
 
@@ -562,6 +573,84 @@ pub enum SourcesError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 1 / BUG-072: a source YAML with a `timeseries:` block parses to
+    /// `SourceInfo.timeseries == Some(TimeseriesConfig { ... })`.
+    #[test]
+    fn source_yaml_timeseries_block_parses() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.yml");
+        std::fs::write(
+            &path,
+            r#"
+description: Raw events
+columns:
+  - name: event_id
+    type: BIGINT
+    nullable: false
+  - name: event_ts
+    type: TIMESTAMP
+    nullable: false
+  - name: event_date
+    type: DATE
+    nullable: false
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+"#,
+        )
+        .unwrap();
+
+        let info = parse_source_yaml(&path).expect("should parse");
+        let ts = info.timeseries.expect("timeseries should be Some");
+        assert_eq!(ts.event_time_column, "event_ts");
+        assert_eq!(ts.partition_column, "event_date");
+        assert_eq!(
+            ts.granularity,
+            crate::config::Granularity::Day,
+            "granularity should be Day"
+        );
+    }
+
+    /// Phase 1 / BUG-072: a source YAML with an unrecognised key (e.g. a typo
+    /// `timseries:`) must return an error rather than silently discarding it.
+    #[test]
+    fn source_yaml_unknown_key_is_loud() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.yml");
+        std::fs::write(
+            &path,
+            r#"
+description: Raw events
+columns:
+  - name: event_id
+    type: BIGINT
+timseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+"#,
+        )
+        .unwrap();
+
+        let result = parse_source_yaml(&path);
+        assert!(
+            result.is_err(),
+            "unknown key `timseries:` should be a parse error, not silently dropped"
+        );
+        match result {
+            Err(SourceError::YamlParse { message, .. }) => {
+                assert!(
+                    message.to_lowercase().contains("timseries")
+                        || message.to_lowercase().contains("unknown"),
+                    "error message should mention the unknown key, got: {message}"
+                );
+            }
+            Err(other) => panic!("expected YamlParse error, got: {other:?}"),
+            Ok(_) => unreachable!(),
+        }
+    }
 
     #[test]
     fn test_sources_with_data_latency() {

@@ -75,6 +75,8 @@ impl PythonModelCache {
         let cache_path = Self::cache_path(project_dir);
         match std::fs::read_to_string(&cache_path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            // intentionally ignored: cache is best-effort; a missing or
+            // unreadable cache file means a cold start, not an error.
             Err(_) => Self::default(),
         }
     }
@@ -83,9 +85,11 @@ impl PythonModelCache {
     pub fn save(&self, project_dir: &Path) {
         let cache_path = Self::cache_path(project_dir);
         if let Some(parent) = cache_path.parent() {
+            // intentionally ignored: cache dir creation is best-effort.
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
+            // intentionally ignored: cache write failure is non-fatal.
             let _ = std::fs::write(&cache_path, json);
         }
     }
@@ -170,6 +174,8 @@ fn execute_python_file(
     };
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
+        // intentionally ignored: if stdin write fails, the child process will
+        // terminate with its own error and child.wait_with_output() catches it.
         let _ = stdin.write_all(context_json.as_bytes());
     }
     let output = match child.wait_with_output() {

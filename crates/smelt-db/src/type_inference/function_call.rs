@@ -205,6 +205,9 @@ fn resolve_struct_return_type(
     let extras = match check_struct_row_var_binding(declared_fields, &cols, param_tail) {
         Ok(Some(extras)) => extras,
         Ok(None) => vec![],
+        // intentionally ignored: binding failure means the argument struct is
+        // incompatible; returning Unknown lets the call-site check emit
+        // RowRequirementUnsatisfied rather than cascading inference errors.
         Err(_) => return DataType::Unknown,
     };
 
@@ -364,8 +367,9 @@ fn try_registry_inference(
                 nullable,
             }))
         }
-        // Unification failed — fall back to the legacy match so permissive
-        // behaviour (e.g. LOWER on Integer, MIN on Unknown) is preserved.
+        // intentionally ignored: unification failed → fall back to the legacy
+        // match so permissive behaviour (LOWER on Integer, MIN on Unknown) is
+        // preserved. The caller handles None as "type unknown, use legacy path".
         Err(_) => Some(None),
     }
 }

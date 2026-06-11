@@ -26,6 +26,8 @@ fn find_source_table_line(
 ) -> u32 {
     let content = match std::fs::read_to_string(sources_path) {
         Ok(c) => c,
+        // intentionally ignored: sources file unreadable → return line 0 as
+        // the diagnostic anchor (best-effort, not user-facing).
         Err(_) => return 0,
     };
 
@@ -80,6 +82,7 @@ fn find_source_column_line(
 ) -> u32 {
     let content = match std::fs::read_to_string(sources_path) {
         Ok(c) => c,
+        // intentionally ignored: same best-effort fallback as find_source_table_line.
         Err(_) => return 0,
     };
 

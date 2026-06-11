@@ -376,6 +376,8 @@ WITH sessionized AS (
 
 Lookup sources (those without `timeseries:`) are never pushdown candidates — they are read in full each run. Pushdown is per-reference: a self-join on a timeseries source receives the same widened filter on each occurrence.
 
+Sources declared in per-entity source YAML files (with a `timeseries:` block — see [Sources guide](sources.md#time-dimension)) are automatically pushdown candidates for every downstream incremental model that reads them. No additional configuration is required on the incremental model.
+
 > **Current scope:** pushdown applies the bound derived from the **outer SQL body**. `smelt.define` function bodies are not yet expanded before bound derivation, so a source whose only INTERVAL pattern is inside a function body receives a partition-local (`PT0S`) filter. The exact run-window filter is still correct for correctness; it may read more data than necessary if the function body introduces a wider lookback. Full expansion-before-derivation is tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
 
 ## Batching

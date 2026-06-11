@@ -45,6 +45,14 @@ jobs:
           --features smelt-cli/duckdb,smelt-ui/duckdb
           -- -D warnings
 
+      - name: Run hardening budget gate
+        # Counts production unwrap/expect/println per crate (excluding test code)
+        # and compares against the committed baseline in .claude/hardening-baseline.txt.
+        # Exits non-zero if any crate exceeds its baseline (regression) or falls
+        # below it (debt paid but baseline not updated — run --update to tighten).
+        # Uses bash/sed/awk/find only; no ripgrep needed.
+        run: bash .claude/scripts/hardening-budget.sh
+
   test:
     name: Test Suite
     runs-on: ubuntu-latest

@@ -3,6 +3,7 @@ use crate::schema_tracking::DeployedSchema;
 use crate::RunManifest;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// JSON file-backed state store.
 ///
@@ -84,11 +85,11 @@ impl FileStore {
                 Ok(content) => match serde_json::from_str::<RunManifest>(&content) {
                     Ok(manifest) => manifests.push(manifest),
                     Err(e) => {
-                        eprintln!("Warning: Failed to parse run manifest {:?}: {}", path, e);
+                        warn!("failed to parse run manifest {:?}: {}", path, e);
                     }
                 },
                 Err(e) => {
-                    eprintln!("Warning: Failed to read {:?}: {}", path, e);
+                    warn!("failed to read {:?}: {}", path, e);
                 }
             }
         }

@@ -108,10 +108,13 @@ pub fn register_loader_files_from_disk(db: &mut Database, project_root: &Path) {
         // Compute the workspace-relative path (forward-slash separators).
         let rel = match path.strip_prefix(project_root) {
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            // intentionally ignored: path is not under the project root (filtering).
             Err(_) => continue,
         };
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
+            // intentionally ignored: loader file discovered but unreadable
+            // (e.g. permissions); workspace loads without it.
             Err(_) => continue,
         };
         db.set_loader_file(Arc::from(rel.as_str()), Arc::from(text.as_str()), true);

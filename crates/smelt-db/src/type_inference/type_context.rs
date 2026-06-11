@@ -791,6 +791,8 @@ impl TypeContext {
     pub fn take_missed_lookups(&self) -> Vec<(Option<String>, String)> {
         match self.missed_lookups.lock() {
             Ok(mut lookups) => std::mem::take(&mut *lookups),
+            // intentionally ignored: mutex poisoning is unreachable in normal
+            // operation (only occurs if a thread panics while holding the lock).
             Err(_) => Vec::new(),
         }
     }

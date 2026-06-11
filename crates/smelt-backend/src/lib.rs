@@ -3,6 +3,8 @@
 //! This crate defines the abstract interface that all smelt backends must implement,
 //! enabling multi-backend support (DuckDB, Spark, etc.).
 
+use tracing::warn;
+
 mod error;
 mod types;
 
@@ -135,7 +137,10 @@ pub trait Backend: Send + Sync {
                     self.drop_materialized_view_if_exists(schema, name).await?;
                     self.create_materialized_view_as(schema, name, sql).await?;
                 } else {
-                    eprintln!("  Warning: backend doesn't support materialized views, using table for '{}'", name);
+                    warn!(
+                        "backend doesn't support materialized views, using table for '{}'",
+                        name
+                    );
                     self.drop_view_if_exists(schema, name).await?;
                     self.drop_table_if_exists(schema, name).await?;
                     self.create_table_as(schema, name, sql).await?;
@@ -307,7 +312,7 @@ pub trait Backend: Send + Sync {
         name: &str,
         sql: &str,
     ) -> Result<(), BackendError> {
-        eprintln!("  Warning: backend does not support materialized views, falling back to table");
+        warn!("backend does not support materialized views, falling back to table");
         self.create_table_as(schema, name, sql).await
     }
 

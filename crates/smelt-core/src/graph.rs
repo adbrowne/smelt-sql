@@ -5,6 +5,7 @@ use crate::SourcesConfig;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Debug, Error)]
 pub enum GraphError {
@@ -98,8 +99,8 @@ impl DependencyGraph {
                 .collect();
 
             if let Some(existing) = models_map.get(&canonical) {
-                eprintln!(
-                    "Warning: Duplicate canonical path '{}'. Model at {} overwrites model at {}.",
+                warn!(
+                    "duplicate canonical path '{}': model at {} overwrites model at {}",
                     canonical,
                     model.path.display(),
                     existing.path.display()
@@ -479,8 +480,8 @@ impl DependencyGraph {
             if mat == Materialization::Ephemeral {
                 let has_consumers = dependents.get(name).is_some_and(|d| !d.is_empty());
                 if !has_consumers {
-                    eprintln!(
-                        "Warning: Ephemeral model '{}' has no downstream consumers and will never be inlined.",
+                    warn!(
+                        "ephemeral model '{}' has no downstream consumers and will never be inlined",
                         name
                     );
                 }

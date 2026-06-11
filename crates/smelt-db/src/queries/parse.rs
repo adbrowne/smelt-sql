@@ -129,6 +129,7 @@ fn is_in_table_expr_position(node: &smelt_parser::syntax_kind::SyntaxNode) -> bo
 #[salsa::tracked]
 pub fn model_sources(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<SourceLocation>> {
     // smelt.source() is a parse error — no legacy SourceCall nodes can appear.
+    // intentionally ignored: suppress unused parameter warnings on this migration stub.
     let _ = (db, file);
     Arc::new(Vec::new())
 }

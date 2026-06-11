@@ -5,6 +5,7 @@ use crate::gen::Gen;
 use crate::generators::{
     bool_with_prob, geometric, log_normal, one_of, uniform, uuid_gen, weighted_choice,
 };
+use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use indexmap::IndexMap;
 use rand::distributions::{Distribution, WeightedIndex};
@@ -84,26 +85,26 @@ pub struct EntityPool {
 }
 
 impl EntityPool {
-    pub fn new(seed: u64, count: usize, col_specs: &[ColumnConfig]) -> Self {
+    pub fn new(seed: u64, count: usize, col_specs: &[ColumnConfig]) -> Result<Self> {
         let empty_fk = FkCounts::new();
         let empty_pools: HashMap<String, Arc<LinkedPool>> = HashMap::new();
         let empty_samples: PoolSamples<'_> = HashMap::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let rows = (0..count)
-            .map(|i| {
-                let ctx = RowContext {
-                    row_index: i,
-                    fk_counts: &empty_fk,
-                    pools: &empty_pools,
-                    pool_samples: &empty_samples,
-                };
-                col_specs
-                    .iter()
-                    .map(|c| apply_spec(&mut rng, &c.generator, &ctx))
-                    .collect()
-            })
-            .collect();
-        Self { rows }
+        let mut rows = Vec::with_capacity(count);
+        for i in 0..count {
+            let ctx = RowContext {
+                row_index: i,
+                fk_counts: &empty_fk,
+                pools: &empty_pools,
+                pool_samples: &empty_samples,
+            };
+            let row: Result<Vec<_>> = col_specs
+                .iter()
+                .map(|c| apply_spec(&mut rng, &c.generator, &ctx))
+                .collect();
+            rows.push(row?);
+        }
+        Ok(Self { rows })
     }
 
     pub fn len(&self) -> usize {
@@ -135,7 +136,7 @@ impl LinkedPool {
     /// `dataset_seed.wrapping_add(100 + linked_pool_index)`). Pool seeding is
     /// kept separate from row generation so that changing `num_rows` does
     /// not perturb pool contents.
-    pub fn new(seed: u64, cfg: &LinkedPoolConfig, fk_counts: &FkCounts) -> LinkedPool {
+    pub fn new(seed: u64, cfg: &LinkedPoolConfig, fk_counts: &FkCounts) -> Result<LinkedPool> {
         // Build the field_index from the first shape (all shapes agree on field names).
         let field_index: IndexMap<String, usize> = cfg.shapes[0]
             .fields
@@ -176,7 +177,7 @@ impl LinkedPool {
                         pools: &empty_pools,
                         pool_samples: &empty_samples,
                     };
-                    let val = apply_spec(&mut rng, spec, &ctx);
+                    let val = apply_spec(&mut rng, spec, &ctx)?;
                     sticky_values.insert(field_name.as_str(), val);
                 }
             }
@@ -196,7 +197,7 @@ impl LinkedPool {
                             pools: &empty_pools,
                             pool_samples: &empty_samples,
                         };
-                        apply_spec(&mut rng, spec, &ctx)
+                        apply_spec(&mut rng, spec, &ctx)?
                     };
                     tuple.push(val);
                 }
@@ -208,7 +209,7 @@ impl LinkedPool {
             }
         }
 
-        LinkedPool { rows, field_index }
+        Ok(LinkedPool { rows, field_index })
     }
 
     /// Look up the value of `field` in pool entry `row_idx`.
@@ -244,7 +245,7 @@ pub fn generate_row(
     col_specs: &[ColumnConfig],
     partition_col: Option<(&str, &str)>,
     ctx: &RowContext<'_>,
-) -> Vec<(String, GenericValue)> {
+) -> Result<Vec<(String, GenericValue)>> {
     let mut row = Vec::new();
 
     // Entity columns first
@@ -256,7 +257,7 @@ pub fn generate_row(
 
     // Regular columns
     for col in col_specs {
-        let value = apply_spec(rng, &col.generator, ctx);
+        let value = apply_spec(rng, &col.generator, ctx)?;
         row.push((col.name.clone(), value));
     }
 
@@ -268,11 +269,15 @@ pub fn generate_row(
         ));
     }
 
-    row
+    Ok(row)
 }
 
 /// Build an EntityPool and return a closure that samples from it.
-pub fn make_entity_pool(seed: u64, num_rows: usize, entity_cfg: &EntityConfig) -> EntityPool {
+pub fn make_entity_pool(
+    seed: u64,
+    num_rows: usize,
+    entity_cfg: &EntityConfig,
+) -> Result<EntityPool> {
     let count = ((num_rows as f64) * entity_cfg.pool_ratio).max(1.0) as usize;
     EntityPool::new(seed, count, &entity_cfg.columns)
 }
@@ -286,64 +291,64 @@ pub fn apply_spec(
     rng: &mut impl RngCore,
     spec: &GeneratorSpec,
     ctx: &RowContext<'_>,
-) -> GenericValue {
+) -> Result<GenericValue> {
     match spec {
         GeneratorSpec::Uuid => {
             let id = uuid_gen().generate(rng);
-            GenericValue::Str(id.to_string())
+            Ok(GenericValue::Str(id.to_string()))
         }
         GeneratorSpec::Constant { value } => match value {
             serde_yaml::Value::Number(n) if n.is_i64() => {
-                GenericValue::Int(n.as_i64().unwrap() as i32)
+                Ok(GenericValue::Int(n.as_i64().unwrap() as i32))
             }
             serde_yaml::Value::Number(n) if n.is_u64() => {
-                GenericValue::Int(n.as_u64().unwrap() as i32)
+                Ok(GenericValue::Int(n.as_u64().unwrap() as i32))
             }
-            _ => GenericValue::Str(value.as_str().unwrap_or("").to_string()),
+            _ => Ok(GenericValue::Str(value.as_str().unwrap_or("").to_string())),
         },
         GeneratorSpec::WeightedChoice { values } => {
             let items: Vec<(String, f64)> = values.iter().map(|(k, v)| (k.clone(), *v)).collect();
             let choice = weighted_choice(items).generate(rng);
-            GenericValue::Str(choice)
+            Ok(GenericValue::Str(choice))
         }
         GeneratorSpec::OneOf { values } => {
             let choice = one_of(values.clone()).generate(rng);
-            GenericValue::Str(choice)
+            Ok(GenericValue::Str(choice))
         }
         GeneratorSpec::UniformInt { min, max } => {
             let v = uniform(*min..*max).generate(rng);
-            GenericValue::Int(v)
+            Ok(GenericValue::Int(v))
         }
         GeneratorSpec::UniformFloat { min, max } => {
             let v = uniform(*min..*max).generate(rng);
-            GenericValue::Float(v)
+            Ok(GenericValue::Float(v))
         }
         GeneratorSpec::LogNormal { median, sigma, max } => {
             let v = log_normal(*median, *sigma, *max).generate(rng);
-            GenericValue::Int(v)
+            Ok(GenericValue::Int(v))
         }
         GeneratorSpec::Geometric { p, min } => {
             let v = geometric(*p).generate(rng);
             let v = if let Some(m) = min { v.max(*m) } else { v };
-            GenericValue::Int(v)
+            Ok(GenericValue::Int(v))
         }
         GeneratorSpec::Bool { prob } => {
             let v = bool_with_prob(*prob).generate(rng);
-            GenericValue::Bool(v)
+            Ok(GenericValue::Bool(v))
         }
         GeneratorSpec::Optional { prob, inner } => {
             let r = (rng.next_u64() as f64) / (u64::MAX as f64);
             if r < *prob {
                 apply_spec(rng, inner, ctx)
             } else {
-                GenericValue::Null
+                Ok(GenericValue::Null)
             }
         }
-        GeneratorSpec::SequentialId => GenericValue::Int((ctx.row_index + 1) as i32),
+        GeneratorSpec::SequentialId => Ok(GenericValue::Int((ctx.row_index + 1) as i32)),
         GeneratorSpec::ForeignKey { dataset } => {
             let count = ctx.fk_counts.get(dataset).copied().unwrap_or(1) as u64;
             let id = (rng.next_u64() % count) + 1;
-            GenericValue::Int(id as i32)
+            Ok(GenericValue::Int(id as i32))
         }
         GeneratorSpec::Date { start, end } => {
             let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
@@ -353,7 +358,7 @@ pub fn apply_spec(
             let days_range = (end_date - start_date).num_days().max(1) as u64;
             let offset = (rng.next_u64() % days_range) as i64;
             let date = start_date + chrono::Duration::days(offset);
-            GenericValue::Str(date.format("%Y-%m-%d").to_string())
+            Ok(GenericValue::Str(date.format("%Y-%m-%d").to_string()))
         }
         GeneratorSpec::Timestamp { start, end } => {
             let start_dt = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
@@ -373,11 +378,13 @@ pub fn apply_spec(
             let secs_range = (end_dt - start_dt).num_seconds().max(1) as u64;
             let offset = (rng.next_u64() % secs_range) as i64;
             let ts = start_dt + chrono::Duration::seconds(offset);
-            GenericValue::Str(ts.format("%Y-%m-%dT%H:%M:%S").to_string())
+            Ok(GenericValue::Str(
+                ts.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            ))
         }
         GeneratorSpec::StringPattern { template } => {
             let result = apply_string_pattern(rng, template, ctx.row_index);
-            GenericValue::Str(result)
+            Ok(GenericValue::Str(result))
         }
         GeneratorSpec::JsonObject { fields } => {
             let mut json = String::from("{");
@@ -390,28 +397,28 @@ pub fn apply_spec(
                 json.push('"');
                 escape_json_string(key, &mut json);
                 json.push_str("\":");
-                let inner_value = apply_spec(rng, inner_spec, ctx);
+                let inner_value = apply_spec(rng, inner_spec, ctx)?;
                 append_generic_value_as_json(&inner_value, &mut json);
             }
             json.push('}');
-            GenericValue::JsonRaw(json)
+            Ok(GenericValue::JsonRaw(json))
         }
         GeneratorSpec::LinkedChoice { pool, field } => {
-            let idx = *ctx.pool_samples.get(pool.as_str()).unwrap_or_else(|| {
-                panic!(
+            let idx = *ctx.pool_samples.get(pool.as_str()).ok_or_else(|| {
+                anyhow!(
                     "linked_choice references pool {pool:?} but no sample was taken for this \
                      row — validate_config should have rejected this configuration before \
                      row generation"
                 )
-            });
-            let pool_ref = ctx.pools.get(pool.as_str()).unwrap_or_else(|| {
-                panic!(
+            })?;
+            let pool_ref = ctx.pools.get(pool.as_str()).ok_or_else(|| {
+                anyhow!(
                     "linked_choice references pool {pool:?} which was not built — \
                      validate_config should have rejected this configuration"
                 )
-            });
-            pool_ref.get(idx, field).cloned().unwrap_or_else(|| {
-                panic!("linked_choice field {field:?} missing in pool {pool:?} at index {idx}")
+            })?;
+            pool_ref.get(idx, field).cloned().ok_or_else(|| {
+                anyhow!("linked_choice field {field:?} missing in pool {pool:?} at index {idx}")
             })
         }
     }
@@ -602,7 +609,7 @@ mod tests {
         };
         let ctx = empty_ctx(&fk);
         for _ in 0..50 {
-            if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, &ctx) {
+            if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, &ctx).unwrap() {
                 let date = NaiveDate::parse_from_str(&s, "%Y-%m-%d").unwrap();
                 let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
                 let end = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
@@ -622,7 +629,7 @@ mod tests {
             end: "2024-01-02T00:00:00".to_string(),
         };
         let ctx = empty_ctx(&fk);
-        if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, &ctx) {
+        if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, &ctx).unwrap() {
             assert!(s.starts_with("2024-01-01T"), "got: {}", s);
         } else {
             panic!("Expected Str variant");
@@ -646,7 +653,7 @@ mod tests {
         let mut min_seen = i32::MAX;
         let mut zero_count = 0;
         for _ in 0..10_000 {
-            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, &ctx) {
+            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, &ctx).unwrap() {
                 if v < min_seen {
                     min_seen = v;
                 }
@@ -677,7 +684,7 @@ mod tests {
         let ctx = empty_ctx(&fk);
         let mut saw_zero = false;
         for _ in 0..10_000 {
-            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, &ctx) {
+            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, &ctx).unwrap() {
                 if v == 0 {
                     saw_zero = true;
                     break;
@@ -705,7 +712,7 @@ fields:
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let fk = FkCounts::new();
         let ctx = empty_ctx(&fk);
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx).unwrap() else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"a":1,"b":"x","c":false}"#);
@@ -728,7 +735,7 @@ fields:
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
         let ctx = empty_ctx(&fk);
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx).unwrap() else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"always_null":null}"#);
@@ -750,7 +757,7 @@ fields:
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
         let ctx = empty_ctx(&fk);
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx).unwrap() else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"outer":{"inner":1}}"#);
@@ -776,7 +783,7 @@ fields:
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let fk = FkCounts::new();
         let ctx = empty_ctx(&fk);
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx).unwrap() else {
             panic!("expected JsonRaw");
         };
         assert_eq!(json, r#"{"meta":{"kind":"x"}}"#);
@@ -826,10 +833,10 @@ fields:
                 pools: &empty_pools,
                 pool_samples: &empty_samples,
             };
-            let GenericValue::JsonRaw(a) = apply_spec(&mut rng_a, &spec, &ctx) else {
+            let GenericValue::JsonRaw(a) = apply_spec(&mut rng_a, &spec, &ctx).unwrap() else {
                 unreachable!()
             };
-            let GenericValue::JsonRaw(b) = apply_spec(&mut rng_b, &spec, &ctx) else {
+            let GenericValue::JsonRaw(b) = apply_spec(&mut rng_b, &spec, &ctx).unwrap() else {
                 unreachable!()
             };
             assert_eq!(a, b, "deterministic mismatch at row {i}");
@@ -859,10 +866,10 @@ fields:
         let ctx = empty_ctx(&fk);
         let mut rng_ab = ChaCha8Rng::seed_from_u64(99);
         let mut rng_ba = ChaCha8Rng::seed_from_u64(99);
-        let GenericValue::JsonRaw(ab) = apply_spec(&mut rng_ab, &spec_ab, &ctx) else {
+        let GenericValue::JsonRaw(ab) = apply_spec(&mut rng_ab, &spec_ab, &ctx).unwrap() else {
             unreachable!()
         };
-        let GenericValue::JsonRaw(ba) = apply_spec(&mut rng_ba, &spec_ba, &ctx) else {
+        let GenericValue::JsonRaw(ba) = apply_spec(&mut rng_ba, &spec_ba, &ctx).unwrap() else {
             unreachable!()
         };
         // Different field order → different field-to-value assignment.
@@ -881,7 +888,7 @@ fields:
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let fk = FkCounts::new();
         let ctx = empty_ctx(&fk);
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx).unwrap() else {
             unreachable!()
         };
         // The float lives between the `:` and `}`; assert it's not quoted.
@@ -908,7 +915,7 @@ fields:
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let fk = FkCounts::new();
         let ctx = empty_ctx(&fk);
-        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx) else {
+        let GenericValue::JsonRaw(json) = apply_spec(&mut rng, &spec, &ctx).unwrap() else {
             unreachable!()
         };
         assert_eq!(json, r#"{"weird\"key":1}"#);
@@ -971,7 +978,7 @@ fields:
     fn test_linked_pool_size_is_exact() {
         let cfg = make_single_shape_pool(1000, 3, vec![], two_fk_fields());
         let fk = fk_counts_100();
-        let pool = LinkedPool::new(42, &cfg, &fk);
+        let pool = LinkedPool::new(42, &cfg, &fk).unwrap();
         assert_eq!(pool.len(), 1000, "pool must have exactly pool_size entries");
     }
 
@@ -981,8 +988,8 @@ fields:
     fn test_linked_pool_deterministic() {
         let cfg = make_single_shape_pool(500, 2, vec![], two_fk_fields());
         let fk = fk_counts_100();
-        let pool_a = LinkedPool::new(99, &cfg, &fk);
-        let pool_b = LinkedPool::new(99, &cfg, &fk);
+        let pool_a = LinkedPool::new(99, &cfg, &fk).unwrap();
+        let pool_b = LinkedPool::new(99, &cfg, &fk).unwrap();
         assert_eq!(pool_a.rows.len(), pool_b.rows.len());
         for (i, (ra, rb)) in pool_a.rows.iter().zip(pool_b.rows.iter()).enumerate() {
             for (j, (va, vb)) in ra.iter().zip(rb.iter()).enumerate() {
@@ -1011,7 +1018,7 @@ fields:
     fn test_linked_pool_seed_isolation() {
         let cfg = make_single_shape_pool(200, 1, vec![], two_fk_fields());
         let fk = fk_counts_100();
-        let pool_a = LinkedPool::new(7, &cfg, &fk);
+        let pool_a = LinkedPool::new(7, &cfg, &fk).unwrap();
 
         // Burn an unrelated RNG seeded with the same value. If pool
         // construction shared global state with any other ChaCha8 stream,
@@ -1021,7 +1028,7 @@ fields:
             let _ = unrelated.next_u64();
         }
 
-        let pool_b = LinkedPool::new(7, &cfg, &fk);
+        let pool_b = LinkedPool::new(7, &cfg, &fk).unwrap();
         assert_eq!(pool_a.rows.len(), pool_b.rows.len());
         for (i, (ra, rb)) in pool_a.rows.iter().zip(pool_b.rows.iter()).enumerate() {
             for (j, (va, vb)) in ra.iter().zip(rb.iter()).enumerate() {
@@ -1049,7 +1056,7 @@ fields:
         let mut fk = FkCounts::new();
         fk.insert("devices".to_string(), 1000);
         let cfg = make_single_shape_pool(100, 1, vec![], fields);
-        let pool = LinkedPool::new(42, &cfg, &fk);
+        let pool = LinkedPool::new(42, &cfg, &fk).unwrap();
         assert_eq!(pool.len(), 100);
         // All device_id values must be in [1, 1000].
         for (i, row) in pool.rows.iter().enumerate() {
@@ -1082,7 +1089,7 @@ fields:
     fn test_linked_pool_emit_two_sticky() {
         let fk = fk_counts_100();
         let cfg = make_single_shape_pool(100, 2, vec!["device_id".to_string()], two_fk_fields());
-        let pool = LinkedPool::new(42, &cfg, &fk);
+        let pool = LinkedPool::new(42, &cfg, &fk).unwrap();
         assert_eq!(pool.len(), 100);
         let device_idx = *pool.field_index.get("device_id").unwrap();
         let user_idx = *pool.field_index.get("user_id").unwrap();
@@ -1117,7 +1124,7 @@ fields:
     fn test_linked_pool_emit_two_sticky_user() {
         let fk = fk_counts_100();
         let cfg = make_single_shape_pool(100, 2, vec!["user_id".to_string()], two_fk_fields());
-        let pool = LinkedPool::new(42, &cfg, &fk);
+        let pool = LinkedPool::new(42, &cfg, &fk).unwrap();
         assert_eq!(pool.len(), 100);
         let user_idx = *pool.field_index.get("user_id").unwrap();
         let device_idx = *pool.field_index.get("device_id").unwrap();
@@ -1185,7 +1192,7 @@ fields:
                 },
             ],
         };
-        let pool = LinkedPool::new(1, &cfg, &FkCounts::new());
+        let pool = LinkedPool::new(1, &cfg, &FkCounts::new()).unwrap();
         assert_eq!(pool.len(), 100_000);
 
         let mut counts = std::collections::HashMap::new();
@@ -1245,8 +1252,8 @@ fields:
             ],
         };
         // Both with the same seed should produce similar distributions.
-        let pool_abs = LinkedPool::new(5, &make_cfg(2.0, 1.0, 5), &FkCounts::new());
-        let pool_norm = LinkedPool::new(5, &make_cfg(0.6667, 0.3333, 5), &FkCounts::new());
+        let pool_abs = LinkedPool::new(5, &make_cfg(2.0, 1.0, 5), &FkCounts::new()).unwrap();
+        let pool_norm = LinkedPool::new(5, &make_cfg(0.6667, 0.3333, 5), &FkCounts::new()).unwrap();
 
         let count_a = |pool: &LinkedPool| -> usize {
             pool.rows
@@ -1280,7 +1287,7 @@ fields:
                 fields,
             }],
         };
-        let pool = LinkedPool::new(42, &cfg, &FkCounts::new());
+        let pool = LinkedPool::new(42, &cfg, &FkCounts::new()).unwrap();
         assert_eq!(
             pool.len(),
             100,
@@ -1293,7 +1300,7 @@ fields:
     fn test_linked_pool_handles_pool_size_one() {
         let cfg = make_single_shape_pool(1, 1, vec![], two_fk_fields());
         let fk = fk_counts_100();
-        let pool = LinkedPool::new(42, &cfg, &fk);
+        let pool = LinkedPool::new(42, &cfg, &fk).unwrap();
         assert_eq!(pool.len(), 1);
     }
 
@@ -1311,7 +1318,7 @@ fields:
         let mut fk = FkCounts::new();
         fk.insert("devices".to_string(), 100);
         let cfg = make_single_shape_pool(500, 1, vec![], fields);
-        let pool = LinkedPool::new(42, &cfg, &fk);
+        let pool = LinkedPool::new(42, &cfg, &fk).unwrap();
         assert_eq!(pool.len(), 500);
         for (i, row) in pool.rows.iter().enumerate() {
             match &row[0] {
@@ -1341,7 +1348,7 @@ fields:
             },
         );
         let cfg = make_single_shape_pool(5, 1, vec![], fields);
-        let pool = LinkedPool::new(1, &cfg, &FkCounts::new());
+        let pool = LinkedPool::new(1, &cfg, &FkCounts::new()).unwrap();
         // All constant so every row has device_id=7, user_id=99.
         for i in 0..5 {
             let dev = pool.get(i, "device_id").expect("device_id present");

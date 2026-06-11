@@ -1,0 +1,63 @@
+# Production code debt baseline
+# Updated: 2026-06-10
+# Format: <crate> <pattern> <count>
+# Patterns: unwrap  expect  println
+# Regenerate with: .claude/scripts/hardening-budget.sh --update
+#
+smelt-backend-duckdb expect 15
+smelt-backend-duckdb println 0
+smelt-backend-duckdb unwrap 0
+smelt-backend expect 0
+smelt-backend println 0
+smelt-backend-spark expect 0
+smelt-backend-spark println 0
+smelt-backend-spark unwrap 0
+smelt-backend unwrap 0
+smelt-bench expect 1
+smelt-bench println 14
+smelt-bench unwrap 8
+smelt-cli expect 35
+smelt-cli println 103
+smelt-cli unwrap 0
+smelt-core expect 9
+smelt-core println 0
+smelt-core unwrap 2
+smelt-datagen expect 2
+smelt-datagen println 12
+smelt-datagen unwrap 10
+smelt-db expect 4
+smelt-db println 0
+smelt-db unwrap 16
+smelt-dialect expect 1
+smelt-dialect println 0
+smelt-dialect unwrap 0
+smelt-fingerprint expect 0
+smelt-fingerprint println 0
+smelt-fingerprint unwrap 1
+smelt-logical expect 1
+smelt-logical println 0
+smelt-logical unwrap 1
+smelt-lsp expect 1
+smelt-lsp println 0
+smelt-lsp unwrap 3
+smelt-parser-compat expect 0
+smelt-parser-compat println 0
+smelt-parser-compat unwrap 3
+smelt-parser expect 0
+smelt-parser println 0
+smelt-parser unwrap 2
+smelt-planner expect 0
+smelt-planner println 0
+smelt-planner unwrap 2
+smelt-runtime expect 7
+smelt-runtime println 0
+smelt-runtime unwrap 0
+smelt-state expect 0
+smelt-state println 0
+smelt-state unwrap 0
+smelt-types expect 7
+smelt-types println 0
+smelt-types unwrap 9
+smelt-ui expect 0
+smelt-ui println 2
+smelt-ui unwrap 3

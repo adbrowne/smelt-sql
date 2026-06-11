@@ -48,6 +48,7 @@ fn make_source(segments: &[&str], path: &str) -> SourceInfo {
         description: None,
         name_override: None,
         tags: vec![],
+        timeseries: None,
     }
 }
 

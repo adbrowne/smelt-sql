@@ -449,6 +449,9 @@ pub fn walk_expression_columns_with_visitor(
     let has_expr_children = expr.syntax().children().any(|c| Expr::cast(c).is_some());
     if !has_expr_children {
         if let Some(col_ref) = expr.as_column_ref() {
+            // intentionally ignored: called for its side-effect of recording
+            // missed column lookups (for proptest discovery); the return value
+            // is not used here — the visitor callback carries it forward.
             let _ = ctx.lookup_column(col_ref.qualifier(), col_ref.name());
             visitor(
                 col_ref.qualifier(),

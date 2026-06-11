@@ -1644,47 +1644,15 @@ pub fn smelt_fn_call_diagnostics_for_file(
     )
 }
 
-/// Check whether a `SmeltType` is a struct annotation containing at least one
-/// field with an unrecognized type name (i.e., a field resolved to
-/// `DataType::Unknown`).
-///
-/// The `SmeltType::Struct { fields, tail }` variant is produced by the
-/// CST-aware extractor (`struct_expr_type_from_cst`) for `Expr<Struct<{…}>>` /
-/// `Struct<{…}>` annotations. It calls `parse_type` for each field's type
-/// text and falls back to `DataType::Unknown` on failure. Because `parse_type`
-/// never produces `Ok(DataType::Unknown)` for any recognised type, every
-/// `Unknown` field in the resolved struct originates from an unrecognised type
-/// name in the source annotation — there is no other production path.
-///
-/// Row-tail markers (`..` / `..r`) live in the `tail` field and are never
-/// placed in `fields`, so they are not flagged here.
-///
-/// Returns `true` when the annotation should emit `InvalidFunctionTypeRef`.
-fn struct_annotation_has_unknown_field(smelt_ty: &smelt_types::signatures::SmeltType) -> bool {
-    use smelt_types::signatures::SmeltType;
-    use smelt_types::DataType;
-    match smelt_ty {
-        SmeltType::Struct { fields, .. } => fields.iter().any(|(_, dt)| *dt == DataType::Unknown),
-        _ => false,
-    }
-}
-
 /// Per-file diagnostics for malformed `smelt.define` parameter / return type
-/// annotations. Iterates `functions_in_file(file)` and emits a diagnostic for
-/// each [`ParamSpec::type_ref`] or [`FunctionSig::return_type`] that:
+/// annotations. Emits `InvalidFunctionTypeRef` for each
+/// [`ParamSpec::type_ref`] or [`FunctionSig::return_type`] that carries a
+/// parse error (`Some(Err(_))`).
 ///
-/// - Carries a parse error (`Some(Err(_))`), OR
-/// - Successfully parses as a struct type (`Some(Ok(SmeltType::Struct{…}))`)
-///   but contains an unrecognized field type (a field resolved to
-///   `DataType::Unknown`).
-///
-/// The second case captures `Expr<Struct<{a: Integer, b: Bogus}>>` where `Bogus`
-/// is not a known `DataType`. The CST-aware extractor absorbs such names as
-/// `DataType::Unknown` rather than producing a parse error, so they would
-/// otherwise pass silently through the `Some(Err(_))` gate. Detecting them here
-/// at the declaration is the spec-faithful fix: the caller's projected `Unknown`
-/// column becomes a downstream consequence of a known-bad declaration, not a
-/// fresh call-site diagnostic.
+/// Struct-field type failures are handled by
+/// [`struct_field_type_unknown_diagnostics_for_file`] (which emits
+/// `UnknownStructFieldType` at the individual field's span) and are not
+/// repeated here.
 ///
 /// Pure-function-rule note: the heavy lifting lives on
 /// `smelt_types::signatures` — this helper is a thin reader over the
@@ -1731,66 +1699,118 @@ pub fn invalid_function_type_ref_diagnostics_for_file(
     let mut out = Vec::new();
     for sig in sigs.iter() {
         for param in &sig.params {
-            match (&param.type_ref, param.type_ref_range) {
-                (Some(Err(err)), Some(range)) => {
-                    if is_deferred_phase13_sort(err) {
-                        continue;
-                    }
-                    out.push(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format!("Invalid type for parameter `{}`: {}", param.name, err),
-                        range,
-                        code: Some(DiagnosticCode::InvalidFunctionTypeRef),
-                        data: None,
-                    });
-                }
-                (Some(Ok(smelt_ty)), Some(range))
-                    if struct_annotation_has_unknown_field(smelt_ty) =>
-                {
-                    out.push(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format!(
-                            "Invalid type for parameter `{}` in `{}`: \
-                             struct annotation contains an unrecognized field type",
-                            param.name, sig.name
-                        ),
-                        range,
-                        code: Some(DiagnosticCode::InvalidFunctionTypeRef),
-                        data: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-        match (&sig.return_type, sig.return_type_range) {
-            (Some(Err(err)), Some(range)) => {
+            if let (Some(Err(err)), Some(range)) = (&param.type_ref, param.type_ref_range) {
                 if is_deferred_phase13_sort(err) {
                     continue;
                 }
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Error,
-                    message: format!("Invalid return type for function `{}`: {}", sig.name, err),
+                    message: format!("Invalid type for parameter `{}`: {}", param.name, err),
                     range,
                     code: Some(DiagnosticCode::InvalidFunctionTypeRef),
                     data: None,
                 });
             }
-            (Some(Ok(smelt_ty)), Some(range)) if struct_annotation_has_unknown_field(smelt_ty) => {
-                out.push(Diagnostic {
-                    severity: DiagnosticSeverity::Error,
-                    message: format!(
-                        "Invalid return type for function `{}`: \
-                         struct annotation contains an unrecognized field type",
-                        sig.name
-                    ),
-                    range,
-                    code: Some(DiagnosticCode::InvalidFunctionTypeRef),
-                    data: None,
-                });
+        }
+        if let (Some(Err(err)), Some(range)) = (&sig.return_type, sig.return_type_range) {
+            if is_deferred_phase13_sort(err) {
+                continue;
             }
-            _ => {}
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("Invalid return type for function `{}`: {}", sig.name, err),
+                range,
+                code: Some(DiagnosticCode::InvalidFunctionTypeRef),
+                data: None,
+            });
         }
     }
+    out
+}
+
+/// Emits `UnknownStructFieldType` for each `smelt.define` / `smelt.extern`
+/// parameter or return-type annotation that has a `Struct<{…}>` shape with one
+/// or more unrecognised field type names. Anchored at the **individual field's**
+/// `TYPE_REF` span (more precise than `InvalidFunctionTypeRef`).
+///
+/// The struct-Unknown fallback in `struct_expr_type_from_cst` still produces a
+/// valid (partial) `SmeltType::Struct` for downstream use; this diagnostic
+/// surfaces the error at the point of definition so the author knows exactly
+/// which field name is unrecognised.
+pub fn struct_field_type_unknown_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_types::signatures::struct_field_unknown_ranges;
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+
+    for define in ast.defines() {
+        if let Some(pl) = define.param_list() {
+            for p in pl.params() {
+                if let Some(tr) = p.type_ref() {
+                    for range in struct_field_unknown_ranges(&tr) {
+                        out.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: "struct field type is not a recognised concrete type"
+                                .to_string(),
+                            range,
+                            code: Some(DiagnosticCode::UnknownStructFieldType),
+                            data: None,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(tr) = define.return_type() {
+            for range in struct_field_unknown_ranges(&tr) {
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "struct return type has an unrecognised field type name".to_string(),
+                    range,
+                    code: Some(DiagnosticCode::UnknownStructFieldType),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    for ext in ast.externs() {
+        if let Some(pl) = ext.param_list() {
+            for p in pl.params() {
+                if let Some(tr) = p.type_ref() {
+                    for range in struct_field_unknown_ranges(&tr) {
+                        out.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: "struct field type is not a recognised concrete type"
+                                .to_string(),
+                            range,
+                            code: Some(DiagnosticCode::UnknownStructFieldType),
+                            data: None,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(tr) = ext.return_type() {
+            for range in struct_field_unknown_ranges(&tr) {
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "struct return type has an unrecognised field type name".to_string(),
+                    range,
+                    code: Some(DiagnosticCode::UnknownStructFieldType),
+                    data: None,
+                });
+            }
+        }
+    }
+
     out
 }
 

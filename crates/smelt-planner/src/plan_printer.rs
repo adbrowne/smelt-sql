@@ -29,13 +29,14 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
             from,
             filter,
         } => {
-            writeln!(out, "{pad}Select projections={projections:?}").unwrap();
+            // infallible: String::write_str never returns Err
+            let _ = writeln!(out, "{pad}Select projections={projections:?}");
             if let Some(f) = filter {
-                writeln!(out, "{pad}  filter:").unwrap();
+                let _ = writeln!(out, "{pad}  filter:");
                 render(f, indent + 2, out);
             }
             if let Some(src) = from {
-                writeln!(out, "{pad}  from:").unwrap();
+                let _ = writeln!(out, "{pad}  from:");
                 render(src, indent + 2, out);
             }
         }
@@ -48,7 +49,7 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
             pushed_filter,
             body,
         } => {
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{pad}FunctionCall fn_id={fn_id:?} transparent={transparent} \
                  deterministic={det} idempotent={idem} append_only={ao} \
@@ -65,8 +66,7 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
                 },
                 argc = args.len(),
                 body_present = if body.is_some() { "Some(_)" } else { "None" },
-            )
-            .unwrap();
+            );
             for arg in args {
                 render(arg, indent + 1, out);
             }
@@ -78,7 +78,7 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
             pushed_filter,
             body,
         } => {
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{pad}ExpandedCall fn_id={fn_id:?} \
                  deterministic={det} idempotent={idem} append_only={ao} \
@@ -93,34 +93,33 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
                 } else {
                     "None"
                 },
-            )
-            .unwrap();
+            );
             if let Some(b) = body {
-                writeln!(out, "{pad}  body:").unwrap();
+                let _ = writeln!(out, "{pad}  body:");
                 render(b, indent + 2, out);
             }
         }
         LogicalNode::Tagged { tag, inner } => {
-            writeln!(out, "{pad}Tagged tag={tag:?}").unwrap();
+            let _ = writeln!(out, "{pad}Tagged tag={tag:?}");
             render(inner, indent + 1, out);
         }
         LogicalNode::SpliceList(items) => {
-            writeln!(out, "{pad}SpliceList len={}", items.len()).unwrap();
+            let _ = writeln!(out, "{pad}SpliceList len={}", items.len());
             for it in items {
                 render(it, indent + 1, out);
             }
         }
         LogicalNode::Raw { sql_text } => {
-            writeln!(out, "{pad}Raw sql_text={sql_text:?}").unwrap();
+            let _ = writeln!(out, "{pad}Raw sql_text={sql_text:?}");
         }
         LogicalNode::TableRef { name } => {
-            writeln!(out, "{pad}TableRef name={name:?}").unwrap();
+            let _ = writeln!(out, "{pad}TableRef name={name:?}");
         }
         LogicalNode::Literal(dt) => {
-            writeln!(out, "{pad}Literal {dt:?}").unwrap();
+            let _ = writeln!(out, "{pad}Literal {dt:?}");
         }
         LogicalNode::Cast { inner, target_type } => {
-            writeln!(out, "{pad}Cast target_type={target_type:?}").unwrap();
+            let _ = writeln!(out, "{pad}Cast target_type={target_type:?}");
             render(inner, indent + 1, out);
         }
         LogicalNode::LeftJoin {
@@ -130,15 +129,14 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
             cardinality,
             output_columns,
         } => {
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{pad}LeftJoin join_columns={join_columns:?} \
                  cardinality={cardinality:?} output_columns={output_columns:?}"
-            )
-            .unwrap();
-            writeln!(out, "{pad}  lhs:").unwrap();
+            );
+            let _ = writeln!(out, "{pad}  lhs:");
             render(lhs, indent + 2, out);
-            writeln!(out, "{pad}  rhs:").unwrap();
+            let _ = writeln!(out, "{pad}  rhs:");
             render(rhs, indent + 2, out);
         }
     }

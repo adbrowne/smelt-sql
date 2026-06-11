@@ -349,6 +349,14 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::DefaultReferencesParameter,
         message_substring: "default",
     },
+    // Hardening Phase 3 — struct field with an unrecognised type name (`Bogus`)
+    // must emit UnknownStructFieldType instead of silently inferring Unknown.
+    Case {
+        fixture: "fn_struct_field_bad_type.sql",
+        companion: None,
+        code: DiagnosticCode::UnknownStructFieldType,
+        message_substring: "recognised concrete type",
+    },
 ];
 
 /// Phase 52 broken fixtures — tested without unstable_schema (extern check is

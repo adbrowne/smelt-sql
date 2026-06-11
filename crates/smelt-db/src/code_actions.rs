@@ -404,6 +404,8 @@ fn generate_pin_seed_schema_action(diagnostic: &Diagnostic) -> Vec<CodeActionKin
 
     // Read the CSV and infer types over all rows (no sample limit).
     let inferred_columns = match smelt_core::read_csv(&csv_path) {
+        // intentionally ignored: if the CSV is unreadable we simply produce
+        // no code-action suggestion — a silent empty list is correct here.
         Err(_) => return vec![],
         Ok((headers, rows_iter)) => {
             let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();

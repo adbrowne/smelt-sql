@@ -174,3 +174,40 @@ fn e2e_config_var_and_ternary_execute_against_duckdb() {
         "ternary picks else branch when env != prod"
     );
 }
+
+/// `smelt.config.var` inside a `smelt.define` body resolves at compile time
+/// when the function is inlined at a call site (BUG-067). Previously the
+/// inlined body's `config.var(...)` call reached DuckDB verbatim
+/// (`Catalog "smelt" does not exist`) even though the LSP reported the
+/// workspace clean.
+#[test]
+fn e2e_config_var_inside_define_body_executes_against_duckdb() {
+    let tmp = TempDir::new().expect("tempdir");
+    let proj = tmp.path();
+    let db_path = proj.join("dev.duckdb");
+
+    let tag_fn = "smelt.define region_tag(prefix) AS (prefix || smelt.config.var('region'))\n";
+
+    write_workspace(
+        proj,
+        &[
+            ("smelt.yml", smelt_yml(&db_path).as_str()),
+            ("functions/region_tag.sql", tag_fn),
+            (
+                "models/tagged.sql",
+                "SELECT smelt.functions.region_tag('r-') AS tag\n",
+            ),
+        ],
+    );
+
+    run_smelt_build(proj, "dev");
+    let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
+
+    let tag: String = conn
+        .query_row("SELECT tag FROM main.tagged", [], |r| r.get(0))
+        .expect("query tagged");
+    assert_eq!(
+        tag, "r-us-west-2",
+        "config.var inside the inlined define body resolves to the vars value"
+    );
+}

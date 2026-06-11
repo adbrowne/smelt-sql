@@ -38,7 +38,7 @@ pub use compile::{
 pub use cumulative::{
     build_cumulative_merge_sql, classify_cumulative_sql, execute_cumulative_aggregate,
 };
-pub use execute::{execute_project, BackendFactory, BackendFuture};
+pub use execute::{build_source_timeseries_map, execute_project, BackendFactory, BackendFuture};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use gate::{format_gate_errors, gate_diagnostics, GateDiagnostic};
 pub use reporter::{NoOpReporter, RunReporter};

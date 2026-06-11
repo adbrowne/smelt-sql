@@ -435,6 +435,33 @@ pub fn expand_function_calls(sql: &str, fn_bodies: &FnBodyMap) -> String {
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
 
+/// If `segs`/`positional` form a `smelt.config.var('name')` call whose name is
+/// present in `vars`, return the variable's value rendered as a single-quoted
+/// SQL `Text` literal. Mirrors `meta_eval::expand_config_vars` for calls the
+/// printer discovers during function-body re-expansion (BUG-067) — the
+/// model-level meta pass has already run by then, so an inlined body's
+/// `config.var` is only visible here. A name absent from `vars` returns `None`
+/// (verbatim fallback; the analyzer gates `ConfigVarNotFound`).
+fn config_var_literal(
+    vars: &std::collections::BTreeMap<String, String>,
+    segs: &[String],
+    positional: &[String],
+) -> Option<String> {
+    if segs.len() != 2
+        || !segs[0].eq_ignore_ascii_case("config")
+        || !segs[1].eq_ignore_ascii_case("var")
+    {
+        return None;
+    }
+    let arg = positional.first()?.trim();
+    let name = arg
+        .strip_prefix('\'')?
+        .strip_suffix('\'')?
+        .replace("''", "'");
+    let value = vars.get(&name)?;
+    Some(format!("'{}'", value.replace('\'', "''")))
+}
+
 pub struct SqlCompiler {
     config: Config,
     dialect: SqlDialect,
@@ -826,6 +853,12 @@ impl SqlCompiler {
         // will return `None` for every call, causing the printer to fall back
         // to verbatim output.  This ensures production PrintContexts always
         // have `smelt_path_call: Some(...)` rather than `None`.
+        //
+        // The expander also resolves `smelt.config.var('x')` (BUG-067): the
+        // model-level meta pass runs before parsing, so a `config.var` inside
+        // a `smelt.define` body is only ever seen here, when the printer
+        // re-expands the inlined body.
+        let vars = self.upstream_schemas.vars.clone();
         let path_call_expander: Option<SmeltPathCallExpander<'static>> =
             Some(match self.fn_bodies.as_ref() {
                 Some(bodies) => {
@@ -834,6 +867,9 @@ impl SqlCompiler {
                         move |segs: &[String],
                               positional: Vec<String>,
                               named: Vec<(String, String)>| {
+                            if let Some(literal) = config_var_literal(&vars, segs, &positional) {
+                                return Some(literal);
+                            }
                             let fn_name = segs.last()?;
                             let (params, body_sql) = bodies.get(fn_name)?;
                             Some(substitute_params_with_named(
@@ -848,9 +884,11 @@ impl SqlCompiler {
                 }
                 None => {
                     let expander: SmeltPathCallExpander<'static> = Box::new(
-                        |_segs: &[String],
-                         _positional: Vec<String>,
-                         _named: Vec<(String, String)>| None,
+                        move |segs: &[String],
+                              positional: Vec<String>,
+                              _named: Vec<(String, String)>| {
+                            config_var_literal(&vars, segs, &positional)
+                        },
                     );
                     expander
                 }

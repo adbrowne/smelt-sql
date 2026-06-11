@@ -42,7 +42,7 @@ pub fn write_generic_dataset(
 
     // Build linked pools ONCE before any row or partition loop (spec §Semantics:
     // "Pools are built once per dataset and shared across all partitions").
-    let linked_pools = Arc::new(build_linked_pools(config, seed, fk_counts));
+    let linked_pools = Arc::new(build_linked_pools(config, seed, fk_counts)?);
 
     if let Some(part_cfg) = &config.partition {
         write_partitioned(
@@ -142,7 +142,7 @@ fn build_linked_pools(
     config: &DatasetConfig,
     dataset_seed: u64,
     fk_counts: &FkCounts,
-) -> HashMap<String, Arc<LinkedPool>> {
+) -> Result<HashMap<String, Arc<LinkedPool>>> {
     config
         .linked_pools
         .as_deref()
@@ -153,8 +153,8 @@ fn build_linked_pools(
             let seed = pool_cfg
                 .seed
                 .unwrap_or_else(|| dataset_seed.wrapping_add(100 + i as u64));
-            let pool = Arc::new(LinkedPool::new(seed, pool_cfg, fk_counts));
-            (pool_cfg.name.clone(), pool)
+            let pool = Arc::new(LinkedPool::new(seed, pool_cfg, fk_counts)?);
+            Ok((pool_cfg.name.clone(), pool))
         })
         .collect()
 }
@@ -194,7 +194,8 @@ fn write_partitioned(
     let entity_pool_arc: Option<Arc<_>> = config
         .entity
         .as_ref()
-        .map(|e| Arc::new(make_entity_pool(entity_seed, config.num_rows, e)));
+        .map(|e| make_entity_pool(entity_seed, config.num_rows, e).map(Arc::new))
+        .transpose()?;
 
     let entity_col_specs: Vec<_> = config
         .entity
@@ -268,7 +269,8 @@ fn write_single(
     let entity_pool = config
         .entity
         .as_ref()
-        .map(|e| make_entity_pool(seed.wrapping_add(1), config.num_rows, e));
+        .map(|e| make_entity_pool(seed.wrapping_add(1), config.num_rows, e))
+        .transpose()?;
 
     let entity_col_specs: Vec<_> = config
         .entity
@@ -359,7 +361,7 @@ fn write_rows_to_file(
                     &ctx,
                 )
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let batch = rows_to_record_batch(&rows, &schema)?;
         writer.write(&batch).context("Failed to write batch")?;
@@ -1308,7 +1310,7 @@ mod tests {
 
         // Rebuild the pool with the same seed to validate against.
         let pool_cfg = &config.linked_pools.as_ref().unwrap()[0];
-        let pool = crate::generic::LinkedPool::new(99, pool_cfg, &fk);
+        let pool = crate::generic::LinkedPool::new(99, pool_cfg, &fk).unwrap();
         // Build a set of valid (device_id, user_id) pairs from the pool.
         let valid_pairs: std::collections::HashSet<(i32, i32)> = pool
             .rows
@@ -1400,7 +1402,7 @@ mod tests {
 
         // Rebuild pool for validation.
         let pool_cfg = &config.linked_pools.as_ref().unwrap()[0];
-        let pool = crate::generic::LinkedPool::new(7, pool_cfg, &fk);
+        let pool = crate::generic::LinkedPool::new(7, pool_cfg, &fk).unwrap();
         let valid_pairs: std::collections::HashSet<(i32, i32)> = pool
             .rows
             .iter()
@@ -1585,7 +1587,7 @@ mod tests {
             }],
         };
 
-        let pool = crate::generic::LinkedPool::new(77, &pool_cfg, &fk);
+        let pool = crate::generic::LinkedPool::new(77, &pool_cfg, &fk).unwrap();
         let valid_pairs: std::collections::HashSet<(i32, i32)> = pool
             .rows
             .iter()
@@ -1754,8 +1756,8 @@ mod tests {
         write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
 
         // Validate that a_x/a_y is a valid pool_a tuple and b_x/b_y is a valid pool_b tuple.
-        let pool_a_built = crate::generic::LinkedPool::new(1, &pool_a, &FkCounts::new());
-        let pool_b_built = crate::generic::LinkedPool::new(2, &pool_b, &FkCounts::new());
+        let pool_a_built = crate::generic::LinkedPool::new(1, &pool_a, &FkCounts::new()).unwrap();
+        let pool_b_built = crate::generic::LinkedPool::new(2, &pool_b, &FkCounts::new()).unwrap();
 
         let valid_a: std::collections::HashSet<(i32, i32)> = pool_a_built
             .rows
@@ -1925,7 +1927,7 @@ mod tests {
 
         // Rebuild pool for validation.
         let pool_cfg = &config.linked_pools.as_ref().unwrap()[0];
-        let pool = crate::generic::LinkedPool::new(9, pool_cfg, &fk);
+        let pool = crate::generic::LinkedPool::new(9, pool_cfg, &fk).unwrap();
         let valid_pairs: std::collections::HashSet<(i32, i32)> = pool
             .rows
             .iter()
@@ -2067,7 +2069,7 @@ mod tests {
             ],
         };
 
-        let pool = crate::generic::LinkedPool::new(42, &pool_cfg, &fk);
+        let pool = crate::generic::LinkedPool::new(42, &pool_cfg, &fk).unwrap();
         assert_eq!(pool.len(), pool_size);
 
         // Count categories from pool snapshot.

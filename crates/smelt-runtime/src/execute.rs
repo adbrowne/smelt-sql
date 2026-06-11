@@ -20,6 +20,7 @@ use std::time::{Duration as StdDuration, Instant};
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, Utc};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
 use smelt_core::config::Config;
@@ -29,6 +30,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
+use crate::compile::build_source_bound_map;
 use crate::compile::CompilerRegistry;
 use crate::reporter::RunReporter;
 use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
@@ -36,7 +38,7 @@ use crate::schema_evolution::{
     check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
 };
 use crate::select::{select_executable_models, SelectionRequest};
-use crate::transformer::{inject_time_filter, TimeRange};
+use crate::transformer::{inject_source_filters, inject_time_filter, TimeRange};
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::windowing::{compute_incremental_windows, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
@@ -459,8 +461,8 @@ pub async fn execute_project(
                 });
             }
             (Some(_inc), None, _, _) => {
-                eprintln!(
-                    "warning: model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
+                warn!(
+                    "model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
                 );
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
@@ -485,10 +487,6 @@ pub async fn execute_project(
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
     let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    // Project-wide `smelt.<path> → timeseries` map. Cumulative dispatch
-    // looks up its driving source's ts here; the classifier resolves the
-    // smelt.<path> key against this map (per cumulative_aggregate.md).
-    let mut source_timeseries: smelt_planner::SourceTimeseriesMap = HashMap::new();
     {
         let exec_order = graph_lock.execution_order()?;
         for model_name in &exec_order {
@@ -504,12 +502,13 @@ pub async fn execute_project(
                     .or_default()
                     .push((model_name.clone(), model.content.clone()));
             }
-            if let Some(ts) = metadata.and_then(|m| m.timeseries.clone()) {
-                let smelt_key = format!("smelt.{}", model.address_segments.join("."));
-                source_timeseries.insert(smelt_key, ts);
-            }
         }
     }
+    // Project-wide `smelt.<path> → timeseries` map. Merges model-frontmatter
+    // timeseries with per-entity source YAML timeseries declarations (BUG-072).
+    // Cumulative dispatch and incremental pushdown (Phase 3) both use this map.
+    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
+    let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
     drop(graph_lock);
 
     // ── Compile context (UpstreamSchemas + FnBodyMap from Salsa) ────────
@@ -796,6 +795,25 @@ pub async fn execute_project(
             Some(inc_plan) => {
                 let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
 
+                // Build source bound map once per model for source-filter pushdown (BUG-073).
+                // The model SQL is the same for every batch — compute once and reuse.
+                // `source_timeseries` is the project-wide smelt-ref → TimeseriesConfig map
+                // (built from model frontmatter + source YAML declarations in Phase 2).
+                // We convert it to the dep_timeseries shape that `build_source_bound_map`
+                // expects: smelt_ref → (address_segments, partition_column).
+                let sql_for_bounds = smelt_parser::strip_frontmatter(&plan.sql);
+                let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
+                    source_timeseries
+                        .iter()
+                        .filter_map(|(smelt_ref, ts)| {
+                            // Strip the leading "smelt." prefix to get the path segments.
+                            let path = smelt_ref.strip_prefix("smelt.")?;
+                            let segs: Vec<String> = path.split('.').map(String::from).collect();
+                            Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
+                        })
+                        .collect();
+                let per_model_source_bounds = build_source_bound_map(&sql_for_bounds, &dep_ts);
+
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
                         reporter.run_cancelled(&run_id);
@@ -820,6 +838,20 @@ pub async fn execute_project(
                         &inc_plan.timeseries.event_time_column,
                         &time_range,
                     )?;
+
+                    // Source-filter pushdown: narrow each source read to the run window
+                    // (partition_start / partition_end) plus per-source bounds derived from
+                    // the model SQL's INTERVAL patterns. The run window is the unwidened
+                    // partition range — `inject_time_filter` above uses filter_start/filter_end
+                    // (the widened write window) for the model's own output constraint; source
+                    // filters derive from the run window so the source scan tracks the
+                    // partition being produced, not the potentially wider DELETE range.
+                    let run_range = TimeRange {
+                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
+                    };
+                    let filtered_sql =
+                        inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range);
 
                     let compiler = compilers.get(model_target);
                     let resolver = &ephemeral_resolvers[model_target];
@@ -1065,4 +1097,51 @@ fn build_outcome(
         total_rows,
         plan_summary: None,
     }
+}
+
+/// Build the project-wide `smelt.<path> → timeseries` lookup map used by
+/// the planner (cumulative classification) and the incremental execute path
+/// (source-filter pushdown, Phase 3).
+///
+/// Merges two sources of timeseries declarations:
+/// 1. **Model-frontmatter** — an incremental model whose output partitions by
+///    a time column is itself a timeseries source for downstream consumers.
+/// 2. **Source YAML** — per-entity sources declaring a `timeseries:` block
+///    become pushdown candidates for incremental models reading them (BUG-072).
+///
+/// In valid workspaces a model and a source cannot share the same `smelt.<path>`
+/// address (address-uniqueness constraint). If they did, the source YAML entry
+/// wins (it is inserted last); that is documented here as a design decision
+/// pending a normative spec ruling.
+pub fn build_source_timeseries_map(
+    graph: &smelt_core::graph::DependencyGraph,
+    source_infos: &[smelt_core::SourceInfo],
+) -> smelt_planner::SourceTimeseriesMap {
+    let mut map = smelt_planner::SourceTimeseriesMap::new();
+
+    // Model-frontmatter entries. `unwrap_or_default`: if the graph is cyclic,
+    // `execution_order` would fail, but the caller's planner-safety gate already
+    // catches cycles before this function is reached, so the fallback is a
+    // degenerate safety net.
+    let exec_order = graph.execution_order().unwrap_or_default();
+    for model_name in &exec_order {
+        let Ok(model) = graph.get_model(model_name) else {
+            continue;
+        };
+        if let Some(ts) = model.metadata.as_deref().and_then(|m| m.timeseries.clone()) {
+            map.insert(format!("smelt.{}", model.address_segments.join(".")), ts);
+        }
+    }
+
+    // Source YAML entries (BUG-072 / Phase 2).
+    for source in source_infos {
+        if let Some(ts) = &source.timeseries {
+            map.insert(
+                format!("smelt.{}", source.address_segments.join(".")),
+                ts.clone(),
+            );
+        }
+    }
+
+    map
 }

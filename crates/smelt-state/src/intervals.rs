@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::warn;
 
 /// Interval tracking for a single model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,8 +72,8 @@ impl ModelIntervals {
             let is = match NaiveDate::parse_from_str(&interval.start, "%Y-%m-%d") {
                 Ok(d) => d,
                 Err(_) => {
-                    eprintln!(
-                        "Warning: malformed interval start date '{}', skipping",
+                    warn!(
+                        "malformed interval start date '{}', skipping",
                         interval.start
                     );
                     continue;
@@ -81,10 +82,7 @@ impl ModelIntervals {
             let ie = match NaiveDate::parse_from_str(&interval.end, "%Y-%m-%d") {
                 Ok(d) => d,
                 Err(_) => {
-                    eprintln!(
-                        "Warning: malformed interval end date '{}', skipping",
-                        interval.end
-                    );
+                    warn!("malformed interval end date '{}', skipping", interval.end);
                     continue;
                 }
             };
