@@ -53,6 +53,8 @@ Owned by `docs/specs/models.md` and the core analysis queries in
 |------|----------|---------|
 | `ParseError` | Error | The SQL source file could not be parsed (syntax error). |
 | `InvalidModel` | Error | The model's frontmatter or structure violates a structural rule. |
+| `MalformedSectionDelimiter` | Error | A multi-model section header (`--- name: model_name ---`) is malformed, or SQL content appears before the first section delimiter in a multi-model file. |
+| `UnclosedFrontmatter` | Error | A frontmatter block opened with `---` (or a `--- name: … ---` section header) is missing its closing `---`. |
 | `UndefinedModelRef` | Error | A `smelt.ref()` or `smelt.<path>` call resolves to a model that does not exist in the workspace. |
 | `UndefinedSource` | Error | A `smelt.source()` or `smelt.<path>` call resolves to a source that does not exist. |
 | `CannotInferType` | Error | The type of a column or expression cannot be inferred from context. |
@@ -129,6 +131,7 @@ Owned by `docs/specs/types.md` and the VALUES/alias-column-list analysis.
 |------|----------|---------|
 | `AliasColumnArityMismatch` | Error | An alias column list in `(VALUES …) AS t(c₁, …)` or `WITH cte(c₁, …) AS (…)` has a different length from the relation's actual column count. |
 | `EmptyValuesClause` | Error | A `(VALUES …)` derived table contains no rows and cannot produce a typed schema. |
+| `DecimalPrecisionOverflow` | Error | A decimal arithmetic expression (`+`, `-`, `*`, `%`) produces a result whose precision exceeds the 38-digit portable maximum. |
 
 ---
 

@@ -555,8 +555,7 @@ impl Backend {
                     .find(|(_, l)| {
                         let t = l.trim();
                         if let Some(rest) = t.strip_prefix("--- name:") {
-                            rest.trim_end().trim_end_matches("---").trim()
-                                == model_name.as_str()
+                            rest.trim_end().trim_end_matches("---").trim() == model_name.as_str()
                         } else {
                             false
                         }
@@ -720,19 +719,18 @@ impl Backend {
     /// Collect test entries from sql_files and merge into `known_tests`.
     ///
     /// Does NOT send the notification — call `publish_known_tests()` after.
-    async fn collect_tests_into_cache(
-        &self,
-        sql_files: &[smelt_core::discovery::ModelFile],
-    ) {
+    async fn collect_tests_into_cache(&self, sql_files: &[smelt_core::discovery::ModelFile]) {
         use crate::notifications::TestInfo;
 
         let mm = self.multi_model_files.lock().await;
         let virtual_to_real_and_line: std::collections::HashMap<PathBuf, (PathBuf, u32)> = mm
             .iter()
             .flat_map(|(real_path, entries)| {
-                entries.iter().map(move |(virtual_path, _sql_start, delimiter_line)| {
-                    (virtual_path.clone(), (real_path.clone(), *delimiter_line))
-                })
+                entries
+                    .iter()
+                    .map(move |(virtual_path, _sql_start, delimiter_line)| {
+                        (virtual_path.clone(), (real_path.clone(), *delimiter_line))
+                    })
             })
             .collect();
         drop(mm);

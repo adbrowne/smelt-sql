@@ -234,7 +234,11 @@ mod tests {
             test_models.len(),
             1,
             "expected 1 test model; got: {:?}",
-            loaded.sql_files.iter().map(|m| (&m.name, m.is_test())).collect::<Vec<_>>()
+            loaded
+                .sql_files
+                .iter()
+                .map(|m| (&m.name, m.is_test()))
+                .collect::<Vec<_>>()
         );
         assert_eq!(test_models[0].name, "test_simple");
     }
