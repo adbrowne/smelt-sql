@@ -2,6 +2,7 @@ description: Raw event data from application
 columns:
 - name: event_id
   type: INTEGER
+  nullable: false
   description: Unique event identifier
 - name: user_id
   type: INTEGER

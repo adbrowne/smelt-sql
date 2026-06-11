@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 254a9ea6716ad17888bf8fe5246408fdc5b63383d1bc0f5cd6d0d094b03c0afe # shrinks to (columns, shape, expr_kinds, func_indices) = ([TypedSource { name: "bigint_col_0", data_type: BigInt, cast_sql: "CAST(100 AS BIGINT)" }, TypedSource { name: "int_col_1", data_type: Integer, cast_sql: "CAST(42 AS INTEGER)" }, TypedSource { name: "bool_col_2", data_type: Boolean, cast_sql: "CAST(TRUE AS BOOLEAN)" }, TypedSource { name: "str_col_3", data_type: Varchar { max_length: None }, cast_sql: "CAST('hello' AS STRING)" }, TypedSource { name: "bool_col_4", data_type: Boolean, cast_sql: "CAST(TRUE AS BOOLEAN)" }], Distinct, [JsonOp, Function], [0, 52])

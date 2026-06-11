@@ -67,8 +67,8 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     |        | 2026-06-11 |
-| 2     | pending  |        |      |
+| 1     | done     | 2d407ff9 | 2026-06-11 |
+| 2     | done     |        | 2026-06-11 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -317,6 +317,70 @@ First axis of ROADMAP item 4 (Type-System Axes), establishing the template the d
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+### `evaluate_generator` and `emitted_model_typed_schema` lack the outer-join nullability pass (2026-06-11)
+
+**Discovered by:** Phase 2 reviewer inspection of `crates/smelt-db/src/queries/project.rs`.
+
+**Symptom:** Two additional call sites in `project.rs` build a `TypeContext` using the same
+`build_type_context` + `add_source_info_to_type_context` pattern but do **not** call
+`apply_outer_join_nullability`:
+
+- `evaluate_generator` (~line 1846): used when type-checking generator-file model bodies.
+- `emitted_model_typed_schema` (~line 2091): used when computing the typed schema for
+  generator-emitted models.
+
+As a result, generator-emitted models whose SQL contains outer joins can still produce
+`nullable: false` claims on the null-supplying side — the same soundness hole that
+Phase 2 fixed for the main `typed_model_schema` path.
+
+**Why not fixed in Phase 2:** Fixing these paths requires investigation of the generator
+execution flow and dedicated test fixtures for generator-emitted models with outer joins.
+Phase 2's scope was the main `typed_model_schema` path only. Wiring the outer-join pass into
+generator paths is a self-contained follow-up that does not affect the soundness of
+hand-authored models.
+
+**Out of scope for this plan.** Tracked here for a future generator-nullability cleanup.
+The fix pattern is identical to Phase 2: call `apply_outer_join_nullability(&select_stmt, &mut ctx)`
+after `add_source_info_to_type_context` in both `evaluate_generator` and
+`emitted_model_typed_schema`, then add real-fixture tests for each.
+
+---
+
+### smelt `infer_select_column_types` under-counts columns for SELECT DISTINCT led by JSON `->` (2026-06-11)
+
+**Discovered by:** the nullability soundness property oracle (`prop_nullability_sound`).
+
+**Symptom:** For a `SELECT DISTINCT` query whose first select item is a JSON arrow operator
+(`CAST('{"a":1,...}' AS JSON) -> 'a' AS expr_0`), smelt's `infer_select_column_types` returns
+only 1 column, but the query actually has 3 SELECT items and DuckDB correctly returns 3 columns.
+The smelt parser appears to treat the `-> 'a'` as consuming the remainder of the SELECT list,
+causing it to see a single select item instead of three.
+
+**Minimised SQL:**
+```sql
+WITH data AS (
+  SELECT CAST(100 AS BIGINT) AS bigint_col_0, CAST(42 AS INTEGER) AS int_col_1,
+         CAST(TRUE AS BOOLEAN) AS bool_col_2, CAST('hello' AS STRING) AS str_col_3,
+         CAST(TRUE AS BOOLEAN) AS bool_col_4
+)
+SELECT DISTINCT
+  CAST('{"a":1,"b":"hello","c":true}' AS JSON) -> 'a' AS expr_0,
+  LEFT(str_col_3, 3) AS expr_1,
+  42 AS nn_scalar_guard
+FROM data
+```
+smelt infers 1 column (`expr_0`); DuckDB returns 3 (`expr_0`, `expr_1`, `nn_scalar_guard`).
+
+**Classification:** Inference-completeness gap (column count), not a nullability-soundness
+defect. smelt made no `nullable: false` claim about the missing columns, so there is nothing
+unsound. The harness now correctly handles this case as an under-count skip (the inferred
+columns are still fully soundness-checked; only the non-vacuous coverage gate is relaxed).
+
+**Out of scope for this plan.** This is a parser/SELECT-list parsing issue for the JSON `->>`
+binary operator, unrelated to nullability. It warrants a separate investigation into how the
+smelt parser handles binary operators that use special-character tokens (`->`, `->>`) as
+SELECT-list separators are ambiguous in the Rowan-based CST parser.
 
 ## Verification
 

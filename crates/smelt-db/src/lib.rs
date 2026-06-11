@@ -228,10 +228,11 @@ pub use queries::project::{
     SourceDiagnostic, SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
-    add_source_info_to_type_context, available_columns, build_type_context,
-    columns_of_for_table_expr, columns_to_column_ref_values, model_function_type,
-    model_input_constraints, model_schema, resolved_model_schema, type_context, typed_model_schema,
-    RefSchemaProvider, SalsaRefSchemaProvider, StaticRefSchemaProvider,
+    add_source_info_to_type_context, apply_outer_join_nullability, available_columns,
+    build_type_context, columns_of_for_table_expr, columns_to_column_ref_values,
+    model_function_type, model_input_constraints, model_schema, resolved_model_schema,
+    type_context, typed_model_schema, RefSchemaProvider, SalsaRefSchemaProvider,
+    StaticRefSchemaProvider,
 };
 
 // ============================================================================

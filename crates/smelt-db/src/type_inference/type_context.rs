@@ -794,4 +794,54 @@ impl TypeContext {
             Err(_) => Vec::new(),
         }
     }
+
+    /// Mark every column registered under `entity_name` as `nullable: true`.
+    ///
+    /// Used by the outer-join nullability pass (`apply_outer_join_nullability`)
+    /// to implement spec §11: columns from the null-supplying side of an outer
+    /// join are nullable regardless of their declared or upstream-inferred
+    /// nullability.
+    ///
+    /// The entity lookup resolves aliases first (so an alias → entity mapping
+    /// is honoured before searching the column maps).
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn mark_entity_columns_nullable(&mut self, entity_or_alias: &str) {
+        // Resolve alias → entity name.
+        let entity = self
+            .aliases
+            .get(entity_or_alias)
+            .cloned()
+            .unwrap_or_else(|| entity_or_alias.to_string());
+
+        let prefix = format!("{}.", entity);
+
+        // Mark in model_columns.
+        for (key, col) in self.model_columns.iter_mut() {
+            if key.starts_with(&prefix) {
+                col.nullable = true;
+            }
+        }
+
+        // Mark in cte_columns.
+        for (key, col) in self.cte_columns.iter_mut() {
+            if key.starts_with(&prefix) {
+                col.nullable = true;
+            }
+        }
+
+        // Mark in source_columns.  `add_source_column` stores BOTH:
+        //   - simple key: `entity.col`          (e.g. `events.event_id`)
+        //   - full key:   `source.entity.col`   (e.g. `raw.events.event_id`)
+        //
+        // We must mark both forms.  The simple key starts with `entity.`; the
+        // full key contains `.entity.` as an infix (schema separator + entity
+        // name + column separator).
+        let full_key_infix = format!(".{}", prefix); // ".entity." — matches "source.entity.col"
+        for (key, col) in self.source_columns.iter_mut() {
+            if key.starts_with(&prefix) || key.contains(&full_key_infix) {
+                col.nullable = true;
+            }
+        }
+    }
 }
