@@ -42,6 +42,7 @@ pub enum BaseType {
     Varchar,
     Date,
     Timestamp,
+    TimestampTz,
     Decimal,
     Time,
     Interval,
@@ -57,6 +58,7 @@ impl BaseType {
             BaseType::Varchar,
             BaseType::Date,
             BaseType::Timestamp,
+            BaseType::TimestampTz,
             BaseType::Decimal,
             BaseType::Time,
             BaseType::Interval,
@@ -73,6 +75,9 @@ impl BaseType {
             BaseType::Date => DataType::Date,
             BaseType::Timestamp => DataType::Timestamp {
                 with_timezone: false,
+            },
+            BaseType::TimestampTz => DataType::Timestamp {
+                with_timezone: true,
             },
             BaseType::Decimal => DataType::Decimal {
                 precision: 10,
@@ -92,6 +97,7 @@ impl BaseType {
             BaseType::Varchar => "CAST('hello' AS STRING)",
             BaseType::Date => "CAST('2024-01-01' AS DATE)",
             BaseType::Timestamp => "CAST('2024-01-01 12:00:00' AS TIMESTAMP)",
+            BaseType::TimestampTz => "CAST('2024-01-01 12:00:00+00' AS TIMESTAMPTZ)",
             BaseType::Decimal => "CAST(99.99 AS DECIMAL(10,2))",
             BaseType::Time => "CAST('12:00:00' AS TIME)",
             BaseType::Interval => "CAST('1 day' AS INTERVAL)",
@@ -107,6 +113,7 @@ impl BaseType {
             BaseType::Varchar => "str_col",
             BaseType::Date => "date_col",
             BaseType::Timestamp => "ts_col",
+            BaseType::TimestampTz => "tstz_col",
             BaseType::Decimal => "dec_col",
             BaseType::Time => "time_col",
             BaseType::Interval => "interval_col",
@@ -761,7 +768,10 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
             base,
             BaseType::Integer | BaseType::BigInt | BaseType::Double | BaseType::Decimal
         ),
-        FuncInput::Temporal => matches!(base, BaseType::Date | BaseType::Timestamp),
+        FuncInput::Temporal => matches!(
+            base,
+            BaseType::Date | BaseType::Timestamp | BaseType::TimestampTz
+        ),
         FuncInput::AnyScalar | FuncInput::AnyAggregate => true,
         FuncInput::BooleanAggregate => base == BaseType::Boolean,
         FuncInput::IntegerAggregate => {
@@ -1408,7 +1418,12 @@ fn smelt_type_to_base(dt: &DataType) -> Option<BaseType> {
             Some(BaseType::Varchar)
         }
         DataType::Date => Some(BaseType::Date),
-        DataType::Timestamp { .. } => Some(BaseType::Timestamp),
+        DataType::Timestamp {
+            with_timezone: true,
+        } => Some(BaseType::TimestampTz),
+        DataType::Timestamp {
+            with_timezone: false,
+        } => Some(BaseType::Timestamp),
         DataType::Decimal { .. } => Some(BaseType::Decimal),
         DataType::SmallInt => Some(BaseType::Integer),
         DataType::Time => Some(BaseType::Time),

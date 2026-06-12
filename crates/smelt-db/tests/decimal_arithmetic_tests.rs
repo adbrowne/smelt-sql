@@ -111,8 +111,7 @@ fn decimal_overflow_check_emits_diagnostic() {
 
     let root = PathBuf::from("/fake/project");
     let model_path = root.join("models").join("overflow_test.sql");
-    let model_src =
-        "--- name: overflow_test\nSELECT CAST(1 AS DECIMAL(30,2)) * CAST(1 AS DECIMAL(30,2)) AS result\n---\n";
+    let model_src = "SELECT CAST(1 AS DECIMAL(30,2)) * CAST(1 AS DECIMAL(30,2)) AS result\n";
 
     let mut db = Database::default();
     let project = db.set_project_input(root.clone(), String::new());
@@ -171,7 +170,7 @@ fn diags_for_model(model_src: &str) -> Vec<smelt_db::diagnostics_types::Diagnost
 /// The inferred result type must be Unknown.
 #[test]
 fn decimal_division_emits_type_mismatch() {
-    let model_src = "--- name: test_model\nSELECT CAST(1 AS DECIMAL(10,2)) / CAST(1 AS DECIMAL(5,1)) AS result\n---\n";
+    let model_src = "SELECT CAST(1 AS DECIMAL(10,2)) / CAST(1 AS DECIMAL(5,1)) AS result\n";
     let all_diags = diags_for_model(model_src);
     let type_mismatch_diags: Vec<_> = all_diags
         .iter()
@@ -207,7 +206,7 @@ fn decimal_division_emits_type_mismatch() {
 /// Phase 3 TDD test 2: Decimal / Integer emits TypeMismatch and returns Unknown.
 #[test]
 fn decimal_integer_division_rejected() {
-    let model_src = "--- name: test_model\nSELECT CAST(1 AS DECIMAL(10,2)) / CAST(1 AS INTEGER) AS result\n---\n";
+    let model_src = "SELECT CAST(1 AS DECIMAL(10,2)) / CAST(1 AS INTEGER) AS result\n";
     let all_diags = diags_for_model(model_src);
     let type_mismatch_diags: Vec<_> = all_diags
         .iter()
@@ -240,11 +239,49 @@ fn decimal_integer_division_rejected() {
     );
 }
 
+/// Integer / Decimal must also be rejected: division with a Decimal operand is
+/// non-portable regardless of operand order (spec §15). The integer-family
+/// numerator must not coerce to a spurious `Decimal(38, 10)` — it rejects with
+/// a TypeMismatch and degrades to Unknown, exactly like `Decimal / Integer`.
+#[test]
+fn integer_decimal_division_rejected() {
+    let model_src = "SELECT CAST(1 AS INTEGER) / CAST(1 AS DECIMAL(10,2)) AS result\n";
+    let all_diags = diags_for_model(model_src);
+    let type_mismatch_diags: Vec<_> = all_diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::TypeMismatch))
+        .collect();
+
+    assert_eq!(
+        type_mismatch_diags.len(),
+        1,
+        "expected exactly one TypeMismatch diagnostic for Integer / Decimal; got: {:?}",
+        all_diags
+    );
+    assert!(
+        type_mismatch_diags[0].message.contains("Double"),
+        "TypeMismatch message should mention 'Double' as the cast remedy; got: {}",
+        type_mismatch_diags[0].message
+    );
+
+    // The result type should be Unknown
+    let sql = "SELECT CAST(1 AS INTEGER) / CAST(1 AS DECIMAL(10,2)) AS result";
+    let parse = smelt_parser::parse(sql);
+    let file = File::cast(parse.syntax()).expect("parse File");
+    let select = file.select_stmt().expect("parse SELECT");
+    let types = infer_select_column_types(&select, &TypeContext::new());
+    assert_eq!(types.len(), 1, "expected exactly one output column");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Unknown,
+        "Integer / Decimal result should be Unknown"
+    );
+}
+
 /// Phase 3 TDD test 3: Integer / Integer is still truncating division — no TypeMismatch.
 #[test]
 fn integer_division_still_truncating() {
-    let model_src =
-        "--- name: test_model\nSELECT CAST(7 AS INTEGER) / CAST(2 AS INTEGER) AS result\n---\n";
+    let model_src = "SELECT CAST(7 AS INTEGER) / CAST(2 AS INTEGER) AS result\n";
     let all_diags = diags_for_model(model_src);
     let type_mismatch_diags: Vec<_> = all_diags
         .iter()
@@ -274,8 +311,7 @@ fn integer_division_still_truncating() {
 /// Phase 3 TDD test 4: Double / Double is still fine — no TypeMismatch.
 #[test]
 fn double_division_still_works() {
-    let model_src =
-        "--- name: test_model\nSELECT CAST(7.0 AS DOUBLE) / CAST(2.0 AS DOUBLE) AS result\n---\n";
+    let model_src = "SELECT CAST(7.0 AS DOUBLE) / CAST(2.0 AS DOUBLE) AS result\n";
     let all_diags = diags_for_model(model_src);
     let type_mismatch_diags: Vec<_> = all_diags
         .iter()

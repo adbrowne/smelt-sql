@@ -168,8 +168,26 @@ pub fn infer_literal_type(text: &str) -> Option<TypedColumn> {
         });
     }
 
-    // SQL standard typed literals: DATE '...', TIMESTAMP '...', TIME '...', INTERVAL '...'
+    // Niladic keyword-functions that the parser treats as bare identifiers
+    // (no parentheses in standard SQL, so `expr.as_function_call()` returns None).
+    // §16: CURRENT_TIMESTAMP returns Timestamp WITH TIME ZONE (non-nullable).
+    // CURRENT_DATE returns Date (non-nullable) — already handled in function_call.rs
+    // for the parenthesised form; replicated here for the bare-keyword form.
     let upper = text.to_uppercase();
+    if upper == "CURRENT_TIMESTAMP" {
+        return Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: true,
+            },
+            nullable: false,
+        });
+    }
+    if upper == "CURRENT_DATE" {
+        return Some(TypedColumn {
+            data_type: DataType::Date,
+            nullable: false,
+        });
+    }
     if upper.starts_with("DATE ") || upper.starts_with("DATE'") {
         return Some(TypedColumn {
             data_type: DataType::Date,

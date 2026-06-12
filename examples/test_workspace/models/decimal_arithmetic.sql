@@ -1,3 +1,1 @@
---- name: decimal_arithmetic
 SELECT CAST(1 AS DECIMAL(10,2)) + CAST(1 AS DECIMAL(5,1)) AS sum_result
----

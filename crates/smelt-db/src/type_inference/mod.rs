@@ -53,6 +53,7 @@ pub(super) use subquery::infer_subquery_type;
 pub use type_context::TypeContext;
 
 pub use dispatch::{
+    check_mixed_tz_case_diagnostics, check_mixed_tz_setop_diagnostics,
     check_window_in_scalar_contexts, infer_expression_kind, infer_expression_type,
     infer_select_column_types, infer_select_output_schema, promote_types,
     WindowInScalarContextInfo,
@@ -60,9 +61,10 @@ pub use dispatch::{
 
 pub use binary::{
     check_crossfamily_arithmetic_diagnostics, check_decimal_division_diagnostics,
-    check_decimal_precision_overflow_diagnostics, check_undeclared_columns, infer_cte_columns,
-    walk_expression_columns, walk_expression_columns_with_visitor, walk_select_columns,
-    walk_select_columns_with_visitor, ColumnRefVisitor, UndeclaredColumnInfo,
+    check_decimal_precision_overflow_diagnostics, check_mixed_tz_arithmetic_diagnostics,
+    check_undeclared_columns, infer_cte_columns, walk_expression_columns,
+    walk_expression_columns_with_visitor, walk_select_columns, walk_select_columns_with_visitor,
+    ColumnRefVisitor, UndeclaredColumnInfo,
 };
 
 pub use subquery::build_subquery_context;

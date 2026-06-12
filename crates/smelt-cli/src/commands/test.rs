@@ -118,8 +118,8 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                 };
                 failed += 1;
                 if !args.json {
-                print_test_result(&result, args.verbose, args.show_all);
-            }
+                    print_test_result(&result, args.verbose, args.show_all);
+                }
                 results.push(result);
                 continue;
             }
@@ -182,8 +182,8 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                     };
                     failed += 1;
                     if !args.json {
-                print_test_result(&result, args.verbose, args.show_all);
-            }
+                        print_test_result(&result, args.verbose, args.show_all);
+                    }
                     results.push(result);
                     continue;
                 }
@@ -217,8 +217,8 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                     };
                     failed += 1;
                     if !args.json {
-                print_test_result(&result, args.verbose, args.show_all);
-            }
+                        print_test_result(&result, args.verbose, args.show_all);
+                    }
                     results.push(result);
                     continue;
                 }

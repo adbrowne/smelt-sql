@@ -87,12 +87,15 @@ fn test_json_pass_status() {
     let output = run_smelt_test(&workspace, &["--json", "--select", "test_pass"]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("stdout not valid JSON: {e}\nStdout:\n{stdout}")
-    });
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout not valid JSON: {e}\nStdout:\n{stdout}"));
 
     let results = parsed["results"].as_array().expect("results must be array");
-    assert_eq!(results.len(), 1, "should have exactly 1 result; got: {parsed}");
+    assert_eq!(
+        results.len(),
+        1,
+        "should have exactly 1 result; got: {parsed}"
+    );
 
     let status = results[0]["status"].as_str().unwrap_or("");
     assert_eq!(
@@ -115,12 +118,15 @@ fn test_json_fail_status() {
     let output = run_smelt_test(&workspace, &["--json", "--select", "test_fail"]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("stdout not valid JSON: {e}\nStdout:\n{stdout}")
-    });
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout not valid JSON: {e}\nStdout:\n{stdout}"));
 
     let results = parsed["results"].as_array().expect("results must be array");
-    assert_eq!(results.len(), 1, "should have exactly 1 result; got: {parsed}");
+    assert_eq!(
+        results.len(),
+        1,
+        "should have exactly 1 result; got: {parsed}"
+    );
 
     let status = results[0]["status"].as_str().unwrap_or("");
     assert_eq!(

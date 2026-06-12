@@ -80,20 +80,31 @@ fn promote_numeric_operands_for_op(
         }
     }
 
-    // Spec §15 division rejection: `Decimal / T` is not in the portable surface.
-    // Return Unknown early so the type is consistent with the TypeMismatch
-    // diagnostic emitted by `check_decimal_division_diagnostics`.
-    // Only the LEFT operand being Decimal triggers rejection — `T / Decimal`
-    // (e.g. Float / decimal_literal) lets the Float promotion path handle it.
-    if op == "/"
-        && left
+    // Spec §15 division rejection: division with a Decimal operand is not in the
+    // portable surface (engines disagree on the result family). Return Unknown
+    // early so the type is consistent with the TypeMismatch diagnostic emitted by
+    // `check_decimal_division_diagnostics`. The carve-out is a Float/Double
+    // counterpart: it promotes the whole expression to a portable floating result
+    // (DuckDB-aligned), so `Float / Decimal` / `Double / Decimal` are NOT rejected
+    // and fall through to the promotion path below. An integer-family numerator
+    // over a Decimal denominator (`Integer / Decimal`) must reject too, rather than
+    // coerce to a spurious `Decimal(38, 10)`.
+    if op == "/" {
+        let left_decimal = left
             .as_ref()
-            .is_some_and(|l| matches!(l, DataType::Decimal { .. }))
-    {
-        return Some(TypedColumn {
-            data_type: DataType::Unknown,
-            nullable: true,
-        });
+            .is_some_and(|l| matches!(l, DataType::Decimal { .. }));
+        let integer_over_decimal = right
+            .as_ref()
+            .is_some_and(|r| matches!(r, DataType::Decimal { .. }))
+            && left
+                .as_ref()
+                .is_some_and(|l| lift_integer_to_decimal(l).is_some());
+        if left_decimal || integer_over_decimal {
+            return Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            });
+        }
     }
 
     // Decimal-family path: if either operand is Decimal or an integer that
@@ -355,12 +366,29 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
                             nullable: true,
                         });
                     }
-                    // TIMESTAMP - TIMESTAMP → Interval
-                    (Some(DataType::Timestamp { .. }), Some(DataType::Timestamp { .. })) => {
-                        return Some(TypedColumn {
-                            data_type: DataType::Interval,
-                            nullable: true,
-                        });
+                    // TIMESTAMP - TIMESTAMP → Interval when both have the same tz variant.
+                    // If tz variants differ (one naive, one tz-aware) the result
+                    // degrades to Unknown; the separate `check_mixed_tz_arithmetic_diagnostics`
+                    // pass emits a TypeMismatch diagnostic at the operator span.
+                    (
+                        Some(DataType::Timestamp {
+                            with_timezone: tz_l,
+                        }),
+                        Some(DataType::Timestamp {
+                            with_timezone: tz_r,
+                        }),
+                    ) => {
+                        if tz_l == tz_r {
+                            return Some(TypedColumn {
+                                data_type: DataType::Interval,
+                                nullable: true,
+                            });
+                        } else {
+                            return Some(TypedColumn {
+                                data_type: DataType::Unknown,
+                                nullable: true,
+                            });
+                        }
                     }
                     // TIME - TIME → Interval
                     (Some(DataType::Time), Some(DataType::Time)) => {
@@ -663,8 +691,17 @@ pub fn check_decimal_division_diagnostics(
 
         let left_tc = infer_binary_operand(&binary, 0, ctx);
         let lt = left_tc.as_ref().map(|t| &t.data_type);
+        let right_tc = infer_binary_operand(&binary, 1, ctx);
+        let rt = right_tc.as_ref().map(|t| &t.data_type);
 
-        if !lt.is_some_and(|d| matches!(d, DataType::Decimal { .. })) {
+        // Reject division with a Decimal operand. Mirror the inference rejection
+        // above: a Decimal numerator (any denominator), or an integer-family
+        // numerator over a Decimal denominator. `Float/Double / Decimal` is the
+        // carve-out — it promotes to a portable floating result and is allowed.
+        let left_decimal = lt.is_some_and(|d| matches!(d, DataType::Decimal { .. }));
+        let integer_over_decimal = rt.is_some_and(|d| matches!(d, DataType::Decimal { .. }))
+            && lt.is_some_and(|d| lift_integer_to_decimal(d).is_some());
+        if !(left_decimal || integer_over_decimal) {
             continue;
         }
 
@@ -677,6 +714,96 @@ pub fn check_decimal_division_diagnostics(
             message: "Decimal division is not in the portable surface — cast operands to Double: \
                       CAST(a AS DOUBLE) / CAST(b AS DOUBLE)"
                 .to_string(),
+            range,
+            code: Some(crate::DiagnosticCode::TypeMismatch),
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Walk all BINARY_EXPR nodes in a SELECT statement and emit one
+/// `TypeMismatch` Error at the operator span whenever a naive `Timestamp` and
+/// a `Timestamp WITH TIME ZONE` appear as operands of an arithmetic operator
+/// (spec §16 — strict mixing rule).
+///
+/// The covered operators are `+`, `-`, `*`, `/`, `%`; in practice only `-` is
+/// meaningful for mixed-tz timestamps (the others already fail the cross-family
+/// check or the temporal arithmetic arms), but we walk all arithmetic to be
+/// exhaustive.
+///
+/// Mirrors `check_decimal_division_diagnostics` in structure.
+pub fn check_mixed_tz_arithmetic_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::BINARY_EXPR;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != BINARY_EXPR {
+            continue;
+        }
+        let binary = match BinaryExpr::cast(node.clone()) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let op = match binary.operator() {
+            Some(op) => op,
+            None => continue,
+        };
+
+        if !matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
+            continue;
+        }
+        if binary.is_unary() {
+            continue;
+        }
+
+        let left_tc = infer_binary_operand(&binary, 0, ctx);
+        let right_tc = infer_binary_operand(&binary, 1, ctx);
+
+        let lt = match left_tc.as_ref().map(|t| &t.data_type) {
+            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            _ => continue,
+        };
+        let rt = match right_tc.as_ref().map(|t| &t.data_type) {
+            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            _ => continue,
+        };
+
+        // Only flag when BOTH operands are Timestamp-family with differing tz.
+        let (tz_l, tz_r) = match (lt, rt) {
+            (
+                DataType::Timestamp {
+                    with_timezone: tz_l,
+                },
+                DataType::Timestamp {
+                    with_timezone: tz_r,
+                },
+            ) => (*tz_l, *tz_r),
+            _ => continue,
+        };
+
+        if tz_l == tz_r {
+            continue; // Same variant — fine.
+        }
+
+        let range = binary
+            .operator_token_range()
+            .unwrap_or_else(|| node.text_range());
+
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: format!(
+                "Timezone mismatch: cannot mix naive Timestamp and Timestamp WITH TIME ZONE \
+                 with `{}`; add an explicit CAST to align timezone variants",
+                op
+            ),
             range,
             code: Some(crate::DiagnosticCode::TypeMismatch),
             data: None,

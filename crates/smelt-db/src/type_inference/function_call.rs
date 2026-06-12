@@ -293,11 +293,14 @@ const REGISTRY_MIGRATED: &[&str] = &[
     "TRIM",
     "CONCAT",
     // Date/time basics (fixed returns).
+    // NOTE: "DATE_TRUNC" is intentionally NOT in this list — its return type
+    // mirrors the tz-axis of its second argument (dynamic behaviour a static
+    // registry signature cannot express). The corrected inference arm lives in
+    // the legacy match below.
     "DATE",
-    "NOW",
     "CURRENT_DATE",
-    "CURRENT_TIMESTAMP",
-    "DATE_TRUNC",
+    "NOW",            // registry: () → Timestamp{with_timezone:true} (§16)
+    "CURRENT_TIMESTAMP", // same as NOW
 ];
 
 /// Policy for deriving [`TypedColumn::nullable`] on a registry-resolved call.
@@ -530,7 +533,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
 
         SqlFunction::Now | SqlFunction::CurrentTimestamp => Some(TypedColumn {
             data_type: DataType::Timestamp {
-                with_timezone: false,
+                with_timezone: true,
             },
             nullable: false,
         }),
@@ -545,12 +548,23 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
-        SqlFunction::DateTrunc => Some(TypedColumn {
-            data_type: DataType::Timestamp {
-                with_timezone: false,
-            },
-            nullable: true,
-        }),
+        SqlFunction::DateTrunc => {
+            // Mirror the tz-axis of the second argument (the timestamp).
+            // DATE_TRUNC(part, ts) — argument index 1 is the timestamp.
+            let with_timezone = func
+                .arguments()
+                .get(1)
+                .and_then(|arg| infer_expression_type(arg, ctx))
+                .and_then(|tc| match tc.data_type {
+                    DataType::Timestamp { with_timezone } => Some(with_timezone),
+                    _ => None,
+                })
+                .unwrap_or(false);
+            Some(TypedColumn {
+                data_type: DataType::Timestamp { with_timezone },
+                nullable: true,
+            })
+        }
 
         SqlFunction::Concat
         | SqlFunction::Upper
@@ -687,9 +701,16 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
-        SqlFunction::MakeTimestamp | SqlFunction::MakeTimestamptz => Some(TypedColumn {
+        SqlFunction::MakeTimestamp => Some(TypedColumn {
             data_type: DataType::Timestamp {
                 with_timezone: false,
+            },
+            nullable: true,
+        }),
+
+        SqlFunction::MakeTimestamptz => Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: true,
             },
             nullable: true,
         }),

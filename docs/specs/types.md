@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-06-11
+last_reviewed: 2026-06-12
 owners: [andrew]
 ---
 
@@ -161,7 +161,7 @@ Built-in SQL function return types are taken from the canonical registry in `cra
 - `SIGN(any numeric) → SmallInt`
 - `ABS(Decimal(p, s)) → Decimal(p, s)` — preserves precision and scale. `ABS(other numeric T) → T`.
 
-Engine-native precision is opt-in via the backend namespace (`postgres.sum(...)`); using it marks the model as non-portable.
+Engine-native precision is opt-in via the backend namespace (`postgres.sum(...)`); using it marks the model as non-portable. Timezone-sensitive function returns (`NOW`, `CURRENT_TIMESTAMP`, `MAKE_TIMESTAMPTZ`, `DATE_TRUNC`) are governed by §16.
 
 **Aggregate non-nullability via `COALESCE`.** A `COALESCE(<agg>, <literal>)` expression where `<literal>` is a non-null literal whose type matches `<agg>`'s return type is non-nullable. This is the canonical idiom for "empty-group becomes 0" (e.g. `COALESCE(SUM(amount), 0)`); the column-level `nullable: bool` flag flips to `false` after the COALESCE wrap. Type matching follows §11 nullability rules — this section only specifies the non-nullability outcome, not the equality predicate.
 
@@ -308,6 +308,33 @@ A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.defi
 - `AVG(Decimal)` → `Double` — implicit division-by-count can produce fractional digits that cannot be expressed in the input's `(p, s)` portably. ByDesign divergence from Spark (stays in `Decimal`); DuckDB agrees on `Double`.
 - `ABS(Decimal(p, s))` → `Decimal(p, s)` — absolute value preserves precision and scale.
 
+### 16. Timezone
+
+**Two-variant type.** `Timestamp` (naive — no timezone offset, no absolute UTC referent) and `Timestamp WITH TIME ZONE` (tz-aware — UTC-normalised internally) are distinct types. The `with_timezone` flag is a value-domain axis: it lives in `DataType`, not in `TypedColumn`, and participates in type equality, promotion, and `CAST` — consistent with the axis-placement rule in §Design. The parser alias `TIMESTAMPTZ` normalises to `Timestamp WITH TIME ZONE` on input.
+
+**Strict mixing rule.** Using a naive `Timestamp` and a `Timestamp WITH TIME ZONE` as branches of the same UNION / EXCEPT / INTERSECT, or as CASE alternatives, is a `TypeMismatch` at the set-operator or CASE keyword span. The user must `CAST` to align variants before the set operation.
+
+**Timezone-sensitive function returns.** These entries override §5 for the listed functions:
+
+| Function | Return type | Notes |
+|---|---|---|
+| `NOW()` | `Timestamp WITH TIME ZONE` (non-nullable) | DuckDB and Spark both return tz-aware. |
+| `CURRENT_TIMESTAMP` | `Timestamp WITH TIME ZONE` (non-nullable) | Same semantics as `NOW()`. |
+| `MAKE_TIMESTAMPTZ(y, mo, d, h, mi, s [, tz])` | `Timestamp WITH TIME ZONE` (nullable) | The `_TZ` suffix signals tz-aware output. `MAKE_TIMESTAMP` (without TZ) returns naive `Timestamp`. |
+| `DATE_TRUNC(part, Timestamp)` | `Timestamp` (nullable) | Tz-axis preserved from input. |
+| `DATE_TRUNC(part, Timestamp WITH TIME ZONE)` | `Timestamp WITH TIME ZONE` (nullable) | Tz-axis preserved from input. DuckDB and Spark agree. |
+
+**Arithmetic is tz-transparent.** The timezone axis passes through unchanged:
+
+- `Timestamp +/- Interval → Timestamp`
+- `Timestamp WITH TIME ZONE +/- Interval → Timestamp WITH TIME ZONE`
+
+Mixing tz variants in arithmetic (e.g. `Timestamp WITH TIME ZONE - Timestamp`) is a `TypeMismatch` by the same rule as mixing in set operations.
+
+**`AT TIME ZONE` — not in portable surface.** The SQL expression `expr AT TIME ZONE zone_str` — which converts `Timestamp → Timestamp WITH TIME ZONE` and `Timestamp WITH TIME ZONE → Timestamp` — is not yet in the portable surface. See Known Divergences.
+
+**Soundness oracle.** `cargo test -p smelt-db --test type_property_tests` must cover `TimestampTz`-typed input columns; new divergences are either fixed or registered `ByDesign` in `divergences.rs`.
+
 ## Design
 
 This section captures the load-bearing rationale behind the type system's shape and the alternatives that were considered and rejected.
@@ -321,6 +348,8 @@ This section captures the load-bearing rationale behind the type system's shape 
 **Axis placement: value-domain axes live in `DataType`; column-population axes live in `TypedColumn`.** Axes that change what values can exist — decimal precision/scale, timezone-awareness, varchar length — are part of the type proper and participate in promotion, unification, and `CAST`. Axes that describe properties of a column's data over an unchanged value domain — nullability today, collation prospectively — live beside the type in `TypedColumn`. This matches SQL's own model (`NOT NULL` is a column constraint, not a type) and keeps nullability out of every type-equality and promotion rule. *`Nullable<T>` in the `DataType` enum* was rejected: it forces every `match` on `DataType` and every unification/promotion rule to answer "what about the wrapper?", an invasive change buying little since `TypedColumn` already flows everywhere inference goes. The accepted cost is that **composite types erase the column channel**: `Struct` fields and `Array` elements carry only a `DataType`, so nested nullability is untracked and nested access is conservatively nullable (§11). This is also the cross-engine intersection — DuckDB and Postgres provide no syntax to declare or enforce `NOT NULL` on struct fields or array elements, so nested positions are always-nullable there; only Spark tracks the nested axis (`StructField.nullable`, `ArrayType.containsNull`, `MapType.valueContainsNull`). If Spark-grade nested precision is ever wanted, the extension point is the composite `DataType` variants themselves (per-field/element nullability flags, Spark's shape), not a relocation of the column-level flag. Collation's placement is tentative until its own design cycle; its SQL coercibility rules suggest the column channel, like nullability.
 
 **Decimal arithmetic: growth formula choice, division exclusion, and AVG→Double.** `+`, `-`, `*`, `%` use Spark's Hive-derived growth formulas — the portable intersection between Spark (exact, 38-capped) and DuckDB (same formulas for non-division ops). Postgres's unbounded exact arithmetic is not reachable within the 38-digit limit; the compile-time overflow check (`p' > 38`) makes precision exhaustion a compile error rather than a runtime surprise. *Division is excluded* because the three engines disagree on the result type family: DuckDB promotes `Decimal / Decimal` to `Double` to avoid infinite-precision growth; Spark stays in `Decimal` with a Hive formula; Postgres returns unbounded `NUMERIC`. No cast sequence produces bit-identical results across all three, so the portable surface refuses the operation. The two current remedies are cast-to-Double (always portable) and engine-bound models (future). A `smelt.divide(a, b, scale => N)`-style stdlib polyfill — the long-term ergonomic answer — requires engine-dispatched function bodies, which are not yet designed; the research doc (`docs/research/20260516-decimal-type-system.md` §7) sketches the shape. *AVG returning `Double`* follows from division: count-based averaging involves implicit division by the row count, which can produce fractional digits that cannot be expressed in the input's `(p, s)` portably across engines; `Double` is the universally-safe answer (DuckDB agrees; Spark diverges). *SUM returning `Decimal(38, s)`* retains scale because summation never introduces new decimal digits — the scale of a sum equals the addends' scale — while the integer part can grow unboundedly; `38` is the maximum within the engine intersection, and DuckDB agrees.
+
+**Timezone mixing is an error, not silent widening.** When a naive `Timestamp` and a `Timestamp WITH TIME ZONE` appear as UNION branches or CASE alternatives, smelt emits `TypeMismatch` rather than silently widening to `Timestamp WITH TIME ZONE`. The alternative — widening — was rejected because naive and tz-aware timestamps carry different semantics: a naive timestamp has no absolute UTC referent, so widening it silently asserts that it does. Real bugs (a `created_at TIMESTAMP` column from one source mixed with a `ts TIMESTAMPTZ` from another) would silently produce a tz-aware result whose UTC interpretation is engine-defined and often wrong. The strict rule follows the same logic as cross-family arithmetic in §1: correctness hazards are errors, not silent promotions. The user resolves this with an explicit `CAST` — `CAST(naive_ts AS TIMESTAMP WITH TIME ZONE)` — which makes the intent auditable. `NOW()` and `CURRENT_TIMESTAMP` returning `Timestamp WITH TIME ZONE` (fixing the prior `with_timezone: false` default) is the motivating correction; the strict mixing rule is what makes the fix load-bearing rather than cosmetic.
 
 **Engine-alias normalisation is a parser concern, not an inference concern.** The aliases `INT`, `INT4`, `STRING`, `BOOL`, `BYTEA`, `TIMESTAMPTZ` are normalised on input by `crates/smelt-types/src/parse.rs`; type inference operates only on canonical `DataType` values. *Carrying alias spellings through inference* was rejected because it doubles the surface every inference rule has to handle ("does `Integer + Int` unify? does `Text + String` round-trip?") with no semantic value — every such pair is the same type. Normalising at the boundary keeps the inference rules clean and means the test surface for type inference doesn't have to enumerate alias permutations.
 
@@ -338,12 +367,16 @@ This section captures the load-bearing rationale behind the type system's shape 
 - Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record lifting rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain subtyping rules; no further branching is permitted without a spec edit. `ModelDef` participates in no subtyping rule — it is neither a subtype nor a supertype of any other sort.
 - One canonical built-in registry (per `signatures.rs::BuiltinRegistry`); per-dialect registries are out of scope. Backend availability is a per-function `backends:` property, not a registry split.
 - **Out of scope for v1**: nested composite nullability (struct fields, array elements — conservatively nullable); multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`; engine-bound decimal division (the `/` operator on `Decimal` operands is rejected in portable code — see §15).
+- **Standing timezone gate.** `cargo test -p smelt-db --test type_property_tests` must stay green with `TimestampTz` inputs exercised. `NOW()` and `CURRENT_TIMESTAMP` must return `Timestamp WITH TIME ZONE`; mixing naive and tz-aware in UNION/CASE must emit `TypeMismatch`; `DATE_TRUNC` must preserve the tz-axis of its input — all three enforced by explicit regression tests.
+
 - **Standing decimal gates.** `cargo test -p smelt-db --test nullability_property_tests` must stay green (no change from §11 gate). The decimal arithmetic growth formulas and division rejection must be covered by the type property oracle (`cargo test -p smelt-db --test type_property_tests`) after the decimal plan lands.
 
 ## Known Divergences / Open Questions
 
-- **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double`. `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (§16 #9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. The `Float < Decimal` ordering divergence in `promote_types` and the `Float` enum variant are follow-up work. (`numeric_lub` in `smelt-types` now correctly applies the §15 LUB formula for Decimal pairs and integer-lifting.)
-- **Engine-bound decimal division is not yet available.** `Decimal / T` is rejected in portable code (§15). The escape hatch of declaring an engine on a model to get native division semantics (`Double` on DuckDB, `Decimal` on Spark, `NUMERIC` on Postgres) is deferred to the engine-declaration feature. Until then, users must cast to `Double` or `Float` explicitly. Tracked in `docs/research/20260516-decimal-type-system.md` §7.
+- **`AT TIME ZONE` conversion operator not yet implemented.** The SQL expression `expr AT TIME ZONE zone_str` converts between naive and tz-aware timestamps: `Timestamp AT TIME ZONE 'zone' → Timestamp WITH TIME ZONE`; `Timestamp WITH TIME ZONE AT TIME ZONE 'zone' → Timestamp`. The operator is supported by DuckDB and PostgreSQL; Spark uses different functions (`to_utc_timestamp`, `from_utc_timestamp`) so a portable mapping requires a design pass. The smelt parser has no AST node for `AT TIME ZONE`; the expression is currently parsed as an unrecognised construct and infers `Unknown`. Until it lands, the escape hatches are an explicit `CAST` or the `TIMEZONE(zone, expr)` scalar function (not yet registered; available on DuckDB and Spark with differing argument semantics).
+
+- **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double`. `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (research §9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. The `Float < Decimal` ordering divergence in `promote_types` and the `Float` enum variant are follow-up work. (`numeric_lub` in `smelt-types` now correctly applies the §15 LUB formula for Decimal pairs and integer-lifting.)
+- **Engine-bound decimal division is not yet available.** Division with a Decimal operand — `Decimal / T` and `T / Decimal` alike — is rejected in portable code (§15); an integer-family numerator over a Decimal denominator does not coerce to a `Decimal` result. The `Float`/`Double` counterpart (`Float / Decimal`, `Double / Decimal`) is the carve-out: it promotes to a portable floating result and is allowed. The escape hatch of declaring an engine on a model to get native division semantics (`Double` on DuckDB, `Decimal` on Spark, `NUMERIC` on Postgres) is deferred to the engine-declaration feature. Until then, users must cast to `Double` or `Float` explicitly. Tracked in `docs/research/20260516-decimal-type-system.md` §7.
 - **ByDesign aggregate divergences.** `SUM(Decimal(p, s))` returns `Decimal(38, s)` where Spark returns `Decimal(min(p+10, 38), s)` — smelt's result is conservative (wider precision). `AVG(Decimal)` returns `Double` where Spark returns `Decimal` — smelt's result is the portable choice agreed with DuckDB. Both are registered ByDesign in the divergence registry (`crates/smelt-db/tests/prop_helpers/divergences.rs`).
 - **`SIGN(Decimal)` returns `SmallInt`.** DuckDB returns `TINYINT` (same), Spark returns `Decimal`; ByDesign divergence from Spark, registered in the divergence registry.
 - **Nullability is not yet folded into the output fingerprint.** `output_fingerprint.md` treats nullability as breaking-by-default (conservative rebuild). Folding the tracked axis into the fingerprint is deferred until the fingerprint is wired into the runtime (see `docs/ROADMAP.md` item 5); the soundness contract here is the precondition for that fold. The fold must hash the structured `TypedColumn` (type + nullability), never a rendered display string, so display conventions can evolve without invalidating fingerprints.
@@ -383,6 +416,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - `docs/plans/20260422-smelt-functions.md`
 - `docs/plans/20260610-nullability-soundness.md`
 - `docs/plans/20260611-decimal-arithmetic.md`
+- `docs/plans/20260612-timezone-axis.md`
 
 ### Related specs
 
