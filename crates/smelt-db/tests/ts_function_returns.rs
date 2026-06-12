@@ -1,4 +1,4 @@
-//! Phase 1 (timezone axis) — Timezone-sensitive function return types.
+//! Timezone axis — Timezone-sensitive function return types and display surface.
 //!
 //! Verifies that:
 //!   1. `NOW()` returns `Timestamp WITH TIME ZONE`, non-nullable.
@@ -7,12 +7,18 @@
 //!   4. `MAKE_TIMESTAMP(...)` (no TZ suffix) returns naive `Timestamp`, nullable (no regression).
 //!   5. `DATE_TRUNC('day', ts_col)` over a naive Timestamp column returns naive `Timestamp`.
 //!   6. `DATE_TRUNC('day', tstz_col)` over a `TIMESTAMPTZ` column returns `Timestamp WITH TIME ZONE`.
+//!   7. `DataType::Timestamp { with_timezone: true }` displays as `"TIMESTAMP WITH TIME ZONE"` (hover regression guard).
+//!   8. `DataType::Timestamp { with_timezone: false }` displays as `"TIMESTAMP"` (naive regression guard).
+//!   9. `smelt.define` with `Expr<Timestamp WITH TIME ZONE>` parameter annotation produces no `InvalidFunctionTypeRef` diagnostic.
 
 use std::path::PathBuf;
 
 use std::sync::Arc;
 
-use smelt_db::{typed_model_schema, Database, ModelSchema, SourceFile, Workspace};
+use smelt_db::{
+    file_diagnostics, typed_model_schema, Database, DiagnosticCode, ModelSchema, SourceFile,
+    Workspace,
+};
 use smelt_types::{DataType, TypedColumn};
 
 // ---------------------------------------------------------------------------
@@ -222,5 +228,80 @@ fn date_trunc_preserves_timestamptz() {
         },
         "DATE_TRUNC over Timestamp WITH TIME ZONE must return Timestamp WITH TIME ZONE, got {:?}",
         typed.data_type
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7 — Timestamp WITH TIME ZONE hover string (regression guard)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn timestamptz_hover_string() {
+    // Verifies the canonical display/hover string for a tz-aware Timestamp.
+    // This is a regression guard: the string "TIMESTAMP WITH TIME ZONE" must
+    // appear verbatim so that hover text, diagnostic messages, and
+    // smelt.define annotation annotations all render consistently.
+    let rendered = DataType::Timestamp {
+        with_timezone: true,
+    }
+    .to_string();
+    assert_eq!(
+        rendered, "TIMESTAMP WITH TIME ZONE",
+        "Timestamp WITH TIME ZONE must render as 'TIMESTAMP WITH TIME ZONE', got '{}'",
+        rendered
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 — Naive Timestamp hover string (regression guard)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn timestamp_hover_string() {
+    // Verifies the canonical display/hover string for a naive (tz-unaware) Timestamp.
+    // Must render without any timezone suffix to match DuckDB's TIMESTAMP type.
+    let rendered = DataType::Timestamp {
+        with_timezone: false,
+    }
+    .to_string();
+    assert_eq!(
+        rendered, "TIMESTAMP",
+        "Naive Timestamp must render as 'TIMESTAMP', got '{}'",
+        rendered
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 — smelt.define with Expr<Timestamp WITH TIME ZONE> produces no
+//           InvalidFunctionTypeRef (regression guard)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn define_signature_timestamptz_parses() {
+    // A smelt.define function with an `Expr<Timestamp WITH TIME ZONE>` parameter
+    // annotation must not produce an `InvalidFunctionTypeRef` (or any error)
+    // diagnostic. The parse path in smelt-types/src/parse.rs recognises both
+    // `TIMESTAMPTZ` and `TIMESTAMP WITH TIME ZONE` as valid type annotations.
+    let root = PathBuf::from("/fake/project/define_sig_tstz");
+    let fn_path = root.join("functions").join("format_ts.sql");
+    let fn_src =
+        "smelt.define format_ts(ts: Expr<Timestamp WITH TIME ZONE>) -> Expr<Text> AS (CAST(ts AS VARCHAR))\n";
+
+    let mut db = Database::default();
+    let project = db.set_project_input(root.clone(), String::new());
+    let sf = db.set_source_file(fn_path, fn_src.to_string(), root.clone());
+    db.set_workspace(vec![sf], vec![project]);
+    let ws = db.workspace();
+
+    let diags = file_diagnostics(&db, ws, sf);
+    let type_ref_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .collect();
+
+    assert!(
+        type_ref_errors.is_empty(),
+        "smelt.define with Expr<Timestamp WITH TIME ZONE> must not produce InvalidFunctionTypeRef; \
+         got: {type_ref_errors:#?}"
     );
 }

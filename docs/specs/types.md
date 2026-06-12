@@ -416,6 +416,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - `docs/plans/20260422-smelt-functions.md`
 - `docs/plans/20260610-nullability-soundness.md`
 - `docs/plans/20260611-decimal-arithmetic.md`
+- `docs/plans/20260612-timezone-axis.md`
 
 ### Related specs
 
