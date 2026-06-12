@@ -551,6 +551,8 @@ impl Backend {
                 let delimiter_line = content[..section.sql_range.start]
                     .lines()
                     .enumerate()
+                    .collect::<Vec<_>>()
+                    .into_iter()
                     .rev()
                     .find(|(_, l)| {
                         let t = l.trim();
@@ -692,7 +694,7 @@ impl Backend {
         // Collect all virtual paths so we can skip them in the main loop
         let virtual_paths: std::collections::HashSet<PathBuf> = mm
             .values()
-            .flat_map(|entries| entries.iter().map(|(vp, _)| vp.clone()))
+            .flat_map(|entries| entries.iter().map(|(vp, _, _)| vp.clone()))
             .collect();
         drop(mm);
 
