@@ -63,7 +63,7 @@ This plan implements `docs/specs/types.md` §16 (Timezone). The `DataType::Times
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     |        | 2026-06-12 |
-| 2     | pending  |        |      |
+| 2     | done     |        | 2026-06-12 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 
@@ -221,6 +221,9 @@ This plan implements `docs/specs/types.md` §16 (Timezone). The `DataType::Times
 
 - **Pre-existing baseline repairs (committed before Phase 1, off-plan, user-approved).** The branch base (main) had four standing gates red from the decimal/parser work, unrelated to timezone: malformed `--- name: X` multi-model delimiters in three `test_workspace` decimal models + five inline strings in `decimal_arithmetic_tests.rs` (`example_diagnostics`, `decimal_arithmetic_tests`); pre-existing `cargo fmt` violations in smelt-cli/core/lsp; three uncatalogued `DiagnosticCode` variants in `docs/specs/diagnostics.md` (`diagnostics_catalogue`). Repaired in commit `32b1d0be` so timezone phases verify against a clean baseline.
 - **Pre-existing decimal-division coercion bug (off-plan, user-approved).** `prop_coercion_matrix` was red: `Integer / Decimal` coerced to `Decimal(38, 10)` where DuckDB returns `Double`. Per spec §15 division with any Decimal operand is rejected; the inference + diagnostic only checked the left operand. Fixed to reject integer-family-over-Decimal too (→ Unknown + TypeMismatch), with the `Float/Double / Decimal` promotion carve-out preserved, in commit `feb32e0b` (which also remediated the affected ecommerce staging + multi_engine mart example models — the idiomatic `SUM(cents) / 100.0` pattern — to the portable `CAST(<int> AS DOUBLE) / 100.0`). Spec §15 Known Divergences wording clarified.
+- **Pre-existing smelt-lsp compile errors (off-plan, user-approved).** `smelt-lsp` did not build on the branch base: `backend.rs` lagged a data-structure migration (a `str::Lines.rev()` that needs collecting first; a `(PathBuf, u32, u32)` tuple destructured as `(vp, _)`). Fixed in commit `46266989` so the full workspace builds. (The user also has an in-progress fix for this file on `main`.)
+- **`unknown_census` gate red on baseline (known, not repaired).** 36 stale/unclassified entries from earlier merges drifting `function_body_check.rs`/`signatures.rs` line numbers — pre-existing, left as-is by user decision. Phase 2's own 2 new `DataType::Unknown` sites (mixed-tz LUB in `dispatch.rs`, mixed-tz arithmetic in `binary.rs`) ARE classified `error` (paired with a `TypeMismatch` diagnostic). The gate fails only on the unrelated pre-existing drift.
+- **Build-env note.** `/dev/shm` (tmpfs) had filled with a stale 30G cargo cache from a prior session, starving the linker (SIGBUS on large DuckDB-linked test binaries). Cleared `/dev/shm/cargo-target`; not a code issue.
 - **Phase 4 follow-up: stale `BuiltinRegistry` tz entries.** Phase 1 removed `NOW`/`CURRENT_TIMESTAMP`/`DATE_TRUNC` from the `REGISTRY_MIGRATED` allowlist so they fall through to the corrected legacy match; the `BuiltinRegistry` signatures in `crates/smelt-types/src/signatures.rs` still carry `with_timezone: false`. No live path surfaces them today (verified by the Phase 1 reviewer), but Phase 4 should update those registry entries to `with_timezone: true` and restore the allowlist entries.
 
 ---

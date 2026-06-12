@@ -711,9 +711,20 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
             (
                 DataType::Timestamp { with_timezone: tz1 },
                 DataType::Timestamp { with_timezone: tz2 },
-            ) => DataType::Timestamp {
-                with_timezone: *tz1 || *tz2,
-            },
+            ) => {
+                if tz1 == tz2 {
+                    // Same tz variant: keep it.
+                    DataType::Timestamp {
+                        with_timezone: *tz1,
+                    }
+                } else {
+                    // Mixed naive / tz-aware: strict rejection. The caller that
+                    // walks CASE branches or UNION columns must emit the
+                    // TypeMismatch diagnostic; promote_types is pure and cannot
+                    // push diagnostics itself.
+                    DataType::Unknown
+                }
+            }
             (DataType::Timestamp { with_timezone }, _)
             | (_, DataType::Timestamp { with_timezone }) => DataType::Timestamp {
                 with_timezone: *with_timezone,
@@ -777,4 +788,189 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
     }
 
     column_types
+}
+
+/// Walk the set-operation chain of a SELECT statement and emit one
+/// `TypeMismatch` Error at the UNION/INTERSECT/EXCEPT keyword span for each
+/// column position where one branch carries a naive `Timestamp` and the
+/// other carries `Timestamp WITH TIME ZONE` (spec §16 — strict mixing rule).
+///
+/// Only the direct (top-level) set operation is checked per call; the Salsa
+/// orchestrator already iterates over every top-level SELECT per model, so
+/// nested set ops surface when their inner SELECT is processed as a model.
+///
+/// This function is PURE — no Salsa calls; it uses only the AST and the
+/// TypeContext provided by the caller.
+pub fn check_mixed_tz_setop_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::{EXCEPT_KW, INTERSECT_KW, UNION_KW};
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+
+    if !select_stmt.has_set_operation() {
+        return diags;
+    }
+
+    let next_select = match select_stmt.set_operation_select() {
+        Some(s) => s,
+        None => return diags,
+    };
+
+    // Collect types from the left branch (this SELECT).
+    let left_types = if let Some(select_list) = select_stmt.select_list() {
+        select_list
+            .items()
+            .map(|item| {
+                item.expression()
+                    .and_then(|e| infer_expression_type(&e, ctx))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        return diags;
+    };
+
+    // Collect types from the right branch.
+    let right_types = if let Some(select_list) = next_select.select_list() {
+        select_list
+            .items()
+            .map(|item| {
+                item.expression()
+                    .and_then(|e| infer_expression_type(&e, ctx))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        return diags;
+    };
+
+    // Find the set-operator token range for the diagnostic span.
+    let op_range = select_stmt
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
+        .map(|t| t.text_range())
+        .unwrap_or_else(|| select_stmt.syntax().text_range());
+
+    // For each column position, check for a naive/tz-aware mismatch.
+    for (i, (l, r)) in left_types.iter().zip(right_types.iter()).enumerate() {
+        let l_dt = match l {
+            Some(tc) if !matches!(tc.data_type, DataType::Unknown) => &tc.data_type,
+            _ => continue,
+        };
+        let r_dt = match r {
+            Some(tc) if !matches!(tc.data_type, DataType::Unknown) => &tc.data_type,
+            _ => continue,
+        };
+
+        let (tz_l, tz_r) = match (l_dt, r_dt) {
+            (
+                DataType::Timestamp {
+                    with_timezone: tz_l,
+                },
+                DataType::Timestamp {
+                    with_timezone: tz_r,
+                },
+            ) => (*tz_l, *tz_r),
+            _ => continue,
+        };
+
+        if tz_l != tz_r {
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: format!(
+                    "Timezone mismatch in set operation: column {} mixes naive Timestamp and \
+                     Timestamp WITH TIME ZONE; add an explicit CAST to align timezone variants",
+                    i + 1
+                ),
+                range: op_range,
+                code: Some(crate::DiagnosticCode::TypeMismatch),
+                data: None,
+            });
+        }
+    }
+
+    diags
+}
+
+/// Walk all CASE expressions in a SELECT statement and emit one `TypeMismatch`
+/// Error at the CASE keyword span when any pair of THEN/ELSE branches mixes a
+/// naive `Timestamp` with a `Timestamp WITH TIME ZONE` (spec §16 — strict
+/// mixing rule).
+///
+/// This function is PURE — no Salsa calls.
+pub fn check_mixed_tz_case_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::CASE_EXPR;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != CASE_EXPR {
+            continue;
+        }
+        let case_expr = match CaseExpr::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Collect inferred types of all result branches (THEN + ELSE).
+        let mut branch_types: Vec<DataType> = Vec::new();
+
+        for when_clause in case_expr.when_clauses() {
+            if let Some(result_expr) = when_clause.result() {
+                if let Some(tc) = infer_expression_type(&result_expr, ctx) {
+                    if !matches!(tc.data_type, DataType::Unknown | DataType::Null) {
+                        branch_types.push(tc.data_type.clone());
+                    }
+                }
+            }
+        }
+        if let Some(else_expr) = case_expr.else_expr() {
+            if let Some(tc) = infer_expression_type(&else_expr, ctx) {
+                if !matches!(tc.data_type, DataType::Unknown | DataType::Null) {
+                    branch_types.push(tc.data_type.clone());
+                }
+            }
+        }
+
+        // Check if any branch is naive Timestamp and any other is tz-aware.
+        let has_naive = branch_types.iter().any(|dt| {
+            matches!(
+                dt,
+                DataType::Timestamp {
+                    with_timezone: false
+                }
+            )
+        });
+        let has_tz_aware = branch_types.iter().any(|dt| {
+            matches!(
+                dt,
+                DataType::Timestamp {
+                    with_timezone: true
+                }
+            )
+        });
+
+        if has_naive && has_tz_aware {
+            // Anchor at the CASE node itself (the CASE keyword).
+            let range = node.text_range();
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message:
+                    "Timezone mismatch in CASE: branches mix naive Timestamp and \
+                          Timestamp WITH TIME ZONE; add an explicit CAST to align timezone variants"
+                        .to_string(),
+                range,
+                code: Some(crate::DiagnosticCode::TypeMismatch),
+                data: None,
+            });
+        }
+    }
+
+    diags
 }

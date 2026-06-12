@@ -2043,6 +2043,44 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // Spec §16 — mixed naive/tz-aware Timestamp in set operations, CASE
+            // branches, and arithmetic → TypeMismatch.
+            //
+            // These three checks need the full per-file TypeContext (column types
+            // from upstream models) so that column references such as `ts_col` and
+            // `tstz_col` resolve to their inferred DataType. They cannot run on the
+            // empty `kind_ctx` used for shape checks above. `type_context` is a
+            // Salsa query that builds the column-schema context for this file; it
+            // is safe to call from within a Salsa tracked function.
+            //
+            // Only run for model files that have at least one data reference
+            // (the model_path filter is already satisfied by the outer `if let
+            // Some(select_stmt)` guard and the `models/` path check earlier).
+            {
+                let tz_ctx = type_context(db, workspace, file);
+
+                // Set-operations (UNION/INTERSECT/EXCEPT)
+                let setop_diags =
+                    type_inference::check_mixed_tz_setop_diagnostics(&select_stmt, &tz_ctx);
+                for diag in setop_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+
+                // CASE branches
+                let case_diags =
+                    type_inference::check_mixed_tz_case_diagnostics(&select_stmt, &tz_ctx);
+                for diag in case_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+
+                // Arithmetic operators (-, +, *, /, %)
+                let mixed_tz_arith_diags =
+                    type_inference::check_mixed_tz_arithmetic_diagnostics(&select_stmt, &tz_ctx);
+                for diag in mixed_tz_arith_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
             // Meta-language (P6) — `MetaListInScalarPosition`.
             //
             // A `List<T>`-typed expression that reaches a Data-World scalar /
