@@ -3964,7 +3964,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         vec![],
         vec![],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: false,
+            with_timezone: true,
         })),
     ));
     insert(Signature::new(
@@ -3978,7 +3978,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         vec![],
         vec![],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: false,
+            with_timezone: true,
         })),
     ));
 

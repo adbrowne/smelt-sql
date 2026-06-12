@@ -293,15 +293,14 @@ const REGISTRY_MIGRATED: &[&str] = &[
     "TRIM",
     "CONCAT",
     // Date/time basics (fixed returns).
-    // NOTE: "NOW", "CURRENT_TIMESTAMP", and "DATE_TRUNC" are intentionally
-    // NOT in this list. The registry carries stale with_timezone=false for
-    // all three; the corrected behaviour lives in the legacy match below:
-    //   - NOW / CURRENT_TIMESTAMP → with_timezone: true  (§16 tz-aware returns)
-    //   - DATE_TRUNC              → mirrors the tz-axis of its second argument
-    // If those registry entries are ever updated, re-add them here and remove
-    // the corresponding legacy arms.
+    // NOTE: "DATE_TRUNC" is intentionally NOT in this list — its return type
+    // mirrors the tz-axis of its second argument (dynamic behaviour a static
+    // registry signature cannot express). The corrected inference arm lives in
+    // the legacy match below.
     "DATE",
     "CURRENT_DATE",
+    "NOW",            // registry: () → Timestamp{with_timezone:true} (§16)
+    "CURRENT_TIMESTAMP", // same as NOW
 ];
 
 /// Policy for deriving [`TypedColumn::nullable`] on a registry-resolved call.
