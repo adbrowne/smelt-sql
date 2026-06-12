@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781258609716,
+  "lastUpdate": 1781258612135,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25064,6 +25064,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.44617168233995,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "825549347ef0357db7848106cf55a8aa822ab16e",
+          "message": "Merge pull request #136 from adbrowne/worktree-timezone-axis\n\nfeat(types): timezone axis — tz-aware functions, strict mixing rule, oracle (§16)",
+          "timestamp": "2026-06-12T20:01:42+10:00",
+          "tree_id": "f25ffa3323ef1811bd43133f2baabcab73db5c0b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/825549347ef0357db7848106cf55a8aa822ab16e"
+        },
+        "date": 1781258611479,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.096267792993423,
             "unit": "MB/s"
           }
         ]
