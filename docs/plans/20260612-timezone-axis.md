@@ -64,7 +64,7 @@ This plan implements `docs/specs/types.md` §16 (Timezone). The `DataType::Times
 |-------|----------|--------|------|
 | 1     | done     |        | 2026-06-12 |
 | 2     | done     |        | 2026-06-12 |
-| 3     | pending  |        |      |
+| 3     | done     |        | 2026-06-12 |
 | 4     | pending  |        |      |
 
 ---
@@ -224,6 +224,7 @@ This plan implements `docs/specs/types.md` §16 (Timezone). The `DataType::Times
 - **Pre-existing smelt-lsp compile errors (off-plan, user-approved).** `smelt-lsp` did not build on the branch base: `backend.rs` lagged a data-structure migration (a `str::Lines.rev()` that needs collecting first; a `(PathBuf, u32, u32)` tuple destructured as `(vp, _)`). Fixed in commit `46266989` so the full workspace builds. (The user also has an in-progress fix for this file on `main`.)
 - **`unknown_census` gate red on baseline (known, not repaired).** 36 stale/unclassified entries from earlier merges drifting `function_body_check.rs`/`signatures.rs` line numbers — pre-existing, left as-is by user decision. Phase 2's own 2 new `DataType::Unknown` sites (mixed-tz LUB in `dispatch.rs`, mixed-tz arithmetic in `binary.rs`) ARE classified `error` (paired with a `TypeMismatch` diagnostic). The gate fails only on the unrelated pre-existing drift.
 - **Build-env note.** `/dev/shm` (tmpfs) had filled with a stale 30G cargo cache from a prior session, starving the linker (SIGBUS on large DuckDB-linked test binaries). Cleared `/dev/shm/cargo-target`; not a code issue.
+- **Test-helper note (no current impact).** The generator helper `function_return_type("DATE_TRUNC", ...)` in `generators.rs` returns naive `Timestamp { with_timezone: false }` regardless of argument tz. It populates `TypedExpr.expected_smelt_type`, which the property oracle never reads (the comparison uses live smelt inference vs DuckDB), so there is no false green today. If a future test wires `expected_smelt_type` into a comparison for a `TimestampTz` input, fix the helper to mirror the argument's tz-axis (as production `DATE_TRUNC` does).
 - **Phase 4 follow-up: stale `BuiltinRegistry` tz entries.** Phase 1 removed `NOW`/`CURRENT_TIMESTAMP`/`DATE_TRUNC` from the `REGISTRY_MIGRATED` allowlist so they fall through to the corrected legacy match; the `BuiltinRegistry` signatures in `crates/smelt-types/src/signatures.rs` still carry `with_timezone: false`. No live path surfaces them today (verified by the Phase 1 reviewer), but Phase 4 should update those registry entries to `with_timezone: true` and restore the allowlist entries.
 
 ---
