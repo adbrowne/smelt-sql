@@ -19,22 +19,13 @@ The mandatory plan structure (execution prompt, per-phase TDD tests, implementer
 
 The items below are the current priority queue, top to bottom. See completed items in [Recently Completed](#recently-completed) below.
 
-The spine of the near-term roadmap is a single through-thread: **harden against silent failures → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority. The shared-runtime consolidation and the feature-sweep bug ledger that previously headed this queue are now complete — see [Recently Completed](#recently-completed).
+The spine of the near-term roadmap is a single through-thread: **harden against silent failures → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority. The shared-runtime consolidation, the feature-sweep bug ledger, and the silent-failures hardening that previously headed this queue are now complete — see [Recently Completed](#recently-completed).
 
-### 1. Silent Failures & Code-Health Hardening
+### 1. Type-System Axes — Collation
 
-A recurring source of hard-to-diagnose bugs is failure that is *swallowed* rather than surfaced. The March 28 hardening pass (`unwrap()` audit, `tracing` migration) was a one-time sweep and has since regressed, so this item makes "fail loud, or handle it" an ongoing tracked discipline — high priority because it is the same correctness baseline the now-complete feature sweep established. Four fronts:
+~~Silent Failures & Code-Health Hardening~~ ✅ (2026-06-10) — see [Recently Completed](#recently-completed).
 
-- **Silent `Unknown` / fallback-without-diagnostic (highest value).** Type inference and resolution collapse to `DataType::Unknown` in ~160 places, many emitting no diagnostic — the user-facing symptom is "inference is silently wrong, with no error." Worst confirmed case: `crates/smelt-types/src/signatures.rs:2200` turns an unparseable struct-field type into `Unknown` with no diagnostic, which then propagates downstream invisibly. The work: audit every `Unknown`/`None`/default sentinel on the inference + resolution paths and split *legitimate* Unknown (meta-language `Any`, deliberate conservatism) from *error* Unknown (parse failure, missing annotation, unresolved ref), emitting a diagnostic for the latter.
-- **Swallowed errors.** `let _ =`, `.ok()`, `.ok()?` chains that drop error context, and no-op `Err(_) =>` arms — concentrated in the type-inference and LSP layers, where a parse/resolution *reason* is lost and the user sees only "type unknown." Triage the cases that hide a real, reportable failure.
-- **Panics & `unwrap()` debt.** ~1,800 `unwrap()`/`expect()` in production project-wide (per the 2026-05-17 codebase review — *up* from the post-March-audit baseline; `crates/smelt-cli/src/python.rs` alone holds ~125), plus genuine input-validation `panic!`s in `smelt-datagen` and `smelt-state/ddl_spark` that should be recoverable errors. Re-run the audit, convert recoverable panics to errors, and add a CI ratchet (e.g. a `clippy::unwrap_used` budget) so the count cannot silently climb again. Also finish the stalled `println!`→`tracing` migration (~237 `println!` remain).
-- **Divergent / duplicate implementations.** Logic implemented twice in parallel paths drifts apart. The largest case — the CLI vs `smelt-runtime` execute loops (schema-evolution checks, planner safety gate, `LogicalGraph`/`PhysicalGraph`) — is now closed by the completed CLI runtime-migration (see [Recently Completed](#recently-completed)): its `execute_parity` CI gate and `pub(crate)` compile-internals lockdown make future divergence a compile error rather than a review catch. Remaining straggler to single-source: `build_fn_body_map` vs `build_fn_body_map_from_model_files` (default-extraction logic duplicated across the Salsa and non-Salsa paths). The single-source invariants that currently *hold* — workspace loading, frontmatter parsing, seed/function/source discovery, the SQL compiler, the diagnostic gate — should stay that way.
-
-A fifth, lighter front — **surfacing deferred work that was never tracked** — lives in the [Deferred-Work Backlog](#deferred-work-backlog-untracked-follow-ups) section below: follow-ups left in `docs/plans/` that never reached the roadmap. The task there is to keep that catalogue current and triage items into the queue, not to resolve them here.
-
-**Plan**: [`docs/plans/20260608-silent-failures-hardening.md`](plans/20260608-silent-failures-hardening.md) — an 11-phase plan covering all four fronts: ratchet-first (freeze the `unwrap`/`println`/silent-`Unknown` debt at a CI baseline), then burn down the highest-value silent-`Unknown` sites with real diagnostics, swallowed errors, recoverable panics, and the `build_fn_body_map` single-source straggler.
-
-### 2. Type-System Axes — Decimal, Nullability, Collation, Timezone
+### 2. Type-System Axes — Collation
 
 smelt's type system tracks base types and NULL propagation structurally, but four axes are coarse or untracked. They are simultaneously (a) real-world correctness gaps and (b) the precision blocker for virtual environments — `output_fingerprint.md` lists decimal/collation/nullability among the untracked axes that force conservative rebuild. Covering them sharpens both, which is why they are sequenced immediately before Virtual Environments.
 
@@ -98,6 +89,17 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 ---
 
 ## Recently Completed
+
+### ~~Silent Failures & Code-Health Hardening~~ ✅ (June 10, 2026)
+
+Eleven-phase hardening plan ([plan](plans/20260608-silent-failures-hardening.md)) that made "fail loud, or handle it" a **tracked, ratcheted discipline** across four fronts:
+
+- **Front 1 (silent `Unknown`)** — Enumerated every `DataType::Unknown` construction site in production (~110 sites); classified each as `legitimate` or `error` in `.claude/unknown-census.toml`; converted the `error`-classified sites (worst case: `signatures.rs` struct-field parse failure) to emit real diagnostics (`UnknownStructFieldType` and others) instead of silently falling back to `Unknown`. New `docs/specs/diagnostics.md` documents the catalogue.
+- **Front 2 (swallowed errors)** — Triaged `let _ =`, `.ok()`, and no-op `Err(_) =>` arms in the type-inference and LSP layers; surfaced genuinely-reportable failures as diagnostics or `tracing::warn`; annotated legitimately-ignored results.
+- **Front 3 (panics / `unwrap` / `println!`)** — Converted the three input-driven `panic!`s in `smelt-datagen/src/generic.rs` to typed errors; annotated the seven internal-invariant guards in `smelt-db/src/diagnostics_types.rs`; gated library-crate `println!` at zero and migrated residual sites to `tracing`; paid down the worst production `unwrap` hotspots (`plan_printer.rs`, `smelt-backend-duckdb`, `smelt-db/src/lib.rs`).
+- **Front 4 (`build_fn_body_map` single-source)** — Collapsed the duplicated default-extraction logic in `smelt-runtime/src/fn_bodies.rs` into one private function; both the Salsa and non-Salsa entry points delegate to it; parity test asserts identical output.
+
+Durable CI gates now enforce the discipline: `unwrap`/`expect` and `println!` production counts frozen at `.claude/hardening-baseline.txt`; zero unresolved `error`-Unknown sites enforced by `cargo test -p smelt-types --test unknown_census`; zero library `println!` by `cargo test -p smelt-core --test hardening_budget::no_println_in_libraries`. Invariants landed in `CLAUDE.md` and `docs/specs/architecture.md`.
 
 ### ~~Feature Sweep / Bug Ledger — sweep complete~~ ✅ (June 8, 2026)
 
@@ -617,7 +619,7 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 
 **Functions / TableExpr**
 - `f(x).field` single-field projection + `..r` row-tail struct-spread descoped — no field-postfix on a function call; schema/codegen disagree on row-tail spread (`20260527-function_schema_inference.md`).
-- `build_fn_body_map` vs `build_fn_body_map_from_model_files` duplication (also called out in #1) (`20260519-functions-meta-1-call-expansion.md`).
+- ~~`build_fn_body_map` vs `build_fn_body_map_from_model_files` duplication~~ ✅ (2026-06-10, hardening Front 4).
 - Phase 57 deferred function tests: FROM-position aliasing, Spark struct-literal lowering, literal-`VALUES` models (`20260519-functions-meta-gaps.md`).
 
 **Meta-language**
