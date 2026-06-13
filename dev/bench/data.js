@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781258612135,
+  "lastUpdate": 1781311691851,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19175,6 +19175,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.377527,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a073390e3385899951bc22a9be9adaacd0e7648f",
+          "message": "fix(test): expand meta HOFs in whole-model test compiler\n\ncompile_whole_model_test_inner never called expand_in_model_meta, so\nreducer names like `and_all` in `reduce([...], and_all)` reached DuckDB\nverbatim and failed with \"Referenced column 'and_all' was not found\".\n\nAdd expand_in_model_meta (empty-vars context) after frontmatter stripping,\nmirroring what SqlCompiler::compile does on the build path. Covers HOFs,\nreducers, pipe, and meta-world ternary in smelt test.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T10:46:01+10:00",
+          "tree_id": "5a96817691c11a55525cca53bf63c5edd61b6261",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a073390e3385899951bc22a9be9adaacd0e7648f"
+        },
+        "date": 1781311690779,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 44.012072,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 41.647831,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.102996,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.632119,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.285548,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 2991.78573,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 5.770657,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 4.018135,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 4.005355000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.757347,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3311.241782,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.4753300000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.18193,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.212574,
             "unit": "ms"
           }
         ]
