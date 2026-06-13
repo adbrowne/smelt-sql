@@ -7,6 +7,7 @@
 //! References: docs/specs/sources.md §"Source YAML shape" and §"Filesystem layout"
 
 use crate::config::TimeseriesConfig;
+use crate::discovery::ModelDiscovery;
 use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
@@ -296,29 +297,16 @@ fn candidate_source_yaml_files(project_dir: &Path, paths: &[String]) -> Vec<(Pat
 pub fn discover_source_infos(project_dir: &Path, paths: &[String]) -> Vec<SourceInfo> {
     let mut sources = Vec::new();
 
-    for (root_dir, file_path) in candidate_source_yaml_files(project_dir, paths) {
+    for (_root_dir, file_path) in candidate_source_yaml_files(project_dir, paths) {
         // Parse the source YAML.
         let mut info = match parse_source_yaml(&file_path) {
             Ok(i) => i,
             Err(_) => continue, // surfaced via discover_source_errors
         };
 
-        let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
-        // Recompute address_segments with the full scan-root-stripped path.
-        let rel = file_path
-            .strip_prefix(&root_dir)
-            .expect("file is under root_dir");
-        let parent = rel.parent().unwrap_or(Path::new(""));
-        let mut address_segments: Vec<String> = parent
-            .components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                _ => None,
-            })
-            .collect();
-        address_segments.push(stem.to_string());
-        info.address_segments = address_segments;
+        // Address via the D-01 strip-list rule (shared with models/seeds).
+        info.address_segments =
+            ModelDiscovery::compute_address_segments(&file_path, project_dir, paths);
 
         sources.push(info);
     }

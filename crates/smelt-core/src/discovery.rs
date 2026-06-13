@@ -142,6 +142,21 @@ pub fn discover_function_file_paths(project_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Strip the first matching `paths:` prefix from a project-root-relative path.
+///
+/// This implements the D-01 addressing rule: `paths:` is a strip-list, not a scan
+/// gate. For a path relative to the project root (e.g. `models/staging/x.sql`) and
+/// `paths: ["models"]`, the result is `staging/x.sql`. If no prefix matches, the
+/// path is returned unchanged (preserving the full project-relative path).
+pub fn strip_paths_prefix<'a>(rel: &'a Path, paths: &[String]) -> &'a Path {
+    for prefix in paths {
+        if let Ok(stripped) = rel.strip_prefix(prefix.as_str()) {
+            return stripped;
+        }
+    }
+    rel
+}
+
 pub struct ModelDiscovery {
     project_root: PathBuf,
     paths: Vec<String>,
@@ -165,9 +180,6 @@ impl ModelDiscovery {
                 continue;
             }
 
-            // The scan root for address computation is project_root / model_path.
-            let scan_root = search_path.clone();
-
             // Recursively find all .sql files
             for entry in WalkDir::new(&search_path)
                 .follow_links(true)
@@ -178,9 +190,10 @@ impl ModelDiscovery {
 
                 if path.extension().and_then(|s| s.to_str()) == Some("sql") {
                     let mut parsed = self.parse_model_file(path)?;
-                    // Compute address_segments: path relative to scan_root,
-                    // parent directory components + leaf model name.
-                    let address_segments = Self::compute_address_segments(path, &scan_root);
+                    // Compute address_segments via the strip-list rule (D-01):
+                    // project-root-relative path with the first matching paths: prefix stripped.
+                    let address_segments =
+                        Self::compute_address_segments(path, &self.project_root, &self.paths);
                     for m in &mut parsed {
                         m.address_segments = address_segments.clone();
                         // For multi-model files, keep the model's declared name
@@ -204,22 +217,36 @@ impl ModelDiscovery {
         Ok(models)
     }
 
-    /// Compute address segments for a file at `path` with the given `scan_root`.
+    /// Compute address segments for a file at `path` using the D-01 strip-list rule.
     ///
-    /// For `models/staging/stg_events.sql` with `scan_root = models/`:
-    ///   dir_segments = ["staging"], leaf = file stem = "stg_events"
-    ///   → ["staging", "stg_events"]
-    pub fn compute_address_segments(path: &Path, scan_root: &Path) -> Vec<String> {
-        let Ok(rel) = path.strip_prefix(scan_root) else {
+    /// Algorithm:
+    /// 1. Strip `project_root` from `path` to get the project-relative path.
+    /// 2. Strip the first matching `paths:` prefix (`strip_paths_prefix`).
+    /// 3. Return parent-directory components + file stem as address segments.
+    ///
+    /// Examples under `paths: ["models"]`:
+    ///   `models/staging/stg_events.sql` → `["staging", "stg_events"]`
+    ///   `functions/helper.sql`          → `["functions", "helper"]`  (no match → full rel path)
+    ///   `foo.sql` (project root)        → `["foo"]`  (bare name)
+    ///
+    /// Pass `paths = &[]` for callers that want the full project-relative path with
+    /// no prefix stripping (e.g. `parse_sql_file` for function files).
+    pub fn compute_address_segments(
+        path: &Path,
+        project_root: &Path,
+        paths: &[String],
+    ) -> Vec<String> {
+        let Ok(rel) = path.strip_prefix(project_root) else {
             return Vec::new();
         };
-        let parent = rel.parent().unwrap_or(std::path::Path::new(""));
+        let stripped = strip_paths_prefix(rel, paths);
+        let parent = stripped.parent().unwrap_or(std::path::Path::new(""));
         let mut segs: Vec<String> = parent
             .components()
             .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
             .collect();
         // Leaf: file stem (will be replaced with model name for multi-model files).
-        if let Some(stem) = rel
+        if let Some(stem) = stripped
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_string())
@@ -289,7 +316,7 @@ pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<Model
                 .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
 
             let address_segments = scan_root
-                .map(|root| ModelDiscovery::compute_address_segments(path, root))
+                .map(|root| ModelDiscovery::compute_address_segments(path, root, &[]))
                 .unwrap_or_default();
 
             Ok(vec![ModelFile {
@@ -307,7 +334,7 @@ pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<Model
         Some(FileMetadata::Multi { models }) => {
             // Multi-model file: create one ModelFile per section
             let base_segments = scan_root
-                .map(|root| ModelDiscovery::compute_address_segments(path, root))
+                .map(|root| ModelDiscovery::compute_address_segments(path, root, &[]))
                 .unwrap_or_default();
 
             let mut result = Vec::with_capacity(models.len());
@@ -384,7 +411,7 @@ pub fn parse_sql_file(path: &Path, scan_root: Option<&Path>) -> Result<Vec<Model
             // (which may differ from the file stem if frontmatter declares
             // a `name:` override). Replace the file-stem leaf with the name.
             let address_segments = if let Some(root) = scan_root {
-                let mut segs = ModelDiscovery::compute_address_segments(path, root);
+                let mut segs = ModelDiscovery::compute_address_segments(path, root, &[]);
                 if let Some(last) = segs.last_mut() {
                     *last = name.clone();
                 }
@@ -634,10 +661,9 @@ SELECT 2 AS id
             .unwrap();
 
         // Simulate the segments that load_workspace computes for function
-        // files: scan_root = project_root, so we get the full path.
-        let scan_root = dir.path();
+        // files: project_root as root, no paths stripping → full workspace-relative path.
         let file_path = patterns_dir.join("sessionize.sql");
-        let segs = ModelDiscovery::compute_address_segments(&file_path, scan_root);
+        let segs = ModelDiscovery::compute_address_segments(&file_path, dir.path(), &[]);
         assert_eq!(segs, vec!["functions", "patterns", "sessionize"]);
 
         let mut model = ModelFile {
@@ -715,6 +741,80 @@ SELECT 2 AS id
             "daily_revenue",
             "canonical path leaf must be the file stem, not frontmatter name:"
         );
+    }
+
+    // ----- P1 address strip-list tests (D-01) --------------------------------
+
+    /// A file directly in the project root yields a single bare-name segment.
+    /// Spec: architecture.md §"Resolution" — root file → `smelt.<stem>`.
+    #[test]
+    fn address_root_level_file_is_bare_name() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("foo.sql");
+        std::fs::File::create(&file_path)
+            .unwrap()
+            .write_all(b"SELECT 1")
+            .unwrap();
+
+        let segs = ModelDiscovery::compute_address_segments(&file_path, dir.path(), &[]);
+        assert_eq!(segs, vec!["foo"]);
+    }
+
+    /// Under `paths: ["models"]`, a file inside the prefix gets the prefix
+    /// stripped; a file outside keeps its full project-relative path.
+    /// Spec: architecture.md §"Resolution" + smelt_yml.md §"Top-level keys" (Semantics 5).
+    #[test]
+    fn address_strips_only_configured_prefix() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path().join("models").join("marts");
+        let sources_dir = dir.path().join("sources").join("raw");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::create_dir_all(&sources_dir).unwrap();
+
+        let inside = models_dir.join("x.sql");
+        let outside = sources_dir.join("events.yml");
+        for p in [&inside, &outside] {
+            std::fs::File::create(p).unwrap().write_all(b"").unwrap();
+        }
+
+        let paths = vec!["models".to_string()];
+        let inside_segs = ModelDiscovery::compute_address_segments(&inside, dir.path(), &paths);
+        let outside_segs = ModelDiscovery::compute_address_segments(&outside, dir.path(), &paths);
+
+        assert_eq!(inside_segs, vec!["marts", "x"]);
+        assert_eq!(outside_segs, vec!["sources", "raw", "events"]);
+    }
+
+    /// With multiple `paths:` entries, each strips independently — two files with
+    /// the same stem in different `paths:` dirs resolve to the same address segments.
+    /// Spec: architecture.md §"Resolution" — multiple prefixes stripped independently.
+    #[test]
+    fn address_multi_prefix_independent_strip() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path().join("models");
+        let fixtures_dir = dir.path().join("fixtures");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+
+        let a = models_dir.join("users.sql");
+        let b = fixtures_dir.join("users.sql");
+        for p in [&a, &b] {
+            std::fs::File::create(p)
+                .unwrap()
+                .write_all(b"SELECT 1")
+                .unwrap();
+        }
+
+        let paths = vec!["models".to_string(), "fixtures".to_string()];
+        let segs_a = ModelDiscovery::compute_address_segments(&a, dir.path(), &paths);
+        let segs_b = ModelDiscovery::compute_address_segments(&b, dir.path(), &paths);
+
+        // Both strip to the same leaf — the collision that DuplicateAddress catches
+        assert_eq!(segs_a, vec!["users"]);
+        assert_eq!(segs_b, vec!["users"]);
     }
 
     /// A generator file (`generates: models` frontmatter) whose filename does

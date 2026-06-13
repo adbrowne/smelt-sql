@@ -21,6 +21,7 @@ pub use error::SeedError;
 pub use sidecar::{parse_sidecar, SeedMaterialization, SeedSidecar, SidecarColumn};
 pub use validate::{validate_against_sidecar, ValidationError};
 
+use crate::discovery::ModelDiscovery;
 use anyhow::Context;
 use infer::infer_columns;
 use smelt_types::DataType;
@@ -121,18 +122,9 @@ pub fn discover_seed_infos_strict(
                     .to_string_lossy()
                     .into_owned();
 
-                let rel = path
-                    .strip_prefix(&seed_dir)
-                    .expect("path is under seed_dir");
-                let parent = rel.parent().unwrap_or(std::path::Path::new(""));
-                let mut address_segments: Vec<String> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                        _ => None,
-                    })
-                    .collect();
-                address_segments.push(name.clone());
+                // Address via the D-01 strip-list rule (shared with models/sources).
+                let address_segments =
+                    ModelDiscovery::compute_address_segments(&path, project_dir, paths);
 
                 // Strict sidecar reading: propagate parse errors (unlike the
                 // lenient LSP path which silently ignores them).
@@ -200,19 +192,9 @@ fn discover_seed_infos_impl(
                     .to_string_lossy()
                     .into_owned();
 
-                // Compute address_segments: path from scan-root to leaf.
-                let rel = path
-                    .strip_prefix(&seed_dir)
-                    .expect("path is under seed_dir");
-                let parent = rel.parent().unwrap_or(std::path::Path::new(""));
-                let mut address_segments: Vec<String> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                        _ => None,
-                    })
-                    .collect();
-                address_segments.push(name.clone());
+                // Address via the D-01 strip-list rule (shared with models/sources).
+                let address_segments =
+                    ModelDiscovery::compute_address_segments(&path, project_dir, paths);
 
                 // Try to read the sidecar YAML (same stem, same directory, .yml extension).
                 let sidecar = if read_sidecars {
