@@ -50,15 +50,21 @@
 # still resolve to a real file. The loop ignores it.
 # ─────────────────────────────────────────────────────────────────────────────
 
-master_plan: docs/plans/20260530-feature-sweep.md
-active_subplan: docs/plans/20260530-feature-sweep.md
+# ACTIVE (2026-06-13): the spec-remediation implementation backlog. The
+# 2026-06-12/13 spec review resolved 58 decisions (docs/research/20260613-spec-remediation-decisions.md)
+# and committed them to 28 specs; this master sequences the code work into
+# dependency-ordered waves and is a PURE REMEDIATION backlog (no probe rows).
+# Only the current wave's sub-plan is registered at a time (just-in-time
+# scaffolding); when the loop reports <<MASTER_EXHAUSTED>> a human scaffolds the
+# next wave via /smelt:plan and adds its registry row.
+master_plan: docs/plans/20260613-spec-impl.md
+active_subplan: docs/plans/20260613-w1-resolve-addressing.md
 
-# Back-compat aliases (older fresh-context flows read these names). In probe mode
-# they mirror master_plan (the in-repo probe backlog); the across-session probe
-# routine lives in the meta-plan ~/.claude/plans/we-now-have-a-idempotent-torvalds.md.
-in_repo_plan: docs/plans/20260530-feature-sweep.md
-meta_plan: docs/plans/20260530-feature-sweep.md
+# Back-compat aliases (older fresh-context flows read these names) — mirror the
+# active master + sub-plan.
+in_repo_plan: docs/plans/20260613-spec-impl.md
+meta_plan: docs/plans/20260613-spec-impl.md
 
-# Completed sub-plans (rolled up): docs/plans/20260531-diagnostic-parity.md (done 2026-06-03),
-# docs/plans/20260604-frontmatter-parity.md (done 2026-06-04),
-# docs/plans/20260604-codegen-soundness.md (done 2026-06-05).
+# PAUSED: docs/plans/20260530-feature-sweep.md (the bug-hunting feature sweep).
+# Its registry sub-plans are all done; its probe rows D1–D8 are all done. To
+# resume probe scanning later, repoint master_plan back to it.

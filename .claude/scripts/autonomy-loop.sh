@@ -83,8 +83,8 @@
 # Stop the loop manually: Ctrl-C. The current Claude iteration will
 # finish naturally; the next iteration will not start.
 #
-# Logs: ${HOME}/.claude/logs/feature-sweep/iter-<ts>-<n>.log
-#       ${HOME}/.claude/logs/feature-sweep/iter-<ts>-<n>.memory.log
+# Logs: ${HOME}/.claude/logs/spec-impl/iter-<ts>-<n>.log
+#       ${HOME}/.claude/logs/spec-impl/iter-<ts>-<n>.memory.log
 # Each iteration's full stdout+stderr is captured for post-hoc review,
 # alongside a periodic memory snapshot (free, top RSS processes, parent
 # cgroup memory.current / memory.peak) so the next systemd-oomd kill has
@@ -96,7 +96,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-LOG_DIR="${HOME}/.claude/logs/feature-sweep"
+# Currently active: the spec-remediation implementation backlog
+# (docs/plans/20260613-spec-impl.md via .claude/active-plan).
+LOG_DIR="${HOME}/.claude/logs/spec-impl"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
