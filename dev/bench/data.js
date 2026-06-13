@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781311693978,
+  "lastUpdate": 1781334040148,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19269,6 +19269,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.212574,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b2c0ec2150ceaba57af2953c7136f47b6b5d5672",
+          "message": "docs(research): spec corpus review — all 30 specs, verified (#137)\n\n* docs(research): add partial spec-corpus review report (17/30 specs)\n\nDraft output of a multi-agent review of docs/specs/ across three\ndimensions (solution quality, clarity, correctness/consistency).\nCovers the 17 specs that completed full single-spec review; 14\nCritical findings spot-checked against spec text by hand. Cross-spec\nclusters, adversarial verification, and the completeness critic are\npending (resume the spec-corpus-review workflow to complete).\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n\n* docs(research): complete spec-corpus review (all 30 specs, verified)\n\nFull multi-agent review across 38 units (22 solo specs, 3 pairs,\nmeta_language in 5 slices, 5 cross-spec clusters, diagnostics-registry\n/ architecture-invariants / ownership agents) with adversarial\nverification (131 confirmed, 29 adjusted, 3 refuted) and a completeness\ncritic.\n\nResult: 26 Critical, 117 Major, 131 Minor, 8 Nit. The cross-spec pass\nsurfaced the most severe class — dangling references to undefined\nprimitives (merge_into, ColumnTypeUnresolved), spec-vs-spec\ncontradictions (nullability, Tier return types, seed loader), and an\narchitectural-invariant conflict (smelt-logical ownership). Includes\ncritic-identified coverage gaps and recommended follow-up passes.\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T16:58:57+10:00",
+          "tree_id": "431fea60138f3158b7bde34e7dab042f878f052c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b2c0ec2150ceaba57af2953c7136f47b6b5d5672"
+        },
+        "date": 1781334039132,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 44.160883,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 41.892664,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.028696,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.611649,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.289515,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 2997.947457,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 5.739226,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 4.0461409999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 4.129987,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.850699,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3311.605647,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.864210000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.471000000000004,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.24047,
             "unit": "ms"
           }
         ]
