@@ -1,7 +1,7 @@
 ---
 feature: meta_language
 status: experimental
-last_reviewed: 2026-05-16
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -114,7 +114,7 @@ Three built-in meta-functions, called as ordinary positional calls:
 | `filter` | `(xs: List<T>, p: Lambda<T, Boolean>) -> List<T>` | sub-list of `xs` (in original order), keeping every `xs[i]` for which `p(xs[i])` is `TRUE` |
 | `reduce` | `(xs: List<T>, r)` where `r` is a bare reducer identifier from the closed registry. Result sort: the reducer's declared output. | single fragment of the reducer's declared output sort |
 
-The HOF names `map`, `filter`, `reduce` are reserved — they resolve only to the built-in HOF; a `smelt.define` declared with one of these names emits `HofNameShadowed` at the declaration. HOFs accept exactly two positional arguments and zero named arguments. The lambda's parameter type is unidirectionally inferred from the HOF's `T` per `types.md` §"Bidirectional checking"; the body is checked under that binding.
+The HOF names `map`, `filter`, `reduce` are reserved — they resolve only to the built-in HOF; a `smelt.define` declared with one of these names emits `HofNameShadowed` at the declaration. HOFs accept exactly two positional arguments and zero named arguments; a named argument (`name => value`) emits `HofNamedArgument` at the named-argument span, regardless of whether the supplied value would otherwise be a valid lambda or reducer (the dedicated named-arg code fires before any kind check, so a lambda passed by name is still rejected). The `HofExpects*` codes are reserved for wrong-*kind* positional arguments. The lambda's parameter type is unidirectionally inferred from the HOF's `T` per `types.md` §"Bidirectional checking"; the body is checked under that binding.
 
 A HOF call carrying a non-`Lambda` second argument (for `map`/`filter`) emits `HofExpectsLambda`. A `reduce` call whose second argument is anything other than a bare reducer identifier from the closed registry emits `HofExpectsReducer` at the second-argument span. A lambda whose body type cannot satisfy the HOF's required result shape (e.g. `filter` requires `Lambda<T, Boolean>`) emits `LambdaResultTypeMismatch` anchored at the body expression.
 
@@ -131,8 +131,9 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 | `LambdaZeroParameters` | `fn () => body` — empty parameter list | `lambda must declare at least one parameter` |
 | `LambdaDuplicateParameter` | the same parameter name appears twice in one lambda's parameter list | `parameter `{name}` already appears in this lambda's parameter list` |
 | `LambdaResultTypeMismatch` | lambda body type incompatible with HOF's required result shape | `{hof} requires lambda result {expected}; found {actual}` |
-| `HofExpectsLambda` | second argument to `map`/`filter` is not a `Lambda<…>` | `{hof} expects a lambda; found {actual type}` |
-| `HofExpectsReducer` | second argument to `reduce` is not a registered reducer | `reduce expects a reducer; found {actual}` |
+| `HofExpectsLambda` | second argument to `map`/`filter` is not a `Lambda<…>` (wrong **kind**) | `{hof} expects a lambda; found {actual type}` |
+| `HofExpectsReducer` | second argument to `reduce` is not a registered reducer (wrong **kind**) | `reduce expects a reducer; found {actual}` |
+| `HofNamedArgument` | a `map`/`filter`/`reduce` call carries a named argument (`name => value`) | `{hof} takes positional arguments only; named arguments are not supported` |
 | `HofNameShadowed` | a `smelt.define` function declared with name `map`, `filter`, or `reduce` | `{name} is a reserved higher-order function name` |
 
 #### LSP support for lambdas and HOFs
@@ -155,7 +156,7 @@ LHS |> f(args...)   ≡   f(LHS, args...)
 
 - New token `|>` added to the lexer (distinct from `||` SQL string concatenation; the lexer must lex `||` before `|>` to avoid mis-tokenisation).
 - Left-associative: `a |> b(p) |> c(q)` ≡ `c(b(a, p), q)`.
-- Lower precedence than every other meta-language operator (`...`, function call, field access). Higher precedence than `;` (statement separator) — pipe never crosses a statement boundary.
+- Lower precedence than every other meta-language operator **except spread (`...`)** (function call, field access). The spread operator `...` is the outermost (lowest-precedence) operator, so it applies *after* a pipe chain: `...smelt.columns_of(smelt.orders) |> map(fn c => c.name)` parses as `...(smelt.columns_of(smelt.orders) |> map(fn c => c.name))` — the list is built and transformed by the pipe, then spread, with no parentheses required. Higher precedence than `;` (statement separator) — pipe never crosses a statement boundary.
 - The RHS of `|>` must syntactically be a call expression (a function call: `f(args)`, `smelt.<path>(args)`, or a HOF). A non-call RHS (`x |> y`, `x |> 3 + 4`) emits `PipeRhsNotCall` at the RHS span.
 - Pipe is meta-world only: both LHS and RHS evaluate at compile time. The Data-World grammar reserves no use for `|>`, so a pipe in a Data-World position (e.g. inside a `WHERE` predicate) parses and is then rejected by the splice-context check with `PipeInDataPosition`.
 - A pipe expression's evaluated type and value equal the type and value of the equivalent un-piped call; pipe is purely sugar.
@@ -324,15 +325,20 @@ A meta-only accessor that returns the column list of a `TableExpr`-valued meta v
 
 #### `ColumnRef` meta record type
 
-`ColumnRef` is a closed meta-only record type with three fields:
+`ColumnRef` is a closed meta-only record type with these fields:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `name` | `Text` | The column's identifier as it appears in the source schema (un-quoted; case-preserved) |
-| `type` | `DataType` (meta literal) | The column's `DataType` from `types.md` §"`DataType` vocabulary" |
+| `type` | `DataType` (meta literal) | The column's `DataType` from `types.md` §"`DataType` vocabulary". Equality (`c.type == T`) is **exact structural equality including type parameters** (see §Semantics — "Reflection: `smelt.columns_of`, `ColumnRef`, identifier lift" rule 4). |
 | `is_numeric` | `Boolean` | `TRUE` iff `type` is in the `Numeric` constraint set per `types.md` §"Type constraints" |
+| `is_decimal` | `Boolean` | `TRUE` iff `type`'s head constructor is `Decimal(_, _)`, irrespective of precision/scale |
+| `is_string` | `Boolean` | `TRUE` iff `type`'s head constructor is in the string family (`Text` / `Varchar(_)` / `Char(_)`) |
+| `is_temporal` | `Boolean` | `TRUE` iff `type`'s head constructor is in the temporal family (`Date` / `Timestamp` / `TimestampTz` / `Time`) |
+| `is_integer` | `Boolean` | `TRUE` iff `type`'s head constructor is an integer type, irrespective of width |
+| `is_boolean` | `Boolean` | `TRUE` iff `type` is `Boolean` |
 
-Field access uses dot-notation (`c.name`, `c.type`, `c.is_numeric`). Field access on any other identifier emits `ColumnRefFieldUnknown` at the field span. `ColumnRef` is **closed**: the field set is exactly these three fields. Adding a field requires a spec edit and a compiler change; the registry pattern matches the closed reducer registry.
+The head-constructor predicates (`is_decimal` … `is_boolean`) exist so a user can test "any `Decimal`" without spelling out precision/scale, since `==` is exact. Field access uses dot-notation (`c.name`, `c.type`, `c.is_numeric`, `c.is_decimal`, …). Field access on any other identifier emits `ColumnRefFieldUnknown` at the field span. `ColumnRef` is **closed**: the field set is exactly these fields. Adding a field requires a spec edit and a compiler change; the registry pattern matches the closed reducer registry.
 
 `ColumnRef` is meta-only. It is not user-writable as a `smelt.define` parameter or return type, not a list element type users construct in literals, and not a value that reaches the database engine. The internal `SmeltType` witness behind `ColumnRef` is unspeced at the user surface; users never write `Record<{name: Text, type: DataType, is_numeric: Boolean}>` and never need to. The user-writable record surface (`smelt.record Name = { … }`) is a separate construct that does not retroactively expose `ColumnRef`'s structure.
 
@@ -345,7 +351,7 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 | `ColumnsOfRequiresTableExpr` | `smelt.columns_of(x)` whose `x` synthesises to a type not assignable to `TableExpr` | `smelt.columns_of expects TableExpr; found {actual}` |
 | `ColumnsOfNamedArgument` | `smelt.columns_of` called with a named argument | `smelt.columns_of takes one positional argument; named arguments are not supported` |
 | `ColumnsOfUnresolvableSchema` | At expansion time, `smelt.columns_of(t)` whose `t` resolves to an `Unknown` schema | `cannot resolve column list for {t}; upstream schema is unknown` |
-| `ColumnRefFieldUnknown` | Field access on a `ColumnRef` value with an identifier outside the closed field set | `ColumnRef has no field {name}; expected one of: name, type, is_numeric` |
+| `ColumnRefFieldUnknown` | Field access on a `ColumnRef` value with an identifier outside the closed field set | `ColumnRef has no field {name}; expected one of: name, type, is_numeric, is_decimal, is_string, is_temporal, is_integer, is_boolean` |
 
 #### LSP support for reflection
 
@@ -353,7 +359,7 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 - **Hover** on a `ColumnRef`-typed binding (a lambda parameter inside a `columns_of` HOF chain) shows `ColumnRef` plus the closed field list with each field's type.
 - **Hover** on a field projection `c.name` / `c.type` / `c.is_numeric` shows the field's declared type (and, when the projection is reached at expansion time over a resolvable list, its concrete value at the current call site).
 - **Goto-definition** on `smelt.columns_of` resolves to the reference page (URL hint, graceful no-op when the client lacks support).
-- **Completion** at a field-projection site (`c.<cursor>`) offers the closed field list (`name`, `type`, `is_numeric`).
+- **Completion** at a field-projection site (`c.<cursor>`) offers the closed field list (`name`, `type`, `is_numeric`, `is_decimal`, `is_string`, `is_temporal`, `is_integer`, `is_boolean`).
 - **Completion** at a `smelt.columns_of(<cursor>)` argument position offers in-scope `TableExpr`-valued names (`smelt.<path>` references and the enclosing function's `TableExpr` parameters).
 - **Diagnostics with frame stacks**: a type error inside a HOF lambda body whose source list comes from `smelt.columns_of(t)` carries the anonymous frame plus an optional `column_origin` field on the per-element entry, recording the source column's declaration span when statically traceable. The `expansion.md` anonymous-frame contract registers this extension.
 
@@ -363,8 +369,8 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 | Accessor | Signature | Returns |
 |---|---|---|
-| `smelt.models.with_tag` | `smelt.models.with_tag(tag: Text) -> List<ModelRef>` | Every model whose merged tag set (frontmatter `tags:` ∪ `smelt.yml` `models.<name>.tags`, deduplicated per `crates/smelt-core/src/config.rs::Config::get_tags`) contains `tag`, sorted ascending by `path`. |
-| `smelt.models.all` | `smelt.models.all() -> List<ModelRef>` | Every model in the workspace, sorted ascending by `path`. |
+| `smelt.models.with_tag` | `smelt.models.with_tag(tag: Text) -> List<ModelRef>` | Every model whose merged tag set (frontmatter `tags:` ∪ `smelt.yml` `models.<name>.tags`, deduplicated per `crates/smelt-core/src/config.rs::Config::get_tags`) contains `tag`, sorted ascending by `path` then `name`. |
+| `smelt.models.all` | `smelt.models.all() -> List<ModelRef>` | Every model in the workspace, sorted ascending by `path` then `name`. |
 
 `smelt.models` is a closed accessor namespace; the set is exactly the two accessors above. A reference to an unknown accessor (`smelt.models.bogus()`) emits `WideReflectionUnknownAccessor` at the accessor name span. Named arguments to `with_tag` emit `WithTagNamedArgument` at the named-argument span. An argument to `with_tag` whose evaluated type is not assignable to compile-time `Text` emits `WithTagRequiresText` at the argument expression. The argument's value must be a compile-time-resolvable `Text` (string literal, `smelt.config.var(...)` result, or any meta-`Text` expression); a runtime `Expr<Text>` argument emits `WithTagRequiresText`. `smelt.models.all` accepts no arguments; any positional or named argument emits `WideReflectionUnexpectedArgument` at the offending argument's span.
 
@@ -372,8 +378,8 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 | Accessor | Signature | Returns |
 |---|---|---|
-| `smelt.sources.with_tag` | `smelt.sources.with_tag(tag: Text) -> List<SourceRef>` | Every source whose declared `tags:` set (from the source's YAML declaration per `crates/smelt-core/src/config.rs`) contains `tag`, sorted ascending by `path`. |
-| `smelt.sources.all` | `smelt.sources.all() -> List<SourceRef>` | Every source in the workspace, sorted ascending by `path`. |
+| `smelt.sources.with_tag` | `smelt.sources.with_tag(tag: Text) -> List<SourceRef>` | Every source whose declared `tags:` set (from the source's YAML declaration per `crates/smelt-core/src/config.rs`) contains `tag`, sorted ascending by `path` then `name`. |
+| `smelt.sources.all` | `smelt.sources.all() -> List<SourceRef>` | Every source in the workspace, sorted ascending by `path` then `name`. |
 
 `smelt.sources` is a closed accessor namespace with the same disposition as `smelt.models`. Diagnostic codes are shared (`WithTagRequiresText`, `WithTagNamedArgument`, `WideReflectionUnknownAccessor`, `WideReflectionUnexpectedArgument`); the message text substitutes "sources" for "models" where appropriate.
 
@@ -697,6 +703,8 @@ A meta-`Text` value spliced into a position where the Data-World SQL grammar exp
 
 In **any other position** — function arguments where the parameter sort is `Expr<Text>`, comparison operands typed `Text`, string-literal positions, named-argument values — a meta-`Text` retains its string-value meaning. The lift is grammar-position-driven, not user-annotated; there is no inverse cast and no opt-in marker.
 
+**Carve-out: `ModelRef`/`SourceRef` `name`/`path`.** Wide-reflection `Text` from `m.name` / `m.path` / `s.name` / `s.path` is a **data value**, not a column name, and is **excluded** from the lift even in the four positions above: in a column-reference, AS-alias, ORDER BY, or GROUP BY position it renders as a SQL **string literal**, never as a bare identifier (see §Semantics — "Reflection: `smelt.models`, `smelt.sources`, `ModelRef`, `SourceRef`" rule 8). `ColumnRef.name`, by contrast, is a column name and does lift.
+
 A lifted identifier is then re-validated against the surrounding splice context's column-resolution scope per `scoping.md`'s standard column-resolution rule. A lifted identifier naming a column not in the surrounding scope emits the existing `UndeclaredColumn` diagnostic at the lifted identifier's source span (the meta expression's CST node, not the lifted text).
 
 The lift applies **only to compile-time meta-`Text` values**, not to runtime `Expr<Text>` values. A runtime `Expr<Text>` (e.g. `UPPER('foo')`) in an identifier position remains a Data-World type error per existing splice-context rules; the meta lift does not extend to evaluated SQL expressions.
@@ -762,7 +770,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
    - `map(xs, f)`: produces a new `List<U>` of length `len(xs)`, with element `i` equal to the result of applying `f` to `xs[i]`. Evaluation walks `xs` left-to-right exactly once; the lambda body is type-checked once (parametrically), evaluated once per element. Order is preserved.
    - `filter(xs, p)`: produces a sub-list of `xs` (in original order) keeping element `i` if and only if `p(xs[i])` evaluates to `TRUE`. The predicate body must synthesise to `Boolean`; a synthesised `Unknown` propagates per `gradual_typing.md` and the element is dropped (with no error) if the predicate is `Unknown`. Order is preserved.
    - `reduce(xs, r)`: produces a single fragment of the reducer's declared output sort. The reducer is fully resolved at type-check time from the closed registry; the second argument is a bare reducer identifier (not a value-bearing expression).
-   - All three HOFs require exactly two positional arguments and zero named arguments. A HOF call with named arguments emits `HofExpectsLambda` or `HofExpectsReducer` at the offending argument expression.
+   - All three HOFs require exactly two positional arguments and zero named arguments. A HOF call with a named argument (`name => value`) emits the dedicated `HofNamedArgument` at the named-argument span — *not* `HofExpectsLambda`/`HofExpectsReducer`, which are reserved for a positional argument of the wrong *kind*. The named-arg check fires before the kind check, so a lambda or reducer passed by name is still rejected (closing the silent-accept hole where a named arg that happened to be a lambda produced no diagnostic).
 
 5. **HOF inline expansion frame.** When a diagnostic surfaces from inside a HOF lambda body, the diagnostic carries an **anonymous expansion frame** identifying the HOF and the source-list element index when known. The frame's shape per `expansion.md`'s extended `FrameInfo` contract: `function = "<hof name>"`, `fn_id = None` (no declaration site), `decl_path = None`, `decl_range = None`, `call_site_range = span_of(HOF call)`, plus an optional `element_index` field naming the source list index whose evaluation produced the inner error. The `expansion.md` anonymous-frame contract registers this form; the frame is producible but the LSP renderer currently reads only the call-site range.
 
@@ -819,7 +827,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
    - If `COND` evaluates to `FALSE`, evaluate `ELSE_EXPR`; `THEN_EXPR` is *not* evaluated under the same suppression rule.
    - The short-circuit rule lets users write `if m.has(k) then m.get(k) else default` without `MapGetMissingKey` firing on the unreached branch.
 
-4. **`Unknown` propagation.** If `COND` synthesises to `Unknown` (e.g. its evaluation surfaced a `ConfigVarNotFound` or a `MapGetMissingKey`), the ternary's evaluated value is `Unknown` and **both** branches are type-checked but neither is evaluated. The surrounding expression's drop-on-error policy governs follow-on diagnostics.
+4. **`Unknown` propagation.** If `COND` synthesises to `Unknown` (e.g. its evaluation surfaced a `ConfigVarNotFound` or a `MapGetMissingKey`), the ternary's evaluated value is `Unknown` and **both** branches are type-checked but neither is evaluated. The surrounding expression's drop-on-error policy governs follow-on diagnostics. A **deferred** boolean — specifically `m.has(k)` with a non-statically-known key (§"Maps" rule 4) — does **not** collapse `COND` to `Unknown`: it stays a `Boolean` meta-value whose resolution is deferred to expansion time, so the short-circuit rule (rule 3) still governs and `if m.has(k) then m.get(k) else default` works for dynamic keys, not only static ones. `Unknown`-collapse is reserved for `COND` evaluations that *fail* (a surfaced diagnostic), not for ones that merely *defer*.
 
 5. **No new scope.** The ternary introduces no binding and no scope. Identifiers referenced inside `COND`, `THEN_EXPR`, and `ELSE_EXPR` resolve against the surrounding context's scope unchanged. The construct is a value expression, not a statement.
 
@@ -844,9 +852,13 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 4. **`ColumnRef` field projection.** Inside any context where a `ColumnRef`-typed value is in scope (a lambda parameter bound by a HOF over `List<ColumnRef>`), the dot-notation `c.<field>` synthesises the declared field's type:
    - `c.name : Text` (a meta-`Text` value)
-   - `c.type : DataType` (a meta literal — comparable for equality, usable in checks like `c.type == Integer`; not user-writable in Data-World annotations per `types.md`)
+   - `c.type : DataType` (a meta literal — not user-writable in Data-World annotations per `types.md`)
    - `c.is_numeric : Boolean`
+   - The head-constructor predicates `c.is_decimal`, `c.is_string`, `c.is_temporal`, `c.is_integer`, `c.is_boolean : Boolean` — each `TRUE` iff `c.type`'s head constructor is in the named family, irrespective of type parameters (e.g. `c.is_decimal` is `TRUE` for any `Decimal(p, s)`).
+
    Any other field name emits `ColumnRefFieldUnknown` at the field span.
+
+   **`c.type` equality is exact structural equality, including type parameters.** `c.type == T` (comparing a `DataType` meta-literal `T`) is `TRUE` iff `c.type` and `T` are the *same* `DataType` constructor with the *same* parameters: `c.type == Decimal(10, 2)` matches only `Decimal(10, 2)`, not `Decimal(18, 4)`; `c.type == Integer` matches only `Integer`. To test "any `Decimal`" (any precision/scale) use the head-constructor predicate `c.is_decimal`, not `==`. The exact-equality choice keeps `==` precise; the predicates supply the family-level test. (Note: the `DataType`-literal comparison surface is normative-but-unlanded — `c.type` currently returns `Unknown`, so `c.type == Integer` silently degrades today; see §"Known Divergences" — "`ColumnRef.type` field projection currently returns `Unknown`". Readers must not treat `c.type == Integer` as working yet.)
 
 5. **`ColumnRef` ordering.** The `List<ColumnRef>` produced by `smelt.columns_of(t)` preserves the source schema's declared column order. For models, sources, and seeds this is the order columns appear in their schema declaration. For function `TableExpr` parameters at expansion time this is the order columns appear in the call-site argument's schema.
 
@@ -866,7 +878,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 1. **Wide-reflection accessors are Salsa-cached pure functions of workspace state.** `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` are Salsa queries reading the `Workspace` singleton input (per `crates/smelt-db/src/lib.rs`'s existing `all_models` and `project_sources` queries). Re-evaluation across two runs over the same workspace input produces byte-equal results — list contents, ordering, and per-element field values are deterministic.
 
-2. **Ordering.** `with_tag` and `all` return lists sorted ascending by `path`. Path comparison is byte-lexicographic on the workspace-relative path string with `/` separators. The order is observable by users; row order in a `reduce(union_all)` over a wide-reflection result follows this order.
+2. **Ordering.** `with_tag` and `all` return lists sorted ascending by `path`, then ascending by `name` as a tiebreaker. Both comparisons are byte-lexicographic — `path` on the workspace-relative path string with `/` separators, `name` on the model/source identifier. The `name` tiebreaker is load-bearing for determinism: generator-co-emitted models share one generator-file `path` (rule 9; §"Multi-model production" rule 7), so `path` alone is non-unique and `name` restores a total, byte-equal order. This rule is authoritative for all wide-reflection ordering; every Surface entry and §"Multi-model production" rule 7 defer to it. The order is observable by users; row order in a `reduce(union_all)` over a wide-reflection result follows this order.
 
 3. **`with_tag` tag matching.** A model matches `smelt.models.with_tag(tag)` iff its merged tag set (frontmatter `tags:` ∪ `smelt.yml` `models.<name>.tags`, deduplicated by `Config::get_tags`) contains `tag` by exact string equality. A source matches `smelt.sources.with_tag(tag)` iff the source YAML's `tags:` list contains `tag` by exact string equality. No case-folding, no glob matching, no prefix matching.
 
@@ -880,7 +892,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 7. **Field projection.** Inside any context where a `ModelRef`-typed value is in scope (a lambda parameter bound by a HOF over `List<ModelRef>`), the dot-notation `m.<field>` synthesises the declared field's type. Inside any context where a `SourceRef`-typed value is in scope, the same applies. Any field name outside the closed four-field set emits `ModelRefFieldUnknown` / `SourceRefFieldUnknown` at the field span.
 
-8. **Identifier lift carries through `ModelRef.name` and `ModelRef.path` only at the four enumerated lift positions.** `m.name` and `m.path` are meta-`Text` values; in one of the four lift positions (column-reference, AS-alias, ORDER BY column-reference, GROUP BY column-reference) they lift to identifiers per §"Reflection: `smelt.columns_of`, `ColumnRef`, identifier lift" rule 6. The `FROM`-clause splice that consumes a `ModelRef` as a `TableExpr` goes through the `ModelRef <: TableExpr` subtyping rule, **not** through the identifier-lift path; the lift positions table is not extended by wide reflection.
+8. **`ModelRef.name` / `ModelRef.path` are data values, not lifted identifiers.** `m.name`, `m.path` (and the `SourceRef` equivalents) are meta-`Text` values that name a model or its source file — a *data value*, not a column reference. They are **not** subject to the four-position identifier lift: in a column-reference, AS-alias, ORDER BY, or GROUP BY position they render as a SQL **string literal** (the same value the Build-path note renders), never as a bare identifier. This carves wide-reflection `Text` out of the lift table in §"Meta-`Text`-as-identifier lift" — a model name is rarely an in-scope column, and treating it as data avoids accidental identifier injection. (Column-name `Text` from `ColumnRef.name` still lifts per rule 6; the carve-out is specific to `ModelRef`/`SourceRef` `name`/`path`.) The `FROM`-clause splice that consumes a `ModelRef` as a `TableExpr` goes through the `ModelRef <: TableExpr` subtyping rule, **not** through the identifier-lift path; the lift positions table is not extended by wide reflection.
 
 9. **Wide-reflection-sourced HOF frames, `model_origin` extension.** The anonymous expansion frame (`function = "<hof>"`, `fn_id = None`, optional `element_index`) is extended for wide-reflection-sourced lists with an additional optional field `model_origin` (or `source_origin` for `smelt.sources.*`-sourced lists): the source `path` and the frontmatter declaration span when statically traceable. When a diagnostic surfaces from inside a HOF lambda body whose source list came from `smelt.models.*` / `smelt.sources.*`, the frame carries this provenance. The `expansion.md` anonymous-frame contract registers this extension as the wide-reflection sibling of `column_origin`.
 
@@ -927,7 +939,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
    - `m.keys()` materialises a `List<K>` whose elements are the entry keys in sorted order.
    - `m.values()` materialises a `List<V>` whose elements are the entry values in the order their keys sort.
    - `m.get(k)` is a single keyed lookup. Statically-known `k` present → value typed `V`; statically-known `k` absent → `MapGetMissingKey` at the call expression, evaluation `Unknown`; non-statically-known `k` → call type `V`, evaluation deferred to expansion time. The argument's type must be assignable to `K`; mismatch emits `MapApiArgTypeMismatch`.
-   - `m.has(k)` is a single keyed presence check; the result type is always `Boolean`. The argument's type rule matches `m.get`. Static-key resolution returns the boolean directly; non-static keys defer to expansion time.
+   - `m.has(k)` is a single keyed presence check; the result type is always `Boolean`. The argument's type rule matches `m.get`. Static-key resolution returns the boolean directly; non-static keys defer to expansion time but the result **remains a `Boolean` meta-value** — a deferred `has` never resolves to `Unknown`. Consequently, when `m.has(k)` is the condition of a ternary (§"Meta-world ternary" rule 4), it does not collapse the ternary to `Unknown`; the short-circuit defaulting pattern `if m.has(k) then m.get(k) else default` works for dynamic keys.
 
 5. **Closed Map API.** The five method names `entries`, `keys`, `values`, `get`, `has` are the entire Map surface in v1. A method call `m.<other>(…)` emits `MapApiUnknown`. The closed-set diagnostic mirrors `ColumnRefFieldUnknown` and `ModelRefFieldUnknown`. Future Map methods (`map_values`, `merge`, `filter_keys`) require a spec edit and a compiler change.
 
@@ -954,22 +966,24 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
    The pipeline is Salsa-cached: each stage is incrementally re-evaluated on workspace input changes. An edit to a generator's body invalidates that generator's W2 result and any W3 collision check that depends on it; the downstream W4 type-check is invalidated only for models that reference the changed generator's emissions.
 
-5. **Determinism.** Generator evaluation is deterministic: same workspace input → same emitted models (byte-equal `ModelDef.body` CST, identical field values, identical emitted-path set). The single-pass W1–W4 ordering makes the rule structural — generators cannot observe each other's emissions, so there is no fixed-point iteration and no ordering ambiguity beyond the lexicographic collision tie-break.
+   **Interleaving with Python models.** The W1–W4 pass governs how SQL generators relate to *each other* within a single evaluation: they cannot observe each other's emissions inside the pass (hence the W2 `smelt.models.*` forbid). It does **not** stand alone — SQL generators and Python `@model` generators run in **one combined, fully-interleaved fixed-point loop**, defined authoritatively in `python_models.md` §"Iterative evaluation". Across the combined loop's bounded rounds, the W1–W4 pass re-runs each round against the growing model set, so a SQL generator's literal `smelt.<path>` references can resolve to Python-derived models from a prior round, and Python `find_models` observes SQL-generator emissions. The combined loop terminates when the model set stabilises across the bounded rounds, ties broken by `path` then `name` (the wide-reflection order, rule 2); non-stabilisation is the combined loop's circular-dependency condition. The within-pass "generators cannot observe each other" rule and the cross-language "generators do observe each other across rounds" rule are not in tension: the former is intra-round and intra-language, the latter is inter-round.
+
+5. **Determinism.** Generator evaluation is deterministic: same workspace input → same emitted models (byte-equal `ModelDef.body` CST, identical field values, identical emitted-path set). Within a single W1–W4 pass, SQL generators cannot observe each other's emissions, so there is no intra-pass fixed-point iteration and no ordering ambiguity beyond the lexicographic collision tie-break. When the pass participates in the combined cross-language fixed-point with Python models (rule 4 — "Interleaving with Python models"), determinism across rounds is preserved by the combined loop's fixed `path`-then-`name` evaluation order and byte-equal stabilisation criterion (`python_models.md` §"Iterative evaluation").
 
 6. **`ModelDef.body` evaluation context.** The `body` field's value is a `TableExpr`-typed expression evaluated at record-literal construction time. The surrounding scope is the generator body's scope: lambda parameters bound by the enclosing HOF (a `fn e => ModelDef { body: ... }` body sees `e` as a value), the loader-resolved record values, and the standard meta-language outer-scope names. Identifiers inside the SQL body resolve through the standard splice-context rules; meta values consumed at SQL splice points lift per the existing meta/Data-World rules (the four-position identifier lift, `Expr<T>` splice rules). The body is type-checked under the same regime as a hand-authored model's body — including reference resolution against the workspace's hand-authored models and sources — once the surrounding `ModelDef`'s `name` is statically bound.
 
 7. **Emitted-model `smelt.<path>` resolution.** A generator-emitted model is reachable through the standard `smelt.<path>` resolution machinery in `crates/smelt-db/src/queries/project.rs`. The corresponding `ModelRef` value carries:
 
-   - `path`: workspace-relative file path of the **generator** file (not a per-emission virtual path).
+   - `path`: workspace-relative file path of the **generator** file (not a per-emission virtual path). This field is *provenance* — it records which generator produced the model, and N co-emitted models deliberately share one `path`.
    - `name`: the `ModelDef.name` value.
    - `tags`: the `ModelDef.tags` value, merged with any `smelt.yml` `models.<emitted_name>.tags` overlays per `Config::get_tags`.
    - `columns`: the model's column list, derived from `ModelDef.body`'s synthesised schema.
 
-   The model participates in all reflection accessors (`smelt.models.with_tag`, `smelt.models.all`) on equal terms with hand-authored models. `smelt.models.all` returns the union of hand-authored and generator-emitted models, sorted ascending by `path` then by `name` (the `name` is the tiebreaker when multiple `ModelRef` values share a generator-file `path`).
+   Because `ModelRef.path` is shared provenance rather than a unique key, every **path-keyed operation** (uniqueness/collision checking, dedup, goto-definition) keys on the model's own **per-emission `smelt.<path>` address** — derived from the emitted model's name and directory prefix per `architecture.md` §"Resolution" — not on the generator-file `path`. Goto-definition on an emitted `ModelRef` resolves through that per-emission address. The model participates in all reflection accessors (`smelt.models.with_tag`, `smelt.models.all`) on equal terms with hand-authored models. `smelt.models.all` returns the union of hand-authored and generator-emitted models, sorted per the authoritative wide-reflection ordering rule (§"Reflection: `smelt.models`, `smelt.sources`, `ModelRef`, `SourceRef`" rule 2): ascending by `path`, then by `name` as the tiebreaker when multiple `ModelRef` values share a generator-file `path`.
 
 8. **Generator-body reflection forbid.** `GeneratorBodyForbidsModelReflection` is emitted at every `smelt.models.with_tag` / `smelt.models.all` call inside a generator body, regardless of whether the call would resolve cleanly against the hand-authored-only set. The forbid is structural, not dependency-based, to keep the W2 phase order simple and to give users a clear, anchored diagnostic that points at a forward-compatible refactor (use `smelt.sources.*` or literal `smelt.<path>` references).
 
-9. **Termination.** Generator evaluation terminates structurally: each generator's body evaluates once (HOF rules apply for any lambda chains within it); the emission set per generator is finite (bounded by the body's `List<ModelDef>` length); collision checks are O(N) in workspace size. No fixed-point iteration.
+9. **Termination.** A single W1–W4 pass terminates structurally: each generator's body evaluates once (HOF rules apply for any lambda chains within it); the emission set per generator is finite (bounded by the body's `List<ModelDef>` length); collision checks are O(N) in workspace size — no fixed-point iteration *within* the pass. When the pass runs inside the combined cross-language fixed-point with Python models (rule 4), termination is bounded by that loop's round cap (`python_models.md` §"Iterative evaluation"), which errors on non-convergence.
 
 10. **Cross-file evaluation order.** Generator files evaluate in workspace-relative path order (byte-lexicographic) for the purposes of collision tie-breaking under `ModelDefHandAuthoredCollision`. Each generator is otherwise independent and evaluable in parallel; the order is observable only at the collision boundary.
 
@@ -1055,7 +1069,7 @@ The exception is `meta_config_loading.md` — the file-loading family is large e
 
 **Why `ColumnRef` is a closed record.** Research §4.8 sketched `ColumnRef` as a meta-only type with `name`, `type`, `is_numeric` accessors. Two alternatives were considered: (i) expose `ColumnRef` as a `Record<{…}>` instance (anticipating the record surface) and let users do generic record operations on it; (ii) keep `ColumnRef` as an opaque type with a closed accessor set. Option (i) entangles reflection with the user-writable record surface (which has its own design uncertainties) and leaks the per-field representation into a stable user surface; option (ii) is the closed-registry pattern that worked for reducers. The closed surface keeps reflection self-contained and matches the `LambdaInForbiddenPosition` discipline — an internal type with a narrowly-typed surface, expanded only when concrete demand arises.
 
-**Why `c.is_numeric` is a derived field rather than `c.type.is_numeric`.** The latter requires elevating `DataType` to a meta value with method-call surface (`Integer.is_numeric`), which is a substantial type-system change with no reflection-stage use case. The former is a single accessor whose semantics are pinned by `types.md` §"Type constraints" — the spec rule "is_numeric iff `type` ∈ Numeric constraint set" tells the user exactly what they get. Adding `is_ordered`, `is_temporal`, etc. follows the same pattern when concrete demand arises; the closed-registry contract makes the addition explicit.
+**Why `c.is_numeric` and the head-constructor predicates are derived fields rather than `c.type.is_numeric`.** The latter requires elevating `DataType` to a meta value with method-call surface (`Integer.is_numeric`), which is a substantial type-system change with no reflection-stage use case. The former is a single accessor whose semantics are pinned by `types.md` §"Type constraints" — the spec rule "is_numeric iff `type` ∈ Numeric constraint set" tells the user exactly what they get. The head-constructor predicates (`is_decimal`, `is_string`, `is_temporal`, `is_integer`, `is_boolean`) follow the same pattern: each is a derived boolean over `c.type`'s head constructor, supplying the "any `Decimal`" family test that exact-equality `==` deliberately does not. Adding further predicates (`is_ordered`, etc.) follows the same pattern when concrete demand arises; the closed-registry contract makes the addition explicit.
 
 **Why the meta-`Text`-as-identifier lift is narrow.** Research §8 noted that `c.name` in `COALESCE(c.name, 0) AS c.name` plays both as a column reference and an identifier alias, and that the crossing rule needs adversarial testing. The narrow rule — lift in exactly four enumerated grammar positions (column-reference, AS-alias, ORDER BY, GROUP BY) — is the smallest commitment that handles the `coalesce_numeric` worked example without committing to a general `Text → identifier` cast. Wider rules considered: (i) lift everywhere a syntactic identifier could appear (CTE names, table aliases, function names) — rejected because it gives users an implicit lift in positions they don't expect, and the resulting Jinja-style "string-becomes-anything" surface defeats the type-system guarantees; (ii) require an explicit `as_identifier(c.name)` cast — rejected because it adds friction at the most common use case (per-column SELECTs in HOF bodies) without payback. The narrow rule is the dial that can widen later under concrete pressure; widening is a spec edit with named additions to the lift positions table.
 
