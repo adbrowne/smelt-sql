@@ -113,11 +113,16 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 ### Track A — systemic sweeps
 | Sweep | Status | Specs touched | Commit | Date |
 |-------|--------|---------------|--------|------|
-| A1 owned-until-lands | pending | | | |
-| A2 call-path spelling | pending | | | |
-| A3 workspace→project | pending | | | |
+| A1 owned-until-lands | done | functions, gradual_typing, incremental_models, planner_integration, scoping, types | c7704007 | 2026-06-13 |
+| A2 call-path spelling | done | diagnostics, lsp | 1932a62a | 2026-06-13 |
+| A3 workspace→project | done | diagnostics, lsp | 23f9511a | 2026-06-13 |
 | A4 template conformance | pending | | | |
 | A5 registry reconcile (edit-only part) | pending | | | |
+
+> **Carried to Track C (decisions surfaced during sweeps):**
+> - `DuplicateFunctionDefinition` scope — directory vs project vs workspace (functions.md name-uniqueness finding); A3 left it scope-neutral. → Theme 6.
+> - A4 References format: flat-bullet vs nested `### Code`/`### Tests` across 17 specs is a `design-decision-needed`. → Theme 2.
+> - A5 code-existence questions (does `ColumnTypeUnresolved` / `UnknownSmeltPath` fire?) → Theme 2.
 
 ### Track C — decision document
 | Step | Status | Artifact | Date |
