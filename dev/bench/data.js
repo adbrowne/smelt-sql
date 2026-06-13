@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781311691851,
+  "lastUpdate": 1781311693978,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25187,6 +25187,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.096267792993423,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a073390e3385899951bc22a9be9adaacd0e7648f",
+          "message": "fix(test): expand meta HOFs in whole-model test compiler\n\ncompile_whole_model_test_inner never called expand_in_model_meta, so\nreducer names like `and_all` in `reduce([...], and_all)` reached DuckDB\nverbatim and failed with \"Referenced column 'and_all' was not found\".\n\nAdd expand_in_model_meta (empty-vars context) after frontmatter stripping,\nmirroring what SqlCompiler::compile does on the build path. Covers HOFs,\nreducers, pipe, and meta-world ternary in smelt test.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T10:46:01+10:00",
+          "tree_id": "5a96817691c11a55525cca53bf63c5edd61b6261",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a073390e3385899951bc22a9be9adaacd0e7648f"
+        },
+        "date": 1781311693403,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.409583325701714,
             "unit": "MB/s"
           }
         ]
