@@ -57,10 +57,11 @@ Owned by `docs/specs/models.md` and the core analysis queries in
 | `InvalidModel` | Error | The model's frontmatter or structure violates a structural rule. |
 | `MalformedSectionDelimiter` | Error | A multi-model section header (`--- name: model_name ---`) is malformed, or SQL content appears before the first section delimiter in a multi-model file. |
 | `UnclosedFrontmatter` | Error | A frontmatter block opened with `---` (or a `--- name: … ---` section header) is missing its closing `---`. |
-| `UndefinedModelRef` | Error | A `smelt.ref()` or `smelt.<path>` call resolves to a model that does not exist in the project. |
-| `UndefinedSource` | Error | A `smelt.source()` or `smelt.<path>` call resolves to a source that does not exist. |
+| `UndefinedModelRef` | Error | A `smelt.<path>` reference in value position resolves to nothing. This is the **default** code for a bare unresolved `smelt.<path>` — when no entity exists at the path, the intended kind is unknowable, so the generic model-ref code fires. |
+| `UndefinedSource` | Error | A `smelt.<path>` reference resolves to a *source* declaration that is itself missing or invalid (reserved for the source-resolution case; the bare-unresolved case is `UndefinedModelRef`). |
 | `CannotInferType` | Error | The type of a column or expression cannot be inferred from context. |
 | `UndeclaredColumn` | Error | A column name referenced in a query is not present in the inferred schema. |
+| `ColumnTypeUnresolved` | Error | A column's type degrades to `Unknown` for a compiler-resolvable reason rather than a genuinely dynamic one (e.g. a `smelt.functions.*`-derived column the schema rules cannot type). Fires at the projection that produced it. Owned by `function_schema_inference.md` (schema-propagation rules) and `types.md` (the `Unknown` reason-discriminant). |
 | `TypeMismatch` | Error | A column's inferred type does not match the expected type in a join or reference. |
 | `CircularDependency` | Error | The model dependency graph contains a cycle. |
 | `UnsupportedConstruct` | Error | A SQL construct is syntactically valid but not supported by smelt's analysis. |
@@ -172,7 +173,7 @@ Owned by `docs/specs/functions.md`.
 | `MissingArgument` | Error | A `smelt.<path>(…)` call omits a required parameter (one without a default value). |
 | `ArgTypeMismatch` | Error | A `smelt.<path>(…)` call passes an argument whose type does not satisfy the declared parameter's `TypeConstraint`. |
 | `ExternCollidesWithBuiltin` | Error | A `smelt.extern` declares a name that already exists in the built-in registry. |
-| `BackendsWideningNotAllowed` | Error | A `smelt.define`'s `backends:` set is broader than what the body implies, or the frontmatter itself is malformed. |
+| `BackendsWideningNotAllowed` | Error | A `smelt.define`'s `backends:` set is broader than what the body implies. (Malformed frontmatter is not this code's concern — it routes to `FrontmatterParseError`.) |
 | `FrontmatterParseError` | Error/Warning | A `smelt.define` or `smelt.extern` frontmatter YAML block could not be parsed (Error) or contained an unknown key/malformed sub-entry (Warning). |
 | `WindowInScalarContext` | Error | A window-function expression appears in a splice point that only accepts scalar/aggregate expressions (e.g. WHERE, GROUP BY). |
 | `ParameterShadowsColumn` | Warning | An `Expr<T>`-kinded parameter name overlaps a column in a sibling `TableExpr`-kinded parameter's schema. |
@@ -193,6 +194,8 @@ Owned by `docs/specs/functions.md`.
 | `JoinsMismatch` | Error | A function's declared `joins:` entry names a table that does not appear as a join alias in the body's outermost FROM clause. |
 | `DeclaredCardinalityUnverifiable` | Warning | A declared join has a non-empty `cardinality` field; cardinality is trusted, not verified against data. |
 | `MissingProvenancePushdownAdvisory` | Hint | A transparent function is called from a SELECT with a WHERE clause but the function lacks declared provenance (which would enable filter pushdown). |
+
+> **Ownership of the four planner-validation codes.** `ProvenanceMismatch`, `JoinsMismatch`, `DeclaredCardinalityUnverifiable`, and `MissingProvenancePushdownAdvisory` are **owned by `planner_integration.md`** — the planner consumes `provenance:`/`joins:` declarations and emits these during plan validation. `functions.md` owns only the *grammar* of those frontmatter keys. They are listed here (rather than under a separate group header) because they sit beside the function-frontmatter codes that share their inputs.
 | `ExternFragmentParamUnsupported` | Error | A `smelt.extern` declaration has a parameter whose type is a fragment sort (`SelectItems`, `OrderSpec`); fragment-sort params require PASSING clauses which `smelt.extern` does not support. |
 | `DefaultReferencesParameter` | Error | A `smelt.define` default expression references another parameter in the same signature. |
 | `UnknownStructFieldType` | Error | A `smelt.define` or `smelt.extern` parameter or return-type annotation has a `Struct<{…}>` shape whose field type text cannot be parsed as a recognised `DataType`. Anchored at the individual field's `TYPE_REF` span. |

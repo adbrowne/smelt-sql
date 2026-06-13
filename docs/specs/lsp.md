@@ -1,7 +1,7 @@
 ---
 feature: lsp
 status: experimental
-last_reviewed: 2026-06-05
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -52,11 +52,16 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 
 #### Severity levels
 
-| Severity | LSP Level | When used |
-|----------|-----------|-----------|
-| Error | `ERROR` | Parse errors, undefined references, type mismatches, missing required sources |
-| Warning | `WARNING` | Undeclared columns, ambiguous unqualified references, deprecated constructs |
-| Hint | `HINT` | Advisory diagnostics (e.g., suggest declaring provenance) |
+Each diagnostic's severity is owned by the `diagnostics.md` catalogue, not re-declared here. The LSP only maps the catalogue severity onto an LSP level:
+
+| Severity (from `diagnostics.md`) | LSP Level |
+|----------|-----------|
+| Error | `ERROR` |
+| Warning | `WARNING` |
+| Info | `INFORMATION` |
+| Hint | `HINT` |
+
+The LSP must not assign a code a different severity than the catalogue gives it — a code's Error/Warning status is load-bearing (the CLI build gates on `Error`), so a single source of truth keeps the two surfaces consistent.
 
 #### Diagnostic categories
 
@@ -68,7 +73,7 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `InvalidModel` — model file cannot be parsed at all
 
 **References:**
-- `UnknownSmeltPath` — a `smelt.<path>` reference does not resolve to any project entity (no file at that path, or the file resolves to a non-addressable kind). Mirrors `UnknownSmeltFn` from `functions.md` for the call form. The diagnostic message is kind-aware on the *expected* kind at the use site (a missing `FROM smelt.<path>` referent reports "model, seed, or source"; a missing `smelt.<path>(...)` call reports "function") so user-facing messages stay specific without a code split.
+- `UndefinedModelRef` / `UndefinedSource` — a `smelt.<path>` reference in value position does not resolve to any project entity. `UndefinedModelRef` is the default for a bare unresolved `smelt.<path>` (the intended kind is unknowable when nothing exists at the path); `UndefinedSource` is reserved for a reference that resolves to a *source* declaration that is itself missing or invalid. (For a call form `smelt.<path>(...)` that resolves to no function, `UnknownSmeltFn` fires — see `functions.md`.) The diagnostic message is kind-aware on the *expected* kind at the use site (a missing `FROM smelt.<path>` referent reports "model, seed, or source") so user-facing messages stay specific.
 - `KindMismatch` — entity used in the wrong context (e.g., a test model in a FROM clause)
 - `CircularDependency` — model dependency graph contains a cycle
 - `CteCycle` — CTE references itself directly or transitively
@@ -244,7 +249,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 
 | Action | Trigger | What it does |
 |--------|---------|--------------|
-| Create model from ref | Cursor on an `UnknownSmeltPath` diagnostic where the expected kind is a model | Generates a SQL file skeleton at the resolved path |
+| Create model from ref | Cursor on an `UndefinedModelRef` diagnostic | Generates a SQL file skeleton at the resolved path |
 | Fix undefined ref | Cursor on parse/ref error | Offers text edit to correct the reference |
 | Add column to source YAML | Cursor on undeclared source column | Inserts column declaration into the resolved per-entity source `.yml` |
 | Extract CTE | Cursor on subquery expression | Extracts subquery into a named CTE in the WITH clause |
@@ -282,7 +287,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 - **Hover on CTEs not implemented.** Hover resolves `smelt.<path>` references but not CTE names or column references.
 - **Find-references for columns not implemented.** Find References resolves model/source/seed paths, function paths, and CTEs, but not column names. Column rename works (it walks the dependency graph), but surfacing all uses of a column without renaming is not supported.
 - **Find-references gaps for other identifier kinds.** The following kinds support go-to-definition but not find-references and are tracked for future work: table aliases (intra-file), lambda parameters (intra-lambda), Python `@model` functions (would return SQL `smelt.<path>` call sites), and `smelt.columns_of` / `smelt.models.*` / `smelt.sources.*` accessor call paths.
-- **`UnknownSmeltPath` vs. code split.** This spec says the implementation uses a single `UnknownSmeltPath` code with a kind-aware message. The actual code (`crates/smelt-db/src/lib.rs`) instead has two separate codes: `UndefinedModelRef` (unresolved model/seed reference) and `UndefinedSource` (unresolved source reference). The spec should be updated to match the split, or the codes should be consolidated.
+- **Unresolved-reference codes.** Unresolved `smelt.<path>` value references use the two catalogued codes `UndefinedModelRef` (the default for a bare unresolved path) and `UndefinedSource` (a reference resolving to a missing/invalid source); unresolved call forms use `UnknownSmeltFn` (`functions.md`). There is no `UnknownSmeltPath` code. The kind-aware *message* is still produced from the use-site's expected kind, but the *code* follows the resolver's classification.
 - **Diagnostic code ownership.** The full `DiagnosticCode` catalogue — every variant, its severity, and its trigger — is maintained in `docs/specs/diagnostics.md`. The LSP surfaces every catalogued code; ownership and stability tiers are documented there.
 
 ## References

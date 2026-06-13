@@ -1,7 +1,7 @@
 ---
 feature: function_schema_inference
 status: experimental
-last_reviewed: 2026-05-28
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -87,7 +87,7 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ## Known Divergences / Open Questions
 
-- **`ColumnTypeUnresolved` is reserved and not yet minted; the no-silent-`Unknown` invariant is enforced at the declaration instead.** The function-derived inference gaps that previously produced silent unknowns are closed — struct-spread `.*` expansion, `TableExpr` schema propagation through CTEs/subqueries, and nested-call body CTEs all resolve — so a column produced by a *well-formed* function signature never resolves to `Unknown`. The one remaining way a function contributes an `Unknown` column is a *malformed* signature: an unrecognized type name nested in the return annotation (e.g. a struct field type). That is a declaration defect and is reported at its origin via `InvalidFunctionTypeRef` (`functions.md` §Semantics 8), which makes the caller's column `Propagated` and correctly silent — so no call-site `ColumnTypeUnresolved` is needed for it. `ColumnTypeUnresolved` therefore has no trigger today and stays reserved for a future genuinely caller-specific unresolvable case (a well-formed signature a particular call still cannot type); it will be minted when such a case exists. Tracked in `docs/plans/20260528-struct-field-type-validation.md` (declaration-side enforcement) and `docs/plans/20260527-function_schema_inference.md` (deferral history).
+- **`ColumnTypeUnresolved` is a live, catalogued code; its emission is not yet wired.** The code is normative and catalogued in `diagnostics.md`: it fires at a projection whose contributed column type the rules below cannot resolve from a present, well-formed signature (the schema-layer instance of the no-silent-`Unknown` rule). In practice the function-derived inference gaps that previously produced silent unknowns are closed — struct-spread `.*` expansion, `TableExpr` schema propagation through CTEs/subqueries, and nested-call body CTEs all resolve — so a column produced by a *well-formed* function signature does not resolve to `Unknown` today. The one remaining way a function contributes an `Unknown` column is a *malformed* signature (an unrecognized type name nested in the return annotation, e.g. a struct field type); that is a declaration defect reported at its origin via `InvalidFunctionTypeRef` (`functions.md` §Semantics 8), which makes the caller's column `Propagated` and correctly silent. The residual case the code names — a well-formed signature a particular call still cannot type — does not yet arise, so emitting `ColumnTypeUnresolved` for it is a remaining implementation gap to close when such a case appears (Track D-misc), not a reserved/unminted code. Tracked in `docs/plans/20260528-struct-field-type-validation.md` (declaration-side enforcement) and `docs/plans/20260527-function_schema_inference.md` (history).
 - **Single-field projection `smelt.functions.<f>(...).field` is not supported.** The parser has no field-postfix syntax on a function call — only `.*` exists via `SMELT_PATH_CALL_STAR`. To access a single field, project the whole struct with `.*` and reference the field downstream. Tracked in `docs/plans/20260527-function_schema_inference.md`.
 - **Row-tail (`..r`) struct returns are not expanded by `.*` at the schema layer.** Only closed `Expr<Struct<{f1: T1, …, fN: TN}>>` returns (no tail marker) are expanded. A row-tail return contributes zero columns from the spread at the schema layer; the `.*` passes through to generated SQL verbatim until codegen and schema expansion are unified. Tracked in `docs/plans/20260527-function_schema_inference.md`.
 
@@ -99,7 +99,7 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 - `crates/smelt-db/src/queries/schema.rs` — `SalsaRefSchemaProvider::resolve_smelt_path_call_schema` / `resolve_table_ref_schema` (`TableExpr` FROM-schema resolution), `typed_model_schema` / `resolved_model_schema` (model output schema, row extensions)
 - `crates/smelt-db/src/function_body_check.rs` — `infer_tableexpr_return_schema`, `register_join_alias_schemas`, `extract_function_body_cte_schemas`
 - `crates/smelt-cli/src/lib.rs` — `init_db` (function discovery into the workspace; parity invariant 3)
-- `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface (`ColumnTypeUnresolved` to be minted)
+- `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface (`ColumnTypeUnresolved` catalogued; emission gap tracked in Known Divergences)
 
 ### Tests
 
