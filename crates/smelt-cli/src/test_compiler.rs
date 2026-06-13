@@ -433,6 +433,16 @@ fn compile_whole_model_test_inner(
     fn_bodies: Option<&FnBodyMap>,
 ) -> Result<String, String> {
     let clean = smelt_parser::strip_frontmatter(model_sql);
+    // Apply compile-time meta-language expansion (HOFs, reduce, pipe,
+    // ternary, config vars) before codegen — mirroring SqlCompiler::compile.
+    // Without this, `reduce([…], and_all)` reaches DuckDB verbatim and fails
+    // with "Referenced column 'and_all' was not found because the FROM clause
+    // is missing" (config vars left verbatim: absent vars are no-ops).
+    let empty_vars = std::collections::BTreeMap::new();
+    let clean = smelt_runtime::meta_eval::expand_in_model_meta(
+        &clean,
+        &smelt_runtime::meta_eval::MetaEvalContext::vars_only(&empty_vars),
+    );
     let parse = smelt_parser::parse(&clean);
     let file = AstFile::cast(parse.syntax()).ok_or("Failed to parse model SQL")?;
 
@@ -967,6 +977,25 @@ GROUP BY u.user_id
         assert!(
             result.contains("users AS"),
             "listed dep 'users' must be present; got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compile_whole_model_reduce_hof_expanded() {
+        // Regression: reduce([true,false,true], and_all) must be expanded to
+        // (true) AND (false) AND (true) before execution. Without
+        // expand_in_model_meta the reducer name reaches DuckDB verbatim and
+        // fails with "Referenced column 'and_all' was not found".
+        let model_sql = "SELECT reduce([true, false, true], and_all) AS all_true";
+        let inputs = BTreeMap::new();
+        let result = compile_whole_model_test(model_sql, &inputs, None).unwrap();
+        assert!(
+            result.contains("AND"),
+            "reduce(and_all) must be expanded to AND fold; got:\n{result}"
+        );
+        assert!(
+            !result.contains("and_all"),
+            "and_all reducer name must not appear in final SQL; got:\n{result}"
         );
     }
 
