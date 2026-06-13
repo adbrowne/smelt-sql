@@ -46,7 +46,7 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| P1 | Addressing: `paths:` as strip-list; address = rel-to-root minus prefix; root file → bare name | pending | D-01 (addr), D-05 (addr) | feat(core): address = project-relative path with paths-prefix stripped (D-01) | |
+| P1 | Addressing: `paths:` as strip-list; address = rel-to-root minus prefix; root file → bare name | done | D-01 (addr), D-05 (addr) | feat(core): address = project-relative path with paths-prefix stripped (D-01) | 2026-06-13 |
 | P2 | Universal discovery: walk every non-excluded subdir, kind by content; functions anywhere; seeds/sources project-wide | pending | D-01 (disc), D-05 (disc) | feat(core): project-wide discovery by file kind, no scan-root gate (D-01, D-05) | |
 | P3 | `schema` optional, default `main` | pending | D-04 | feat(core): default target schema to `main` when omitted (D-04) | |
 | P4 | `DuplicateEmittedName` emitted-name collision diagnostic | pending | D-02 | feat(db): enforce emitted (schema,table) uniqueness via DuplicateEmittedName (D-02) | |
