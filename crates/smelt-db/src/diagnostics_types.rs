@@ -711,6 +711,15 @@ pub enum DiagnosticCode {
     /// (arithmetic) or UNION keyword span (UNION coercion). The result type
     /// degrades to Unknown.
     DecimalPrecisionOverflow,
+    /// Emitted when portable code declares or uses a non-binary collation on a
+    /// string (§17). Non-binary collations (case-insensitive, accent-insensitive,
+    /// locale-aware) are not in the portable surface: `Binary` (`COLLATE "C"`,
+    /// `COLLATE BINARY`, `COLLATE UTF8_BINARY`, `COLLATE POSIX`) is the only
+    /// cross-engine collation. Anchored at the `COLLATE` clause span. Recovery:
+    /// the expression type degrades to `Unknown` (reason `Unresolved`). The user
+    /// must compare byte-wise (the default binary collation) or declare an engine
+    /// on the model to use the engine's native collation.
+    NonPortableCollation,
 }
 
 /// Structured metadata attached to diagnostics for code actions

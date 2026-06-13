@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
+    BinaryExpr, CaseExpr, CastExpr, CollateExpr, Cte, Expr, ExtractExpr, FunctionCall,
+    RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
@@ -20,6 +20,13 @@ use super::*;
 
 pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColumn> {
     let text = expr.text().trim().to_string();
+
+    // Try COLLATE expression (§17 — binary collation passes through; non-binary → Unknown).
+    // The diagnostic for non-binary collations is emitted separately by
+    // `check_collation_diagnostics` in `lib.rs::check_file_diagnostics`.
+    if let Some(collate_expr) = expr.as_collate() {
+        return super::collation::infer_collate_expr_type(&collate_expr, ctx);
+    }
 
     // Try CAST expression first
     if let Some(cast_expr) = expr.as_cast() {

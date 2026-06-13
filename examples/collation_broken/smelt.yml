@@ -1,0 +1,13 @@
+name: collation_broken
+version: 1
+
+paths:
+  - models
+
+default_materialization: view
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main

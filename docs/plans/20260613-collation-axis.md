@@ -58,10 +58,10 @@ You are executing this plan from the start of a new session. Your job is to driv
 
 ## Progress tracking
 
-| Phase | Status   | Commit | Date |
-|-------|----------|--------|------|
-| 1     | pending  |        |      |
-| 2     | pending  |        |      |
+| Phase | Status   | Commit | Date       |
+|-------|----------|--------|------------|
+| 1     | done     |        | 2026-06-13 |
+| 2     | pending  |        |            |
 
 ---
 
@@ -121,7 +121,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 - `examples/` — positive binary-string fixture.
 
 **Docs touched.**
-- `docs/specs/types.md` — Known Divergences: update the "Collation tracking is not yet implemented" entry to reflect that the **portable binary-only contract is now enforced** (`NonPortableCollation`), while the value-domain `DataType` field, engine-bound native collation, the Postgres `COLLATE "C"` emission pin (until the Postgres backend), and the fingerprint fold remain deferred. Flip the §Constraints "Standing collation gate" from "after the collation plan lands" to active, naming the test.
+- `docs/specs/types.md` — the Known Divergences entry was already reconciled when Phase 1 landed (so no commit ever contradicts the code); Phase 2 only flips the §Constraints "Standing collation gate" from "after the collation plan lands" to active, naming the test.
 - `docs-site/docs/...` — extend the Phase 1 note with the binary-comparison guarantee (portable string ops produce identical results on every engine).
 
 **Review checklist** (material findings only):

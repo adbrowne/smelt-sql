@@ -3483,3 +3483,87 @@ fn types_broken_crossfamily_add_emits_type_mismatch() {
 fn d3_meta_fn_config_generator_without_gen_suffix_no_diagnostics() {
     check_workspace_no_diagnostics("examples/d3_meta_fn_config");
 }
+
+// ===== §17 Collation TDD tests =====
+
+/// §17 TDD: `examples/collation_clean/` produces zero diagnostics.
+///
+/// The model uses `COLLATE "C"` — a binary (portable) collation — so no
+/// `NonPortableCollation` diagnostic should fire.
+#[test]
+fn collation_clean_workspace() {
+    check_workspace_no_diagnostics("examples/collation_clean");
+}
+
+/// §17 TDD: `examples/collation_broken/` — `models/non_binary_collation.sql`
+/// uses `COLLATE NOCASE` and must produce exactly one `NonPortableCollation`
+/// Error diagnostic and no other diagnostics.
+#[test]
+fn collation_broken_non_binary() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+
+    let example_dir = "examples/collation_broken";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let models = discovery.discover_models().unwrap();
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut all_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            all_diags.push(d.clone());
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            all_diags.push(d.0.clone());
+        }
+    }
+
+    let collation_diags: Vec<_> = all_diags
+        .iter()
+        .filter(|d| d.code == Some(smelt_db::DiagnosticCode::NonPortableCollation))
+        .collect();
+
+    assert_eq!(
+        collation_diags.len(),
+        1,
+        "expected exactly 1 NonPortableCollation diagnostic in {example_dir}; got {}:\n  {}",
+        all_diags.len(),
+        all_diags
+            .iter()
+            .map(|d| format!("[{:?}] {:?}: {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        collation_diags[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "NonPortableCollation must be Error severity"
+    );
+    assert_eq!(
+        all_diags.len(),
+        1,
+        "collation_broken must emit exactly 1 diagnostic total (no extra diagnostics); got {}:\n  {}",
+        all_diags.len(),
+        all_diags
+            .iter()
+            .map(|d| format!("[{:?}] {:?}: {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}

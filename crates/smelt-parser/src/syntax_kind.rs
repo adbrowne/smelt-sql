@@ -90,6 +90,7 @@ pub enum SyntaxKind {
     LIKE_KW,
     ILIKE_KW,
     EXTRACT_KW,
+    COLLATE_KW,
 
     // Contextual keywords (lexed as IDENT, recognized by parser contextually)
     // These variants exist for the enum but are never produced by the lexer.
@@ -208,6 +209,7 @@ pub enum SyntaxKind {
     STRUCT_LITERAL,      // STRUCT(a, b, c)
     ROW_CONSTRUCTOR,     // ROW(1, 2, 3)
     EXTRACT_EXPR,        // EXTRACT(field FROM expr)
+    COLLATE_EXPR,        // expr COLLATE collation_name
     ANY_EXPR,            // ANY(expr) / ALL(expr) / SOME(expr)
     WITHIN_GROUP_CLAUSE, // WITHIN GROUP (ORDER BY ...)
     FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
@@ -414,6 +416,7 @@ impl SyntaxKind {
                 | LIKE_KW
                 | ILIKE_KW
                 | EXTRACT_KW
+                | COLLATE_KW
         )
     }
 

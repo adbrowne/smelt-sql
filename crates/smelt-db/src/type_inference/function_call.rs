@@ -299,7 +299,7 @@ const REGISTRY_MIGRATED: &[&str] = &[
     // the legacy match below.
     "DATE",
     "CURRENT_DATE",
-    "NOW",            // registry: () → Timestamp{with_timezone:true} (§16)
+    "NOW",               // registry: () → Timestamp{with_timezone:true} (§16)
     "CURRENT_TIMESTAMP", // same as NOW
 ];
 
