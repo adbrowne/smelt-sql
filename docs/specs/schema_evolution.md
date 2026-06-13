@@ -87,8 +87,8 @@ The `columns:` frontmatter map (full shape: see `models.md` §"`columns:` — co
 
 | Key | Description |
 |-----|-------------|
-| `default` | SQL literal used as the DEFAULT expression when adding a NOT NULL column. Required when adding a NOT NULL column to an existing table. |
-| `backfill` | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. |
+| `default` | SQL literal used as the DEFAULT expression when adding a NOT NULL column. Supplying `default:` **or** `backfill:` (or both) reclassifies a NOT NULL column add as Safe; both populate existing rows. |
+| `backfill` | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. Like `default:`, its presence reclassifies a NOT NULL column add as Safe. |
 
 ```yaml
 columns:
@@ -127,20 +127,24 @@ The following change types are detected:
 | Change | Classification |
 |--------|---------------|
 | Add nullable column | **Safe** — ALTER TABLE ADD COLUMN |
-| Add NOT NULL column with `default:` | **Safe** — ALTER TABLE ADD with DEFAULT |
-| Add NOT NULL column without `default:` | **Blocked** — requires `--allow-full-refresh` |
+| Add NOT NULL column with `default:` and/or `backfill:` | **Safe** — ALTER TABLE ADD with DEFAULT (and an UPDATE backfill when `backfill:` is set) |
+| Add NOT NULL column with neither `default:` nor `backfill:` | **Blocked** — requires `--allow-full-refresh` |
 | Remove column | **Blocked by default** — requires `--allow-column-removal` |
 | Widen scalar type (see widening table) | **Safe** — ALTER TABLE ALTER COLUMN TYPE |
 | Narrow scalar type | **Blocked** — requires `--allow-full-refresh` |
 | Incompatible type change (struct↔scalar) | **Blocked** — requires `--allow-full-refresh` |
 | Change NOT NULL → NULL | **Safe** — ALTER TABLE ALTER COLUMN |
-| Change NULL → NOT NULL | **Blocked** — requires `--allow-full-refresh` unless `default:` is set |
+| Change NULL → NOT NULL | **Blocked** — requires `--allow-full-refresh` unless `default:` and/or `backfill:` is set |
 | Add nullable struct field | **Safe** |
 | Remove struct field | **Blocked** — requires `--allow-column-removal` |
 | Reorder struct fields | **Blocked** — requires `--allow-full-refresh` |
 | Widen array element type | **Safe** if element widening is safe |
 | Change map key type | **Always blocked** — requires `--allow-full-refresh` |
 | Widen map value type | **Safe** if value widening is safe |
+
+### NOT NULL column-add reclassification
+
+Adding a NOT NULL column (or tightening NULL → NOT NULL) is Safe **iff at least one of `default:` or `backfill:` is declared** on that column. Both populate existing rows so the NOT NULL constraint can hold: `default:` supplies the value via an `ADD COLUMN ... DEFAULT`, `backfill:` populates existing rows with an UPDATE after the add. When **both** are present, the column is added with the `default:` expression and the `backfill:` UPDATE then overwrites existing rows (the backfill takes precedence for pre-existing rows; the default governs subsequent inserts). When **neither** is present, the change stays **Blocked** and requires `--allow-full-refresh` — smelt will not silently insert NULL into a NOT NULL column.
 
 ### Safe scalar type widenings
 

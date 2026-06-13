@@ -1,7 +1,7 @@
 ---
 feature: run_state
 status: experimental
-last_reviewed: 2026-06-04
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -87,6 +87,7 @@ Under `state.mode: environments`, run state additionally records, per model: the
 
 ## Known Divergences / Open Questions
 
+- **Interval-ledger key granularity is date-only, pending the incremental rewrite.** The interval ledger (§"Interval ledger") keys coverage by calendar-date string (`"2026-01-01"`), but incremental models routinely filter on sub-day (hourly/second) event-time boundaries. Whether the ledger keys move to RFC3339 instants (sub-day capable) is **coordinated with the incremental_models rewrite** rather than changed here, so the ledger granularity and the incremental cadence model land together. Tracked in `docs/plans/20260322-incremental-model-support.md` (`incremental_models.md`).
 - **Snapshot / environment store is unbuilt.** Today `smelt-state` persists run manifests, the interval ledger, and deployed schemas. The expanded-logical-SQL snapshot, the recorded output fingerprint, and the `(environment, model) → table` map are **specified here but not implemented**; they arrive with the virtual-environments orchestration layer. Tracking: `docs/research/20260601-virtual-environments.md` §8.
 - **JSON files vs. embedded store.** Research §8 sketched an embedded `.smelt/state.db`; the implementation uses JSON files (`runs/*.json`, `intervals.json`, `schemas/*.json`). The current normative layout is the JSON form; whether to move to an embedded store as the snapshot/environment map grows is open.
 - **Concurrency / parallelism.** Run IDs and the file layout assume a single smelt process at a time; concurrent runs against one `.smelt/` are not specified. Parallel *model* execution within one run is owned by `smelt-runtime`, not by this layout.

@@ -1,7 +1,7 @@
 ---
 feature: virtual_environments
 status: experimental
-last_reviewed: 2026-06-04
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -30,6 +30,14 @@ state:
 - `stateless` (default) is exactly today's behaviour: no `.smelt/` state store is required, and no model is snapshot-reused. Stateless projects pay nothing for this feature.
 - `intervals` enables the persisted interval ledger (see `incremental_models.md`, `run_state.md`).
 - `environments` enables environment-suffixed addressing and fingerprint-keyed reuse (this spec). A model may narrow but not widen the project posture.
+
+The three postures form a lattice ordered by capability:
+
+```
+environments  ⊇  intervals  ⊇  stateless
+```
+
+`environments` includes everything `intervals` provides (the interval ledger) and adds fingerprint-keyed reuse and environment addressing; `intervals` includes the zero-cost `stateless` baseline and adds the persisted ledger. **Narrowing** means a model declaring a posture lower in this lattice than the project's; **widening** (a model declaring a higher posture than the project) is rejected. A model that narrows to `stateless` **opts out of reuse**: it is built the normal way every run and is never snapshot-reused, even when the project is `environments`.
 
 ### Environment-addressed runs
 
@@ -62,11 +70,15 @@ These are explicit, logged, user-owned overrides. They are the only way to make 
 For a model `M` building into environment `E`, smelt may **reuse** an existing physical table `T` (from production or another environment) instead of rebuilding `M` when **all** of:
 
 1. `M` is under `state.mode: environments`. A stateless model is never snapshot-reused.
-2. `fingerprint(M_current) == fingerprint(T.source)` — the output fingerprint of `M` equals that of the model version that built `T`, computed fresh on both sides by the current compiler (`output_fingerprint.md`).
-3. `M` is **deterministic** (`output_fingerprint.md` §"Determinism signal"), **or** the author set `reuse.accept_current` / `reuse.assert_deterministic`.
+2. `fingerprint(M_current) == fingerprint(T.source)` — the output fingerprint of `M` equals that of the model version that built `T`, computed fresh on both sides by the current compiler (`output_fingerprint.md`). The candidate table `T` is located via the `(environment, model) → physical table` index recorded in run state (`run_state.md` §"Snapshot and environment store (virtual environments)"), where each table's source SQL and fingerprint are persisted; see the candidate-precedence rule below.
+3. One of two reuse trust paths holds:
+   - **3a (rebuild-identity preserved).** `M` is **deterministic** (`output_fingerprint.md` §"Determinism signal"), **or** the author set `reuse.assert_deterministic`. Under 3a, reusing `T` produces a table byte-identical to what rebuilding `M` would produce — rebuild-identity is preserved. An `assert_deterministic` assertion is unproven, trusted by the prover, and logged.
+   - **3b (output-preserving reuse without rebuild-identity).** `M` is known non-deterministic and the author set `reuse.accept_current`. Under 3b, smelt reuses the existing materialization across an output-preserving change rather than re-rolling the dice; the reused table is *not* guaranteed byte-identical to a fresh rebuild (a rebuild would draw different non-deterministic values), but it is accepted as a valid current output. The `accept_current` acceptance is logged.
 4. No physical schema migration is required, or one is applied (see `schema_evolution.md`).
 
-If any condition fails, `M` is rebuilt in `E`'s namespace. Reuse must never produce a table different from what a rebuild would have produced (the soundness invariant of `output_fingerprint.md`, plus the determinism gate of condition 3).
+If any condition fails, `M` is rebuilt in `E`'s namespace.
+
+**Candidate-table precedence.** When more than one recorded `(environment, model)` entry is fingerprint-equal to `M_current`, smelt prefers the table backing the **target environment `E`** itself (already-correct, no repoint), then the **base/production** environment, then any other environment in a deterministic order (lexicographic by environment name). This keeps the choice stable across runs.
 
 ### Plan categorization
 
@@ -95,7 +107,8 @@ A model with state normally gets safe, revertible, provable-equivalence reuse. `
 ## Constraints & Invariants
 
 - **Stateless is the default and is untouched.** Enabling this feature must not change behaviour, output, or required on-disk artifacts for a `state.mode: stateless` project.
-- **Reuse soundness.** A reused or promoted table is identical to what a rebuild of the current model version would produce — guaranteed by `output_fingerprint.md` soundness plus the determinism precondition. A non-deterministic model is never silently reused; it requires an explicit `reuse.*` override.
+- **Reuse soundness (rebuild-identity, path 3a).** Under reuse path 3a (deterministic or `assert_deterministic`), a reused or promoted table is **byte-identical** to what a rebuild of the current model version would produce — guaranteed by `output_fingerprint.md` soundness plus the determinism precondition.
+- **Reuse soundness (output-preserving, path 3b).** Under reuse path 3b (`accept_current` on a known non-deterministic model), the reused table is a **valid current output** for the fingerprint-equal model version but is **not** guaranteed byte-identical to a fresh rebuild; this weaker contract is the explicit cost of reusing a non-deterministic model, and it is logged. A non-deterministic model is never silently reused — it requires the explicit `reuse.accept_current` override.
 - **Overrides are logged.** Every `accept_current`, `assert_deterministic`, and `forward_only` decision is recorded in run state so the trust delegation is auditable.
 - **Cross-model categorization is conservative without lineage.** Until the column-lineage analyser exists, the non-breaking (downstream-spared) class is recognised only where single-model equivalence proves it; everything else rebuilds (parity).
 

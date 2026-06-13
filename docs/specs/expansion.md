@@ -74,6 +74,8 @@ Every node in a codegen-expanded CST carries an **origin tag** identifying where
 
 Origin tags are attached at expansion time and must propagate through every subsequent CST transformation (planner rewrites included). A planner rule that produces a new CST node must label it `Synthesized` (or copy an existing tag forward) — it must not silently emit untagged nodes.
 
+**Tags are assigned once, relative to the original source; nested expansion leaves prior tags intact.** When a model calls `A` which calls `B` (nested expansion), each node is tagged exactly once when it first enters an expanded tree, and that tag is *not* rewritten by any subsequent expansion level. Concretely: expanding `B` inside `A`'s body does not re-tag `A`'s already-expanded nodes, and the argument subtrees the model spliced into `A` keep their original `Caller(span)` tags. As a result, **`Caller` only ever denotes the root model file** — the file the user wrote the top-level call in — never an intermediate callee body. A node that came from `A`'s body (acting as the "caller" of `B`) is tagged `Callee(A, span)`, not `Caller`, because it originated in `A`'s source, not the model's. This keeps `Caller` unambiguously resolvable to a single file (the root model) even though `Caller(span)` carries no file identity of its own: there is exactly one caller file in any expansion tree, and it is the root.
+
 ### Frame-stack invariants
 
 Whenever a diagnostic surfaces from inside an expanded body, the compiler stamps `DiagnosticData::ExpansionFrames(Vec<FrameInfo>)` onto the diagnostic. The vector obeys these rules:

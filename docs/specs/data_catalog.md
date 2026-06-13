@@ -23,7 +23,7 @@ smelt docs generate [--format markdown|json] [--output <dir>] [--select <selecto
 
 Generates a data catalog from the current project. The default format is `markdown`. The default output directory is `target/docs/`.
 
-`--select` applies the standard selector syntax to limit which models are included. Models excluded by the selector are omitted from the output.
+`--select` applies the standard selector syntax to limit which models are rendered as catalog entries. A model excluded by the selector does not get its own `models` entry, `tag_index` membership, `execution_order` slot, or `model_count` contribution — but its **name is retained in the `upstream`/`downstream` edge arrays** of selected models, so lineage stays complete and diffable (see §"`--select` and lineage").
 
 ### `smelt docs list`
 
@@ -93,7 +93,7 @@ Prints a message indicating that docs are embedded in the binary and advises usi
       "owner": "<string>",              // omitted if absent
       "tags": ["<string>"],             // omitted if empty
       "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "cumulative_aggregate" | "test",
-      "path": "<absolute path>",
+      "path": "<workspace-relative path>",
       "columns": [
         {
           "name": "<string>",
@@ -136,6 +136,8 @@ Prints a message indicating that docs are embedded in the binary and advises usi
 - Fields with `null` or empty-list values are omitted from the JSON output (`skip_serializing_if`).
 - Column `source.type` is a tagged enum with `"type"` as the discriminator.
 - Column types and nullability come from the type inference system; if unavailable, the fields are omitted.
+- The `source` object is **always present** on every column. When lineage cannot be determined it is `source: {"type": "unknown"}` (never omitted), so a consumer can always read `source.type` without a presence check.
+- `path` is **workspace-relative** (relative to the directory containing `smelt.yml`), never an absolute filesystem path, so the catalog diffs identically across machines and CI checkouts.
 
 ## Semantics
 
@@ -167,7 +169,17 @@ Topic paths correspond to relative paths under `docs-site/docs/`, without the `.
 
 ### `--select` and test models
 
-When `--select` is specified, only selected models appear in the output. Test models (`materialization: test`) are excluded from catalog output regardless of selector.
+When `--select` is specified, only selected models get their own catalog entry. Test models (`materialization: test`) are excluded from catalog output regardless of selector.
+
+### `--select` and lineage
+
+A `--select` that excludes some models prunes the *entries* but never the *edges*:
+
+- The `models` map, `tag_index`, `execution_order`, and `project.model_count` contain **only selected models**.
+- The `upstream` / `downstream` edge arrays of a selected model **retain the names of excluded dependencies** (full lineage). A consumer reading the edges sees the true graph; a name in an edge array that has no corresponding `models` entry denotes a model present in the project but excluded from this render.
+- In the **Markdown** output, an excluded dependency is rendered as **plain text** (its name, not a link), since there is no `models/<name>.md` page to link to. Selected dependencies render as links as usual.
+
+This keeps the lineage contract stable and diffable for orchestrator consumers regardless of the selector.
 
 ### Wide-reflection visibility
 

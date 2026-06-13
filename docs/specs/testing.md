@@ -28,7 +28,7 @@ test:
   model: daily_revenue
   target_cte: daily_agg           # optional: test a specific CTE
   inputs:
-    orders:                       # dependency name → rows
+    orders:                       # bare address path (smelt.<path> minus `smelt.`) → rows
       - {order_id: 1, amount: 100.0, order_date: '2024-01-15'}
       - {order_id: 2, amount: 200.0, order_date: '2024-01-15'}
   expect:
@@ -46,7 +46,7 @@ Tests are discovered by the same project-wide scan as SQL models (discovery is n
 |-----|------|----------|---------|-------------|
 | `model` | string | yes | — | Name of the model under test |
 | `target_cte` | string | no | — | If set: test only this CTE in isolation. If absent: test the full model. |
-| `inputs` | map | no | `{}` | Mock data: map from dependency name → list of row objects |
+| `inputs` | map | no | `{}` | Mock data: map from a dependency's bare address path (the `smelt.<path>` minus the leading `smelt.`, e.g. `orders` or `silver.orders`) → list of row objects |
 | `expect` | list | yes | — | Expected output rows |
 | `check_order` | bool | no | `false` | If `true`: compare rows positionally. If `false`: compare as sets. |
 | `cases` | integer | no | `10` | Number of property-based test iterations (used when inputs omit columns) |
@@ -76,6 +76,7 @@ WITH cleaned AS (
 |------------|----------|
 | Integer (`42`) | `INTEGER` |
 | Float (`3.14`) | `DOUBLE` |
+| Decimal string (`'300.00'`, a numeric string with a decimal point and no exponent) | `DECIMAL` |
 | String `'YYYY-MM-DD'` pattern | `DATE` |
 | String `'YYYY-MM-DD HH:MM:SS'` or `'YYYY-MM-DDTHH:MM:SS'` pattern | `TIMESTAMP` |
 | Other string | `VARCHAR` |
@@ -87,7 +88,8 @@ Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`; st
 ### Comparison behavior
 
 - **Columns**: Only columns listed in `expect` are compared. Extra columns in the actual output are ignored.
-- **Floating point**: Values within `1e-6` of each other are treated as equal.
+- **Floating point**: When the actual column is `FLOAT`/`DOUBLE`, values within `1e-6` of each other are treated as equal.
+- **Decimal**: When the actual column is `DECIMAL`, values are compared **exactly by numeric value** — no `1e-6` tolerance. The `1e-6` tolerance applies only to `FLOAT`/`DOUBLE` actuals. This keeps money columns (`SUM(amount)` over a `DECIMAL` source, which yields `DECIMAL`) from passing on a sub-cent discrepancy. An expected value written as a float literal (e.g. `300.0`) is compared against a `DECIMAL` actual by its exact numeric value, so `300.0` equals `300.00` but `300.001` does not.
 - **Row order**: When `check_order: false` (default), row order does not matter; both actual and expected are compared as multisets. When `check_order: true`, rows are compared positionally.
 
 ### Selector behaviour
@@ -111,17 +113,19 @@ Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`; st
 
 When `target_cte` is absent, the entire model SQL is compiled with mock data substituted for every `smelt.<path>` reference named in `inputs`. Dependencies not listed in `inputs` are replaced with empty CTEs (zero rows).
 
+**Unmatched `inputs` keys are diagnosed.** Every `inputs` key must match a compiled dependency of the model under test (a `smelt.<path>` the model actually references). An `inputs` key that matches no dependency is reported via `UnknownTestInput` and fails the test loudly, rather than silently creating an unused mock CTE. This catches the typo class (`order:` vs `orders:`) that would otherwise leave the real dependency mocked as an empty CTE — a false green in a testing tool.
+
 If the model SQL already begins with its own `WITH` clause (after any leading line comments), the mock CTEs are injected **inside** that existing `WITH` rather than prepended as a second one — `WITH <mock_ctes>, <model's existing ctes> ...` — so the compiled test SQL remains a single, well-formed query. Models without a leading `WITH` get a fresh `WITH <mock_ctes>` prefix.
 
 ### CTE-level tests
 
-When `target_cte` is set, smelt:
-1. Extracts the named CTE from the model's WITH clause.
-2. Identifies which upstream CTEs that CTE depends on directly.
-3. Substitutes those upstream CTEs with mock data from `inputs`.
-4. Executes only the target CTE's SQL expression.
+When `target_cte` is set, the test names a target CTE within the model, but the mock boundary is still the **model's external dependencies** — the `smelt.<path>` inputs feeding the CTE chain — not the model's internal CTEs. smelt:
+1. Extracts the target CTE and the chain of model-internal CTEs it depends on (directly and transitively) from the model's WITH clause.
+2. Substitutes the model's external dependencies (the `smelt.<path>` refs reachable from the target CTE's dependency chain) with mock data from `inputs`.
+3. Executes the target CTE's SQL expression, with its internal CTE chain running **as written**.
+4. Compares the target CTE's output against `expect`.
 
-`inputs` keys in a CTE-level test must match the **CTE names** that the target CTE depends on, not the model's external refs.
+The internal CTEs — both the target CTE and every CTE it depends on, direct and transitive — execute exactly as written; only the model's external inputs are mockable. `inputs` keys in a CTE-level test are therefore the same bare address paths as in a whole-model test (the model's `smelt.<path>` dependencies), never internal CTE names.
 
 ### Property-based tests
 
@@ -144,7 +148,7 @@ Each iteration uses a different random seed derived from the test's global seed.
 
 **`smelt.test <name>` as a top-level declaration kind — deferred, not closed.** An earlier shape made tests a sibling of `smelt.define` / `smelt.extern` at the file level. v1 takes the simpler `materialization: test` route because (a) the body grammar is identical to a model SELECT — same parser, same type checker, same LSP affordances — and (b) `crates/smelt-core/src/metadata.rs::TestConfig` already implements the frontmatter shape. The case for revisiting is a symmetry argument: now that `smelt.define`, `smelt.extern`, seeds, and sources are all kind-signalled by something *other than* frontmatter, `materialization: test` is the only kind that piggybacks on another kind's syntax with a frontmatter flag. A future spec change could mint `smelt.test <name>` as a first-class declaration — most interestingly with `expect`/`inputs` lifted out of YAML and into a SQL-grammar `EXPECT (...) PASSING ... AS (...)` clause that mirrors the function `PASSING` shape. See Known Divergences for the open framing.
 
-**Mock by dependency name.** Input mock data is keyed by the dependency's `smelt.<path>` address (or, for CTE-level tests, the CTE name), not by some other handle. The keys mirror the addresses that appear in the SQL body, so tests read naturally without an extra lookup table.
+**Mock by dependency name.** Input mock data is keyed by the dependency's bare address path (the `smelt.<path>` minus the `smelt.` prefix), not by some other handle. This is the same key shape for whole-model and CTE-level tests: a CTE-level test targets a CTE but mocks the model's external dependencies, so the keys mirror the addresses that appear in the SQL body, and tests read naturally without an extra lookup table.
 
 **Set comparison by default.** `check_order: false` is the safe default. Most models do not produce ordered output, and ordering in SQL is non-deterministic unless an `ORDER BY` is present. Requiring `check_order: true` explicitly for ordered output avoids brittle tests that depend on DuckDB's internal sort order.
 
@@ -157,7 +161,7 @@ Each iteration uses a different random seed derived from the test's global seed.
 1. **Tests run in-memory on DuckDB.** No connection to the project's configured target is made during `smelt test`.
 2. **Test models are never materialized by `smelt run` or `smelt build`.** `materialization: test` models are excluded from execution runs. They cannot have `incremental` config or `target` overrides.
 3. **`expect` is required.** A test with no `expect` rows is invalid.
-4. **`inputs` keys are dependency addresses.** For whole-model tests: the `smelt.<path>` form used in the SQL body. For CTE tests: names of upstream CTEs the target CTE depends on.
+4. **`inputs` keys are bare dependency address paths.** For both whole-model and CTE-level tests, each key is the bare address path of a model dependency — the `smelt.<path>` minus the leading `smelt.` (e.g. `orders` or `silver.orders`). A CTE-level test still mocks the model's external dependencies, not its internal CTEs. A key that matches no compiled dependency is reported via `UnknownTestInput` (see §Semantics).
 5. **Column comparison uses only `expect` columns.** Extra actual columns are never treated as failure.
 
 ## Known Divergences / Open Questions

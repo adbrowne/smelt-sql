@@ -1,7 +1,7 @@
 ---
 feature: meta_config_loading
 status: experimental
-last_reviewed: 2026-05-14
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -54,7 +54,7 @@ configs/sources.prod.yaml     # overlay for target=prod
 configs/sources.dev.yaml      # overlay for target=dev
 ```
 
-When `target` is set (via `smelt build --target prod` or `smelt.yml`'s `target:` field), the loader checks for `<basename>.<target>.<ext>` as a sibling of `<basename>.<ext>` and, if present, merges the overlay into the base by field. Overlay merging is **field-by-field deep merge** for record-shaped roots: an overlay's value for a field replaces the base's value for that field; an overlay field absent in the overlay is taken from the base. For `List<S>`-shaped roots the overlay **replaces** the base entirely (no list concatenation; users wanting concatenation author the merged list explicitly). For `Map<Text, S>`-shaped roots the overlay merges by key: an overlay key replaces the base's value for that key; a key absent in the overlay is taken from the base.
+When `target` is set (via `smelt build --target prod` or `smelt.yml`'s `target:` field), the loader checks for `<basename>.<target>.<ext>` as a sibling of `<basename>.<ext>` and, if present, merges the overlay into the base by field. Overlay merging is **field-by-field shallow replace** for record-shaped roots: an overlay's value for a field replaces the base's value for that field **wholesale — including a nested record value, which is replaced as a whole, not recursively blended**; a field absent in the overlay is taken from the base. For `List<S>`-shaped roots the overlay **replaces** the base entirely (no list concatenation; users wanting concatenation author the merged list explicitly). For `Map<Text, S>`-shaped roots the overlay merges by key: an overlay key replaces the base's value for that key; a key absent in the overlay is taken from the base.
 
 A target overlay file that does not validate against the schema emits the same diagnostic family as a base-file mismatch, anchored at the overlay file's offending row.
 
@@ -78,7 +78,7 @@ A target overlay file that does not validate against the schema emits the same d
 
 ### LSP support
 
-- **Hover** on a loader call site shows the resolved file path, the file's resolved row count (for `List`/`Map` roots) or the schema's field set (for record roots), and the file's last-modified timestamp.
+- **Hover** on a loader call site shows the resolved file path and the file's resolved row count (for `List`/`Map` roots) or the schema's field set (for record roots). It does **not** show the file's last-modified timestamp: hover content is keyed on file bytes for deterministic re-evaluation (§Semantics "Deterministic output", "Pure validation"), and mtime is not a function of bytes — surfacing it would risk registering mtime as a Salsa input.
 - **Hover** on the `schema` argument shows the resolved schema (inline structural display for inline schemas, declaration link for named schemas).
 - **Goto-definition** on the loader name (`load_yaml`) resolves to the reference page (URL hint, graceful no-op when the client lacks support).
 - **Goto-definition** on the `path` argument resolves to the loaded file (cursor on row 1).
@@ -159,13 +159,13 @@ A non-literal `path` (a variable, an expression) would require resolving an arbi
 
 Three candidates from research §4.10.1: (i) **path interpolation** in the literal (`load_yaml('configs/{target}/sources.yaml', S)`), (ii) **file overlay** (load `sources.yaml`, merge `sources.<target>.yaml` if present), (iii) **post-load filter** (load all targets' rows, apply `filter` by `target` field). Option (iii) requires authors to bake the target into every row, doubling YAML size for two-target cases. Option (i) requires string interpolation in path literals, which is a parallel surface (and conflicts with the literal-only `path` rule). Option (ii) is the chosen lean: the base file is the source of truth, the overlay is an opt-in adjustment, and the merge rule is field-by-field (predictable, no concatenation surprises).
 
-The merge rule is **replace, not concatenate** for `List<S>` overlays. List concatenation surprises authors who expect the overlay to replace the base; users wanting concatenation author a merged list explicitly. The field-level deep merge for record-shaped roots matches the common case (override one or two fields per target).
+The merge rule is **replace, not concatenate** for `List<S>` overlays. List concatenation surprises authors who expect the overlay to replace the base; users wanting concatenation author a merged list explicitly. The field-level shallow replace for record-shaped roots matches the common case (override one or two top-level fields per target); a nested record under one of those fields is replaced as a whole, not recursively blended.
 
-### Why deep-merge for record fields but replace for lists
+### Why shallow field-replace for record roots but full replace for lists
 
-Record-field deep merge: a user wants to override `connection_string` per target without restating every other field. Replacing the entire record forces overlay authors to copy the whole base record, which is exactly the duplication overlays exist to avoid. Deep merge is the convenient default.
+Field-level shallow replace at the record root: a user wants to override `connection_string` per target without restating every other top-level field. Replacing the entire record root would force overlay authors to copy the whole base record, which is exactly the duplication overlays exist to avoid. So the overlay replaces only the top-level fields it names — but each named field is replaced *wholesale*, nested records included. Recursive (deep) blending of nested record sub-fields was rejected for the same reason list element-merge was: it needs an identity/merge rule for the nested structure and produces surprising partial-blend behaviour. Shallow field replace is the predictable default; an overlay that needs to change one sub-field of a nested record restates that nested record.
 
-List replacement: lists are typically sequence-of-records (`List<SourceEntry>`); deep-merging element-by-element would require an identity rule (merge by `name`? by index? by primary key?) and produce surprising behaviour when source files reorder. Replacement is the unambiguous default; users wanting merge author the merged list.
+List replacement: lists are typically sequence-of-records (`List<SourceEntry>`); merging element-by-element would require an identity rule (merge by `name`? by index? by primary key?) and produce surprising behaviour when source files reorder. Full replacement is the unambiguous default; users wanting merge author the merged list.
 
 ### Why diagnostic anchoring at the YAML/JSON row
 

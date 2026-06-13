@@ -1,7 +1,7 @@
 ---
 feature: datagen
 status: experimental
-last_reviewed: 2026-05-18
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -195,7 +195,9 @@ Each dataset writes Parquet files:
 
 ### Scale factor
 
-The effective row count for each dataset is `floor(num_rows × scale_factor)`. When `scale_factor < 1`, `foreign_key` generators automatically adjust their upper bound to match the scaled dimension table size, preserving referential integrity.
+The effective row count for each dataset is `floor(num_rows × scale_factor)`. A `foreign_key` generator's upper bound is **always the referenced dataset's effective (scaled) row count, for any scale factor** (`< 1`, `1`, or `> 1`) — the bound is `[1, effective_row_count]` where `effective_row_count = floor(referenced_num_rows × scale_factor)`. This preserves referential integrity at every scale: references never point past the scaled dimension table.
+
+**Zero-row guard.** If an effective row count comes out as `0` (e.g. `num_rows: 1` with `scale_factor: 0.4` → `floor(0.4) = 0`), the `[1, 0]` FK range is empty and would be ill-formed. A dataset whose effective row count is `0`, or a `foreign_key` whose referenced dataset has an effective row count of `0`, is a **configuration error** reported at generation time, not a silent empty/clamped range. (Pool size has the analogous guard — see §"`linked_choice` and joint-distribution pools".)
 
 ## Semantics
 
@@ -269,7 +271,11 @@ A `linked_pools:` entry under `DatasetConfig` declares a **pre-computed joint-di
 
 **Interaction with partitioning.** Pools are built once per dataset and shared across all partitions. Each partition's per-row sampling uses its own RNG stream (per the existing `day_seeds[]` mechanism), so partitions sample independently from the shared pool. Partitions do not regenerate the pool.
 
-**Determinism.** Same seed + same config + same binary version → byte-identical pool contents → byte-identical row-level draws → byte-identical Parquet output. The pool seed is not affected by changes to row-level columns elsewhere in the dataset.
+**Scale-invariance is qualified by `foreign_key`.** Pool contents are scale-invariant — identical across `--scale-factor` settings — **only if no shape field uses `foreign_key`**. A `foreign_key` field inside `shapes[].fields` resolves against the referenced dataset's *effective (scaled)* row count, so when the scale factor changes, FK-bearing pool entries change with it; the pool is no longer the same device/user universe across scales. Pools built entirely from primitive (non-FK) generators stay byte-identical across scale factors (the comparability property the isolated pool RNG stream provides). Authors who need a strictly scale-invariant pool must avoid `foreign_key` in its shapes.
+
+**Pool-size zero guard.** A `pool_size:` of `0` (or any non-positive value) is a configuration error — an empty pool has no entry for a `linked_choice` column to sample. Likewise, a `foreign_key` field inside a pool shape whose referenced dataset has an effective row count of `0` is the same zero-row error described in §"Scale factor".
+
+**Determinism.** Same seed + same config + same binary version → byte-identical pool contents → byte-identical row-level draws → byte-identical Parquet output. The pool seed is not affected by changes to row-level columns elsewhere in the dataset. (Scale factor is part of "same config" for this guarantee; see scale-invariance qualification above for how `foreign_key` fields interact with scaling.)
 
 ## Design
 
@@ -313,7 +319,7 @@ A raw tuple-list mode was rejected for v1 because it provides no abstraction ove
 3. **Scale factor applies to all datasets.** Per-dataset row counts cannot override the global `scale_factor` when set via CLI flag.
 4. **Entity pool size is a fraction of row count.** `pool_size = floor(num_rows × pool_ratio)` — the pool is not an absolute size.
 5. **Partition column values span exactly `days` days starting at `start`.** No skipping, no gaps, no irregular intervals.
-6. **`linked_pools` pool size is an absolute count.** `pool_size:` is the exact number of pool entries (rows in the pool, not draws). The pool is not scaled by `--scale-factor`. Scaling the dataset's `num_rows` keeps the same pool; the row-time uniform sampling adapts automatically.
+6. **`linked_pools` pool size is an absolute count, and pool contents are scale-invariant only without `foreign_key` fields.** `pool_size:` is the exact number of pool entries (rows in the pool, not draws) and must be a positive integer; `pool_size: 0` is a configuration error. The pool's *size* is not scaled by `--scale-factor`. Pool *contents* are byte-identical across scale factors **only when no shape field uses `foreign_key`** — an FK field resolves against the referenced dataset's effective (scaled) row count, so it varies with scale. Scaling the dataset's `num_rows` keeps the same pool size; the row-time uniform sampling adapts automatically.
 7. **`linked_pools` shapes must agree on field names and field generator output types.** Every shape's `fields:` must declare the same set of keys; the generator under a given key must produce the same Arrow type in every shape (modulo `Optional` wrapping). `linked_choice` columns reference fields by name; a missing or type-mismatched key is a configuration error.
 8. **`linked_choice` is forbidden inside `shapes[].fields`.** Pools cannot reference other pools. The configuration loader rejects this at parse time.
 9. **A `linked_choice` column's `pool:` and `field:` must resolve.** Referencing an undeclared pool or an undeclared field within a pool is a configuration error.

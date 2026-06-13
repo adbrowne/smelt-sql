@@ -40,15 +40,18 @@ The VS Code extension auto-activates when a `*.sql` file is found under a `model
 
 ### Watched files
 
-The server watches two glob patterns via `workspace/didChangeWatchedFiles`:
-- `**/models/**/*.py` — Python model files. Changes trigger a workspace refresh: re-discovering Python models and re-running type inference.
-- `**/functions/**/*.sql` — function definition files. External edits (e.g. `git checkout`, `sed`) that bypass `textDocument/didChange` are picked up so dependent models re-diagnose.
+The server watches, via `workspace/didChangeWatchedFiles`, the files that participate in the loaded project. The watch set is **derived from discovery, not hardcoded by kind**: smelt discovers entities by walking every non-excluded subdirectory under the project root, and *any* `.sql` file is discoverable unless ruled out by the project's exclude set (`architecture.md` §"Resolution" — discovery is project-wide; `paths:` only strips address prefixes, it does not gate discovery). The server therefore watches:
+
+- **All project `.sql` files** in non-excluded directories — model definitions and `smelt.define` function definitions alike, wherever they live (defines and models are not confined to `functions/` or `models/`). External edits (e.g. `git checkout`, `sed`) that bypass `textDocument/didChange` are picked up so dependent models re-diagnose.
+- **Python model files** (`.py`) in non-excluded directories. Changes trigger a workspace refresh: re-discovering Python models and re-running type inference.
+
+The watcher follows the project-wide-discovery + exclude rule rather than hardcoded `**/models/**` / `**/functions/**` globs; when a loaded project narrows discovery via `paths:`/exclude config, the watch set narrows with it.
 
 ## Semantics
 
 ### Diagnostics
 
-Diagnostics are published on every file change. All diagnostics for a file are derived from the Salsa incremental computation database; only affected queries are re-run.
+On every file change the server republishes diagnostics for **the changed file plus every file whose Salsa-derived diagnostics changed as a result** — at minimum all open files in the same project, since an upstream edit can stale a downstream file's diagnostics. Publishing only the changed file would leave consumers of the edited entity showing diagnostics computed against the old text. All diagnostics for a file are derived from the Salsa incremental computation database; only affected queries are re-run, so the set of files whose diagnostics actually changed is exactly the set Salsa recomputes.
 
 #### Severity levels
 
@@ -236,10 +239,12 @@ Rename is supported on:
 |------------|----------------|
 | CTE name | CTE definition and all references within the same file |
 | `smelt.<path>` | All `smelt.<path>` references to that entity across the workspace; the source file itself is **not** renamed |
-| Column name | Column in local file, upstream model files (via source tracing), downstream model files (via dependency graph), and the relevant per-entity source `.yml` (for source-table columns) |
+| Column name (model/CTE column) | The column at its **resolved definition site** and every transitive consumer, rewritten from that root: local file, downstream model files reachable through the dependency graph, and upstream model files traced to the definition. Propagation **terminates at an `AS` re-aliasing** (a consumer that renames the column under a new alias is the boundary — its alias and downstream uses are not rewritten). `SELECT *` chains **propagate** (the column flows through unnamed, so its rename carries downstream). |
 | Lambda parameter | The parameter binder and every reference to it inside the lambda's body. Scope is the single lambda; inner lambdas that shadow the parameter are not touched. The new name must be a valid SQL identifier, must not collide with a meta-namespace keyword (`if`, `then`, `else`, `fn`, `let`), and must not shadow an outer binder already referenced inside the lambda body |
 
-`prepare_rename` is supported — editors can preview the rename range before committing.
+**Source columns are not renameable.** A column declared by a source `.yml` names a column of an externally-managed table that smelt does not own. Renaming it would rewrite the *declaration* — turning the source `.yml` green — while every runtime query against the real external table still references the old name and breaks. `prepare_rename` on a source column therefore responds **not-supported**, with an explanatory message that the table is external and its columns must be renamed at the source. Renaming a model/CTE column that *reads from* a source column rewrites the model-side references and stops at the source boundary; it never edits the source `.yml`.
+
+`prepare_rename` is supported for the renameable identifiers above — editors can preview the rename range before committing. For a source column it returns not-supported as described.
 
 The new name must be a valid SQL identifier. Invalid identifiers are rejected with an error.
 
@@ -263,7 +268,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 
 **Full text sync.** The server uses full text synchronization rather than incremental text. This is simpler and sufficient given that Salsa handles incremental analysis. The text diff is not needed at the LSP level.
 
-**Cross-file rename via graph traversal.** Column renames traverse the model dependency graph in both directions (upstream for source tracing, downstream for consumers). This ensures that renaming a column in a base model also updates derived models that expose or transform that column.
+**Cross-file rename via graph traversal, rooted at the definition site.** Column renames resolve the column's definition site first, then rewrite every transitive consumer from that root (downstream through the dependency graph; upstream traced back to the definition). Rooting at the definition rather than the invocation file makes the rewritten set independent of where the rename was triggered. Re-aliasing (`AS`) is a deliberate propagation boundary, and source columns are refused outright (renaming an external table's declaration cannot be made safe). This ensures that renaming a column in a base model also updates derived models that expose or transform that column, without silently breaking external-table contracts.
 
 **Python models as virtual SQL files.** Python-generated models are registered as virtual `.sql` paths in the Salsa database. Editor positions in Python files are mapped to virtual file boundaries; diagnostics and go-to-definition work through this virtual path layer.
 

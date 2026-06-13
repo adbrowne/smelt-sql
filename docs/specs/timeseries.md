@@ -1,7 +1,7 @@
 ---
 feature: timeseries
 status: experimental
-last_reviewed: 2026-05-21
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -111,6 +111,8 @@ A source declaring `timeseries:` opts in to being a pushdown target for downstre
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.
 5. **Granularity closure.** Must be one of the enumerated values. Unknown values produce `MalformedTimeseries`. Custom granularity is reserved for a future plugin surface (see `incremental_models.md` § "Granularity values").
 6. **`week_start` requires `granularity: week` and must be `monday` or `sunday`.** Setting `week_start` on any other granularity, or setting it to a weekday other than `monday` or `sunday`, is `MalformedTimeseries`.
+7. **Partition / pruning columns must be NOT NULL.** `partition_column` must be NOT NULL on the model's output (or declared `nullable: false` on the source's columns). When `event_time_column` drives pruning (it differs from `partition_column` and is the column a downstream rule filters on), it must be NOT NULL too. A NULL partition value silently escapes the half-open `>= start AND < end` pruning window — it is never deleted or re-inserted — which is a correctness hole for incremental execution. A nullable partition/pruning column is `MalformedTimeseries`.
+8. **Sub-day granularity requires a timestamp-resolution partition type.** When `granularity` is `hour` (a sub-day unit), `partition_column` must be a timestamp-resolution type (timestamp or timestamp-with-timezone), not a plain `date` — a `DATE` cannot represent hour boundaries, so hour-granularity pruning against a `DATE` partition silently coarsens to whole days. A sub-day granularity paired with a `date` (or otherwise day-resolution) partition type is `MalformedTimeseries`.
 
 ### LSP surface
 
@@ -144,6 +146,8 @@ This section captures the load-bearing rationale.
 4. **`partition_column` must exist on the output / in the columns list.** No "virtual" or "synthesised" partition column for a v1 timeseries declaration. The column must be projected.
 5. **Sources never run; `timeseries:` on a source does not imply any execution behaviour.** Sources remain externally managed (`sources.md`). A `timeseries:` block on a source declares the partition shape for downstream pushdown only.
 6. **Compatibility with ephemeral/test materializations is forbidden.** Out of scope and deliberately so (Semantics § "Compatibility with materialization modes").
+7. **Partition and pruning columns are NOT NULL.** `partition_column` (and `event_time_column` when it drives pruning) must be NOT NULL on the output / source. A nullable pruning column silently escapes the `>= start AND < end` window and is rejected with `MalformedTimeseries` (Semantics § "Validation rules", rule 7).
+8. **Granularity resolution must fit the partition type.** A sub-day granularity (`hour`) requires a timestamp-resolution `partition_column`; pairing it with a day-resolution type (`date`) is `MalformedTimeseries` (Semantics § "Validation rules", rule 8).
 
 ## Known Divergences / Open Questions
 
@@ -151,7 +155,7 @@ This section captures the load-bearing rationale.
 - **Custom granularity plugin surface.** Reserved for future work. No plugin shipping today; the closed enum is authoritative.
 - **`smelt verify` against the database.** A future pass could check that an external source's declared `partition_column` and `event_time_column` exist in the live database. Out of scope here; mentioned in `sources.md` Known Divergences as well.
 - **LSP enrichment.** Hover and goto-definition for `timeseries:` fields are specced (Semantics § "LSP surface") but not yet implemented in the LSP. Tracked alongside the migration plan.
-- **Output-schema-dependent validation rules.** Validation rules 2, 3, and 4 (event-time column projection, event-time type constraint, partition-column type constraint) require the model's output schema, which is not available at frontmatter extraction. These rules land alongside type-aware analysis in a follow-on; tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`. Rules 1, 5, 6 are enforced at frontmatter parse time.
+- **Output-schema-dependent validation rules.** Validation rules 2, 3, 4, 7, and 8 (event-time column projection, event-time type constraint, partition-column type constraint, partition/pruning-column NOT NULL, and sub-day-granularity partition-type resolution) require the model's output schema — column types and nullability — which is not available at frontmatter extraction. These rules land alongside type-aware analysis in a follow-on; tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`. Rules 1, 5, 6 are enforced at frontmatter parse time.
 
 ## References
 
