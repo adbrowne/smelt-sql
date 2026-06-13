@@ -137,7 +137,7 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 ### Track B — per-spec no-brainer batches
 | Spec | Status | Findings closed | Commit | Date |
 |------|--------|-----------------|--------|------|
-| **Appendix-A determinate batch** (veto-only) | done | C16, C17, C26 + 11 Maj/Min across 11 specs | _pending_ | 2026-06-13 |
+| **Appendix-A determinate batch** (veto-only) | done | C16, C17, C26 + 11 Maj/Min across 11 specs | 5eb056f3 | 2026-06-13 |
 | lsp.md (general per-spec batch) | pending | | | |
 | diagnostics.md (general per-spec batch) | pending | | | |
 | meta_language.md (general per-spec batch) | pending | | | |
