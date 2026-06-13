@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781334042185,
+  "lastUpdate": 1781361039654,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19363,6 +19363,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.24047,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "83765ca22214431054b6fa627c3b545296f00c74",
+          "message": "Merge pull request #139 from adbrowne/worktree-type_system\n\nCollation type-system axis — portable binary-only contract (§17)",
+          "timestamp": "2026-06-14T00:28:37+10:00",
+          "tree_id": "09bf112928a5b63ab76c1f0b9ae169076a2634a6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/83765ca22214431054b6fa627c3b545296f00c74"
+        },
+        "date": 1781361038013,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 48.74521,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 46.570634,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.864576,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.5943120000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.410598,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 2852.0176699999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 5.131064,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.96308,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 3.892638,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.797871,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3128.015527,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.28692,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.20485,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.727061,
             "unit": "ms"
           }
         ]
