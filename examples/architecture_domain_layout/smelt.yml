@@ -1,0 +1,10 @@
+name: architecture_domain_layout
+version: 1
+paths:
+  - billing
+  - finance
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main

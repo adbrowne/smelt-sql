@@ -132,15 +132,38 @@ pub fn classify(
             })
         }
         "yml" | "yaml" => {
+            // `smelt.yml` / `smelt.yaml` are project config files, not sources.
+            if stem == "smelt" {
+                return None;
+            }
+            // `sources.yml` / `sources.yaml` is the aggregate sources file (legacy);
+            // it is not addressable as a per-entity source.
+            if stem == "sources" {
+                return None;
+            }
             // If a sibling .csv exists (same stem), this is a sidecar — not addressable.
             let has_csv_sibling = sibling_paths.iter().any(|p| {
                 p.extension().and_then(|e| e.to_str()) == Some("csv")
                     && p.file_stem().and_then(|s| s.to_str()) == Some(stem)
             });
             if has_csv_sibling {
-                None // sidecar — not addressable
+                return None; // sidecar — not addressable
+            }
+            // Content-sniff: a per-entity source YAML is a top-level mapping
+            // with at least one known source-schema key. Arbitrary data YAML
+            // files (lists, mappings with domain-specific keys) are NOT sources.
+            let text = if let Some(c) = content {
+                c.to_string()
             } else {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                }
+            };
+            if looks_like_source_yaml(&text) {
                 Some(EntityKind::Source)
+            } else {
+                None
             }
         }
         "sql" => {
@@ -179,6 +202,34 @@ fn classify_sql(content: &str) -> EntityKind {
     } else {
         EntityKind::Model
     }
+}
+
+/// Return `true` if a YAML file's content looks like a per-entity source
+/// definition. A source YAML is a top-level YAML mapping containing at least
+/// one known source-schema key (`description`, `columns`, `name`,
+/// `materialization`, `tags`, `timeseries`). This distinguishes source
+/// definitions from arbitrary data files used by `smelt.config.load_yaml`
+/// (which may be lists or mappings with domain-specific keys).
+fn looks_like_source_yaml(text: &str) -> bool {
+    const SOURCE_KEYS: &[&str] = &[
+        "description:",
+        "columns:",
+        "materialization:",
+        "tags:",
+        "timeseries:",
+    ];
+    // Must not start with `-` (list item marker) — source YAMLs are mappings.
+    let first_non_empty = text.trim_start();
+    if first_non_empty.starts_with('-') {
+        return false;
+    }
+    // Must have at least one known source key at the top level.
+    // Line-based scan: look for a key at column 0 (no leading whitespace).
+    text.lines().any(|line| {
+        SOURCE_KEYS
+            .iter()
+            .any(|k| line == *k || line.starts_with(k))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -340,8 +391,44 @@ mod tests {
     #[test]
     fn classify_yml_without_csv_sibling_is_source() {
         let path = PathBuf::from("/tmp/x/orders.yml");
-        let kind = classify(&path, None, &[]).unwrap();
+        let source_content = "description: Raw orders\ncolumns:\n  - name: id\n    type: INTEGER\n";
+        let kind = classify(&path, Some(source_content), &[]).unwrap();
         assert_eq!(kind, EntityKind::Source);
+    }
+
+    #[test]
+    fn classify_yml_list_content_is_none() {
+        // A YAML file whose content is a list (not a mapping) is not a source.
+        let path = PathBuf::from("/tmp/x/cohorts.yaml");
+        let list_content = "- name: us_west\n  region: us-west-2\n";
+        assert!(classify(&path, Some(list_content), &[]).is_none());
+    }
+
+    #[test]
+    fn classify_yml_arbitrary_mapping_is_none() {
+        // A YAML mapping with no recognized source-schema keys is not a source.
+        let path = PathBuf::from("/tmp/x/tenants.yaml");
+        let arbitrary_content =
+            "tenant_a:\n  host: db-a.example.com\ntenant_b:\n  host: db-b.example.com\n";
+        assert!(classify(&path, Some(arbitrary_content), &[]).is_none());
+    }
+
+    #[test]
+    fn classify_smelt_yml_is_none() {
+        // `smelt.yml` is the project config file, not a source.
+        let path = PathBuf::from("/tmp/x/smelt.yml");
+        assert!(classify(&path, None, &[]).is_none());
+        let path_yaml = PathBuf::from("/tmp/x/smelt.yaml");
+        assert!(classify(&path_yaml, None, &[]).is_none());
+    }
+
+    #[test]
+    fn classify_sources_yml_is_none() {
+        // `sources.yml` is the aggregate sources file, not a per-entity source.
+        let path = PathBuf::from("/tmp/x/sources.yml");
+        assert!(classify(&path, None, &[]).is_none());
+        let path_yaml = PathBuf::from("/tmp/x/sources.yaml");
+        assert!(classify(&path_yaml, None, &[]).is_none());
     }
 
     #[test]

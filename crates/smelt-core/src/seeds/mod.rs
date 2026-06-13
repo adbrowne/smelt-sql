@@ -170,65 +170,64 @@ fn discover_seed_infos_impl(
     paths: &[String],
     read_sidecars: bool,
 ) -> Vec<SeedInfo> {
+    use crate::discovery::project_root_files_by_dir;
+    use crate::resolver::{classify, EntityKind};
+
     let mut seeds = Vec::new();
 
-    for seed_path in paths {
-        let seed_dir = project_dir.join(seed_path);
-        if !seed_dir.exists() {
-            continue;
-        }
+    // Universal walk (D-01): project-wide discovery, not gated on `paths:`.
+    for (_, files) in project_root_files_by_dir(project_dir) {
+        for file_path in &files {
+            // Only process CSV files classified as seeds.
+            if !matches!(
+                classify(file_path, None, &files),
+                Some(EntityKind::Seed { .. })
+            ) {
+                continue;
+            }
 
-        for entry in WalkDir::new(&seed_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path().to_path_buf();
-            if path.extension().is_some_and(|e| e == "csv") {
-                let name = path
-                    .file_stem()
-                    .expect("CSV file always has a stem")
-                    .to_string_lossy()
-                    .into_owned();
+            let name = file_path
+                .file_stem()
+                .expect("CSV file always has a stem")
+                .to_string_lossy()
+                .into_owned();
 
-                // Address via the D-01 strip-list rule (shared with models/sources).
-                let address_segments =
-                    ModelDiscovery::compute_address_segments(&path, project_dir, paths);
+            // Address via the D-01 strip-list rule (shared with models/sources).
+            let address_segments =
+                ModelDiscovery::compute_address_segments(file_path, project_dir, paths);
 
-                // Try to read the sidecar YAML (same stem, same directory, .yml extension).
-                let sidecar = if read_sidecars {
-                    let yml_path = path.with_extension("yml");
-                    if yml_path.exists() {
-                        parse_sidecar(&yml_path).ok()
-                    } else {
-                        None
-                    }
+            // Try to read the sidecar YAML (same stem, same directory, .yml extension).
+            let sidecar = if read_sidecars {
+                let yml_path = file_path.with_extension("yml");
+                if yml_path.exists() {
+                    parse_sidecar(&yml_path).ok()
                 } else {
                     None
-                };
+                }
+            } else {
+                None
+            };
 
-                // Use sidecar-pinned columns when available and valid;
-                // otherwise fall back to inference.
-                let columns = if let Some(sc) = &sidecar {
-                    if let Some(cols) = &sc.columns {
-                        // Reorder columns to match the CSV header order.
-                        infer_csv_columns_with_pins(&path, cols)
-                    } else {
-                        infer_csv_columns(&path)
-                    }
+            // Use sidecar-pinned columns when available and valid;
+            // otherwise fall back to inference.
+            let columns = if let Some(sc) = &sidecar {
+                if let Some(cols) = &sc.columns {
+                    // Reorder columns to match the CSV header order.
+                    infer_csv_columns_with_pins(file_path, cols)
                 } else {
-                    infer_csv_columns(&path)
-                };
+                    infer_csv_columns(file_path)
+                }
+            } else {
+                infer_csv_columns(file_path)
+            };
 
-                seeds.push(SeedInfo {
-                    name,
-                    path,
-                    columns,
-                    address_segments,
-                    sidecar,
-                });
-            }
+            seeds.push(SeedInfo {
+                name,
+                path: file_path.clone(),
+                columns,
+                address_segments,
+                sidecar,
+            });
         }
     }
 
@@ -488,5 +487,31 @@ mod tests {
         let col_map: std::collections::HashMap<_, _> = seeds[0].columns.iter().cloned().collect();
         assert_eq!(col_map["zoned_ts"], DataType::Text);
         assert_eq!(col_map["offset_ts"], DataType::Text);
+    }
+
+    /// A seed CSV in `billing/seeds/users.csv` (not in `paths: ["models"]`) must
+    /// be discovered project-wide after D-01 universal walk.
+    /// Spec: seeds.md §"What a seed is" — project-wide discovery.
+    #[test]
+    fn seed_discovered_project_wide() {
+        let tmp = TempDir::new().unwrap();
+        // paths: ["models"] — billing/ is NOT in paths
+        std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+        let billing_seeds = tmp.path().join("billing").join("seeds");
+        fs::create_dir_all(&billing_seeds).unwrap();
+        fs::write(billing_seeds.join("users.csv"), "id,name\n1,alice\n").unwrap();
+
+        let seeds = discover_seed_infos(tmp.path(), &["models".to_string()]);
+        assert!(
+            seeds.iter().any(|s| s.name == "users"),
+            "users.csv outside models/ must be discovered project-wide; got: {:?}",
+            seeds.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        let users = seeds.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(
+            users.address_segments,
+            vec!["billing", "seeds", "users"],
+            "address must include full path since billing/ is not a paths prefix"
+        );
     }
 }

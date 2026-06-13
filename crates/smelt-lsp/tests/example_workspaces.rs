@@ -513,6 +513,14 @@ async fn non_ascii_columns() {
     assert_example_workspace_clean("non_ascii_columns").await;
 }
 
+/// D-01/D-05: domain-grouped layout — models live under `billing/` and
+/// `finance/`, not under a top-level `models/` dir. The LSP gate verifies
+/// project-wide discovery (no scan-root gate) via the real Backend.
+#[tokio::test]
+async fn architecture_domain_layout() {
+    assert_example_workspace_clean("architecture_domain_layout").await;
+}
+
 // ---------------------------------------------------------------------------
 // Emission-body diagnostics: broken fixture LSP tests.
 // These mirror the CLI broken-fixture tests to satisfy the Workspace-Loading-

@@ -111,34 +111,74 @@ impl ModelFile {
     }
 }
 
-/// Discover `smelt.define` / `smelt.extern` files under the project-root
-/// `functions/` directory.
+/// Walk every non-excluded file under `project_root`, grouped by directory.
 ///
-/// Returns the paths of every `.sql` file beneath `<project_root>/functions/`
-/// (recursive). The `functions/` directory is hardcoded and not currently
-/// configurable in `smelt.yml`; a configurable discovery policy is deferred
-/// per §21 of the smelt-functions research.
+/// Excluded (fixed skip-list, per spec architecture.md §"Resolution"):
+/// - Any directory whose name starts with `.` (`.git`, `.smelt`, etc.)
+/// - Any directory named `target` (Cargo / smelt build output)
 ///
-/// Returns an empty vector if `functions/` does not exist. Both the CLI's
-/// `Discovery::discover_function_files` and the LSP's `initialize` call this
-/// to keep their function-discovery behavior in sync.
-pub fn discover_function_file_paths(project_root: &Path) -> Vec<PathBuf> {
-    let search_path = project_root.join("functions");
-    if !search_path.exists() {
-        return Vec::new();
-    }
+/// Returns a list of `(dir, files_in_dir)` pairs where `files_in_dir` contains
+/// all files found directly inside `dir`. The sibling list is used by callers
+/// that need `classify()` for sidecar detection.
+pub fn project_root_files_by_dir(project_root: &Path) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut by_dir: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+        std::collections::HashMap::new();
 
-    let mut paths = Vec::new();
-    for entry in WalkDir::new(&search_path)
+    for entry in WalkDir::new(project_root)
         .follow_links(true)
         .into_iter()
+        .filter_entry(|e| {
+            // Never prune the root itself (depth 0 — the project root may be in
+            // a path component that starts with `.`, e.g. a hidden parent dir).
+            // Only prune *subdirectories* whose names match the exclusion list.
+            if e.depth() == 0 {
+                return true;
+            }
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_str().unwrap_or("");
+                !name.starts_with('.') && name != "target"
+            } else {
+                true
+            }
+        })
         .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
     {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-            paths.push(path.to_path_buf());
+        let path = entry.path().to_path_buf();
+        let dir = path
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf();
+        by_dir.entry(dir).or_default().push(path);
+    }
+
+    by_dir.into_iter().collect()
+}
+
+/// Discover `smelt.define` / `smelt.extern` files under the project root.
+///
+/// Returns the paths of every `.sql` file under any non-excluded directory that
+/// contains a `smelt.define` (or `smelt.extern`) declaration. Discovery is
+/// project-wide — no dedicated `functions/` gate; functions live wherever they
+/// are declared (D-01/D-05). Hidden directories and `target/` are excluded.
+///
+/// Both the CLI's `Discovery::discover_function_files` and the LSP's
+/// `initialize` call this to keep their function-discovery behavior in sync.
+pub fn discover_function_file_paths(project_root: &Path) -> Vec<PathBuf> {
+    use crate::resolver::{classify, EntityKind};
+
+    let mut paths = Vec::new();
+    for (_, files) in project_root_files_by_dir(project_root) {
+        for file_path in &files {
+            if matches!(
+                classify(file_path, None, &files),
+                Some(EntityKind::Function)
+            ) {
+                paths.push(file_path.clone());
+            }
         }
     }
+    paths.sort(); // deterministic ordering
     paths
 }
 
@@ -171,47 +211,54 @@ impl ModelDiscovery {
     }
 
     pub fn discover_models(&self) -> Result<Vec<ModelFile>> {
+        use crate::resolver::{classify, EntityKind};
+
         let mut models = Vec::new();
 
-        for model_path in &self.paths {
-            let search_path = self.project_root.join(model_path);
-
-            if !search_path.exists() {
-                continue;
-            }
-
-            // Recursively find all .sql files
-            for entry in WalkDir::new(&search_path)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let path = entry.path();
-
-                if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                    let mut parsed = self.parse_model_file(path)?;
-                    // Compute address_segments via the strip-list rule (D-01):
-                    // project-root-relative path with the first matching paths: prefix stripped.
-                    let address_segments =
-                        Self::compute_address_segments(path, &self.project_root, &self.paths);
-                    for m in &mut parsed {
-                        m.address_segments = address_segments.clone();
-                        // For multi-model files, keep the model's declared name
-                        // as the leaf segment instead of the file stem.
-                        if let Some(last) = m.address_segments.last_mut() {
-                            *last = m.name.clone();
+        // Universal walk: visit every non-excluded file under the project root.
+        // `paths:` is the strip-list (for address derivation), NOT the scan gate.
+        for (_, files) in project_root_files_by_dir(&self.project_root) {
+            for file_path in &files {
+                // Classify by content/extension (sidecar-aware via siblings list).
+                match classify(file_path, None, &files) {
+                    Some(EntityKind::Model)
+                    | Some(EntityKind::Function)
+                    | Some(EntityKind::Test) => {
+                        // Parse (address_segments filled in below).
+                        let mut parsed = match self.parse_model_file(file_path) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!("Failed to parse {}: {}", file_path.display(), e);
+                                continue;
+                            }
+                        };
+                        // Address via the D-01 strip-list rule.
+                        let address_segments = Self::compute_address_segments(
+                            file_path,
+                            &self.project_root,
+                            &self.paths,
+                        );
+                        for m in &mut parsed {
+                            m.address_segments = address_segments.clone();
+                            // For multi-model files, replace the leaf with the
+                            // declared model name.
+                            if let Some(last) = m.address_segments.last_mut() {
+                                *last = m.name.clone();
+                            }
                         }
+                        models.extend(parsed);
                     }
-                    models.extend(parsed);
+                    // Seeds (CSV), sources (standalone YAML), and sidecars
+                    // are handled by their own discovery paths — skip here.
+                    // Generator files classify as Model (no smelt.define/test);
+                    // parse_sql_file handles the Generator frontmatter arm.
+                    _ => {}
                 }
             }
         }
 
         if models.is_empty() {
-            return Err(anyhow!(
-                "No models found in paths: {}",
-                self.paths.join(", ")
-            ));
+            return Err(anyhow!("No SQL files found in project"));
         }
 
         Ok(models)
@@ -547,12 +594,12 @@ SELECT * FROM smelt.models.staging_events
         let top = functions_dir.join("sessionize.sql");
         std::fs::File::create(&top)
             .unwrap()
-            .write_all(b"-- top-level fn")
+            .write_all(b"smelt.define sessionize(x: Expr<Integer>) AS (x)")
             .unwrap();
         let nested = nested_dir.join("inner.sql");
         std::fs::File::create(&nested)
             .unwrap()
-            .write_all(b"-- nested fn")
+            .write_all(b"smelt.define inner(x: Expr<Integer>) AS (x + 1)")
             .unwrap();
         // Non-sql files are ignored.
         let other = functions_dir.join("README.md");
@@ -857,6 +904,116 @@ smelt.config.load_yaml('cohorts.yaml', List<{ name: Text }>)
                 .iter()
                 .flat_map(|m| m.parse_errors.iter())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ----- P2 universal discovery tests (D-01, D-05) -----------------------
+
+    /// A bare-SELECT .sql under `billing/staging/` (not in `paths: ["models"]`)
+    /// must be discovered and addressed `billing.staging.<stem>`.
+    /// Spec: architecture.md §"Resolution" — project-wide discovery, kind by content.
+    #[test]
+    fn discovers_model_outside_models_dir() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let billing_dir = dir.path().join("billing").join("staging");
+        std::fs::create_dir_all(&billing_dir).unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        // Write smelt.yml with paths: ["models"] — billing/ is NOT in paths
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\n",
+        )
+        .unwrap();
+        let sql_path = billing_dir.join("invoices.sql");
+        std::fs::File::create(&sql_path)
+            .unwrap()
+            .write_all(b"SELECT 1 AS id")
+            .unwrap();
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+        let invoice = models.iter().find(|m| m.name == "invoices");
+        assert!(
+            invoice.is_some(),
+            "invoices.sql outside models/ must be discovered; got: {:?}",
+            models.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            invoice.unwrap().address_segments,
+            vec!["billing", "staging", "invoices"],
+            "address must include full path because billing/ is not a paths prefix"
+        );
+    }
+
+    /// A `smelt.define` .sql under `random/x.sql` (not in `functions/`) must be
+    /// discovered as a function with address `random.x`.
+    /// Spec: architecture.md §"Resolution" — no dedicated `functions/` gate.
+    #[test]
+    fn discovers_function_anywhere() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let random_dir = dir.path().join("random");
+        std::fs::create_dir_all(&random_dir).unwrap();
+        let fn_path = random_dir.join("helper.sql");
+        std::fs::File::create(&fn_path)
+            .unwrap()
+            .write_all(b"smelt.define helper() AS (SELECT 1)")
+            .unwrap();
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+        let found = models.iter().find(|m| m.name == "helper");
+        assert!(
+            found.is_some(),
+            "helper.sql in random/ must be discovered; got: {:?}",
+            models.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            found.unwrap().address_segments,
+            vec!["random", "helper"],
+            "address must be random.helper (no functions/ prefix stripped)"
+        );
+    }
+
+    /// Files under hidden directories (`.git`, `.smelt`) and `target/` must NOT
+    /// be discovered by the universal walk.
+    /// Spec: architecture.md §"Resolution" — exclusion skip-list.
+    #[test]
+    fn excludes_hidden_and_target_dirs() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+
+        // A normal model that SHOULD be discovered
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::File::create(models_dir.join("good.sql"))
+            .unwrap()
+            .write_all(b"SELECT 1")
+            .unwrap();
+
+        // Files under hidden and target dirs that SHOULD NOT be discovered
+        for excluded in [".git", ".smelt", "target"] {
+            let excluded_dir = dir.path().join(excluded);
+            std::fs::create_dir_all(&excluded_dir).unwrap();
+            std::fs::File::create(excluded_dir.join("hidden.sql"))
+                .unwrap()
+                .write_all(b"SELECT 1")
+                .unwrap();
+        }
+
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+
+        // Should only find good.sql
+        assert!(
+            models.iter().any(|m| m.name == "good"),
+            "good.sql must be discovered"
+        );
+        assert!(
+            !models.iter().any(|m| m.name == "hidden"),
+            "files in .git/.smelt/target/ must not be discovered; got: {:?}",
+            models.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
     }
 }

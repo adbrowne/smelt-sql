@@ -13,7 +13,6 @@ use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use walkdir::WalkDir;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -229,60 +228,33 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
     })
 }
 
-/// Walk all `paths` under `project_root` and return every candidate source
-/// `.yml`/`.yaml` file — a standalone YAML with no same-stem `.csv` sibling —
-/// paired with the scan-root directory it was found under.
+/// Walk the project root and return every candidate source `.yml`/`.yaml` file —
+/// a standalone YAML with no same-stem `.csv` sibling.
+///
+/// Discovery is project-wide (D-01: `paths:` is a strip-list, not a scan gate).
+/// The `paths` parameter is retained for the `address_segments` derivation in
+/// callers but is no longer used as a scan gate here.
 ///
 /// This is the single place the source/sidecar disambiguation lives, shared by
-/// [`discover_source_infos`] (which parses each candidate into a `SourceInfo`)
-/// and [`discover_source_errors`] (which collects the candidates that fail to
-/// parse). Keeping one walk means both surfaces see exactly the same file set.
+/// [`discover_source_infos`] and [`discover_source_errors`].
 fn candidate_source_yaml_files(project_dir: &Path, paths: &[String]) -> Vec<(PathBuf, PathBuf)> {
+    use crate::discovery::project_root_files_by_dir;
+    use crate::resolver::{classify, EntityKind};
+
     let mut candidates = Vec::new();
 
-    for scan_root in paths {
-        let root_dir = project_dir.join(scan_root);
-        if !root_dir.exists() {
-            continue;
-        }
-
-        // Collect all files grouped by directory for sibling detection.
-        let mut by_dir: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
-            std::collections::HashMap::new();
-        for entry in WalkDir::new(&root_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let p = entry.path().to_path_buf();
-            let dir = p.parent().unwrap_or(Path::new("")).to_path_buf();
-            by_dir.entry(dir).or_default().push(p);
-        }
-
-        for files in by_dir.values() {
-            for file_path in files {
-                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext != "yml" && ext != "yaml" {
-                    continue;
-                }
-
-                let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
-                // Skip sidecar: if a same-stem CSV exists in the same dir, skip.
-                let has_csv_sibling = files.iter().any(|p| {
-                    p.extension().and_then(|e| e.to_str()) == Some("csv")
-                        && p.file_stem().and_then(|s| s.to_str()) == Some(stem)
-                });
-                if has_csv_sibling {
-                    continue;
-                }
-
-                candidates.push((root_dir.clone(), file_path.clone()));
+    for (_, files) in project_root_files_by_dir(project_dir) {
+        for file_path in &files {
+            if matches!(classify(file_path, None, &files), Some(EntityKind::Source)) {
+                // root_dir kept as project_dir for legacy API compatibility;
+                // address computation uses the full project-root-relative path.
+                candidates.push((project_dir.to_path_buf(), file_path.clone()));
             }
         }
     }
 
+    // Suppress unused-variable warning: paths is used by callers for address stripping
+    let _ = paths;
     candidates
 }
 
@@ -677,5 +649,43 @@ sources:
 
         let amount = table.columns.iter().find(|c| c.name == "amount").unwrap();
         assert!(amount.data_latency.is_none());
+    }
+
+    /// A standalone .yml in `billing/raw/events.yml` (not in `paths: ["models"]`)
+    /// must be discovered project-wide after D-01 universal walk.
+    /// Spec: architecture.md §"Resolution" — project-wide discovery for sources.
+    #[test]
+    fn source_discovered_project_wide() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // paths: ["models"] — billing/ is NOT in paths
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        let raw_dir = dir.path().join("billing").join("raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        std::fs::write(
+            raw_dir.join("events.yml"),
+            "description: raw events\ncolumns:\n  - name: id\n    type: Integer\n",
+        )
+        .unwrap();
+
+        let sources = discover_source_infos(dir.path(), &["models".to_string()]);
+        assert!(
+            sources
+                .iter()
+                .any(|s| s.address_segments.last() == Some(&"events".to_string())),
+            "events.yml outside models/ must be discovered project-wide; got: {:?}",
+            sources
+                .iter()
+                .map(|s| &s.address_segments)
+                .collect::<Vec<_>>()
+        );
+        let events = sources
+            .iter()
+            .find(|s| s.address_segments.last() == Some(&"events".to_string()))
+            .unwrap();
+        assert_eq!(
+            events.address_segments,
+            vec!["billing", "raw", "events"],
+            "address must include full path since billing/ is not a paths prefix"
+        );
     }
 }

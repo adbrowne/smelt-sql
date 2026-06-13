@@ -162,10 +162,11 @@ pub fn project_seeds(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec
 
 /// Discover per-entity source YAML files for a project root.
 ///
-/// Phase 6: sources live as standalone `.yml` files (no sibling `.csv`) under
-/// the project's `paths:` directories. The query is keyed on `ProjectInput`
-/// so it re-runs when `smelt.yml` changes (e.g. `paths:` updated) but not on
-/// every source file change (LSP restarts are acceptable for source changes).
+/// Discovery is project-wide (D-01): every non-excluded subdirectory is walked;
+/// `paths:` is the strip-list for address derivation, not a scan gate. The
+/// query is keyed on `ProjectInput` so it re-runs when `smelt.yml` changes
+/// (e.g. `paths:` updated) but not on every source file change (LSP restarts
+/// are acceptable for source changes).
 #[salsa::tracked]
 pub fn project_sources(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SourceInfo>> {
     let project_root = project.root(db).clone();

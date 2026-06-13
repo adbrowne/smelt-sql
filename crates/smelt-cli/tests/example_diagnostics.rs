@@ -134,6 +134,15 @@ fn fn_incremental_ts_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_incremental_ts");
 }
 
+/// D-01/D-05: domain-grouped layout where models live under `billing/` and
+/// `finance/` rather than a top-level `models/` directory. Verifies that
+/// project-wide discovery (no scan-root gate) finds both models and that
+/// `paths:` acts as a strip-list only, producing addresses `orders` and `revenue`.
+#[test]
+fn architecture_domain_layout_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/architecture_domain_layout");
+}
+
 /// Test 4 (TDD): All example SQL files must use the unified `smelt.<path>`
 /// syntax.  This test FAILS until the migration tool has been run on all
 /// example workspaces.

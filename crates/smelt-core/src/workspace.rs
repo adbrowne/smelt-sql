@@ -19,7 +19,7 @@
 //!   query).
 
 use crate::config::{Config, Materialization};
-use crate::discovery::{discover_function_file_paths, parse_sql_file, ModelDiscovery, ModelFile};
+use crate::discovery::{ModelDiscovery, ModelFile};
 use std::path::{Path, PathBuf};
 
 /// Errors collected while loading a workspace. Mirrors the LSP's
@@ -111,36 +111,21 @@ pub fn load_workspace(project_root: &Path) -> LoadedWorkspace {
         }
     };
 
-    // SQL models: walk config.paths via the existing discovery, then collect.
+    // SQL files: project-wide walk via ModelDiscovery (D-01 universal
+    // discovery). Functions, models, tests, and generators are all returned.
+    // `config.paths` is the strip-list for address derivation, not the scan
+    // gate.  The `functions/` hardcoded gate is gone — functions anywhere are
+    // discovered by classify() inside discover_models().
     let mut sql_files: Vec<ModelFile> = Vec::new();
     let model_discovery = ModelDiscovery::new(project_root.to_path_buf(), config.paths.clone());
     match model_discovery.discover_models() {
         Ok(models) => sql_files.extend(models),
         Err(e) => {
-            // ModelDiscovery returns an error when *no* models are found — that's
-            // a soft warning here (the workspace might be functions-only, or
-            // empty during onboarding). Surface it but keep going.
+            // discover_models() returns an error only when the project has zero
+            // SQL files — a soft warning (empty workspace during onboarding, or
+            // a project that only has seeds/sources with no SQL yet). Surface it
+            // but keep going.
             errors.model_errors.push(format!("{}", e));
-        }
-    }
-
-    // Function files: <project_root>/functions/*.sql, parsed the same way as
-    // models so each becomes a `SourceFile` and the function-signature query
-    // (`functions_in_file`) can index it. The `functions/` directory is
-    // hardcoded (see `discover_function_file_paths` docs).
-    //
-    // Pass `project_root` as the scan root so that address_segments retains
-    // the full workspace-relative path (e.g. `["functions", "sessionize"]`
-    // for `functions/sessionize.sql`). Function files are NOT in `config.paths`
-    // so their scan-root prefix is never stripped — per the architecture spec.
-    for fn_path in discover_function_file_paths(project_root) {
-        match parse_sql_file(&fn_path, Some(project_root)) {
-            Ok(parsed) => sql_files.extend(parsed),
-            Err(e) => {
-                errors
-                    .model_errors
-                    .push(format!("Failed to parse {}: {}", fn_path.display(), e));
-            }
         }
     }
     LoadedWorkspace {

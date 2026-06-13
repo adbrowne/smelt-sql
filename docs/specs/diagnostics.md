@@ -155,6 +155,7 @@ Owned by `docs/specs/types.md` and the VALUES/alias-column-list analysis.
 | `AliasColumnArityMismatch` | Error | An alias column list in `(VALUES …) AS t(c₁, …)` or `WITH cte(c₁, …) AS (…)` has a different length from the relation's actual column count. |
 | `EmptyValuesClause` | Error | A `(VALUES …)` derived table contains no rows and cannot produce a typed schema. |
 | `DecimalPrecisionOverflow` | Error | A decimal arithmetic expression (`+`, `-`, `*`, `%`) produces a result whose precision exceeds the 38-digit portable maximum. |
+| `NonPortableCollation` | Error | A `COLLATE` clause names a non-binary collation in portable code (§17 of `types.md`). The expression type degrades to `Unknown` (reason `Unresolved`). Binary collation names (`C`, `POSIX`, `BINARY`, `UTF8_BINARY`, case-insensitive) are accepted as no-ops and do not fire this diagnostic. |
 
 ---
 
