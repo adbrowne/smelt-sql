@@ -49,7 +49,7 @@ Set the row to `blocked` + one-line reason; append a dated §"Blocked phases" en
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| P1 | `Char(_)` folded into string family in `normalize()` | pending | D-29 | feat(types): fold Char into the string-equality family in normalize (D-29) | |
+| P1 | `Char(_)` folded into string family in `normalize()` | done | D-29 | feat(types): fold Char into the string-equality family in normalize (D-29) | 2026-06-14 |
 | P2 | VALUES temporal-family LUB + strict tz-mixing | pending | D-28 | feat(db): strict temporal/tz mixing in VALUES columns → TypeMismatch (D-28) | |
 | P3 | Non-nullable origin for nullary built-ins; signature-nullability reconcile | pending | NOW-null, C26 | feat(types): non-nullable origin for NOW/CURRENT_TIMESTAMP; lock bare-stays-nullable (C26) | |
 | P4 | Decimal widening predicate + arithmetic lift-trigger lock | pending | C16, decimal-arith | feat(types): decimal widening safety predicate (s2≥s ∧ p2−s2≥p−s); lock decimal-arith trigger (C16) | |

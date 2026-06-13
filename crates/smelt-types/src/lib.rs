@@ -128,12 +128,15 @@ impl DataType {
 
     /// Normalize this type to its canonical form for comparison.
     ///
-    /// - `Text` → `Varchar { max_length: None }` (canonical string type)
+    /// - `Text`, `Char(_)`, `Varchar(_)` → `Varchar { max_length: None }` (canonical string type)
+    ///   Length annotations and the varchar/char distinction are discarded for equality (§4 types.md).
     /// - Recursively normalizes Array elements, Struct fields, Map key/value
     /// - All other types are returned as-is
     pub fn normalize(&self) -> DataType {
         match self {
-            DataType::Text => DataType::Varchar { max_length: None },
+            DataType::Text | DataType::Char { .. } | DataType::Varchar { .. } => {
+                DataType::Varchar { max_length: None }
+            }
             DataType::Array(inner) => DataType::Array(Box::new(inner.normalize())),
             DataType::Struct(fields) => DataType::Struct(
                 fields
@@ -463,5 +466,27 @@ mod tests {
             max_length: Some(100),
         });
         assert_eq!(col.to_string(), "VARCHAR(100)");
+    }
+
+    #[test]
+    fn char_normalizes_to_string_family() {
+        let canonical = DataType::Varchar { max_length: None };
+        assert_eq!(DataType::Char { length: 5 }.normalize(), canonical);
+        assert_eq!(DataType::Text.normalize(), canonical);
+        assert_eq!(
+            DataType::Varchar { max_length: None }.normalize(),
+            canonical
+        );
+        assert_eq!(
+            DataType::Char { length: 5 }.normalize(),
+            DataType::Text.normalize()
+        );
+        assert_eq!(
+            DataType::Char { length: 5 }.normalize(),
+            DataType::Varchar {
+                max_length: Some(10)
+            }
+            .normalize()
+        );
     }
 }

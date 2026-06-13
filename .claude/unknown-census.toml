@@ -414,7 +414,7 @@ reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_w
 
 # ── smelt-types / lib ─────────────────────────────────────────────────────────
 
-["crates/smelt-types/src/lib.rs:246"]
+["crates/smelt-types/src/lib.rs:248"]
 classification = "legitimate"
 reason = "TypedColumn::unknown() constructor — this IS the definition of the Unknown sentinel value"
 

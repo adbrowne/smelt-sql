@@ -674,7 +674,11 @@ mod tests {
         };
 
         // address-map: different addresses → no DuplicateAddress
-        let (_, addr_collisions) = resolve_address_map(std::slice::from_ref(&fn_file), std::slice::from_ref(&seed), &[]);
+        let (_, addr_collisions) = resolve_address_map(
+            std::slice::from_ref(&fn_file),
+            std::slice::from_ref(&seed),
+            &[],
+        );
         assert!(
             addr_collisions.is_empty(),
             "same-stem / different-address pair must not produce an AddressCollision: {:?}",
