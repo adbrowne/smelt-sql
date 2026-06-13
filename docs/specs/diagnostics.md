@@ -156,9 +156,9 @@ Owned by `docs/specs/functions.md`.
 | `FunctionBodyTypeMismatch` | Error | A `smelt.define` body contains a type mismatch (e.g. `x + 'text'` when `x: Expr<Integer>`). Anchored at the inner bad subexpression. |
 | `UnknownIdentifier` | Error | A `smelt.define` body references a name that is neither a declared parameter nor resolvable in any enclosing scope. |
 | `DuplicateParameterName` | Error | Two parameters in a single `smelt.define` share a name. Anchored at the second occurrence. |
-| `UnknownSmeltFn` | Error | A `smelt.fn.<path>(…)` call references a function name not registered in the workspace. |
-| `MissingArgument` | Error | A `smelt.fn.*` call omits a required parameter (one without a default value). |
-| `ArgTypeMismatch` | Error | A `smelt.fn.*` call passes an argument whose type does not satisfy the declared parameter's `TypeConstraint`. |
+| `UnknownSmeltFn` | Error | A `smelt.<path>(…)` call resolves to a function name not registered in the workspace. |
+| `MissingArgument` | Error | A `smelt.<path>(…)` call omits a required parameter (one without a default value). |
+| `ArgTypeMismatch` | Error | A `smelt.<path>(…)` call passes an argument whose type does not satisfy the declared parameter's `TypeConstraint`. |
 | `ExternCollidesWithBuiltin` | Error | A `smelt.extern` declares a name that already exists in the built-in registry. |
 | `BackendsWideningNotAllowed` | Error | A `smelt.define`'s `backends:` set is broader than what the body implies, or the frontmatter itself is malformed. |
 | `FrontmatterParseError` | Error/Warning | A `smelt.define` or `smelt.extern` frontmatter YAML block could not be parsed (Error) or contained an unknown key/malformed sub-entry (Warning). |

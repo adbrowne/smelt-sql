@@ -82,7 +82,7 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 
 **Functions (`smelt.define`, `smelt.extern`):**
 - `UnrecognizedFunction` — call to an SQL built-in function not in the recognized registry
-- `UnknownSmeltFn` — call to a `smelt.functions.*` path that does not resolve to any declared `smelt.define` in the workspace
+- `UnknownSmeltFn` — a `smelt.<path>(…)` call that resolves to no declared `smelt.define` in the workspace
 - `DuplicateFunctionDefinition` — two `smelt.define` blocks with the same name
 - `InvalidFunctionTypeRef` — malformed type annotation
 - `FunctionBodyTypeMismatch` — type error inside function body
@@ -166,7 +166,7 @@ Find References resolves the following identifier types:
 |------------|---------|
 | `smelt.<path>` (at definition or use, resolves to a model / source / seed) | All `smelt.<path>` references to the same entity across the workspace |
 | `smelt.<path>(...)` (at a call site, resolves to a function) | All `smelt.<path>(...)` call sites for the same function across the workspace, scoped to the function's project |
-| `smelt.define <name>` declaration name token | All `smelt.functions.<name>(...)` call sites in the same project |
+| `smelt.define <name>` declaration name token | All `smelt.<path>(...)` call sites resolving to that function, in the same project |
 | CTE name (at definition or use) | All references to that CTE within the same file |
 
 Cross-file find-references for `smelt.<path>` searches all loaded workspace files **within the same project** — a workspace folder may contain multiple smelt projects, and references do not cross project boundaries (see `architecture.md` → "Project isolation rule"). For CTEs, the search is intra-file by construction.
