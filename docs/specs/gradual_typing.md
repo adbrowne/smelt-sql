@@ -197,35 +197,26 @@ This section captures the load-bearing rationale behind the tier model and the b
 
 ## References
 
-### Code
-
-- `crates/smelt-types/src/signatures.rs` — `Tier`, `FunctionSig::tier`, `compute_tier`, `FrameInfo`
-- `crates/smelt-db/src/function_body_check.rs` — `CheckMode` (`Tier1Expansion` / `Tier2Isolated` / `Tier2CallSite`), `is_tier2_function`, `check_function_body`, `check_function_body_with_expansion`, `walk_body_with_ctx`, `check_smelt_fn_call`, `check_tier3_return_type`, `NestedCallHandler`
-- `crates/smelt-db/src/lib.rs::DiagnosticData::ExpansionFrames` — frame-stack payload on diagnostics
-- `crates/smelt-db/src/type_inference.rs` — synthesis-mode walk consumed by tier dispatch (`infer_expression_type`, `TypeContext::function_params`, `TypeContext::expected_return`)
-
-### Tests
-
-- `crates/smelt-db/src/function_body_check.rs::tests` — tier classification, Tier 2 isolated check, Tier 3 return-type validation, single-frame and multi-frame expansion traces
-- `crates/smelt-db/tests/` — workspace-level tier-mixing tests (Tier 2 → Tier 1 inline expansion, frame-stack stamping)
-- `examples/test_workspace/functions/` — worked tier examples consumed by the LSP-diagnostics integration test
-
-### User docs
-
-- `docs-site/docs/concepts/functions.md` and adjacent typing pages — to be reconciled against this spec via `/smelt:validate gradual_typing`
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260422-smelt-functions.md` — primary implementation plan; Phases 5, 6, 12, 25, 26 cover the surface in this spec
-- `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
-
-### Related specs
-
-- `docs/specs/types.md` — type vocabulary, fragment sorts, bidirectional checking rule, generics inference
-- `docs/specs/functions.md` — declaration grammar, frontmatter, function-level diagnostics, cycle rule
-- `docs/specs/scoping.md` — body-scope name resolution and the `TypeContext` seeding contract
-- `docs/specs/expansion.md` — AST-level expansion mechanics, provenance origin tags, hygiene
-- `docs/specs/meta_language.md` — `List<Unknown>` widening interacts with the meta-language list surface; this spec owns the widening discipline, `meta_language.md` owns the diagnostic codes
+- **Code**:
+  - `crates/smelt-types/src/signatures.rs` — `Tier`, `FunctionSig::tier`, `compute_tier`, `FrameInfo`
+  - `crates/smelt-db/src/function_body_check.rs` — `CheckMode` (`Tier1Expansion` / `Tier2Isolated` / `Tier2CallSite`), `is_tier2_function`, `check_function_body`, `check_function_body_with_expansion`, `walk_body_with_ctx`, `check_smelt_fn_call`, `check_tier3_return_type`, `NestedCallHandler`
+  - `crates/smelt-db/src/lib.rs::DiagnosticData::ExpansionFrames` — frame-stack payload on diagnostics
+  - `crates/smelt-db/src/type_inference.rs` — synthesis-mode walk consumed by tier dispatch (`infer_expression_type`, `TypeContext::function_params`, `TypeContext::expected_return`)
+- **Tests**:
+  - `crates/smelt-db/src/function_body_check.rs::tests` — tier classification, Tier 2 isolated check, Tier 3 return-type validation, single-frame and multi-frame expansion traces
+  - `crates/smelt-db/tests/` — workspace-level tier-mixing tests (Tier 2 → Tier 1 inline expansion, frame-stack stamping)
+  - `examples/test_workspace/functions/` — worked tier examples consumed by the LSP-diagnostics integration test
+- **User docs**:
+  - `docs-site/docs/concepts/functions.md` and adjacent typing pages — to be reconciled against this spec via `/smelt:validate gradual_typing`
+- **Plans (history)**:
+  - `docs/plans/20260422-smelt-functions.md` — primary implementation plan; Phases 5, 6, 12, 25, 26 cover the surface in this spec
+  - `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
+- **Related specs**:
+  - `docs/specs/types.md` — type vocabulary, fragment sorts, bidirectional checking rule, generics inference
+  - `docs/specs/functions.md` — declaration grammar, frontmatter, function-level diagnostics, cycle rule
+  - `docs/specs/scoping.md` — body-scope name resolution and the `TypeContext` seeding contract
+  - `docs/specs/expansion.md` — AST-level expansion mechanics, provenance origin tags, hygiene
+  - `docs/specs/meta_language.md` — `List<Unknown>` widening interacts with the meta-language list surface; this spec owns the widening discipline, `meta_language.md` owns the diagnostic codes
 
 ### Research
 

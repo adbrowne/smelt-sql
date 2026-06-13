@@ -148,33 +148,24 @@ This section captures the load-bearing mechanical decisions. Most of expansion i
 
 ## References
 
-### Code
-
-- `crates/smelt-types/src/signatures.rs` — `FrameInfo` (struct shape and field documentation)
-- `crates/smelt-db/src/lib.rs::DiagnosticData::ExpansionFrames` — diagnostic-payload variant carrying the frame stack
-- `crates/smelt-db/src/function_body_check.rs` — Tier 1 expansion (`check_smelt_fn_call`, `walk_body_with_ctx`), frame-stack push at each call (`frames.push(FrameInfo { … })`), nested-call dispatch via `NestedCallHandler`
-- `crates/smelt-lsp/src/...` — `to_lsp_diagnostic` consumer that reverses the frame stack for outer-to-inner rendering
-
-### Tests
-
-- `crates/smelt-db/src/function_body_check.rs::tests` — single-frame and multi-frame expansion-trace coverage
-- `crates/smelt-db/tests/` — workspace-level tests pinning frame ordering and `DiagnosticRelatedInformation` payload shape
-
-### User docs
-
-- User-visible expansion behaviour is documented under the function-error-message pages reachable from `docs-site/docs/concepts/functions.md` — to be reconciled via `/smelt:validate expansion` in a follow-up plan.
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260422-smelt-functions.md` — Phases 6 (single-level frame stamping) and 12 (multi-level frames, `decl_path` / `call_site_range` data, related-information fan-out)
-- `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
-
-### Related specs
-
-- `docs/specs/gradual_typing.md` — when frames are pushed, format guarantees, multi-level renderer divergence
-- `docs/specs/scoping.md` — parameters-first hygiene rule, CTE-collision interaction
-- `docs/specs/functions.md` — declaration grammar, `FunctionCallCycle` cycle rule (bounds expansion)
-- `docs/specs/planner_integration.md` — Level-1 vs Level-2 planning; codegen-time expansion runs at L2
+- **Code**:
+  - `crates/smelt-types/src/signatures.rs` — `FrameInfo` (struct shape and field documentation)
+  - `crates/smelt-db/src/lib.rs::DiagnosticData::ExpansionFrames` — diagnostic-payload variant carrying the frame stack
+  - `crates/smelt-db/src/function_body_check.rs` — Tier 1 expansion (`check_smelt_fn_call`, `walk_body_with_ctx`), frame-stack push at each call (`frames.push(FrameInfo { … })`), nested-call dispatch via `NestedCallHandler`
+  - `crates/smelt-lsp/src/...` — `to_lsp_diagnostic` consumer that reverses the frame stack for outer-to-inner rendering
+- **Tests**:
+  - `crates/smelt-db/src/function_body_check.rs::tests` — single-frame and multi-frame expansion-trace coverage
+  - `crates/smelt-db/tests/` — workspace-level tests pinning frame ordering and `DiagnosticRelatedInformation` payload shape
+- **User docs**:
+  - User-visible expansion behaviour is documented under the function-error-message pages reachable from `docs-site/docs/concepts/functions.md` — to be reconciled via `/smelt:validate expansion` in a follow-up plan.
+- **Plans (history)**:
+  - `docs/plans/20260422-smelt-functions.md` — Phases 6 (single-level frame stamping) and 12 (multi-level frames, `decl_path` / `call_site_range` data, related-information fan-out)
+  - `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
+- **Related specs**:
+  - `docs/specs/gradual_typing.md` — when frames are pushed, format guarantees, multi-level renderer divergence
+  - `docs/specs/scoping.md` — parameters-first hygiene rule, CTE-collision interaction
+  - `docs/specs/functions.md` — declaration grammar, `FunctionCallCycle` cycle rule (bounds expansion)
+  - `docs/specs/planner_integration.md` — Level-1 vs Level-2 planning; codegen-time expansion runs at L2
 
 ### Research
 

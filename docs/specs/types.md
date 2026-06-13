@@ -394,40 +394,33 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 ## References
 
-### Code
-
-- `crates/smelt-types/src/lib.rs` — `DataType`, `TypedColumn`, `is_numeric` / `is_string` / `is_temporal`, `normalize`, `to_backend_sql`
-- `crates/smelt-types/src/parse.rs` — type-string parsing (sources YAML, `CAST`, type annotations)
-- `crates/smelt-types/src/signatures.rs` — `SmeltType`, `ExprKind`, `TypeConstraint`, `SchemaRequirement`, `RowTail`, `StructRowTail`, `BuiltinRegistry`, `unify_call`, `numeric_lub`, `kind_ceiling`, `subkind_of`
-- `crates/smelt-types/src/functions.rs` — `SqlFunction`, `FunctionCategory`
-- `crates/smelt-db/src/type_inference.rs` — pure inference (`TypeContext`, `infer_expression_type`, `infer_expression_kind`, `promote_types`, `infer_select_column_types`, `check_window_in_scalar_contexts`)
-- `crates/smelt-db/src/schema.rs` — `ModelSchema`, `Column`, `ColumnSource`, `RowExtension`, `InputConstraint`, `ModelFunctionType`
-- `crates/smelt-db/src/function_body_check.rs` — Tier 1 / 2 / 3 body checking
-- `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface
-
-### Tests
-
-- `crates/smelt-db/tests/type_property_tests.rs` — DuckDB oracle for type inference (type correctness, not nullability)
-- `crates/smelt-db/tests/nullability_property_tests.rs` — value-based DuckDB oracle for nullability soundness (§11 verification gate: single-table, two-table joins, and set-operation coverage)
-- `crates/smelt-types/tests/registry_coverage.rs` — built-in registry coverage
-- Unit tests under `crates/smelt-db/src/type_inference.rs::tests` and `function_body_check.rs::tests`
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260321-dialect-function-remapping.md`
-- `docs/plans/20260404-parser-type-testing-completeness.md`
-- `docs/plans/20260405-schema-evolution-complex-types.md`
-- `docs/plans/20260422-smelt-functions.md`
-- `docs/plans/20260610-nullability-soundness.md`
-- `docs/plans/20260611-decimal-arithmetic.md`
-- `docs/plans/20260612-timezone-axis.md`
-
-### Related specs
-
-- `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
-- `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
-- `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; `ModelDef` field rules, generator-file body semantics, and construction restrictions; this spec registers the type vocabulary entries, the meta-language spec owns the rules.
-- `docs/specs/function_schema_inference.md` — how `smelt.functions.*` calls contribute columns/types to a caller's schema; owns the `ColumnTypeUnresolved` schema-propagation rules; this spec owns the `Unknown` reason-discriminant and the no-silent-`Unknown` doctrine it consumes.
+- **Code**:
+  - `crates/smelt-types/src/lib.rs` — `DataType`, `TypedColumn`, `is_numeric` / `is_string` / `is_temporal`, `normalize`, `to_backend_sql`
+  - `crates/smelt-types/src/parse.rs` — type-string parsing (sources YAML, `CAST`, type annotations)
+  - `crates/smelt-types/src/signatures.rs` — `SmeltType`, `ExprKind`, `TypeConstraint`, `SchemaRequirement`, `RowTail`, `StructRowTail`, `BuiltinRegistry`, `unify_call`, `numeric_lub`, `kind_ceiling`, `subkind_of`
+  - `crates/smelt-types/src/functions.rs` — `SqlFunction`, `FunctionCategory`
+  - `crates/smelt-db/src/type_inference.rs` — pure inference (`TypeContext`, `infer_expression_type`, `infer_expression_kind`, `promote_types`, `infer_select_column_types`, `check_window_in_scalar_contexts`)
+  - `crates/smelt-db/src/schema.rs` — `ModelSchema`, `Column`, `ColumnSource`, `RowExtension`, `InputConstraint`, `ModelFunctionType`
+  - `crates/smelt-db/src/function_body_check.rs` — Tier 1 / 2 / 3 body checking
+  - `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface
+- **Tests**:
+  - `crates/smelt-db/tests/type_property_tests.rs` — DuckDB oracle for type inference (type correctness, not nullability)
+  - `crates/smelt-db/tests/nullability_property_tests.rs` — value-based DuckDB oracle for nullability soundness (§11 verification gate: single-table, two-table joins, and set-operation coverage)
+  - `crates/smelt-types/tests/registry_coverage.rs` — built-in registry coverage
+  - Unit tests under `crates/smelt-db/src/type_inference.rs::tests` and `function_body_check.rs::tests`
+- **Plans (history)**:
+  - `docs/plans/20260321-dialect-function-remapping.md`
+  - `docs/plans/20260404-parser-type-testing-completeness.md`
+  - `docs/plans/20260405-schema-evolution-complex-types.md`
+  - `docs/plans/20260422-smelt-functions.md`
+  - `docs/plans/20260610-nullability-soundness.md`
+  - `docs/plans/20260611-decimal-arithmetic.md`
+  - `docs/plans/20260612-timezone-axis.md`
+- **Related specs**:
+  - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
+  - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
+  - `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; `ModelDef` field rules, generator-file body semantics, and construction restrictions; this spec registers the type vocabulary entries, the meta-language spec owns the rules.
+  - `docs/specs/function_schema_inference.md` — how `smelt.functions.*` calls contribute columns/types to a caller's schema; owns the `ColumnTypeUnresolved` schema-propagation rules; this spec owns the `Unknown` reason-discriminant and the no-silent-`Unknown` doctrine it consumes.
 
 ### Backend divergence appendix
 

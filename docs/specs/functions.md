@@ -1,7 +1,7 @@
 ---
 feature: functions
 status: experimental
-last_reviewed: 2026-05-28
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -268,41 +268,32 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 ## References
 
-### Code
-
-- `crates/smelt-parser/src/parser.rs` — `parse_smelt_define`, `parse_smelt_extern`, `parse_smelt_path_form`, `parse_passing_clause`, `parse_smelt_as_struct`, `at_smelt_*_trigger`
-- `crates/smelt-parser/src/syntax_kind.rs` — `SMELT_DEFINE`, `SMELT_EXTERN`, `SMELT_PATH_CALL`, `CALL_PATH`, `PASSING_CLAUSE`, `PASSING_NAME`, `PASSING_BODY`, `SMELT_AS_STRUCT_CALL`, `EXCEPT_COL_LIST`
-- `crates/smelt-parser/src/ast.rs` — `SmeltDefine`, `SmeltExtern`, `SmeltPathCall` AST wrappers
-- `crates/smelt-types/src/signatures.rs` — `FunctionSig`, `Tier`, `ParamSpec`, `BackendSet`, `extract_signature`, `extract_extern_signature`, `extract_function_signatures`, `parse_frontmatter_backends`
-- `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed in Surface
-- `crates/smelt-db/src/function_body_check.rs` — body checking (`check_function_body`, `check_smelt_path_call`), Tier dispatch (`is_tier2_function`, `check_tier3_return_type`), `PASSING` validation, frame-stack construction
-- `crates/smelt-db/src/functions.rs` — function registry / lookup
-- `crates/smelt-db/src/backends.rs` — `infer_body_backends`, `apply_narrow_rule`, `resolve_backends`
-- `crates/smelt-db/src/provenance_validator.rs` — `ProvenanceMismatch` / `JoinsMismatch` checks (Phase 51)
-
-### Tests
-
-- `crates/smelt-db/src/function_body_check.rs::tests` — body-check unit tests
-- `crates/smelt-db/tests/` — workspace-level function tests (duplicate detection, cycle detection, PASSING)
-- `examples/test_workspace/functions/` — worked examples that the LSP-diagnostics integration test runs against
-
-### User docs
-
-- `docs-site/docs/concepts/functions.md` (and adjacent `smelt.<path>` call / `smelt.extern` pages) — to be reconciled against this spec via `/smelt:validate functions`
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260422-smelt-functions.md` — primary implementation plan; Phases 1–57 cover the surface in this spec
-- `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
-
-### Related specs
-
-- `docs/specs/architecture.md` — system pipeline, project layout, models-as-functions
-- `docs/specs/types.md` — type vocabulary, fragment sorts, generics inference, bidirectional checking, variadics
-- `docs/specs/scoping.md` — body-scope name resolution (parameters-first, no-overlap, splice contexts)
-- `docs/specs/gradual_typing.md` — Tier 1/2/3 checking model and error-tracing contract
-- `docs/specs/planner_integration.md` — how frontmatter properties feed planner rules
-- `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
+- **Code**:
+  - `crates/smelt-parser/src/parser.rs` — `parse_smelt_define`, `parse_smelt_extern`, `parse_smelt_path_form`, `parse_passing_clause`, `parse_smelt_as_struct`, `at_smelt_*_trigger`
+  - `crates/smelt-parser/src/syntax_kind.rs` — `SMELT_DEFINE`, `SMELT_EXTERN`, `SMELT_PATH_CALL`, `CALL_PATH`, `PASSING_CLAUSE`, `PASSING_NAME`, `PASSING_BODY`, `SMELT_AS_STRUCT_CALL`, `EXCEPT_COL_LIST`
+  - `crates/smelt-parser/src/ast.rs` — `SmeltDefine`, `SmeltExtern`, `SmeltPathCall` AST wrappers
+  - `crates/smelt-types/src/signatures.rs` — `FunctionSig`, `Tier`, `ParamSpec`, `BackendSet`, `extract_signature`, `extract_extern_signature`, `extract_function_signatures`, `parse_frontmatter_backends`
+  - `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed in Surface
+  - `crates/smelt-db/src/function_body_check.rs` — body checking (`check_function_body`, `check_smelt_path_call`), Tier dispatch (`is_tier2_function`, `check_tier3_return_type`), `PASSING` validation, frame-stack construction
+  - `crates/smelt-db/src/functions.rs` — function registry / lookup
+  - `crates/smelt-db/src/backends.rs` — `infer_body_backends`, `apply_narrow_rule`, `resolve_backends`
+  - `crates/smelt-db/src/provenance_validator.rs` — `ProvenanceMismatch` / `JoinsMismatch` checks (Phase 51)
+- **Tests**:
+  - `crates/smelt-db/src/function_body_check.rs::tests` — body-check unit tests
+  - `crates/smelt-db/tests/` — workspace-level function tests (duplicate detection, cycle detection, PASSING)
+  - `examples/test_workspace/functions/` — worked examples that the LSP-diagnostics integration test runs against
+- **User docs**:
+  - `docs-site/docs/concepts/functions.md` (and adjacent `smelt.<path>` call / `smelt.extern` pages) — to be reconciled against this spec via `/smelt:validate functions`
+- **Plans (history)**:
+  - `docs/plans/20260422-smelt-functions.md` — primary implementation plan; Phases 1–57 cover the surface in this spec
+  - `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
+- **Related specs**:
+  - `docs/specs/architecture.md` — system pipeline, project layout, models-as-functions
+  - `docs/specs/types.md` — type vocabulary, fragment sorts, generics inference, bidirectional checking, variadics
+  - `docs/specs/scoping.md` — body-scope name resolution (parameters-first, no-overlap, splice contexts)
+  - `docs/specs/gradual_typing.md` — Tier 1/2/3 checking model and error-tracing contract
+  - `docs/specs/planner_integration.md` — how frontmatter properties feed planner rules
+  - `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
 
 ### Research
 

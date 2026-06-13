@@ -174,46 +174,37 @@ The plan that produced this spec acknowledges the wired-vs-aspirational gap expl
 
 ## References
 
-### Code
-
-- `crates/smelt-logical/src/logical.rs` — `LogicalNode`, `FunctionProperties`, `Provenance`, `JoinSpec`, `Cardinality`, `ProvenanceTag`, `parse_function_properties` (the logical model lives in `smelt-logical`; `smelt-planner` re-exports it — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
-- `crates/smelt-logical/src/rules/rule_diagnostics.rs` — `RuleContext`, `detect_builtin_rules` (the pure rule-data interface, in `smelt-logical`)
-- `crates/smelt-planner/src/logical_plan_rules.rs` — `PlannerRule` trait, `apply_rules_to_fixed_point`, `show_plan_rules`, the four L1 rules (rule *application* stays in `smelt-planner`)
-- `crates/smelt-planner/src/plan_printer.rs` — `format_plan` (deterministic renderer used by `--show-plan`)
-- `crates/smelt-planner/src/rules/` — graph-level (model-graph) rules; distinct from logical-plan rules above
-- `crates/smelt-logical/src/lowering/` — lowering helpers (`as_struct_to_sql`, etc.)
-- `crates/smelt-logical/src/analysis/temporal.rs` — temporal-dependency analysis feeding incremental strategy selection
-- `crates/smelt-db/src/lib.rs` — `logical_plan` Salsa query, `DiagnosticCode::{ProvenanceMismatch, JoinsMismatch, DeclaredCardinalityUnverifiable, MissingProvenancePushdownAdvisory}`, the missing-provenance-pushdown emission site
-- `crates/smelt-db/src/provenance_validator.rs` — pure validators for the four diagnostic codes
-- `crates/smelt-db/src/backends.rs` — `infer_body_backends`, `apply_narrow_rule`
-- `crates/smelt-cli/src/main.rs` — `--show-plan` CLI argument
-- `crates/smelt-cli/src/commands/build.rs` — `show_plan` driver (gather workspace, build plan, run rules, print)
-
-### Tests
-
-- `crates/smelt-cli/tests/show_plan.rs` — end-to-end `smelt build --show-plan` integration tests
-- `crates/smelt-planner/tests/logical_plan_tests.rs` — logical-plan construction tests
-- `crates/smelt-planner/tests/logical_plan_rule_tests.rs` — per-rule unit tests
-- `crates/smelt-planner/tests/pushdown_tests.rs` — combined-rule fixed-point ordering test
-- `crates/smelt-planner/tests/join_elimination_tests.rs` — `EliminateUnusedLeftJoin` cases
-- `crates/smelt-planner/tests/phase41_body_splice_tests.rs` — body-splicing and provenance-tag tests
-
-### User docs
-
-- `docs-site/docs/concepts/planner.md` (and adjacent rule pages) — to be reconciled with this spec via `/smelt:validate planner_integration`
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260422-smelt-functions.md` — Phases 30–52 land the logical-plan IR, the four L1 rules, frontmatter-property parsing, the validators, and `--show-plan`
-- `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
-
-### Related specs
-
-- `docs/specs/architecture.md` — the planner's place in the compilation pipeline; transparent-vs-black-box at the system level; models-as-functions
-- `docs/specs/functions.md` — `smelt.define` / `smelt.extern` / frontmatter key catalogue
-- `docs/specs/incremental_models.md` — model-frontmatter keys consumed by L2 strategy selection
-- `docs/specs/types.md` — type vocabulary referenced by `FunctionProperties`-adjacent fields
-- `docs/specs/expansion.md` — internal invariants for AST expansion
+- **Code**:
+  - `crates/smelt-logical/src/logical.rs` — `LogicalNode`, `FunctionProperties`, `Provenance`, `JoinSpec`, `Cardinality`, `ProvenanceTag`, `parse_function_properties` (the logical model lives in `smelt-logical`; `smelt-planner` re-exports it — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
+  - `crates/smelt-logical/src/rules/rule_diagnostics.rs` — `RuleContext`, `detect_builtin_rules` (the pure rule-data interface, in `smelt-logical`)
+  - `crates/smelt-planner/src/logical_plan_rules.rs` — `PlannerRule` trait, `apply_rules_to_fixed_point`, `show_plan_rules`, the four L1 rules (rule *application* stays in `smelt-planner`)
+  - `crates/smelt-planner/src/plan_printer.rs` — `format_plan` (deterministic renderer used by `--show-plan`)
+  - `crates/smelt-planner/src/rules/` — graph-level (model-graph) rules; distinct from logical-plan rules above
+  - `crates/smelt-logical/src/lowering/` — lowering helpers (`as_struct_to_sql`, etc.)
+  - `crates/smelt-logical/src/analysis/temporal.rs` — temporal-dependency analysis feeding incremental strategy selection
+  - `crates/smelt-db/src/lib.rs` — `logical_plan` Salsa query, `DiagnosticCode::{ProvenanceMismatch, JoinsMismatch, DeclaredCardinalityUnverifiable, MissingProvenancePushdownAdvisory}`, the missing-provenance-pushdown emission site
+  - `crates/smelt-db/src/provenance_validator.rs` — pure validators for the four diagnostic codes
+  - `crates/smelt-db/src/backends.rs` — `infer_body_backends`, `apply_narrow_rule`
+  - `crates/smelt-cli/src/main.rs` — `--show-plan` CLI argument
+  - `crates/smelt-cli/src/commands/build.rs` — `show_plan` driver (gather workspace, build plan, run rules, print)
+- **Tests**:
+  - `crates/smelt-cli/tests/show_plan.rs` — end-to-end `smelt build --show-plan` integration tests
+  - `crates/smelt-planner/tests/logical_plan_tests.rs` — logical-plan construction tests
+  - `crates/smelt-planner/tests/logical_plan_rule_tests.rs` — per-rule unit tests
+  - `crates/smelt-planner/tests/pushdown_tests.rs` — combined-rule fixed-point ordering test
+  - `crates/smelt-planner/tests/join_elimination_tests.rs` — `EliminateUnusedLeftJoin` cases
+  - `crates/smelt-planner/tests/phase41_body_splice_tests.rs` — body-splicing and provenance-tag tests
+- **User docs**:
+  - `docs-site/docs/concepts/planner.md` (and adjacent rule pages) — to be reconciled with this spec via `/smelt:validate planner_integration`
+- **Plans (history)**:
+  - `docs/plans/20260422-smelt-functions.md` — Phases 30–52 land the logical-plan IR, the four L1 rules, frontmatter-property parsing, the validators, and `--show-plan`
+  - `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
+- **Related specs**:
+  - `docs/specs/architecture.md` — the planner's place in the compilation pipeline; transparent-vs-black-box at the system level; models-as-functions
+  - `docs/specs/functions.md` — `smelt.define` / `smelt.extern` / frontmatter key catalogue
+  - `docs/specs/incremental_models.md` — model-frontmatter keys consumed by L2 strategy selection
+  - `docs/specs/types.md` — type vocabulary referenced by `FunctionProperties`-adjacent fields
+  - `docs/specs/expansion.md` — internal invariants for AST expansion
 
 ### Research
 

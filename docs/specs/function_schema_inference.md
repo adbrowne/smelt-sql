@@ -93,36 +93,27 @@ A column contributed by rules 1–4 whose type the rules cannot resolve from a p
 
 ## References
 
-### Code
-
-- `crates/smelt-db/src/type_inference/function_call.rs` — `infer_smelt_path_call_type` (scalar return resolution), `resolve_struct_return_type` (struct-return scalar type)
-- `crates/smelt-db/src/queries/schema.rs` — `SalsaRefSchemaProvider::resolve_smelt_path_call_schema` / `resolve_table_ref_schema` (`TableExpr` FROM-schema resolution), `typed_model_schema` / `resolved_model_schema` (model output schema, row extensions)
-- `crates/smelt-db/src/function_body_check.rs` — `infer_tableexpr_return_schema`, `register_join_alias_schemas`, `extract_function_body_cte_schemas`
-- `crates/smelt-cli/src/lib.rs` — `init_db` (function discovery into the workspace; parity invariant 3)
-- `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface (`ColumnTypeUnresolved` catalogued; emission gap tracked in Known Divergences)
-
-### Tests
-
-- `crates/smelt-cli/tests/type_command_function_returns.rs` — scalar function-return inference via the `type` discovery flow (parity regression for invariant 3)
-- `crates/smelt-cli/tests/example_diagnostics.rs` — zero-diagnostic gate over example workspaces
-- `crates/smelt-lsp/tests/example_workspaces.rs` — real-Backend zero-diagnostic gate (catches asymmetric-discovery)
-
-### User docs
-
-- `docs-site/docs/reference/language.md` — `smelt.functions` call surface and `smelt.as_struct`; the `.*` struct-spread schema-projection surface
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260422-smelt-functions.md` — function surface, tier model, `TableExpr` return-schema inference
-- `docs/plans/20260519-functions-meta-1-call-expansion.md` — struct-returning and named-arg call expansion (codegen layer)
-- `docs/plans/20260519-functions-meta-2-from-alias.md` — `TableExpr` FROM-position derived-table aliasing
-- `docs/plans/20260519-functions-meta-gaps.md` — tracker for the divergences above
-
-### Related specs
-
-- `docs/specs/types.md` — `DataType` vocabulary, the `Unknown` reason-discriminant, the strict-by-default / no-silent-`Unknown` doctrine, `TableExpr` row polymorphism
-- `docs/specs/gradual_typing.md` — tier dispatch, call-site return resolution, single-primary-span error contract
-- `docs/specs/functions.md` — declaration grammar, frontmatter, cycle rule
-- `docs/specs/expansion.md` — AST-level call expansion and codegen this spec's schema layer must agree with
-- `docs/specs/architecture.md` — workspace loading parity rule (invariant 3)
-- `docs/specs/meta_language.md` — generator-emitted and reflected schemas, HOF values in data position (out of scope here)
+- **Code**:
+  - `crates/smelt-db/src/type_inference/function_call.rs` — `infer_smelt_path_call_type` (scalar return resolution), `resolve_struct_return_type` (struct-return scalar type)
+  - `crates/smelt-db/src/queries/schema.rs` — `SalsaRefSchemaProvider::resolve_smelt_path_call_schema` / `resolve_table_ref_schema` (`TableExpr` FROM-schema resolution), `typed_model_schema` / `resolved_model_schema` (model output schema, row extensions)
+  - `crates/smelt-db/src/function_body_check.rs` — `infer_tableexpr_return_schema`, `register_join_alias_schemas`, `extract_function_body_cte_schemas`
+  - `crates/smelt-cli/src/lib.rs` — `init_db` (function discovery into the workspace; parity invariant 3)
+  - `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface (`ColumnTypeUnresolved` catalogued; emission gap tracked in Known Divergences)
+- **Tests**:
+  - `crates/smelt-cli/tests/type_command_function_returns.rs` — scalar function-return inference via the `type` discovery flow (parity regression for invariant 3)
+  - `crates/smelt-cli/tests/example_diagnostics.rs` — zero-diagnostic gate over example workspaces
+  - `crates/smelt-lsp/tests/example_workspaces.rs` — real-Backend zero-diagnostic gate (catches asymmetric-discovery)
+- **User docs**:
+  - `docs-site/docs/reference/language.md` — `smelt.functions` call surface and `smelt.as_struct`; the `.*` struct-spread schema-projection surface
+- **Plans (history)**:
+  - `docs/plans/20260422-smelt-functions.md` — function surface, tier model, `TableExpr` return-schema inference
+  - `docs/plans/20260519-functions-meta-1-call-expansion.md` — struct-returning and named-arg call expansion (codegen layer)
+  - `docs/plans/20260519-functions-meta-2-from-alias.md` — `TableExpr` FROM-position derived-table aliasing
+  - `docs/plans/20260519-functions-meta-gaps.md` — tracker for the divergences above
+- **Related specs**:
+  - `docs/specs/types.md` — `DataType` vocabulary, the `Unknown` reason-discriminant, the strict-by-default / no-silent-`Unknown` doctrine, `TableExpr` row polymorphism
+  - `docs/specs/gradual_typing.md` — tier dispatch, call-site return resolution, single-primary-span error contract
+  - `docs/specs/functions.md` — declaration grammar, frontmatter, cycle rule
+  - `docs/specs/expansion.md` — AST-level call expansion and codegen this spec's schema layer must agree with
+  - `docs/specs/architecture.md` — workspace loading parity rule (invariant 3)
+  - `docs/specs/meta_language.md` — generator-emitted and reflected schemas, HOF values in data position (out of scope here)

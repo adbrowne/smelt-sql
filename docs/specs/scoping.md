@@ -195,34 +195,25 @@ This section captures the load-bearing rationale behind the scoping rules above.
 
 ## References
 
-### Code
-
-- `crates/smelt-db/src/type_inference.rs` — `TypeContext` (`function_params`, `tableexpr_param_schemas`, `fragment_param_kinds`, `opaque_ctes`, `cte_columns`), `lookup_identifier`, `columns_for_qualifier`
-- `crates/smelt-db/src/function_body_check.rs` — `check_function_body` (parameter binding into `TypeContext`), `compute_shadow_warnings` (`ParameterShadowsColumn`), bare-column resolution from `TableExpr` parameters, fragment validation at call sites
-- `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed in Surface
-- `crates/smelt-types/src/signatures.rs` — `ParamSpec` (parameter sort discrimination via `is_tableexpr_param`)
-
-### Tests
-
-- `crates/smelt-db/src/function_body_check.rs::tests` — body-check unit tests covering parameters-first lookup, shadow warnings, bare-column resolution
-- `crates/smelt-db/tests/` — workspace-level scoping tests (context inference, multi-splice intersection, fragment-column validation)
-- `examples/test_workspace/functions/` — worked examples exercised by the LSP-diagnostics integration test
-
-### User docs
-
-- `docs-site/docs/concepts/functions.md` and adjacent scoping pages — to be reconciled against this spec via `/smelt:validate scoping`
-
-### Plans (history) — oldest → newest
-
-- `docs/plans/20260422-smelt-functions.md` — primary implementation plan; Phases 5, 15, 19–21, 22, 44b cover the surface in this spec
-- `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
-
-### Related specs
-
-- `docs/specs/types.md` — type vocabulary, fragment sorts, kind ladder, row polymorphism
-- `docs/specs/functions.md` — declaration grammar, frontmatter, `PASSING`, function-level diagnostics
-- `docs/specs/gradual_typing.md` — Tier 1/2/3 dispatch and how parameters seed the body's type context
-- `docs/specs/architecture.md` — models-as-functions equivalence
+- **Code**:
+  - `crates/smelt-db/src/type_inference.rs` — `TypeContext` (`function_params`, `tableexpr_param_schemas`, `fragment_param_kinds`, `opaque_ctes`, `cte_columns`), `lookup_identifier`, `columns_for_qualifier`
+  - `crates/smelt-db/src/function_body_check.rs` — `check_function_body` (parameter binding into `TypeContext`), `compute_shadow_warnings` (`ParameterShadowsColumn`), bare-column resolution from `TableExpr` parameters, fragment validation at call sites
+  - `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed in Surface
+  - `crates/smelt-types/src/signatures.rs` — `ParamSpec` (parameter sort discrimination via `is_tableexpr_param`)
+- **Tests**:
+  - `crates/smelt-db/src/function_body_check.rs::tests` — body-check unit tests covering parameters-first lookup, shadow warnings, bare-column resolution
+  - `crates/smelt-db/tests/` — workspace-level scoping tests (context inference, multi-splice intersection, fragment-column validation)
+  - `examples/test_workspace/functions/` — worked examples exercised by the LSP-diagnostics integration test
+- **User docs**:
+  - `docs-site/docs/concepts/functions.md` and adjacent scoping pages — to be reconciled against this spec via `/smelt:validate scoping`
+- **Plans (history)**:
+  - `docs/plans/20260422-smelt-functions.md` — primary implementation plan; Phases 5, 15, 19–21, 22, 44b cover the surface in this spec
+  - `docs/plans/20260428-author-missing-specs.md` — the spec-authoring plan that produced this file
+- **Related specs**:
+  - `docs/specs/types.md` — type vocabulary, fragment sorts, kind ladder, row polymorphism
+  - `docs/specs/functions.md` — declaration grammar, frontmatter, `PASSING`, function-level diagnostics
+  - `docs/specs/gradual_typing.md` — Tier 1/2/3 dispatch and how parameters seed the body's type context
+  - `docs/specs/architecture.md` — models-as-functions equivalence
 
 ### Research
 
