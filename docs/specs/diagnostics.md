@@ -55,7 +55,7 @@ Owned by `docs/specs/models.md` and the core analysis queries in
 | `InvalidModel` | Error | The model's frontmatter or structure violates a structural rule. |
 | `MalformedSectionDelimiter` | Error | A multi-model section header (`--- name: model_name ---`) is malformed, or SQL content appears before the first section delimiter in a multi-model file. |
 | `UnclosedFrontmatter` | Error | A frontmatter block opened with `---` (or a `--- name: … ---` section header) is missing its closing `---`. |
-| `UndefinedModelRef` | Error | A `smelt.ref()` or `smelt.<path>` call resolves to a model that does not exist in the workspace. |
+| `UndefinedModelRef` | Error | A `smelt.ref()` or `smelt.<path>` call resolves to a model that does not exist in the project. |
 | `UndefinedSource` | Error | A `smelt.source()` or `smelt.<path>` call resolves to a source that does not exist. |
 | `CannotInferType` | Error | The type of a column or expression cannot be inferred from context. |
 | `UndeclaredColumn` | Error | A column name referenced in a query is not present in the inferred schema. |
@@ -156,7 +156,7 @@ Owned by `docs/specs/functions.md`.
 | `FunctionBodyTypeMismatch` | Error | A `smelt.define` body contains a type mismatch (e.g. `x + 'text'` when `x: Expr<Integer>`). Anchored at the inner bad subexpression. |
 | `UnknownIdentifier` | Error | A `smelt.define` body references a name that is neither a declared parameter nor resolvable in any enclosing scope. |
 | `DuplicateParameterName` | Error | Two parameters in a single `smelt.define` share a name. Anchored at the second occurrence. |
-| `UnknownSmeltFn` | Error | A `smelt.<path>(…)` call resolves to a function name not registered in the workspace. |
+| `UnknownSmeltFn` | Error | A `smelt.<path>(…)` call resolves to a function name not registered in the project. |
 | `MissingArgument` | Error | A `smelt.<path>(…)` call omits a required parameter (one without a default value). |
 | `ArgTypeMismatch` | Error | A `smelt.<path>(…)` call passes an argument whose type does not satisfy the declared parameter's `TypeConstraint`. |
 | `ExternCollidesWithBuiltin` | Error | A `smelt.extern` declares a name that already exists in the built-in registry. |
@@ -174,7 +174,7 @@ Owned by `docs/specs/functions.md`.
 | `FragmentKindMismatch` | Error | A caller-provided fragment for a `SelectItems<Kind>` parameter is of a lower expression kind than required. |
 | `ReturnTypeMismatch` | Error | A Tier 3 function's body synthesises a return type that does not match the declared `-> Expr<T>` return annotation. |
 | `UnknownPassingParameter` | Error | A `PASSING name AS (…)` clause names a parameter not declared in the callee's signature. |
-| `UnstableSchemaRequired` | Error | A function's frontmatter uses the `provenance:` key but the workspace's `smelt.yml` does not have `unstable_schema: true`. |
+| `UnstableSchemaRequired` | Error | A function's frontmatter uses the `provenance:` key but the project's `smelt.yml` does not have `unstable_schema: true`. |
 | `AsStructUnsupportedBackend` | Error | `smelt.as_struct()` is used in a function body but the function's declared backend set includes a backend that does not support struct literal syntax. |
 | `FunctionCallCycle` | Error | The transparent-function call graph contains a cycle (directly or transitively). Anchored at the offending function declaration's name span. |
 | `ProvenanceMismatch` | Error | A function's declared `provenance:` entry lists a source column not read by the body, or the body reads a column not listed. |
@@ -304,7 +304,7 @@ Owned by `docs/specs/meta_language.md` (records/maps/loaders sections).
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `SmeltRecordRedefinition` | Error | A second `smelt.record` declaration in the workspace shares an existing record's name. Anchored at the second declaration's name token. |
+| `SmeltRecordRedefinition` | Error | A second `smelt.record` declaration in the same project shares an existing record's name. Anchored at the second declaration's name token. |
 | `RecordFieldUnknown` | Error | Field projection or literal field name is outside the target's declared field set. |
 | `RecordFieldMissing` | Error | A record literal omits a field required by the target type. |
 | `RecordFieldDuplicate` | Error | A record literal names the same field twice. |
@@ -334,7 +334,7 @@ Owned by `docs/specs/meta_language.md` (records/maps/loaders sections).
 | `ConfigLoaderPathNotLiteral` | Error | A loader `path` argument is not a string literal. |
 | `ConfigLoaderPathEscapesWorkspace` | Error | A loader path is absolute, contains `..` escapes, or has a scheme prefix. |
 | `ConfigLoaderPathBackslash` | Error | A loader path contains `\` (use `/` as the path separator). |
-| `ConfigLoaderFileNotFound` | Error | The resolved loader file does not exist in the workspace. |
+| `ConfigLoaderFileNotFound` | Error | The resolved loader file does not exist in the project. |
 | `ConfigLoaderSchemaForbidden` | Error | A loader schema argument is not a record type, `List<record>`, or `Map<Text, record>`. |
 | `ConfigLoaderTomlNotYetSupported` | Error | `smelt.config.load_toml` is called (only YAML and JSON loaders are supported in v1). |
 | `ConfigLoaderParseError` | Error | The loaded file is not valid YAML or JSON. |

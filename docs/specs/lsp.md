@@ -82,7 +82,7 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 
 **Functions (`smelt.define`, `smelt.extern`):**
 - `UnrecognizedFunction` — call to an SQL built-in function not in the recognized registry
-- `UnknownSmeltFn` — a `smelt.<path>(…)` call that resolves to no declared `smelt.define` in the workspace
+- `UnknownSmeltFn` — a `smelt.<path>(…)` call that resolves to no declared `smelt.define` in the project
 - `DuplicateFunctionDefinition` — two `smelt.define` blocks with the same name
 - `InvalidFunctionTypeRef` — malformed type annotation
 - `FunctionBodyTypeMismatch` — type error inside function body
@@ -185,9 +185,9 @@ Hover is supported on:
 | Field projection `c.name` / `c.type` / `c.is_numeric` | The field's declared type |
 | Meta-`Text` lifted as identifier | The lift description (`Text → identifier`) and, when statically traceable, the resolved column name |
 | `smelt.models.with_tag(t)` call path | `List<ModelRef>` plus, when `t` resolves to a string literal, the match count and the first five matching model names |
-| `smelt.models.all` call path | `() -> List<ModelRef>` plus the workspace's total model count |
+| `smelt.models.all` call path | `() -> List<ModelRef>` plus the total model count for the project containing the current file |
 | `smelt.sources.with_tag(t)` call path | `List<SourceRef>` plus, when `t` resolves to a string literal, the match count and the first five matching source names |
-| `smelt.sources.all` call path | `() -> List<SourceRef>` plus the workspace's total source count |
+| `smelt.sources.all` call path | `() -> List<SourceRef>` plus the total source count for the project containing the current file |
 | `ModelRef`-typed lambda parameter (bound by a HOF over a `smelt.models.*` list) | `ModelRef` plus the closed field list with each field's type (`path: Text`, `name: Text`, `tags: List<Text>`, `columns: List<ColumnRef>`) |
 | `SourceRef`-typed lambda parameter (bound by a HOF over a `smelt.sources.*` list) | `SourceRef` plus the closed field list with each field's type (`path: Text`, `name: Text`, `tags: List<Text>`, `columns: List<ColumnRef>`) |
 | Field projection `m.path` / `m.name` / `m.tags` / `m.columns` (on `ModelRef`) | The field's declared type |
@@ -206,7 +206,7 @@ Completions are triggered by the characters `'`, `(`, and `.`.
 
 | Context | Completions offered |
 |---------|---------------------|
-| After `smelt.` | All addressable entities in the workspace (models, seeds, sources, functions), grouped by kind in the completion list |
+| After `smelt.` | All addressable entities in the project containing the current file (models, seeds, sources, functions), grouped by kind in the completion list |
 | After a `smelt.<partial>` segment | Entities whose path begins with the entered segments |
 | Column context (unqualified) | All reachable column names with inferred types |
 | After `<alias>.` | Columns from the table/model/CTE bound to that alias |
