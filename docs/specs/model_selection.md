@@ -1,7 +1,7 @@
 ---
 feature: model_selection
 status: experimental
-last_reviewed: 2026-05-27
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -90,7 +90,7 @@ If no model in the project has the given tag, the selector matches nothing (no e
 
 The selection methods are `ModelName`, `Tag`, and `GeneratorFile`. There is no glob, regex, or directory-based selection.
 
-A `ModelName` selector value is an entity identifier and is resolved through the CLI argument-resolution algorithm (`cli.md` §"Argument resolution algorithm"): the value is treated as a dot-path argument, expanded against the active scope (`--scope` or cwd-derived), and matched against the workspace's canonical `smelt.<path>` set. A selector that resolves to no entity matches nothing (no error). A bare-leaf selector value with no active scope that matches **multiple** entities by leaf is an error (the same ambiguity diagnostic CLI argument resolution emits), so `--select events_parsed` never silently picks one of two `events_parsed` models.
+A `ModelName` selector value is an entity identifier and is resolved through the CLI argument-resolution algorithm (`cli.md` §"Argument resolution algorithm"): any leading/trailing `+` graph operators are stripped first (re-attached to the resolved full path afterwards), then the value is treated as a dot-path argument, expanded against the active scope (`--scope` or cwd-derived), and matched against the workspace's canonical `smelt.<path>` set. A `ModelName` selector that resolves to **no entity is a hard "not found" error** (non-zero exit), not a silent empty match — the same fail-loud behaviour as a bare command argument, so `--select typo_name` fails loudly rather than building nothing. (A `tag:`/`generator_file:` selector that matches no models is a *valid empty selection*, not an error — see §"Tag matching" and §"Selection methods"; this asymmetry is intentional: an entity name that cannot resolve is almost always a typo, whereas a tag with no members is a legitimate state.) A bare-leaf selector value with no active scope that matches **multiple** entities by leaf is an error (the same ambiguity diagnostic CLI argument resolution emits), so `--select events_parsed` never silently picks one of two `events_parsed` models.
 
 A `GeneratorFile` selector takes a workspace-relative path to a generator file (a `.sql` file whose YAML frontmatter declares `generates: models` per `meta_language.md` §"Multi-model production") and matches every model the file emits during workspace-shape resolution. The match set is computed at selector-evaluation time against the post-W3 workspace shape (per `meta_language.md` §"Multi-model production" rule 4); generator-emitted models that lost a collision (`ModelDefHandAuthoredCollision`) are not in the match set. A `GeneratorFile` selector pointing at a path that is not a generator file (a hand-authored model, a missing file, a non-`.sql` file) matches nothing (no error).
 
@@ -109,16 +109,16 @@ A `GeneratorFile` selector takes a workspace-relative path to a generator file (
 1. **Selector syntax is strict.** `+` may appear only as a leading prefix or trailing suffix. Any other position is a parse error.
 2. **Union of selectors, not intersection.** Multiple `--select` flags produce a union.
 3. **Exclusion is applied after all inclusion expansions.** An excluded model cannot be re-included by a separate `--select`.
-4. **No-match is not an error.** A selector that matches no models produces no error; the working set may become empty.
+4. **No-match is not an error for method selectors.** A `tag:` or `generator_file:` selector that matches no models produces no error; the working set may become empty. A `ModelName` selector that resolves to no entity is the exception — it is a hard "not found" error (§"Selection methods"), because an unresolvable entity name is almost always a typo.
 5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`. The case-sensitivity contract is owned by `models.md` §"Tag merging"; this rule cross-references it.
 6. **`GeneratorFile` selectors match against the post-resolution workspace shape.** The match set is what the workspace actually contains after multi-model production has resolved, including any collision losses. Generator emissions discarded by `ModelDefHandAuthoredCollision` are not selectable via the originating generator's `generator_file:` path.
 
 ## Known Divergences / Open Questions
 
-- **`--select` on `smelt test` is substring match, not selector syntax.** The `--select` flag on `smelt test` does a simple substring match on test names, not full selector syntax. This is inconsistent with all other commands.
+- **`--select` on `smelt test` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (the same methods and `+` operators as every other command — see `cli.md` §"`smelt test` isolation"). Any remaining substring-match-on-test-names behaviour in the implementation is an unlanded gap, not the intended contract.
 - **Seeds in downstream traversal.** Seeds are included in upstream traversal (when a model depends on a seed). It is unclear whether seeds should appear in `smelt explain --select +model` output or be silently filtered. Current behavior undocumented.
 - **Selector order and deduplication.** When a model is added by multiple selectors or traversals, it appears once in the working set (deduplicated). The execution order is purely topological; selector order does not affect execution order.
-- **`--exclude` with `+` traversal.** `--exclude +model_name` removes `model_name` and all its upstream dependencies. This can remove shared dependencies that other selected models also need, potentially leaving the working set in an inconsistent state. This interaction is untested.
+- **`--exclude` with `+` traversal.** `--exclude +model_name` removes `model_name` and all its upstream dependencies. If a removed upstream is still required by a model that remains in the working set, smelt refuses the inconsistent set with a diagnostic rather than running a model against an absent input (see `cli.md` §"`--exclude` and inconsistent working sets"). The user narrows the exclusion (drop the `+`) or also excludes the dependent model.
 
 ## References
 

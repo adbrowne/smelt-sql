@@ -56,31 +56,31 @@ owners: [andrew]
 
 ### Argument resolution and `--scope`
 
-Every CLI command that takes an entity identifier (a model, function, seed, source, or test) accepts a **dot-path argument** matching the universal addressing scheme defined in `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme". The argument never carries the leading `smelt.` prefix — that prefix is implicit at the CLI surface — but the remainder is the same path tuple the resolver matches against.
+Every CLI command that takes an entity identifier (a model, function, seed, source, or test) accepts a **dot-path argument** matching the universal addressing scheme defined in `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme". The argument is normally written without the leading `smelt.` prefix — that prefix is implicit at the CLI surface — but a leading `smelt.` is **accepted and stripped** so that any identifier the CLI prints (which is always the full canonical `smelt.<path>` form) can be copy-pasted straight back into a command. Both `silver.events_parsed` and `smelt.silver.events_parsed` resolve identically. After the optional prefix is stripped, the remainder is the same path tuple the resolver matches against.
 
 Three input shapes are accepted:
 
 | Shape | Example | Resolution |
 |-------|---------|------------|
-| **Full path** | `silver.events_parsed` | Resolved as-is against the workspace. Always works. |
-| **Scoped shorthand** | `events_parsed` (with scope `silver`) | Expanded to `<scope>.<arg>` (`silver.events_parsed`) and resolved. Falls back to the bare argument if the scoped expansion does not exist. |
+| **Full path** | `silver.events_parsed` (or `smelt.silver.events_parsed`) | A leading `smelt.` is stripped if present, then resolved as-is against the workspace. Always works. |
+| **Scoped shorthand** | `events_parsed` (with scope `silver`) | Expanded to `<scope>.<arg>` (`silver.events_parsed`) and resolved. There is **no fall-through** to the bare argument: if `<scope>.<arg>` does not resolve, the command errors (it does not silently retry `<arg>`). To address an entity outside the active scope, pass its full path. |
 | **No-scope bare leaf** | `events_parsed` (no scope set) | Resolved as a full path. Errors if no entity at that exact path exists, even if a same-named entity exists in a sub-namespace. |
 
 **Scope sources, in precedence order:**
 
 1. **`--scope <prefix>` flag** (explicit). The flag value is a dot-path (e.g. `silver`, `marts.daily`); whitespace and the literal `smelt.` prefix are rejected.
-2. **Working-directory derivation** (auto). If the process's current working directory is under `<project>/<scan_root>/<segs...>` for some scan root in `paths:`, the auto-scope is `<segs joined by .>`. If `cwd` is the project root, above the project, or inside a `scan_root` itself, no auto-scope applies.
+2. **Working-directory derivation** (auto). The auto-scope is the address segments of the current working directory — that is, the cwd's path relative to the project root, with any matching `paths:` strip-prefix removed (the same address derivation the resolver applies to files, per `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). If cwd is `<project>/<prefix>/<segs...>` where `<prefix>` is a `paths:` entry, the auto-scope is `<segs joined by .>`; if cwd is under a directory **not** named in `paths:`, those directory names remain part of the scope. If cwd is the project root, above the project, or is exactly a `paths:` strip-prefix directory (so the remaining segments are empty), no auto-scope applies.
 3. **No scope.** The argument must be a full path; bare leaves resolve only against entities whose full path is exactly the leaf.
 
 `--scope ''` (empty string) forces "no scope" regardless of cwd. This is the explicit opt-out for scripts that want to be cwd-insensitive.
 
 **Disambiguation rules:**
 
-- **Scope expansion fall-through** is silent: if `<scope>.<arg>` resolves, use it; otherwise try `<arg>`. The fall-through is one-shot — there is no recursive search up the scope hierarchy.
+- **No scope-expansion fall-through.** When a scope is active, a shorthand argument resolves **only** as `<scope>.<arg>`. If that exact path does not resolve, the command errors; it never silently retries the bare `<arg>` or searches up the scope hierarchy. This is what keeps a passing command stable: adding a top-level entity later can never change which entity a scoped shorthand resolved to. To reach an entity outside the active scope, pass its full path (full-path arguments are honored regardless of scope — see below).
 - **Ambiguity at no-scope resolution.** When the user passes a bare leaf (e.g. `events_parsed`) with no scope and the leaf matches multiple entities (`silver.events_parsed`, `bronze.events_parsed`), the command exits non-zero with a diagnostic listing all matches and a hint to use `--scope` or the full path. The CLI does not silently pick one.
 - **Cross-scope full paths.** A full-path argument (`bronze.raw_events`) is honored regardless of the active scope. Scope narrows input, never output or cross-references.
 
-**Canonical-display rule.** Every CLI command's output uses the full canonical `smelt.<path>` form for every entity it names — model lists, type signatures, diagnostics, JSON output keys, log lines. Scope changes how the user *types* an identifier; it never changes how the CLI *prints* one. Copy-pasting any printed identifier back into a `--select`, into a model `FROM` clause, or into another command must produce the same resolution.
+**Canonical-display rule.** Every CLI command's output uses the full canonical `smelt.<path>` form for every entity it names — model lists, type signatures, diagnostics, JSON output keys, log lines. Scope changes how the user *types* an identifier; it never changes how the CLI *prints* one. Copy-pasting any printed identifier — including its leading `smelt.` prefix — back into a `--select`, into another command argument, or (minus the prefix) into a model `FROM` clause must produce the same resolution. Because entity arguments strip a leading `smelt.` (see above), the printed `smelt.<path>` form round-trips without edits.
 
 ### Exit codes
 
@@ -161,19 +161,32 @@ Three input shapes are accepted:
 
 ### No-op rebuild output
 
-When `smelt build` or `smelt run` completes with no models executed (either because `--select` matched nothing, or because no models required re-running), smelt must emit a human-readable line to **stderr** to avoid silent ambiguity:
+An empty result set is **not** the same as an unresolvable selector. A selector that names an entity which does not resolve to anything is a hard error (see §"Argument resolution algorithm" step 4 and §"No-op vs unresolvable selector" below); the no-op messages here apply only when every selector **resolved** but the resulting working set is legitimately empty.
+
+When `smelt build` or `smelt run` completes with no models executed — every selector resolved, but either the resolved set selected nothing or no models required re-running — smelt must emit a human-readable line to **stderr** to avoid silent ambiguity and exits **`0`** (an empty-but-valid selection is a success, not a failure):
 
 ```
 smelt: nothing to rebuild
 ```
 
-When `--select` matched no models, the message is:
+When the (valid) selectors matched no models, the message is:
 
 ```
 smelt: no models matched the selector(s)
 ```
 
 Both messages are emitted to **stderr** so they do not pollute stdout-parsed output. Neither message is emitted on a successful build that ran at least one model.
+
+### No-op vs unresolvable selector
+
+The two empty-output cases are distinct and have different exit codes:
+
+| Case | Example | Behaviour | Exit code |
+|------|---------|-----------|-----------|
+| **Unresolvable selector** — an entity-name selector resolves to no entity of any kind | `--select typo_name` (no such model) | Hard "not found" diagnostic (§"Argument resolution algorithm" step 4) | non-zero |
+| **Valid but empty selection** — every selector resolved, but the matched set is empty | `--select tag:nonexistent`, or a valid selector whose models are all up-to-date | `smelt: no models matched the selector(s)` / `smelt: nothing to rebuild` to stderr | `0` |
+
+A typo'd entity name fails loudly rather than silently building nothing; a `tag:`/`generator_file:` selector that legitimately matches no models (per `model_selection.md` §"Tag matching" and `model_selection.md` §"Selection methods") is a quiet no-op.
 
 > **Implementation note.** The current implementation logs `"No models matched the selectors"` via `info!()`, which is only visible when `RUST_LOG=info` is set. This diverges from the above spec. Until fixed, users observing complete silence should treat it as a no-op (not an error).
 
@@ -183,7 +196,7 @@ A single `smelt build` performs these steps, in order:
 
 1. **Load** `smelt.yml` from `--project-dir`. Fail if absent.
 2. **Validate** that the requested `--target` exists in the config.
-3. **Discover** all project files by walking every non-excluded subdirectory under the project root (discovery is project-wide; `paths:` only strips address prefixes — there are no per-kind dedicated scan paths, per `architecture.md` §"Resolution"). The resolver classifies each file by format and content: `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone) become seed sidecars or sources respectively.
+3. **Discover** all project files by walking every non-excluded subdirectory under the project root (discovery is project-wide; `paths:` only strips address prefixes — there are no per-kind dedicated scan paths, per `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The resolver classifies each file by format and content: `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone) become seed sidecars or sources respectively.
 4. **Seed** — run the seed lifecycle per `seeds.md` for each non-ephemeral CSV seed (in deterministic sorted order): smelt parses and type-infers the CSV itself and ingests it via `Backend::load_table(...)` — not a backend-specific `read_csv_auto` recipe. Ephemeral seeds are skipped (they inline as CTEs at compile time); sources are never loaded. Schemas are auto-created if absent.
 5. **Plan** — build the logical dependency graph; apply planner rules; produce the physical execution graph. Models execute in topological order.
 6. **Run** — for each model in topological order, materialize according to its effective materialization:
@@ -192,6 +205,10 @@ A single `smelt build` performs these steps, in order:
    - `ephemeral`: inlined as CTE — no DDL emitted
 
 `smelt build` is idempotent. Re-running with the same inputs and the same time range produces the same final database state.
+
+### `--exclude` and inconsistent working sets
+
+`--exclude` removes models from the working set after all `--select` expansions complete (`model_selection.md` §"Selection algorithm"). When the excluded selector carries an upstream `+` operator (`--exclude +model`), it removes the model **and its transitive upstreams**. If any removed upstream is still required by a model that remains in the working set, smelt refuses to run an inconsistent set: it emits a diagnostic naming the retained model and the missing upstream dependency rather than executing a model against an absent input. The user must either narrow the exclusion (drop the `+`) or also exclude the dependent model.
 
 ### `smelt run` vs `smelt backbuild`
 
@@ -237,30 +254,34 @@ Both commands derive output from SQL parsing and type inference only. No databas
 
 For each user-supplied entity identifier `arg`:
 
+0. **Strip an optional `smelt.` prefix.** If `arg` begins with the literal `smelt.`, remove it before any further processing, so a copy-pasted canonical identifier resolves to the same entity as its bare form.
 1. **Determine the active scope.** If `--scope` was passed, use its value (treating `--scope ''` as "no scope"). Otherwise compute the cwd-derived scope per §"Argument resolution and `--scope`". The active scope is either a `Vec<String>` of path segments or `None`.
-2. **Build the candidate path tuples.**
-   - If the active scope is `Some(s)`, the candidates are `[s ++ arg_segs, arg_segs]` in that order.
+2. **Build the candidate path tuple.**
+   - If the active scope is `Some(s)`, the only candidate is `s ++ arg_segs`. There is no bare-`arg_segs` fall-through candidate — a scoped shorthand resolves exclusively under its scope; a full path must be passed to reach an entity elsewhere.
    - If `None`, the only candidate is `arg_segs`.
-3. **Resolve each candidate** against the workspace via `resolve_ref_path` (the same resolver `smelt.<path>` references use inside model SQL — `architecture.md` §"Resolution"). The first candidate that resolves wins.
+3. **Resolve the candidate** against the workspace via `resolve_ref_path` (the same resolver `smelt.<path>` references use inside model SQL — `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). It either resolves or it does not.
 4. **No candidate resolves** → emit a "not found" diagnostic that lists every entity whose leaf segment matches `arg_segs.last()`. If exactly one such entity exists, the diagnostic includes `did you mean '<full path>'?`.
 5. **No candidate resolves and the arg itself is a bare leaf with no scope active**, but multiple entities have that leaf → emit the "ambiguous" diagnostic listing all matches.
 
-Selectors passed to `--select` / `--exclude` are expanded through the same algorithm: each selector value is treated as a bare identifier and substituted with its resolved full path before the selection engine runs. Selectors that already contain a `:` (selector grammar such as `tag:revenue`, `path:models/silver`) are passed through unchanged — they are not entity identifiers.
+Selectors passed to `--select` / `--exclude` are expanded through the same algorithm: each **entity-name** selector value (a `model_name` selector, after any leading/trailing `+` graph operators are stripped — see below) is treated as a bare identifier and substituted with its resolved full path before the selection engine runs. An entity-name selector that resolves to no entity is a **hard "not found" error** (step 4), not a silent empty match — the same fail-loud behaviour as a bare command argument. Selectors that use a method prefix (`tag:`, `generator_file:`) are not entity identifiers and are passed through to the selection engine unchanged; a method selector that matches no models is a valid empty selection, not an error (see §"No-op vs unresolvable selector").
+
+**Graph operators are stripped before resolution.** A `model_name` selector may carry leading and/or trailing `+` graph operators (`+events_parsed`, `events_parsed+`, `+events_parsed+`, per `model_selection.md` §"Selector syntax"). The `+` markers are removed before the bare identifier is resolved, and re-attached to the resolved full path afterwards: `+events_parsed` resolves `events_parsed` to `silver.events_parsed` and yields the selector `+silver.events_parsed`. The `+` operators never participate in entity resolution.
 
 ### Cwd-derived scope computation
 
-Given the resolved project root `<project>` and the configured scan-root list `paths:` (which defaults to `["models"]`):
+The cwd-derived scope is the **address** of the current working directory — the cwd's path relative to the project root, with any matching `paths:` strip-prefix removed. This is identical to how a file's `smelt.<path>` address is derived (`architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"): `paths:` is a list of strip-prefixes, **not** a discovery gate, and there are no per-kind dedicated scan paths. Given the resolved project root `<project>` and the configured strip-prefix list `paths:` (which defaults to `["models"]`):
 
 1. Compute `rel = cwd.strip_prefix(<project>)`. If `cwd` is not under the project root, no auto-scope applies.
-2. For each `scan_root` in `paths:`, in declaration order, check whether `rel.starts_with(scan_root)`. The first match wins.
-3. If a match is found, the auto-scope segments are `rel.strip_prefix(scan_root)`'s components, joined by `.`. An empty result (cwd *is* the scan root itself) is "no scope".
-4. If no scan root matches, no auto-scope applies.
+2. For each strip-prefix in `paths:`, in declaration order, check whether `rel.starts_with(<prefix>)`. The first match wins; the matched prefix is removed from `rel`. (If no prefix matches, `rel` is used unchanged — directories not named in `paths:` keep their names as scope segments, exactly as they would as address segments.)
+3. The auto-scope segments are the remaining components of `rel` (after any prefix strip), joined by `.`. An empty result — `cwd` is the project root, or is exactly a `paths:` strip-prefix directory — is "no scope".
 
 The cwd-derived scope is informational at command start and does not change mid-run. It is also surfaced on the first line of the `--verbose` log so users can see which scope is active.
 
 ### `smelt test` isolation
 
 `smelt test` compiles each test into a standalone SQL query and executes it against an **in-memory DuckDB instance** using mock data declared in the test's frontmatter. No connection to the project's target database is made. Tests always run on DuckDB regardless of the project's configured target(s).
+
+`smelt test --select` uses the **full selector syntax** (`model_selection.md` §"Selector syntax") — the same `model_name` / `tag:` / `generator_file:` methods and `+` graph operators every other command accepts, resolved through the §"Argument resolution algorithm". It is **not** a substring match on test names. A test model matches a `model_name` selector by its canonical `smelt.<path>` (test models are addressable, per `architecture.md`), and matches `tag:` by its effective tag set. This makes test selection consistent with `smelt run`/`smelt build` selection.
 
 ### `smelt docs generate` output
 
@@ -296,6 +317,10 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 
 **Bare leaves with no scope are a hard error, not a fallback search.** When the user runs `smelt type events_parsed` from the project root (no auto-scope) and the workspace contains `silver.events_parsed`, the command must error rather than silently picking the only candidate. This is what makes ambiguity safe: adding a second `bronze.events_parsed` later will never change the behaviour of a passing command. The error includes a `did you mean '<full path>'?` hint for the single-match case so the failure is one keystroke from a fix.
 
+**Scoped shorthand resolves only under its scope — no fall-through.** With scope `silver` active, `events_parsed` resolves exclusively as `silver.events_parsed`; it never falls back to a bare top-level `events_parsed`. A silent fall-through would be a stability hazard: a command that resolved `events_parsed` to the top-level entity via fall-through would silently retarget the moment a `silver/events_parsed.sql` was added. Removing the fall-through extends the same "adding an entity never changes a passing command" invariant to the scoped case — the only way to address an entity outside the active scope is its full path, which is unambiguous and cwd-independent.
+
+**`paths:` is a strip-list, and the cwd scope is derived the same way.** The auto-scope is just the address of the current directory, so it tracks exactly the addressing model `architecture.md` defines: discovery scans every non-excluded subdirectory and `paths:` only strips address prefixes. There is no separate "scan root" concept in the CLI — the directory a developer stands in maps to a scope segment list by the identical strip-prefix rule that maps a file to its `smelt.<path>`. This keeps the mental model singular: where you stand and what an entity is called are the same coordinate system.
+
 ## Constraints & Invariants
 
 1. **`smelt build` is idempotent.** Re-running on the same inputs produces the same final state.
@@ -309,11 +334,13 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 9. **Multi-value flags are repetition-based.** `--select`, `--exclude`, and similar flags must not silently split internal whitespace into multiple values.
 10. **All CLI output is canonical `smelt.<path>`.** Model lists, type signatures, diagnostics, `smelt explain --json` keys, log lines, and any other identifier-bearing output must use the full canonical path. `--scope` adjusts input parsing only.
 11. **Argument resolution uses the same resolver as model SQL.** Every entity argument flows through `resolve_ref_path` after scope expansion; there is no parallel leaf-only resolver in the CLI surface. The dependency graph and run manifest are keyed by canonical paths only.
+12. **Scoped shorthand has no fall-through.** With a scope active, a shorthand argument resolves only as `<scope>.<arg>`; it never silently retries the bare `<arg>`. Reaching an entity outside the scope requires a full path. Adding a new entity (at any level) never changes which entity a previously-passing command resolved to.
+13. **`paths:` is a strip-list, not a scan gate.** Discovery walks every non-excluded subdirectory under the project root; `paths:` only strips address prefixes (`architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The cwd-derived scope is computed by the same strip-prefix rule, and the CLI defines no separate per-kind scan paths.
 
 ## Known Divergences / Open Questions
 
 - **Exit code standardization incomplete.** Configuration errors, YAML parse failures, and selector parse errors exit with non-zero codes but the exact code is not consistently `2` or any defined value distinct from `1`. Exit code meaning for "user/config error" is not defined.
-- **`smelt test --select` is substring match, not selector syntax.** Unlike all other commands, `smelt test`'s `--select` does a simple substring match on test file names rather than using the selector parser. See `model_selection.md` Known Divergences.
+- **`smelt test --select` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (§"`smelt test` isolation"), consistent with every other command. Any remaining substring-match behaviour in the implementation is an unlanded gap, not the intended contract.
 - **`smelt explain` physical section gating.** The `physical` section of the explain output is documented as present, but the condition that triggers its inclusion (`--show-physical` flag?) is not clearly surfaced in the CLI help or user guide.
 - **`.smelt/schemas/` not documented.** The schema state directory that `smelt diff` reads from is not documented in user-facing docs. Its format, update timing, and lifecycle are not specified.
 - **`smelt status` reads from live DB.** Gap detection requires a database connection; this is not documented clearly in the command help.
