@@ -317,6 +317,49 @@ smelt assigns canonical return types to aggregates so the same model writes the 
 
 See [`docs/specs/types.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/specs/types.md) §5 for the normative rules and [`docs/type_semantics.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/type_semantics.md) for backend divergence notes.
 
+## String collation
+
+smelt supports the `COLLATE` clause for explicit string collation: `expr COLLATE collation_name`.
+
+In **portable models** (no `engine:` declaration), only the binary collation is allowed.
+Binary collation names are case-insensitive and accepted on all target backends:
+
+| Collation name | Notes |
+|---|---|
+| `"C"` or `POSIX` | ISO/ANSI byte-order comparison (PostgreSQL/DuckDB convention) |
+| `BINARY` | DuckDB default byte-order comparison |
+| `UTF8_BINARY` | Spark default byte-order comparison |
+
+Binary collation is a **no-op for type inference**: `expr COLLATE "C"` returns the same type as `expr`.
+
+```sql
+-- ok: binary collation is portable
+SELECT name COLLATE "C" AS sorted_name FROM t
+SELECT name COLLATE BINARY AS sorted_name FROM t
+```
+
+Using any **non-binary collation** (case-insensitive, locale-aware, accent-insensitive) in a portable model is a `NonPortableCollation` error. The comparison degrades to `Unknown` type to prevent silent cross-engine divergence:
+
+```sql
+-- error: non-portable collation — use COLLATE "C" or remove the clause
+SELECT name COLLATE NOCASE AS sorted_name FROM t
+```
+
+To use a non-binary collation, declare an engine on the model so smelt can emit engine-specific SQL.
+
+**Binary string comparisons and grouping are stable across all target engines.**
+Under binary (byte-wise) collation, the following operations produce identical results on DuckDB,
+Spark, and PostgreSQL regardless of the database's locale setting:
+
+- Equality and ordering (`=`, `<`, `<=`, `>`, `>=`)
+- `GROUP BY` and `DISTINCT` on string columns
+- `ORDER BY` on string columns
+- `MIN` and `MAX` over string columns
+
+This means a portable smelt model that groups, sorts, or deduplicates strings produces the
+same rows in the same order on every engine — no cross-engine divergence, no silent locale
+differences.
+
 ## Multi-dialect features
 
 These features are parsed in smelt SQL and rewritten to target-specific syntax:

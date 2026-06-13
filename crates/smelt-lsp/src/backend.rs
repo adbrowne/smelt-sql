@@ -401,6 +401,7 @@ impl Backend {
                 DbCode::DefaultReferencesParameter => "default-references-parameter",
                 DbCode::UnknownStructFieldType => "unknown-struct-field-type",
                 DbCode::DecimalPrecisionOverflow => "decimal-precision-overflow",
+                DbCode::NonPortableCollation => "non-portable-collation",
             };
             NumberOrString::String(code_str.to_string())
         });

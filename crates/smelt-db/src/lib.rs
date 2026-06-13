@@ -2043,6 +2043,23 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
 
+            // Spec §17 — non-portable collation → `NonPortableCollation`.
+            //
+            // Walks every COLLATE_EXPR in the SELECT statement. For any
+            // non-binary collation name the diagnostic fires at the COLLATE
+            // clause span and the expression type degrades to Unknown
+            // (handled in `infer_expression_type` via
+            // `infer_collate_expr_type`). Binary collations (COLLATE "C",
+            // COLLATE BINARY, COLLATE UTF8_BINARY, COLLATE POSIX) are
+            // silent no-ops.
+            {
+                let collation_diags =
+                    type_inference::check_collation_diagnostics(&select_stmt, &kind_ctx);
+                for diag in collation_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
             // Spec §16 — mixed naive/tz-aware Timestamp in set operations, CASE
             // branches, and arithmetic → TypeMismatch.
             //

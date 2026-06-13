@@ -1,12 +1,12 @@
 use super::*;
 #[allow(unused_imports)]
 use crate::ast::{
-    ArraySlice, ArraySubscript, BetweenExpr, BinaryExpr, CaseExpr, CastExpr, Cte, ExistsExpr, Expr,
-    File, FilterClause, FrameUnit, FunctionCall, GroupByClause, HavingClause, InExpr, JoinType,
-    Lambda, LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering, OrderByClause,
-    OrderByItem, PartitionByClause, PipeExpr, PivotClause, QualifyClause, SelectItem, SelectList,
-    SelectStmt, SortDirection, Subquery, TableRef, UnpivotClause, ValuesClause, WhenClause,
-    WindowFrame, WindowSpec, WithClause,
+    ArraySlice, ArraySubscript, BetweenExpr, BinaryExpr, CaseExpr, CastExpr, CollateExpr, Cte,
+    ExistsExpr, Expr, File, FilterClause, FrameUnit, FunctionCall, GroupByClause, HavingClause,
+    InExpr, JoinType, Lambda, LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering,
+    OrderByClause, OrderByItem, PartitionByClause, PipeExpr, PivotClause, QualifyClause,
+    SelectItem, SelectList, SelectStmt, SortDirection, Subquery, TableRef, UnpivotClause,
+    ValuesClause, WhenClause, WindowFrame, WindowSpec, WithClause,
 };
 
 /// Helper: parse SQL, assert no errors, return the SelectStmt
@@ -6154,5 +6154,56 @@ fn rejects_not_null_on_struct_field() {
     assert!(
         !parse.errors.is_empty(),
         "NOT NULL inside Struct<{{...}}> should produce at least one parse error"
+    );
+}
+
+#[test]
+fn collate_expr_parses_to_node() {
+    // `name COLLATE NOCASE` should produce a COLLATE_EXPR node (no parse errors)
+    let sql = "SELECT name COLLATE NOCASE FROM t";
+    let result = parse(sql);
+    assert!(
+        result.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result.errors
+    );
+    let file = File::cast(result.syntax()).unwrap();
+    let select = file.select_stmt().unwrap();
+    let select_list = select.select_list().unwrap();
+    let item = select_list.items().next().unwrap();
+    let expr = item.expression().unwrap();
+    // The expression must be a COLLATE_EXPR
+    assert!(
+        expr.as_collate().is_some(),
+        "Expected COLLATE_EXPR node, got syntax: {:?}",
+        expr.syntax().kind()
+    );
+    let collate = expr.as_collate().unwrap();
+    assert_eq!(
+        collate.collation_name().as_deref(),
+        Some("NOCASE"),
+        "Collation name should be NOCASE"
+    );
+
+    // `name COLLATE "C"` should also work (quoted collation name)
+    let sql2 = r#"SELECT name COLLATE "C" FROM t"#;
+    let result2 = parse(sql2);
+    assert!(
+        result2.errors.is_empty(),
+        "Expected no parse errors for quoted collation, got: {:?}",
+        result2.errors
+    );
+    let file2 = File::cast(result2.syntax()).unwrap();
+    let select2 = file2.select_stmt().unwrap();
+    let item2 = select2.select_list().unwrap().items().next().unwrap();
+    let expr2 = item2.expression().unwrap();
+    assert!(
+        expr2.as_collate().is_some(),
+        "Expected COLLATE_EXPR for quoted collation"
+    );
+    assert_eq!(
+        expr2.as_collate().unwrap().collation_name().as_deref(),
+        Some("C"), // quotes stripped
+        "Collation name should be C (without quotes)"
     );
 }
