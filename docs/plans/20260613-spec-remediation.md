@@ -148,14 +148,16 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 ### Track C — decision execution (by theme)
 | Theme | Status | Findings closed | Commit | Date |
 |-------|--------|-----------------|--------|------|
-| 1 architecture resolution/naming | done | D-01..D-06 (C1,C2,C22 + schema-default + scan-universe + stem-rule) | _next_ | 2026-06-13 |
-| 2 diagnostics existence/severity | done | D-07,08,09,10,12,14 (D-11→R2; D-13 separate) | _next_ | 2026-06-13 |
-| 3 meta-language reflection/precedence | pending | C11,C12,C13,… | | |
-| 4 python↔meta | pending | C14,C15,… | | |
-| 5 type system | pending | C16,C17,C26,… | | |
-| 6 project surface/config | pending | | | |
-| 7 cli & selection | pending | | | |
-| 8 per-spec smaller calls | pending | | | |
+| 1 architecture resolution/naming | done | D-01..D-06 (C1,C2,C22 + schema-default + scan-universe + stem-rule) | e125ce73 | 2026-06-13 |
+| 2 diagnostics existence/severity | done | D-07,08,09,10,12,14 (D-11→R2; D-13 = 8f05806b) | 277538a9 | 2026-06-13 |
+| 3 meta-language reflection/precedence | done | D-15..D-21 (D-16,D-24 = user B) | c7773476 | 2026-06-13 |
+| 4 python↔meta | done | D-22..D-27 | c7773476 | 2026-06-13 |
+| 5 type system | done | D-28,D-29 | 4c1ee530 | 2026-06-13 |
+| 6 project surface/config | done | D-30..D-35 (D-35 = user B) | 1426d801 | 2026-06-13 |
+| 7 cli & selection | done | D-36..D-41 + D-01 scope reconcile | bab08fb0 | 2026-06-13 |
+| 8 per-spec smaller calls | done | D-42..D-58 (D-44 = user B; D-45 = user model; D-51→R2) | 8495cd6f | 2026-06-13 |
+
+**Diagnostics catalogue adds/reconciles** (cross-theme, commit `e952566b`): `HofNamedArgument` (D-19), `UnknownTestInput` + Testing group (D-43), `DuplicateFunctionDefinition` directory-scoped (D-30), `FrontmatterParseError`→Error (D-31). `DuplicateEmittedName` added in theme 1 (D-02).
 
 ### Spawned — rewrites & code waves (own plans/spec cycles)
 | Item | Substantive home | Closes | Status |
