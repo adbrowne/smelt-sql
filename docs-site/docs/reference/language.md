@@ -347,6 +347,19 @@ SELECT name COLLATE NOCASE AS sorted_name FROM t
 
 To use a non-binary collation, declare an engine on the model so smelt can emit engine-specific SQL.
 
+**Binary string comparisons and grouping are stable across all target engines.**
+Under binary (byte-wise) collation, the following operations produce identical results on DuckDB,
+Spark, and PostgreSQL regardless of the database's locale setting:
+
+- Equality and ordering (`=`, `<`, `<=`, `>`, `>=`)
+- `GROUP BY` and `DISTINCT` on string columns
+- `ORDER BY` on string columns
+- `MIN` and `MAX` over string columns
+
+This means a portable smelt model that groups, sorts, or deduplicates strings produces the
+same rows in the same order on every engine — no cross-engine divergence, no silent locale
+differences.
+
 ## Multi-dialect features
 
 These features are parsed in smelt SQL and rewritten to target-specific syntax:

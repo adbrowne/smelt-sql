@@ -3567,3 +3567,16 @@ fn collation_broken_non_binary() {
             .join("\n  ")
     );
 }
+
+/// §17 standing collation gate: `examples/collation_clean/` — including the
+/// binary-string grouping and ordering model — produces zero diagnostics.
+///
+/// This test is the positive companion to `collation_broken_non_binary`.  It
+/// covers `models/binary_groupby_orderby.sql` which uses `GROUP BY` and
+/// `ORDER BY` on a `Text` column without any COLLATE clause (implicit binary)
+/// alongside `models/binary_collation.sql` which uses an explicit `COLLATE "C"`.
+/// Neither model should emit a `NonPortableCollation` diagnostic.
+#[test]
+fn collation_clean_binary_groupby_orderby() {
+    check_workspace_no_diagnostics("examples/collation_clean");
+}

@@ -61,7 +61,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | Phase | Status   | Commit | Date       |
 |-------|----------|--------|------------|
 | 1     | done     |        | 2026-06-13 |
-| 2     | pending  |        |            |
+| 2     | done     |        | 2026-06-13 |
 
 ---
 
