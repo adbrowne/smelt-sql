@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781390708070,
+  "lastUpdate": 1781390710045,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25556,6 +25556,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.457238151706328,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "72c811f0ccdd81c835c70602880d4b36cd6478e9",
+          "message": "test(lsp): update e2e refs to canonical smelt.<path> addressing (#140)\n\nThe e2e LSP tests still used the retired smelt.models.<name> ref form\n(architecture.md §\"Resolution\": kind-prefixed forms are retired; the\ncanonical address strips the matching paths: scan-root prefix). Under\ncanonical addressing a model at models/upstream.sql resolves as\nsmelt.upstream, so smelt.models.upstream is correctly reported undefined\n(\"did you mean 'smelt.upstream'?\"), which broke four tests that expected\nthe path-form ref to resolve:\n  - test_goto_definition_ref\n  - test_goto_definition_smelt_model_ref_still_works\n  - test_diagnostics_clear_after_fix\n  - test_no_stale_diagnostics_after_model_rename\n\nReplace all smelt.models.<name> with the canonical smelt.<name> and\nadjust the two goto-definition cursor columns whose offsets shifted with\nthe shorter path. No production change — the resolver was already correct.\n\nCo-authored-by: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-14T08:43:32+10:00",
+          "tree_id": "a61c101e1a25fd2a4aa59e1d98cbc911b2660bf9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/72c811f0ccdd81c835c70602880d4b36cd6478e9"
+        },
+        "date": 1781390709530,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.242920800059668,
             "unit": "MB/s"
           }
         ]
