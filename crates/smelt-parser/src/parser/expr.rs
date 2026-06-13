@@ -202,7 +202,7 @@ impl<'a> super::Parser<'a> {
 
     pub(super) fn parse_comparison_expr(&mut self) {
         let checkpoint = self.builder.checkpoint();
-        self.parse_concat_expr();
+        self.parse_collate_expr();
 
         loop {
             self.skip_trivia();
@@ -237,7 +237,7 @@ impl<'a> super::Parser<'a> {
                     self.expect(RPAREN);
                     self.finish_node(); // ANY_EXPR
                 } else {
-                    self.parse_concat_expr();
+                    self.parse_collate_expr();
                 }
                 self.finish_node();
             } else if self.at(IS_KW) {
@@ -268,11 +268,35 @@ impl<'a> super::Parser<'a> {
                 self.start_node_at(checkpoint, BINARY_EXPR);
                 self.advance(); // consume LIKE/ILIKE
                 self.skip_trivia();
-                self.parse_concat_expr();
+                self.parse_collate_expr();
                 self.finish_node();
             } else {
                 break;
             }
+        }
+    }
+
+    /// Parse a COLLATE expression: `expr COLLATE collation_name`.
+    ///
+    /// COLLATE binds tighter than comparison operators (=, <, >, LIKE, etc.)
+    /// but looser than concatenation (||) and lower, so `a COLLATE c = b`
+    /// groups as `(a COLLATE c) = b`.
+    fn parse_collate_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
+        self.parse_concat_expr();
+
+        self.skip_trivia();
+        if self.at(COLLATE_KW) {
+            self.start_node_at(checkpoint, COLLATE_EXPR);
+            self.advance(); // consume COLLATE_KW
+            self.skip_trivia();
+            // Expect IDENT or STRING for the collation name.
+            if self.at(IDENT) || self.at(STRING) {
+                self.advance(); // consume the collation name token
+            } else {
+                self.error("Expected collation name after COLLATE".to_string());
+            }
+            self.finish_node(); // COLLATE_EXPR
         }
     }
 

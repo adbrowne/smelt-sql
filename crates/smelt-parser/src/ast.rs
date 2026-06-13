@@ -1574,9 +1574,9 @@ impl Expr {
                 }
                 Some(Self(inner))
             }
-            BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL | SMELT_PATH_REF
-            | SMELT_PATH_CALL
+            BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | COLLATE_EXPR
+            | SUBQUERY | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL
+            | SMELT_PATH_REF | SMELT_PATH_CALL
             // Phase B (meta-language): lambdas and pipe expressions are expressions.
             | LAMBDA | PIPE_EXPR
             // Phase F (meta-language): ternary expressions and reducer calls are expressions.
@@ -1602,6 +1602,7 @@ impl Expr {
                             | CASE_EXPR
                             | CAST_EXPR
                             | EXTRACT_EXPR
+                            | COLLATE_EXPR
                             | SUBQUERY
                             | BETWEEN_EXPR
                             | IN_EXPR
@@ -1738,6 +1739,14 @@ impl Expr {
             .children()
             .find_map(ExtractExpr::cast)
             .or_else(|| ExtractExpr::cast(self.0.clone()))
+    }
+
+    /// Check if this is a COLLATE expression
+    pub fn as_collate(&self) -> Option<CollateExpr> {
+        self.0
+            .children()
+            .find_map(CollateExpr::cast)
+            .or_else(|| CollateExpr::cast(self.0.clone()))
     }
 
     /// Check if this is a CAST expression
@@ -2606,6 +2615,55 @@ impl ExtractExpr {
     /// Get the source expression (the expression after FROM)
     pub fn expression(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// COLLATE expression (expr COLLATE collation_name)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CollateExpr(SyntaxNode);
+
+impl CollateExpr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == COLLATE_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the operand expression (the left-hand side of COLLATE)
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Get the collation name. If the token is a quoted STRING, the surrounding
+    /// quotes are stripped. Returns `None` if no name token is found.
+    pub fn collation_name(&self) -> Option<String> {
+        let mut after_collate_kw = false;
+        for elem in self.0.children_with_tokens() {
+            if let Some(token) = elem.as_token() {
+                match token.kind() {
+                    COLLATE_KW => after_collate_kw = true,
+                    IDENT if after_collate_kw => return Some(token.text().to_string()),
+                    STRING if after_collate_kw => {
+                        let raw = token.text();
+                        // Strip surrounding single or double quotes
+                        let inner = raw
+                            .strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .or_else(|| raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                            .unwrap_or(raw);
+                        return Some(inner.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 
     pub fn syntax(&self) -> &SyntaxNode {
