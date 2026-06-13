@@ -654,4 +654,40 @@ mod tests {
         );
         assert_eq!(collisions[0].emitted_name, "main.staging_orders");
     }
+
+    #[test]
+    fn same_stem_different_addresses_no_stem_rule() {
+        // D-06: address-based collision is the only uniqueness rule; there is no
+        // file-stem-uniqueness check.  Two files that share a leaf stem (`users`)
+        // but live in different directories get distinct addresses and must NOT
+        // collide under any rule.
+        use crate::seeds::{SeedInfo, SeedSidecar};
+        // A function at functions/users.sql → address ["functions", "users"]
+        let fn_file = make_sql_model("functions/users.sql", vec!["functions", "users"]);
+        // A seed at data/users.csv → address ["data", "users"]
+        let seed = SeedInfo {
+            name: "users".to_string(),
+            path: PathBuf::from("data/users.csv"),
+            columns: vec![],
+            address_segments: vec!["data".to_string(), "users".to_string()],
+            sidecar: None::<SeedSidecar>,
+        };
+
+        // address-map: different addresses → no DuplicateAddress
+        let (_, addr_collisions) = resolve_address_map(std::slice::from_ref(&fn_file), std::slice::from_ref(&seed), &[]);
+        assert!(
+            addr_collisions.is_empty(),
+            "same-stem / different-address pair must not produce an AddressCollision: {:?}",
+            addr_collisions
+        );
+
+        // emitted-name map: functions excluded, seed address → "main.data_users"
+        // which does not collide with anything
+        let emitted_collisions = compute_emitted_name_collisions(&[], &[seed], &[], "main");
+        assert!(
+            emitted_collisions.is_empty(),
+            "different emitted names must not collide: {:?}",
+            emitted_collisions
+        );
+    }
 }

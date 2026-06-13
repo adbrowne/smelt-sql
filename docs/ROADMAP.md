@@ -90,6 +90,16 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W1 — Universal Discovery & `paths:`-Strip Addressing~~ ✅ (June 14, 2026)
+
+Five-phase remediation plan ([plan](plans/20260613-w1-resolve-addressing.md)) landing the D-resolve cluster from the 2026-06-13 spec review (D-01/02/04/05/06):
+
+- **Address derivation (D-01)** — `paths:` repurposed from a scan gate to a pure strip-list; address = project-root-relative path minus any matching `paths:` prefix; a root-level file addresses as its bare stem (`smelt.<stem>`). Default `paths: ["models"]` preserves all existing example-workspace addresses.
+- **Universal discovery (D-01/D-05)** — one project-wide walk replaces the per-kind gated scans; kind comes from `classify()` (content/extension), never from directory; functions discoverable anywhere (hardcoded `functions/` gate dropped); seeds and sources found project-wide; eager (`load_workspace`) and lazy (`project_seeds`/`project_sources`) share the same universe — CLI↔LSP parity by construction.
+- **`schema` default (D-04)** — `targets.<name>.schema` now optional, defaulting to `"main"` via serde; downstream emitted-name path unchanged.
+- **`DuplicateEmittedName` (D-02)** — structural emitted-name collision check (`(schema, segs.join("_"))`) alongside `project_address_collisions`; Error severity; persisted entities only (functions/ephemeral excluded, sources included); evaluated per active target; surfaced in both CLI and LSP.
+- **Close-out / single-rule audit (D-06)** — verified address-based collision is the only uniqueness rule (no residual stem rule); no Known-Divergence retractions needed (specs already describe the new model cleanly).
+
 ### ~~Silent Failures & Code-Health Hardening~~ ✅ (June 10, 2026)
 
 Eleven-phase hardening plan ([plan](plans/20260608-silent-failures-hardening.md)) that made "fail loud, or handle it" a **tracked, ratcheted discipline** across four fronts:
