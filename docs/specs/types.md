@@ -50,7 +50,8 @@ sources:
 
 A `(VALUES (e₁, e₂, …), …) AS alias(c₁, c₂, …)` derived table produces a typed schema using the following rules:
 
-- **Column-wise LUB.** Each column's type is the least upper bound of the corresponding element across all rows, computed by the numeric promotion chain (§"Numeric promotion chain") and the string/temporal family rules (§"String unification", §5).
+- **Column-wise LUB.** Each column's type is the least upper bound of the corresponding element across all rows, computed by the numeric promotion chain (§"Numeric promotion chain") and the string-family rules (§"String unification").
+- **Temporal-family LUB.** When a column mixes temporal elements, the strict tz-mixing rule of §"Timezone" applies the same way it does to UNION / CASE branches: a column that mixes a naive `Timestamp` with a `Timestamp WITH TIME ZONE`, or that mixes incompatible temporal families (`Date` with `Timestamp`), has no least upper bound and is a `TypeMismatch` (anchored at the VALUES clause span), exactly as a cross-family mix is. The user must `CAST` the offending row elements to a common type before the VALUES table type-checks. There is no silent widening of naive to tz-aware (or `Date` to `Timestamp`).
 - **Alias column list.** When `alias(c₁, c₂, …)` provides an explicit column list, the inferred types are bound to those names positionally. When the list is omitted, the columns are named `col1`, `col2`, … (1-indexed). The `AS` keyword is optional: `(VALUES …) t(c₁, …)` binds the column list identically to `(VALUES …) AS t(c₁, …)`.
 - **Empty VALUES (zero rows).** A `VALUES` clause with no rows produces no columns. The compiler emits `EmptyValuesClause` (§"Diagnostic codes") anchored at the VALUES clause span.
 
@@ -148,7 +149,7 @@ SmallInt < Integer < BigInt < Decimal < Double
 
 ### 4. String unification
 
-`Text`, `Varchar(_)`, `Char(_)` are interchangeable for type-equality (`normalize()` collapses `Text ↔ Varchar(None)`). String operations discard length annotations. String functions (`UPPER`, `SUBSTRING`, `||`, …) return `Text`. Backend output emits `VARCHAR` for engines without a `TEXT` type via `to_backend_sql()`.
+`Text`, `Varchar(_)`, `Char(_)` are interchangeable for type-equality (`normalize()` folds `Text`, `Varchar(_)`, and `Char(_)` into one canonical string type — length annotations and the varchar/char distinction are discarded for equality). String operations discard length annotations. String functions (`UPPER`, `SUBSTRING`, `||`, …) return `Text`. Backend output emits `VARCHAR` for engines without a `TEXT` type via `to_backend_sql()`.
 
 ### 5. Canonical built-in returns
 
