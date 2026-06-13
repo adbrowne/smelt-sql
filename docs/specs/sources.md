@@ -28,7 +28,7 @@ A source is declared by a `.yml` file in any non-excluded directory under the pr
 | `models/sources/raw/users.yml` | `smelt.sources.raw.users` |
 | `models/external/api/orders.yml` | `smelt.external.api.orders` |
 
-The address path follows universal addressing (`architecture.md` §"Resolution"). The mapping from `smelt.<path>` to `<db_schema>.<db_table>` follows the default rule in `architecture.md` §"Default materialization name mapping" — `<target_schema>.<path-joined-by-_>` — unless the YAML provides a `name:` override (recommended whenever the external pipeline named the table differently).
+The address path follows universal addressing (`architecture.md` §"Resolution"). The mapping from `smelt.<path>` to `<db_schema>.<db_table>` follows the default rule in `architecture.md` §"Default materialization name mapping" — `<target_schema>.<path-joined-by-_>` — unless the YAML provides a `name:` override (recommended whenever the external pipeline named the table differently). The override is **target-aware**: it may pin one external name for all targets, or supply a per-target map so `--target dev` and `--target prod` resolve the same source to different external schemas/tables (see §"Target-aware `name:` override").
 
 ### Source YAML shape
 
@@ -53,7 +53,7 @@ columns:
 | `columns[].type` | yes | — | Smelt `DataType` (`types.md`). Same vocabulary as model type-checking and seed sidecars. |
 | `columns[].nullable` | no | `true` | Whether the column may contain NULL in the upstream database. Type-checking respects this. |
 | `columns[].description` | no | absent | Free-text description, surfaced in LSP hover. |
-| `name` | no | derived | Override the database-side name. When present, must be a `<schema>.<table>` literal. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
+| `name` | no | derived | Override the database-side name. **Target-aware** (see §"Target-aware `name:` override"): either a single `<schema>.<table>` literal applied to every target, or a per-target map `{ <target>: <schema>.<table>, … }` so different targets read different external schemas/tables. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
 | `timeseries` | no | absent | Declares a time dimension on this source (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. When present, the named columns must appear in `columns:` with date/timestamp-compatible types. |
 | `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
@@ -78,6 +78,33 @@ timeseries:
 
 Declaring `timeseries:` does not change how the source is loaded — sources remain externally managed. It only declares the partition shape downstream consumers may rely on.
 
+### Target-aware `name:` override
+
+The `name:` override is resolved against the **active target** so a single source declaration can point at different external tables in different environments. Two forms are accepted:
+
+**Literal form** — one `<schema>.<table>` string, applied to every target:
+
+```yaml
+name: raw_cdc.users        # all targets read raw_cdc.users
+```
+
+**Per-target map** — keys are target names from `smelt.yml::targets`, values are `<schema>.<table>` literals:
+
+```yaml
+name:
+  dev:  raw_cdc_dev.users
+  prod: raw_cdc.users
+```
+
+Resolution rules:
+
+- The map is keyed by the active `--target` name. When the active target has an entry, its `<schema>.<table>` is used verbatim (the literal's schema is **not** overridden by the target's `schema:`).
+- A target with no entry in the map falls back to the default mapping (`<target_schema>.<address-path-joined-by-_>`) — the map only overrides the targets it names.
+- The literal form is shorthand for a map whose single value applies to every target.
+- A map value that is not a `<schema>.<table>` literal, or a map key that names no declared target, is a `MalformedSource` error.
+
+The grammar lives here in `sources.md`; `smelt.yml` carries no source-name config key. `smelt_yml.md` references this section for the target-aware behaviour.
+
 ### Discovery and addressing
 
 Sources are discovered alongside every other project file by walking `paths:`. Resolution rules (`architecture.md` §"Resolution"):
@@ -99,7 +126,7 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 
 | Code | Severity | Trigger |
 |---|---|---|
-| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry). |
+| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry, or a `name:` override whose value is not a `<schema>.<table>` literal / whose per-target map names an undeclared target). |
 | `SourceTypeError` | Error | A `columns[].type` value is not a recognised smelt `DataType` (`types.md`). |
 
 ## Semantics
@@ -117,6 +144,8 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 **Per-entity YAML, not aggregate `sources.yml`.** The aggregate file violates universal addressing — every project entity should live at its addressed path. `models/sources/raw/users.yml` *is* `smelt.sources.raw.users`. Splitting the old `sources.yml` into per-entity files is a hard cut; pre-1.0 + the workspace's "no backward compatibility" doctrine means we don't ship a compat shim. A `smelt migrate` follow-up tool can mechanise the rewrite.
 
 **Why `name:` is allowed on sources but not on seeds.** A seed's identity *is* its workspace path — smelt picks the database name. A source's identity is the external table the pipeline produces; smelt only declares it. The external name is not a function of the workspace layout, so the YAML must be able to override the default mapping. Disallowing `name:` for seeds keeps the "config falls out of structure" doctrine intact for the things smelt actually owns.
+
+**Why `name:` is target-aware.** Schema otherwise comes from the active target, so a single `<schema>.<table>` literal would pin one schema across every target — `--target dev` and `--target prod` would both read the same hardcoded external schema, defeating multi-target portability. Real pipelines stage the same logical feed in different schemas per environment (`raw_cdc_dev` vs `raw_cdc`). Making the override a per-target map (with the literal form as the all-targets shorthand) lets one source declaration follow the environment. A purely table-only override (schema always from the target) was considered and rejected: it cannot express the common case where the *schema* differs per environment, which is exactly where source portability breaks.
 
 **`materialization:` not allowed on sources.** Sources are external by definition — there is no smelt-controlled materialization. A `materialization: ephemeral` source would mean "smelt should not assume this table exists" which is closer to a feature flag than a data shape, and we have no concrete need for it. If one emerges, the spec opens up.
 

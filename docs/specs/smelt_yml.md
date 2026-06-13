@@ -23,10 +23,12 @@ owners: [andrew]
 | `version` | integer | no | `1` | Schema version of the `smelt.yml` format. Optional to remove the trip-hazard where users wrote a semver string and got a parse error. Currently only `1` is meaningful. |
 | `paths` | list of strings | no | `["models"]` | Directory prefixes **stripped** from entity addresses (`architecture.md` §"Resolution"). This does **not** gate discovery: smelt scans **every non-excluded subdirectory** under the project root and classifies each file by format/content (`.sql`, `.py`, `.csv`, `.yml`), regardless of which directory it lives in. The default `["models"]` simply strips a leading `models/` so the conventional layout addresses cleanly (`models/marts/x.sql` → `smelt.marts.x`); a project that groups files by domain under another container sets `paths:` to that container (`["src"]`). |
 | `targets` | map of `<name>` → target object | yes | — | Named execution environments. The `--target` CLI flag selects one (default `dev`). |
-| `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts `table`, `view`, `ephemeral`, `materialized_view`, `cumulative_aggregate`, `test`. |
+| `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts only `table`, `view`, `materialized_view`, `ephemeral`. `test` and `cumulative_aggregate` are **rejected** with a validation error (a blanket default of either is nonsensical — see Semantics §8). |
 | `models` | map of `<name>` → model-config object | no | `{}` | Per-model overrides keyed by model name. Each entry may declare `materialization`, `tags`, `target`, `incremental`, etc. |
 | `python` | string | no | — | Path to a Python interpreter for Python-model discovery. The `SMELT_PYTHON` environment variable takes precedence. |
 | `unstable_schema` | bool | no | `false` | Gate for unstable feature surfaces. When `true`, the gated keys listed in §"`unstable_schema:` gated keys" parse without warnings. |
+| `vars` | map of `<name>` → YAML scalar | no | `{}` | Compile-time variable declarations read by `smelt.config.var('<name>')`. The value shape is a flat map of name → scalar (string/number/bool/null); the lookup, YAML-scalar coercion, and per-target overlay semantics are owned by `meta_language.md` §"Compile-time variables". |
+| `state` | object | no | `{ mode: stateless }` | Project state posture. Carries `mode:` (`stateless` \| `intervals` \| `environments`); the posture lattice, reuse semantics, and environment addressing are owned by `virtual_environments.md` §"`state.mode` — the opt-in posture". |
 
 ### `unstable_schema:` gated keys
 
@@ -62,6 +64,7 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 | `incremental` | object | absent | Incremental-materialization config — full shape in `incremental_models.md`. |
 | `tags` | list of strings | `[]` | Selector tags merged with frontmatter tags (union, deduplicated). |
 | `target` | string | inherits CLI `--target` | Override which target this model executes on. |
+| `format` | string (`delta` \| `parquet`) | inherits `targets.<name>.format` | Per-model table format override. Ignored for DuckDB targets; meaningful only on Spark targets. Full key semantics in `models.md` §"YAML frontmatter keys". |
 
 ### Precedence rules
 
@@ -69,6 +72,7 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 2. **Incremental**: SQL frontmatter > `smelt.yml::models.<name>.incremental`.
 3. **Target**: SQL frontmatter `target:` > `smelt.yml::models.<name>.target` > CLI `--target` flag (default `dev`).
 4. **Tags**: union of `smelt.yml::models.<name>.tags` and frontmatter `tags`, deduplicated.
+5. **Format**: SQL frontmatter `format:` > `smelt.yml::models.<name>.format` > `targets.<name>.format` (Spark default `delta`). The model override wins over the target, the same way `materialization:` does.
 
 ### Unknown keys
 
@@ -85,6 +89,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 5. **`paths` is an address strip-list; discovery is project-wide.** Smelt walks **every non-excluded subdirectory** under the project root (the directory containing `smelt.yml`), classifying each file by format/content (`.sql` bare-SELECT → model, `.sql` `smelt.define` → function, `.csv` → seed, `.yml` with sibling `.csv` → sidecar, `.yml` standalone → source). `paths:` does **not** restrict what is discovered — its entries are directory prefixes **stripped** from the resulting `smelt.<path>` addresses (`architecture.md` §"Resolution"). **Excluded** directories — hidden directories (`.`-prefixed, e.g. `.git`, `.smelt`) and the conventional build output `target/` — are not scanned. A `paths:` entry naming a directory that does not exist is harmless: there is simply nothing for it to strip.
 6. **`unstable_schema: true` opts in to gated keys.** The list of currently-gated keys is owned by the feature spec that introduces them (today: `joins:` and `provenance:` in `functions.md`). The flag itself is parsed by a small text-based helper (`parse_unstable_schema_flag`) so even malformed `smelt.yml` files can be probed for the gate.
 7. **Forward compatibility via warnings.** A new release that adds a top-level key produces a warning on older consumers, not an error — the old binary keeps working with the field absent. This invariant means tooling can read newer projects without crashing.
+8. **`default_materialization` accepts only persistent-model modes.** The legal values are `table`, `view`, `materialized_view`, and `ephemeral`. `test` and `cumulative_aggregate` are **rejected with a validation error**: a project-wide default of `test` would make every un-annotated model a non-materialising unit test, and `cumulative_aggregate` is a per-model stateful-merge mode that cannot be a meaningful blanket fallback (its driving partition shape and unique key come from the individual model). Both remain valid as a per-model `materialization:` (frontmatter or `models.<name>.materialization`); they are simply not accepted as the project default. `ephemeral` is retained as a defensible default.
 
 ## Design
 
@@ -112,6 +117,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.
 - **Multi-target precedence with frontmatter `target:`.** The model-level `target:` frontmatter overrides `smelt.yml::models.<name>.target`, which overrides the CLI `--target`. The frontmatter form is a relatively recent addition; whether it should also be allowed to declare a target *not* defined in `smelt.yml::targets` is open (today: hard error before any work begins).
 - **`unstable_schema:` discoverability.** There is no `smelt unstable_schema list` or similar way to enumerate the currently-gated keys. Users find them through individual feature docs; a discoverability mechanism is open.
+- **User-extensible top-level keys.** Today the top-level key set is closed (unknown keys warn). A future direction is to let projects register their own top-level keys to carry configuration for custom planner rules. That extensibility is not specified now; the key set in §"Top-level keys" remains the authoritative list, and `vars:` / `state:` point at their owning feature specs for semantics.
 - **Configurable discovery exclusions.** Project-wide discovery skips hidden directories (`.`-prefixed) and the conventional build output `target/`. Whether a project can extend this with an explicit `exclude:` key (to omit, say, a `sandbox/` or `archive/` subtree from discovery) is open; today the skip-list is fixed and conventional. The `paths:` strip-list is a separate concern (it renames addresses, it does not hide files).
 
 ## References
@@ -125,5 +131,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
   - `incremental_models.md` — `incremental:` shape on `models.<name>`.
   - `functions.md` — `unstable_schema: true` gates `joins:` and `provenance:` frontmatter.
   - `seeds.md` — CSV parsing rules and `smelt seed` lifecycle; consumes `paths:` and `targets.<name>.schema`.
-  - `sources.md` — source declaration shape; consumes `paths:` for discovery.
+  - `sources.md` — source declaration shape; consumes `paths:` for discovery. The target-aware source `name:` override is keyed by `targets.<name>` but its grammar lives in `sources.md` §"Target-aware `name:` override" — `smelt.yml` carries no source-name config key.
   - `cli.md` — `--target` resolves against `targets`; `--project-dir` is the workspace root.
+  - `meta_language.md` — semantics of the `vars:` block consumed by `smelt.config.var('<name>')`.
+  - `virtual_environments.md` — semantics of the `state:` block (`mode:` posture).
