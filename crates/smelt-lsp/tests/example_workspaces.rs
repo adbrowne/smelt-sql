@@ -1113,6 +1113,50 @@ async fn architecture_broken_path_collision_surfaces_via_lsp() {
     );
 }
 
+/// LSP gate: `architecture_broken_emitted_name_collision` surfaces a
+/// `duplicate-emitted-name` diagnostic via the real LSP backend published at
+/// `initialized` (CLI↔LSP parity for D-02).
+#[tokio::test]
+async fn architecture_broken_emitted_name_collision_surfaces_via_lsp() {
+    let workspace = examples_root().join("architecture_broken_emitted_name_collision");
+    assert!(
+        workspace.exists(),
+        "fixture not found: {}",
+        workspace.display()
+    );
+
+    let files = workspace_sql_files(&workspace);
+    let mut client = TestClient::open_workspace(&workspace).await;
+    for file in &files {
+        if let Err(e) = client.open_file(file).await {
+            eprintln!("skipping {}: {}", file.display(), e);
+        }
+    }
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let has_duplicate_emitted_name = diags.iter().any(|(_uri, ds)| {
+        ds.iter().any(|d| {
+            d.code.as_ref().is_some_and(
+                |c| {
+                    matches!(c, lsp_types::NumberOrString::String(s) if s == "duplicate-emitted-name")
+                },
+            )
+        })
+    });
+    assert!(
+        has_duplicate_emitted_name,
+        "expected a duplicate-emitted-name diagnostic via LSP for the broken emitted-name \
+         collision fixture, got: {:?}",
+        diags
+            .iter()
+            .flat_map(|(uri, ds)| ds
+                .iter()
+                .map(move |d| format!("{}: {:?}: {}", uri, d.code, d.message)))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// LSP gate: `types_broken_crossfamily_add` produces at least one `type-mismatch`
 /// diagnostic via the real LSP backend (BUG-017 parity).
 #[tokio::test]

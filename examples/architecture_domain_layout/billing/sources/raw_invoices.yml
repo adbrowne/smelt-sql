@@ -1,0 +1,14 @@
+description: Raw invoice records from the billing system
+columns:
+  - name: invoice_id
+    type: INTEGER
+    nullable: false
+  - name: customer_id
+    type: INTEGER
+    nullable: false
+  - name: amount
+    type: DECIMAL(12, 2)
+    nullable: false
+  - name: issued_at
+    type: TIMESTAMP
+    nullable: false

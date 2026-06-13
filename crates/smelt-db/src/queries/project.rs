@@ -330,6 +330,121 @@ pub fn project_address_collisions(
     Arc::new(diags)
 }
 
+/// A diagnostic produced by a `DuplicateEmittedName` collision: two persisted
+/// entities in the same project have distinct addresses but map to the same
+/// `(target_schema, address.join("_"))` emitted table name, risking a silent
+/// table clobber. Anchored at the second (later-discovered) entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmittedNameCollisionDiagnostic {
+    /// Path of the second (later-discovered) entity — where the diagnostic is
+    /// anchored in the editor.
+    pub path: PathBuf,
+    /// Path of the first entity that claimed the emitted name (context for the message).
+    pub other_path: PathBuf,
+    /// The emitted table name that both entities map to (e.g. `main.staging_orders`).
+    pub emitted_name: String,
+    /// The diagnostic (code `DuplicateEmittedName`, severity `Error`, range at 0).
+    pub diagnostic: crate::Diagnostic,
+}
+
+/// Surface emitted-name collisions as project-scoped `DuplicateEmittedName` errors.
+///
+/// The `_`-join mapping from address segments to an emitted table name is not
+/// injective: `smelt.staging.orders` and `smelt.staging_orders` both produce
+/// `main.staging_orders`. This check catches that class of silent table clobber
+/// that `project_address_collisions` (address-level) cannot see.
+///
+/// Keyed on `ProjectInput`; restart-scoped (same contract as
+/// `project_address_collisions`). Only persisted entities participate: SQL
+/// models with non-Ephemeral/non-Test materialization, seeds, and sources.
+/// Function files (`smelt.define`) are excluded because they have no DB table.
+/// Evaluated for the active/default target's resolved schema (D-04 default `"main"`).
+#[salsa::tracked]
+pub fn project_emitted_name_collisions(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Arc<Vec<EmittedNameCollisionDiagnostic>> {
+    use smelt_core::config::Materialization;
+    use smelt_core::discovery::{discover_function_file_paths, ModelDiscovery};
+    use smelt_core::resolver::compute_emitted_name_collisions;
+
+    let project_root = project.root(db).clone();
+    let config = smelt_core::Config::load(&project_root);
+    let paths = config
+        .as_ref()
+        .map(|c| c.paths.clone())
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+
+    // Resolve the active target's schema (D-04 default = "main").
+    let target_schema = config
+        .as_ref()
+        .ok()
+        .and_then(|c| {
+            let name = c.target.as_deref()?;
+            c.targets.get(name).map(|t| t.schema.clone())
+        })
+        .unwrap_or_else(|| "main".to_string());
+
+    // Discover all SQL model files (universal walk, same as project_address_collisions).
+    let sql_files: Vec<smelt_core::discovery::ModelFile> =
+        ModelDiscovery::new(project_root.clone(), paths)
+            .discover_models()
+            .unwrap_or_default();
+
+    // Function files don't have emitted table names — exclude them.
+    let function_paths: std::collections::HashSet<PathBuf> =
+        discover_function_file_paths(&project_root)
+            .into_iter()
+            .collect();
+
+    // Filter to persisted-only: no functions, no ephemeral, no test.
+    let persisted: Vec<&smelt_core::discovery::ModelFile> = sql_files
+        .iter()
+        .filter(|f| !function_paths.contains(&f.path))
+        .filter(|f| {
+            let mat = f.metadata.as_ref().and_then(|m| m.materialization.as_ref());
+            !matches!(
+                mat,
+                Some(Materialization::Ephemeral) | Some(Materialization::Test)
+            )
+        })
+        .collect();
+
+    let seeds = project_seeds(db, project);
+    let sources = project_sources(db, project);
+
+    let collisions = compute_emitted_name_collisions(&persisted, &seeds, &sources, &target_schema);
+
+    let diags = collisions
+        .into_iter()
+        .map(|col| {
+            let msg = format!(
+                "duplicate emitted name `{}`: both `{}` (address `{}`) and `{}` (address `{}`) \
+                 materialise to the same table — rename one to avoid a silent clobber",
+                col.emitted_name,
+                col.first.path.display(),
+                col.first.address_segments.join("."),
+                col.second.path.display(),
+                col.second.address_segments.join("."),
+            );
+            EmittedNameCollisionDiagnostic {
+                path: col.second.path.clone(),
+                other_path: col.first.path.clone(),
+                emitted_name: col.emitted_name,
+                diagnostic: crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: msg,
+                    range: TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::DuplicateEmittedName),
+                    data: None,
+                },
+            }
+        })
+        .collect();
+
+    Arc::new(diags)
+}
+
 /// Resolve a `smelt.seeds.<address>` or `smelt.sources.<address>` path to
 /// the on-disk file (`.csv` for seeds, `.yml` for sources) so the LSP can
 /// goto-definition into it.

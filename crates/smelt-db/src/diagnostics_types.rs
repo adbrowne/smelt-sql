@@ -694,6 +694,13 @@ pub enum DiagnosticCode {
     /// different projects is independent). Error severity. Anchored at the
     /// second (later-discovered) file's path, at offset 0.
     DuplicateAddress,
+    /// Emitted when two persisted entities in the same project resolve to the
+    /// same `(active-target schema, address-joined-by-_)` emitted table name,
+    /// even though their `smelt.<path>` addresses differ (the `_`-join is not
+    /// injective — e.g. `smelt.staging.orders` and `smelt.staging_orders` both
+    /// emit `main.staging_orders`). Prevents a silent table clobber. Error
+    /// severity. Project-scoped. Anchored at the second entity's path, offset 0.
+    DuplicateEmittedName,
     /// Emitted when a `smelt.define` default expression references another
     /// parameter in the same signature, violating Semantics #9 ("a default
     /// expression must not reference other parameters"). Anchored at the

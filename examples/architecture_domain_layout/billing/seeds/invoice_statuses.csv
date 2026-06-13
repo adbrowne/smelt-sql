@@ -1,0 +1,5 @@
+status_code,label,is_terminal
+draft,Draft,false
+issued,Issued,false
+paid,Paid,true
+cancelled,Cancelled,true

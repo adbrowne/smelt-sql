@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use line_index::LineIndex;
 use smelt_db::{
     check_type_diagnostics, file_diagnostics, project_address_collisions,
-    project_source_diagnostics, Database, Diagnostic, DiagnosticAcc, DiagnosticCode,
-    DiagnosticSeverity, Workspace,
+    project_emitted_name_collisions, project_source_diagnostics, Database, Diagnostic,
+    DiagnosticAcc, DiagnosticCode, DiagnosticSeverity, Workspace,
 };
 
 /// A single `Error`-severity diagnostic that blocks the build, with its source
@@ -143,6 +143,20 @@ pub fn gate_diagnostics(
                 col: 1,
                 code: cd.diagnostic.code,
                 message: cd.diagnostic.message.clone(),
+            });
+        }
+        // Emitted-name collision diagnostics: structural (address-level check
+        // cannot catch the `_`-join non-injective clobber).
+        for ec in project_emitted_name_collisions(db, project).iter() {
+            if ec.diagnostic.severity != DiagnosticSeverity::Error {
+                continue;
+            }
+            errors.push(GateDiagnostic {
+                path: ec.path.clone(),
+                line: 1,
+                col: 1,
+                code: ec.diagnostic.code,
+                message: ec.diagnostic.message.clone(),
             });
         }
     }

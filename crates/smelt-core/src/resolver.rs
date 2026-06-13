@@ -365,6 +365,110 @@ pub fn default_db_name(address_segments: &[String], target_schema: &str) -> Stri
     format!("{}.{}", target_schema, address_segments.join("_"))
 }
 
+// ---------------------------------------------------------------------------
+// Emitted-name collision detection (D-02)
+// ---------------------------------------------------------------------------
+
+/// A collision between two persisted entities that both resolve to the same
+/// `(target_schema, address.join("_"))` emitted table name, even though their
+/// `smelt.<path>` addresses differ.
+#[derive(Debug, Clone)]
+pub struct EmittedNameCollision {
+    /// The emitted name that both entities map to, e.g. `main.staging_orders`.
+    pub emitted_name: String,
+    /// The first entity to claim this emitted name.
+    pub first: EntityRef,
+    /// The second entity that collided with `first`.
+    pub second: EntityRef,
+}
+
+/// Compute emitted-name collisions across persisted entities.
+///
+/// The `_`-join mapping from address segments to a table name is not injective:
+/// `smelt.staging.orders` and `smelt.staging_orders` both emit `main.staging_orders`.
+/// `project_address_collisions` cannot catch this because the addresses are distinct.
+/// This function detects the clobber by building an emitted-name → EntityRef map
+/// and reporting every collision.
+///
+/// `sql_files` must be **pre-filtered** to persisted-only entities (no functions,
+/// no `Ephemeral`, no `Test`); the caller (the Salsa query) applies this filter
+/// using EntityKind context from discovery. Seeds and sources are always persisted.
+/// `target_schema` is the active target's resolved `schema:` field (D-04 default
+/// `"main"` must already be applied by the caller).
+pub fn compute_emitted_name_collisions(
+    sql_files: &[&ModelFile],
+    seeds: &[SeedInfo],
+    sources: &[SourceInfo],
+    target_schema: &str,
+) -> Vec<EmittedNameCollision> {
+    let mut map: HashMap<String, EntityRef> = HashMap::new();
+    let mut collisions: Vec<EmittedNameCollision> = Vec::new();
+
+    fn register(
+        map: &mut HashMap<String, EntityRef>,
+        collisions: &mut Vec<EmittedNameCollision>,
+        kind: EntityRefKind,
+        path: PathBuf,
+        segments: Vec<String>,
+        target_schema: &str,
+    ) {
+        if segments.is_empty() {
+            return;
+        }
+        let emitted = default_db_name(&segments, target_schema);
+        let entity_ref = EntityRef {
+            kind,
+            path,
+            address_segments: segments,
+        };
+        match map.entry(emitted.clone()) {
+            std::collections::hash_map::Entry::Occupied(occ) => {
+                collisions.push(EmittedNameCollision {
+                    emitted_name: emitted,
+                    first: occ.get().clone(),
+                    second: entity_ref,
+                });
+            }
+            std::collections::hash_map::Entry::Vacant(vac) => {
+                vac.insert(entity_ref);
+            }
+        }
+    }
+
+    for model in sql_files {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::SqlModel,
+            model.path.clone(),
+            model.address_segments.clone(),
+            target_schema,
+        );
+    }
+    for seed in seeds {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::Seed,
+            seed.path.clone(),
+            seed.address_segments.clone(),
+            target_schema,
+        );
+    }
+    for source in sources {
+        register(
+            &mut map,
+            &mut collisions,
+            EntityRefKind::Source,
+            source.path.clone(),
+            source.address_segments.clone(),
+            target_schema,
+        );
+    }
+
+    collisions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +583,75 @@ mod tests {
             default_db_name(&["staging".to_string(), "orders".to_string()], "main"),
             "main.staging_orders"
         );
+    }
+
+    fn make_sql_model(path: &str, segments: Vec<&str>) -> ModelFile {
+        let p = PathBuf::from(path);
+        ModelFile {
+            name: segments.last().unwrap_or(&"x").to_string(),
+            model_id: crate::model_id::ModelId::from_path(p.clone()),
+            path: p,
+            content: String::new(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            address_segments: segments.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn emitted_name_collision_detected() {
+        // ["staging", "orders"] and ["staging_orders"] both → main.staging_orders
+        let m1 = make_sql_model("models/staging/orders.sql", vec!["staging", "orders"]);
+        let m2 = make_sql_model("models/staging_orders.sql", vec!["staging_orders"]);
+
+        let collisions = compute_emitted_name_collisions(&[&m1, &m2], &[], &[], "main");
+        assert_eq!(
+            collisions.len(),
+            1,
+            "expected one collision, got: {:?}",
+            collisions
+        );
+        assert_eq!(collisions[0].emitted_name, "main.staging_orders");
+    }
+
+    #[test]
+    fn distinct_emitted_names_no_collision() {
+        // ["staging", "orders"] → main.staging_orders; ["users"] → main.users
+        let m1 = make_sql_model("models/staging/orders.sql", vec!["staging", "orders"]);
+        let m2 = make_sql_model("models/users.sql", vec!["users"]);
+
+        let collisions = compute_emitted_name_collisions(&[&m1, &m2], &[], &[], "main");
+        assert!(
+            collisions.is_empty(),
+            "expected no collisions, got: {:?}",
+            collisions
+        );
+    }
+
+    #[test]
+    fn sources_included_in_emitted_name_check() {
+        use crate::sources::SourceInfo;
+        // A model and a source that resolve to the same emitted name
+        let m = make_sql_model("models/staging_orders.sql", vec!["staging_orders"]);
+        let src = SourceInfo {
+            path: PathBuf::from("models/staging/orders.yml"),
+            address_segments: vec!["staging".to_string(), "orders".to_string()],
+            columns: vec![],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: None,
+        };
+
+        let collisions = compute_emitted_name_collisions(&[&m], &[], &[src], "main");
+        assert_eq!(
+            collisions.len(),
+            1,
+            "expected source collision, got: {:?}",
+            collisions
+        );
+        assert_eq!(collisions[0].emitted_name, "main.staging_orders");
     }
 }

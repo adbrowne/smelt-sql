@@ -49,7 +49,7 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 | P1 | Addressing: `paths:` as strip-list; address = rel-to-root minus prefix; root file → bare name | done | D-01 (addr), D-05 (addr) | feat(core): address = project-relative path with paths-prefix stripped (D-01) | 2026-06-13 |
 | P2 | Universal discovery: walk every non-excluded subdir, kind by content; functions anywhere; seeds/sources project-wide | done | D-01 (disc), D-05 (disc) | feat(core): project-wide discovery by file kind, no scan-root gate (D-01, D-05) | 2026-06-14 |
 | P3 | `schema` optional, default `main` | done | D-04 | feat(core): default target schema to `main` when omitted (D-04) | 2026-06-14 |
-| P4 | `DuplicateEmittedName` emitted-name collision diagnostic | pending | D-02 | feat(db): enforce emitted (schema,table) uniqueness via DuplicateEmittedName (D-02) | |
+| P4 | `DuplicateEmittedName` emitted-name collision diagnostic | done | D-02 | feat(db): enforce emitted (schema,table) uniqueness via DuplicateEmittedName (D-02) | 2026-06-14 |
 | P5 | Close-out: single address-rule audit (D-06) + KD retraction + registry/ROADMAP | pending | D-06 | docs(spec-impl): close out W1 — universal addressing landed; registry + roadmap | |
 
 **Status values**: `pending`, `done`, `blocked`. A phase is `done` only when its tests are red-green confirmed and all gates are green. A `blocked` phase has a dated §"Blocked phases" entry and returns to `pending` once a human resolves it.

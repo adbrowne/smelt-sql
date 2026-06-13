@@ -1,0 +1,10 @@
+name: architecture_broken_emitted_name_collision
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+target: dev
