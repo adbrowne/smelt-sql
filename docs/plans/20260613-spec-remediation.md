@@ -116,8 +116,10 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 | A1 owned-until-lands | done | functions, gradual_typing, incremental_models, planner_integration, scoping, types | c7704007 | 2026-06-13 |
 | A2 call-path spelling | done | diagnostics, lsp | 1932a62a | 2026-06-13 |
 | A3 workspace→project | done | diagnostics, lsp | 23f9511a | 2026-06-13 |
-| A4 template conformance | done | 25 specs (all but function_schema_inference, output_fingerprint, run_state, virtual_environments — already conformant) | _pending_ | 2026-06-13 |
-| A5 registry reconcile (edit-only part) | pending | | | |
+| A4 template conformance | done | 25 specs (all but function_schema_inference, output_fingerprint, run_state, virtual_environments — already conformant) | b3bb6ff3 | 2026-06-13 |
+| A5 registry reconcile (edit-only part) | done | diagnostics, meta_language | _pending_ | 2026-06-13 |
+
+> **A5 edit-only done; existence/severity questions carried to Track C.** Done here: (1) meta_language.md `UnknownColumn`→`UndeclaredColumn` (same code under two names; 4 refs); (2) diagnostics.md split the "Incremental & cumulative" catalogue group — the ten `Cumulative*` codes now sit under a new "### Cumulative aggregate" group owned by `cumulative_aggregate.md`; `IncrementalNotBatchSafe` stays under "### Incremental" (owned by incremental_models.md; timeseries.md dropped — it owns no code here). **Carried to Track C** (not resolved): `ColumnTypeUnresolved` existence/status (D-07); `IncrementalNotBatchSafe` *trigger semantics* (D-11, ↔R2); planner-validation-code owner (D-12); `UndeclaredColumn`/`AmbiguousColumn` lsp-vs-catalogue severity (D-10).
 
 > **A4 scope grew on sweep.** The review *sampled* template conformance; a full sweep found the gap was corpus-wide, not a handful of specs. User decided (2026-06-13): **full boilerplate sweep** + standardise label **to `**What this is.**`**. See the conformance table in Appendix A4 below. The References flat-vs-nested `### Code`/`### Tests` question (17 specs) was **left untouched** — it is a `design-decision-needed` (Track C, decision D-13).
 

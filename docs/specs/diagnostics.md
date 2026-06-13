@@ -105,13 +105,22 @@ Owned by `docs/specs/timeseries.md`.
 
 ---
 
-### Incremental & cumulative
+### Incremental
 
-Owned by `docs/specs/incremental_models.md` and `docs/specs/timeseries.md`.
+Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `IncrementalNotBatchSafe` | Warning | An `incremental` model's SQL is not batch-safe under the planner's incremental safety classifier; execution falls back to a safe chunking strategy. |
+
+---
+
+### Cumulative aggregate
+
+Owned by `docs/specs/cumulative_aggregate.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
 | `CumulativeRequiresGroupBy` | Error | A `cumulative_aggregate` SELECT has no GROUP BY (key columns are required). |
 | `CumulativeUnknownAggregator` | Error | A `cumulative_aggregate` projection uses a non-allowlisted aggregator or composite expression over aggregates. |
 | `CumulativeGroupByContainsPartitionColumn` | Error | The `cumulative_aggregate` GROUP BY contains the driving source's `partition_column`. |
