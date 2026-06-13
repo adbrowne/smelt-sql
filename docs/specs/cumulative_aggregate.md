@@ -1,7 +1,7 @@
 ---
 feature: cumulative_aggregate
 status: experimental
-last_reviewed: 2026-05-23
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -49,11 +49,11 @@ Frontmatter wins over `smelt.yml` when both set `materialization`. The same forb
 
 ### CLI
 
-`cumulative_aggregate` consumes the same `--start`/`--end` flags as incremental execution — the run window names the source partitions that will be merged in. Format and alignment rules follow `incremental_models.md` §"CLI". The flags apply to the driving source's `partition_column` / `granularity` (Semantics §"Driving source"), not to any column on the cumulative output.
+`cumulative_aggregate` consumes the same `--event-time-start`/`--event-time-end` flags as incremental execution — the run window names the source partitions that will be merged in. Format and alignment rules follow `incremental_models.md` §"CLI". The flags apply to the driving source's `partition_column` / `granularity` (Semantics §"Driving source"), not to any column on the cumulative output.
 
 ```
-smelt run --start <ISO-8601> --end <ISO-8601> [selectors]
-smelt backbuild --start <ISO-8601> --end <ISO-8601> [selectors]
+smelt run --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]
+smelt backbuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]
 ```
 
 ### Aggregator allowlist
@@ -104,7 +104,7 @@ For a `cumulative_aggregate` model with a run window `[run_start, run_end)`:
    - **Backend `merge_into` call** with the derived `unique_key` and a per-column combiner map. Matched rows: target's value is combined with delta's value via the cross-partition combiner (`target.event_count + delta.event_count`, `LEAST(target.first_seen, delta.first_seen)`, `GREATEST(target.last_seen, delta.last_seen)`, etc.). Unmatched rows: insert as-is.
 3. If the output table does not exist when the first partition is merged, the rule creates it from the first partition's delta SELECT (`CREATE TABLE AS SELECT`); subsequent partitions are merged into it.
 
-A run window covering N source partitions performs N `merge_into` calls in temporal order. Each `merge_into` is one backend transaction. Earlier committed partitions do not roll back on a later failure — partial progress is intentional and idempotent under fixed input (re-running the same `[run_start, run_end)` over unchanged source data converges to the same final state for the reversible-aggregator case; see Semantics §"Reprocessing semantics" for the irreversible-aggregator case).
+A run window covering N source partitions performs N `merge_into` calls in temporal order. Each `merge_into` is one backend transaction. Earlier committed partitions do not roll back on a later failure — partial progress is intentional. Re-running the same `[run_start, run_end)` over unchanged source data converges to the same final state **only for idempotent combiners** (`MIN`, `MAX`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR` — where re-applying an already-merged partition's delta is a no-op). `SUM`, `COUNT`, and `BIT_XOR` are **not** idempotent: re-merging an already-applied partition double-counts, so retry-after-partial-failure for these aggregators relies on the reprocessing machinery in Semantics §"Reprocessing semantics", not a blind re-run.
 
 ### Output shape
 

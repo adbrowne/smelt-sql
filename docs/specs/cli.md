@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-05-27
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -119,7 +119,7 @@ Three input shapes are accepted:
   "models": {
     "<model_name>": {
       "dependencies": ["<upstream_model_name>", ...],
-      "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "test",
+      "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "cumulative_aggregate" | "test",
       "incremental": {                      // omitted if not incremental
         "granularity": "day" | "hour" | ...,
         "partition_column": "<col>",
@@ -184,10 +184,7 @@ A single `smelt build` performs these steps, in order:
 1. **Load** `smelt.yml` from `--project-dir`. Fail if absent.
 2. **Validate** that the requested `--target` exists in the config.
 3. **Discover** all project files under `paths:` and the dedicated scan paths (functions, sources, tests). The resolver classifies each file by format and content per `architecture.md` §"Resolution": `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone in `sources/`) become seed sidecars or sources respectively.
-4. **Seed** — for each CSV file (in deterministic sorted order):
-   - Drop any existing table or view with the same qualified name.
-   - `CREATE TABLE <schema>.<name> AS SELECT * FROM read_csv_auto('<path>')`.
-   - Schemas are auto-created if absent.
+4. **Seed** — run the seed lifecycle per `seeds.md` for each non-ephemeral CSV seed (in deterministic sorted order): smelt parses and type-infers the CSV itself and ingests it via `Backend::load_table(...)` — not a backend-specific `read_csv_auto` recipe. Ephemeral seeds are skipped (they inline as CTEs at compile time); sources are never loaded. Schemas are auto-created if absent.
 5. **Plan** — build the logical dependency graph; apply planner rules; produce the physical execution graph. Models execute in topological order.
 6. **Run** — for each model in topological order, materialize according to its effective materialization:
    - `table` / `materialized_view`: `CREATE OR REPLACE TABLE` (atomic replacement)

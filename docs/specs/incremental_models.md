@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-05-21
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -263,7 +263,7 @@ Cross-link: `planner_integration.md` §"Optimization boundary: transparent vs bl
 
 ### `partition_column` validation
 
-The optimizer requires `partition_column` to appear in both the `SELECT` list and the `GROUP BY` (when grouping is present). A model whose SELECT does not project `partition_column` is rejected before execution.
+Partition-column projection is owned by `timeseries.md` §"Constraints & Invariants" rule 1 (Partition column projection): `partition_column` must appear in the model's output `SELECT` list (and in the `GROUP BY` when grouping is present), else `MalformedTimeseries`. The incremental rule consumes that guarantee — a model whose SELECT does not project `partition_column` is rejected before execution by that check, not by a separate one defined here.
 
 ### State ownership
 

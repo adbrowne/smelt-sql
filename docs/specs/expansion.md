@@ -1,7 +1,7 @@
 ---
 feature: expansion
 status: experimental
-last_reviewed: 2026-05-13
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -9,7 +9,7 @@ owners: [andrew]
 
 > **What this is.** Normative spec for the AST-level expansion mechanics that back `smelt.define` calls: the two senses of "expansion" (type-check-time binding versus codegen-time CST rewrite), the provenance origin tags attached to expanded nodes, the frame-stack data structure consumed by diagnostics, and v1 hygiene (parameters-first lookup at type-check time, CTE-collision diagnostic instead of alpha-rename).
 >
-> Most of this spec describes an **implementation invariant**, not a user-visible surface. The user-visible bits are exactly two: the rendered expansion-frame trace on type errors (already specified in `gradual_typing.md` §"LSP stability under broken bodies" and §"Tier 1 — call-site expansion") and the `CteCycle` / future CTE-collision diagnostic. This spec is short on purpose. It exists so future planner work cannot silently drop the provenance contract.
+> Most of this spec describes an **implementation invariant**, not a user-visible surface. The user-visible bits are exactly two: the rendered expansion-frame trace on type errors (already specified in `gradual_typing.md` §"LSP stability under broken bodies" and §"Tier 1 — call-site expansion") and the `CteShadowsCallerCte` CTE-collision diagnostic. This spec is short on purpose. It exists so future planner work cannot silently drop the provenance contract.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -22,7 +22,7 @@ owners: [andrew]
 The following are the only outputs of expansion that a user can observe:
 
 - **Expansion-frame messages on diagnostics.** When a Tier 1 expansion causes an error to fire inside an expanded body, the diagnostic carries `DiagnosticData::ExpansionFrames(Vec<FrameInfo>)`. The LSP renderer turns this into a trailing `in expansion of <fn>, <param> was bound to <type>` line and (for clients that consume it) a `DiagnosticRelatedInformation` link per frame pointing at the declaring file. The format guarantees and the per-tier conditions under which frames appear are normative in `gradual_typing.md`; this spec only specifies the underlying data structure.
-- **CTE-collision diagnostic.** When a CTE name introduced inside a function body would collide with a CTE in the calling scope at codegen time, the compiler emits a diagnostic rather than alpha-renaming. The exact code surfaces under `scoping.md`'s `CteCycle` family in v1 (or a dedicated code minted in a follow-up); the v2 design replaces this diagnostic with an automatic alpha-rename — see Known Divergences.
+- **CTE-collision diagnostic.** When a CTE name introduced inside a function body would collide with a CTE in the calling scope at codegen time, the compiler emits the dedicated `CteShadowsCallerCte` diagnostic rather than alpha-renaming. It is detected at check time and anchored at the call site (the anchor is owned by `scoping.md`). The v2 design replaces this diagnostic with an automatic alpha-rename — see Known Divergences.
 
 ### `FrameInfo` shape
 

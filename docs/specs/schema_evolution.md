@@ -1,7 +1,7 @@
 ---
 feature: schema_evolution
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -153,7 +153,7 @@ A type change is a safe widening if it cannot cause data loss:
 | `FLOAT` | `DOUBLE` |
 | `CHAR` | `VARCHAR` |
 | `VARCHAR(n)` | `VARCHAR` (unbounded) |
-| `DECIMAL(p,s)` | `DECIMAL(p2,s2)` where p2 ≥ p and s2 ≥ s |
+| `DECIMAL(p,s)` | `DECIMAL(p2,s2)` where s2 ≥ s **and** (p2 − s2) ≥ (p − s) — the scale must not shrink and the integer-digit capacity must not shrink (`p2 ≥ p` follows). `DECIMAL(5,0) → DECIMAL(6,4)` is **not** safe: integer digits drop 5 → 2. |
 | Any type | Nullable version of same type (NOT NULL → NULL) |
 
 Widening chains are transitive: `SMALLINT → BIGINT` is safe even though it skips `INTEGER`.

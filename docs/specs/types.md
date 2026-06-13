@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-06-12
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -237,7 +237,7 @@ Columns carry `nullable: bool` in `TypedColumn`.
 
 **Sound-upper-bound contract.** `nullable: false` is a guarantee: the column cannot contain `NULL` in any row, for any input data satisfying the declared source schemas. `nullable: true` means only "may contain NULL". When inference cannot establish the guarantee, it must answer `nullable: true`. Claiming `nullable: false` for a column that can hold NULL is a soundness defect; claiming `nullable: true` for a column that provably cannot is acceptable imprecision. Because the contract is one-sided, the rules below enumerate the **only** ways an inferred column or expression may be non-nullable; anything not covered defaults to nullable.
 
-- **Non-nullable origins:** non-NULL literals; source/seed columns declared `nullable: false`; `COUNT(*)` and `COUNT(expr)`; `EXISTS`; struct/array literals (the container itself); `COALESCE(…)` with at least one non-nullable argument; `CASE … ELSE …` when all result branches are non-nullable; `CAST` preserves the input's nullability. Scalar operators and functions that are NULL-propagating may claim non-nullable only when every operand is non-nullable.
+- **Non-nullable origins:** non-NULL literals; source/seed columns declared `nullable: false`; `COUNT(*)` and `COUNT(expr)`; `EXISTS`; struct/array literals (the container itself); `COALESCE(…)` with at least one non-nullable argument; `CASE … ELSE …` when all result branches are non-nullable; registry-declared non-nullable nullary built-ins (`NOW()`, `CURRENT_TIMESTAMP` — see §16); `CAST` preserves the input's nullability. Scalar operators and functions that are NULL-propagating may claim non-nullable only when every operand is non-nullable.
 - **Always nullable (overrides non-nullable inputs):** `SUM`, `AVG`, `MIN`, `MAX` (empty groups → NULL); scalar subqueries; `IN (subquery)`; array subscript (out-of-bounds → NULL); struct field access (conservative); `TRY_CAST`; `NULLIF`; `CASE` without `ELSE`; `LAG`/`LEAD` without an explicit default.
 - **Outer joins.** Columns sourced from the null-supplying side(s) of an outer join are nullable in the join's output scope, regardless of declared or upstream-inferred nullability: `LEFT JOIN` — all right-side columns; `RIGHT JOIN` — all left-side columns; `FULL JOIN` — both sides. `INNER` and `CROSS` joins preserve input nullability.
 - **Set operations.** A `UNION` / `INTERSECT` / `EXCEPT` output column is non-nullable only if the corresponding column is non-nullable in **every** branch.
@@ -282,7 +282,7 @@ A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.defi
 
 **Portable surface.** `+`, `-`, `*`, and `%` on `Decimal` operands are in the portable surface. Division (`/`) is not — it emits `TypeMismatch` at the operator span (see "Division rejection" below). Unary minus preserves the operand's `(p, s)`.
 
-**Integer lifting.** When an integer-family operand appears in a decimal arithmetic expression, it is lifted to its natural decimal equivalent before the growth formula applies:
+**Integer lifting.** Integer lifting applies only when **at least one operand is already Decimal-family** — an all-integer expression stays in integer arithmetic and never triggers the decimal growth formula. When an integer-family operand appears alongside a decimal operand, it is lifted to its natural decimal equivalent before the growth formula applies:
 
 | Integer type | Lifted as |
 |---|---|

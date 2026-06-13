@@ -117,7 +117,7 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 | A2 call-path spelling | done | diagnostics, lsp | 1932a62a | 2026-06-13 |
 | A3 workspace→project | done | diagnostics, lsp | 23f9511a | 2026-06-13 |
 | A4 template conformance | done | 25 specs (all but function_schema_inference, output_fingerprint, run_state, virtual_environments — already conformant) | b3bb6ff3 | 2026-06-13 |
-| A5 registry reconcile (edit-only part) | done | diagnostics, meta_language | _pending_ | 2026-06-13 |
+| A5 registry reconcile (edit-only part) | done | diagnostics, meta_language | cad47d06 | 2026-06-13 |
 
 > **A5 edit-only done; existence/severity questions carried to Track C.** Done here: (1) meta_language.md `UnknownColumn`→`UndeclaredColumn` (same code under two names; 4 refs); (2) diagnostics.md split the "Incremental & cumulative" catalogue group — the ten `Cumulative*` codes now sit under a new "### Cumulative aggregate" group owned by `cumulative_aggregate.md`; `IncrementalNotBatchSafe` stays under "### Incremental" (owned by incremental_models.md; timeseries.md dropped — it owns no code here). **Carried to Track C** (not resolved): `ColumnTypeUnresolved` existence/status (D-07); `IncrementalNotBatchSafe` *trigger semantics* (D-11, ↔R2); planner-validation-code owner (D-12); `UndeclaredColumn`/`AmbiguousColumn` lsp-vs-catalogue severity (D-10).
 
@@ -137,10 +137,13 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 ### Track B — per-spec no-brainer batches
 | Spec | Status | Findings closed | Commit | Date |
 |------|--------|-----------------|--------|------|
-| lsp.md | pending | | | |
-| diagnostics.md | pending | | | |
-| meta_language.md | pending | | | |
+| **Appendix-A determinate batch** (veto-only) | done | C16, C17, C26 + 11 Maj/Min across 11 specs | _pending_ | 2026-06-13 |
+| lsp.md (general per-spec batch) | pending | | | |
+| diagnostics.md (general per-spec batch) | pending | | | |
+| meta_language.md (general per-spec batch) | pending | | | |
 | *(remaining specs added as worked)* | | | | |
+
+> **Appendix-A determinate fixes done (one commit).** The decision-doc Appendix-A veto-only list, applied as-worded across 11 specs (last_reviewed bumped on each): **C16** schema_evolution DECIMAL widening (`s2≥s` ∧ `(p2−s2)≥(p−s)`); **C17** scoping `FragmentKindMismatch` direction reversed (fires when fragment kind is *higher* than the splice point admits); **C26** gradual_typing nullability-in-signatures → points to types.md §11; types `NOW()`/`CURRENT_TIMESTAMP` non-nullable origin added to §11; types decimal integer-lifting trigger ("≥1 operand already Decimal-family"); cli seed step → seed lifecycle/`Backend::load_table` (was `read_csv_auto`); cli + data_catalog `explain` enums gain `cumulative_aggregate`; data_catalog Constraint 3 → "deterministic *key ordering*", `generated_at` flagged non-deterministic; cumulative `--start/--end` → `--event-time-start/--end`; cumulative idempotency parenthetical (idempotent combiners only: MIN/MAX/BOOL_*/BIT_AND/BIT_OR; SUM/COUNT/BIT_XOR not); incremental partition-column projection rule de-duped → links timeseries.md rule 1 as owner; expansion `CteShadowsCallerCte` named (dropped `CteCycle` hedge); seeds invariant 1 reworded; sources Constraint 6 softened + Constraint 7 drops "sources namespace" framing. *(Already landed earlier: meta_language `UnknownColumn`→`UndeclaredColumn` in A5; template conformance in A4.)* Items tagged `↔R1/R2` in Appendix A are parentheticals only — the deeper rewrites still belong to R1/R2.
 
 ### Track C — decision execution (by theme)
 | Theme | Status | Findings closed | Commit | Date |

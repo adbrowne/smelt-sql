@@ -1,7 +1,7 @@
 ---
 feature: seeds
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -160,7 +160,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 
 ## Constraints & Invariants
 
-1. The compile-time and runtime CSV inferencers are the same code path with different sample sizes. They cannot diverge by construction.
+1. The compile-time and runtime CSV inferencers are the same code path. Because they share that code path, their inferred types may differ solely by sample size, never by logic.
 2. The CSV parser is strict: comma, double-quote, mandatory header, UTF-8, empty cell = NULL. No auto-detection.
 3. The inferred type set is exactly `{BOOLEAN, INTEGER, DECIMAL(p,s), DOUBLE, DATE, TIMESTAMP, VARCHAR}`. `TIMESTAMP WITH TIME ZONE`, `TIME`, `INTERVAL`, and complex types are never inferred from CSV.
 4. When a sidecar YAML declares `columns:`, the CSV header column set must match exactly (by name); mismatch is a hard error.

@@ -1,7 +1,7 @@
 ---
 feature: gradual_typing
 status: experimental
-last_reviewed: 2026-05-09
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -138,7 +138,7 @@ These exclusions are normative — they bound what future plans may add without 
 - **No higher-rank polymorphism.** A user `smelt.define` parameter is not itself polymorphic. (`<T: Constraint>` generics live in built-ins and `smelt.extern` only — see `types.md` §"Generics inference".)
 - **No global constraint solving.** Unification is local per call site. There is no Hindley-Milner Algorithm W, no occurs check, no let-generalisation.
 - **No implicit cross-type coercion.** When the caller passes `Expr<Integer>` to an `Expr<Double>` parameter, this is a type error; the caller writes `CAST(x AS DOUBLE)`. (Built-in operators that compute the LUB of multiple numeric arguments are a property of those built-in signatures — `types.md` §"Numeric promotion chain" — not implicit coercion at the user-function boundary.)
-- **No nullability in user signatures.** `Expr<T>` parameters and returns are implicitly nullable in v1. The column-level `nullable` flag flows through inference but does not surface in `smelt.define` annotations.
+- **Signature nullability is opt-in (`types.md` §11).** `Expr<T>` parameters and returns are nullable by default; non-nullability is declared with a trailing `NOT NULL` qualifier on a top-level parameter or return type (`types.md` §11 "Signature nullability"). A bare type stays nullable. The column-level `nullable` flag flows through inference; `NOT NULL` is the only nullability annotation the signature surface exposes.
 - **No `Any` / unknown escape hatch.** A function the checker cannot type degrades by surfacing the underlying error or by losing precision on its return type to `Unknown`; there is no opt-out annotation that suppresses checking.
 
 ### Interactions with adjacent specs

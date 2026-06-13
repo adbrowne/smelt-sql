@@ -1,7 +1,7 @@
 ---
 feature: data_catalog
 status: experimental
-last_reviewed: 2026-06-05
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -92,7 +92,7 @@ Prints a message indicating that docs are embedded in the binary and advises usi
       "description": "<string>",        // omitted if absent
       "owner": "<string>",              // omitted if absent
       "tags": ["<string>"],             // omitted if empty
-      "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "test",
+      "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "cumulative_aggregate" | "test",
       "path": "<absolute path>",
       "columns": [
         {
@@ -193,7 +193,7 @@ Hand-authored models omit the `origin` field (the standard `skip_serializing_if`
 
 1. **Catalog is regenerated in full on each `smelt docs generate` run.** There is no incremental update; all output files are overwritten.
 2. **Test models are excluded from catalog output.** `materialization: test` models do not appear in the generated catalog.
-3. **JSON `models` keys are alphabetically ordered.** The `BTreeMap` serialization ensures stable, deterministic output.
+3. **JSON `models` keys are alphabetically ordered.** The `BTreeMap` serialization ensures a stable, deterministic *key ordering*. The output is not byte-for-byte identical across runs: `generated_at` (the catalogue's wall-clock build timestamp) is the one intentionally non-deterministic field.
 4. **Embedded docs match the binary version.** `smelt docs show` returns documentation embedded at build time. It does not read from the filesystem.
 5. **Column `source` is derived from type inference, not user-declared.** If the type inference system cannot determine lineage, `source.type` is `"unknown"`.
 

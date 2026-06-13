@@ -1,7 +1,7 @@
 ---
 feature: scoping
 status: experimental
-last_reviewed: 2026-05-16
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -53,7 +53,7 @@ User-visible codes anchored to scoping. Full descriptions live alongside `Diagno
 | `ContextMismatch` | An explicit `ctx` annotation disagrees with the context inferred from the parameter's splice point. |
 | `AnnotationTooWide` | An explicit `ctx` annotation claims access to columns the inferred splice context does not actually expose. |
 | `FragmentColumnMissing` | At a call site, a caller-supplied fragment references a column that is not in the parameter's inferred splice context. |
-| `FragmentKindMismatch` | At a call site, a caller-supplied fragment is of a lower expression kind than the parameter requires (e.g. scalar passed where `SelectItems<Agg>` is expected). |
+| `FragmentKindMismatch` | At a call site, a caller-supplied fragment is of a *higher* expression kind than the splice point admits (e.g. an `Agg`/`Window` fragment passed where the splice point admits `Scalar` only). |
 | `CteCycle` | A CTE in a body forms a cyclic reference, directly or transitively. |
 | `CteShadowsCallerCte` | A CTE declared in a directly-called transparent function's body shares a name with a CTE in the calling model's top-level WITH clause. Error severity — v1 refuses and asks the author to rename one CTE; automatic alpha-rename is deferred to v2. Anchored at the call site in the model. |
 | `DuplicateAddress` | Two files in a project resolve to the same `smelt.<path>` address across any kinds — e.g. a model `dup.sql` and a seed `dup.csv` in the same directory, or `models/users.csv` and `fixtures/users.csv` under multiple `paths:` roots. Error severity — the colliding entities do not load. Project-scoped: the same address in two different projects is independent, not a collision. See `architecture.md` §Resolution (one-path-one-entity) and §"Workspace loading parity rule". |
@@ -134,7 +134,7 @@ When both an explicit `ctx` annotation and an inferred splice context exist for 
 At a `smelt.<path>(...)` call site (whether arguments are inline or supplied via `PASSING`; see `functions.md`), each caller-provided fragment is validated against the parameter's inferred splice context:
 
 - A column reference inside the fragment that is not present in the splice context emits `FragmentColumnMissing` at the offending column reference.
-- A fragment whose synthesised expression kind is **lower** than the parameter's required `Kind` (e.g. a bare scalar passed for `SelectItems<Agg>`) emits `FragmentKindMismatch` at the argument expression. The kind ladder is `Scalar <: Agg <: Window` (see `types.md`).
+- A fragment whose synthesised expression kind is **higher** than the splice point's admitted `Kind` ceiling (e.g. an `Agg` or `Window` expression passed where the splice point admits `Scalar` only) emits `FragmentKindMismatch` at the argument expression. The kind ladder is `Scalar <: Agg <: Window` (see `types.md`); a lower-kind fragment is always admissible at a higher-kind splice point — never the reverse.
 - Fragment-kind validation is independent of column-context validation; both run.
 
 ### CTE rules
