@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781334040148,
+  "lastUpdate": 1781334042185,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25310,6 +25310,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.409583325701714,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b2c0ec2150ceaba57af2953c7136f47b6b5d5672",
+          "message": "docs(research): spec corpus review — all 30 specs, verified (#137)\n\n* docs(research): add partial spec-corpus review report (17/30 specs)\n\nDraft output of a multi-agent review of docs/specs/ across three\ndimensions (solution quality, clarity, correctness/consistency).\nCovers the 17 specs that completed full single-spec review; 14\nCritical findings spot-checked against spec text by hand. Cross-spec\nclusters, adversarial verification, and the completeness critic are\npending (resume the spec-corpus-review workflow to complete).\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n\n* docs(research): complete spec-corpus review (all 30 specs, verified)\n\nFull multi-agent review across 38 units (22 solo specs, 3 pairs,\nmeta_language in 5 slices, 5 cross-spec clusters, diagnostics-registry\n/ architecture-invariants / ownership agents) with adversarial\nverification (131 confirmed, 29 adjusted, 3 refuted) and a completeness\ncritic.\n\nResult: 26 Critical, 117 Major, 131 Minor, 8 Nit. The cross-spec pass\nsurfaced the most severe class — dangling references to undefined\nprimitives (merge_into, ColumnTypeUnresolved), spec-vs-spec\ncontradictions (nullability, Tier return types, seed loader), and an\narchitectural-invariant conflict (smelt-logical ownership). Includes\ncritic-identified coverage gaps and recommended follow-up passes.\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T16:58:57+10:00",
+          "tree_id": "431fea60138f3158b7bde34e7dab042f878f052c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b2c0ec2150ceaba57af2953c7136f47b6b5d5672"
+        },
+        "date": 1781334041643,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.35604853906243,
             "unit": "MB/s"
           }
         ]
