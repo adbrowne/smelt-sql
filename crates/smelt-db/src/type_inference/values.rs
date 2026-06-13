@@ -10,6 +10,7 @@
 //! Every item in this module is a pure function — no Salsa imports, no
 //! `#[salsa::tracked]`.
 
+use rowan::TextRange;
 use smelt_parser::ast::{Cte, Expr, SelectItem, SelectStmt, TableRef, ValuesClause};
 use smelt_parser::SyntaxKind;
 use smelt_types::{DataType, TypedColumn};
@@ -257,4 +258,207 @@ pub fn check_cte_alias_arity(cte: &Cte) -> Vec<Diagnostic> {
         data: None,
     });
     out
+}
+
+// ─── Temporal-mix check for VALUES columns ────────────────────────────────────
+
+/// Return a `TypeMismatch` diagnostic if `types` contains a prohibited
+/// temporal mix within a single VALUES column:
+/// - naive `Timestamp` and tz-aware `Timestamp WITH TIME ZONE` coexist, or
+/// - `Date` and any `Timestamp` coexist.
+///
+/// `span` is the span of the enclosing VALUES clause (used as the error anchor).
+fn check_mixed_temporal_mismatch(types: &[DataType], span: TextRange) -> Option<Diagnostic> {
+    let has_naive_ts = types.iter().any(|dt| {
+        matches!(
+            dt,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        )
+    });
+    let has_tz_ts = types.iter().any(|dt| {
+        matches!(
+            dt,
+            DataType::Timestamp {
+                with_timezone: true
+            }
+        )
+    });
+    let has_date = types.iter().any(|dt| matches!(dt, DataType::Date));
+    let has_timestamp = types
+        .iter()
+        .any(|dt| matches!(dt, DataType::Timestamp { .. }));
+
+    if has_naive_ts && has_tz_ts {
+        return Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: "Timezone mismatch in VALUES: column mixes naive Timestamp and \
+                      Timestamp WITH TIME ZONE; add an explicit CAST to align timezone variants"
+                .to_string(),
+            range: span,
+            code: Some(DiagnosticCode::TypeMismatch),
+            data: None,
+        });
+    }
+    if has_date && has_timestamp {
+        return Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: "Type mismatch in VALUES: column mixes Date and Timestamp types; \
+                      add an explicit CAST to align temporal types"
+                .to_string(),
+            range: span,
+            code: Some(DiagnosticCode::TypeMismatch),
+            data: None,
+        });
+    }
+    None
+}
+
+/// Walk all VALUES-derived-table subqueries in a SELECT statement and emit
+/// a `TypeMismatch` diagnostic for each column that contains a prohibited
+/// temporal mix (strict §16 rule: naive/tz-aware or Date/Timestamp).
+///
+/// This function is PURE — no Salsa calls.
+pub fn check_mixed_temporal_values_diagnostics(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::TABLE_REF;
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for node in select_stmt.syntax().descendants() {
+        if node.kind() != TABLE_REF {
+            continue;
+        }
+        let table_ref = match TableRef::cast(node) {
+            Some(t) => t,
+            None => continue,
+        };
+        let subquery = match table_ref.subquery() {
+            Some(s) => s,
+            None => continue,
+        };
+        let values_clause = match subquery.values_clause() {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let values_span = values_clause.syntax().text_range();
+
+        // Re-collect rows (mirrors infer_values_columns logic without the promotion step).
+        let rows: Vec<Vec<Expr>> = values_clause
+            .syntax()
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::VALUES_ROW)
+            .map(|row_node| row_node.children().filter_map(Expr::cast).collect())
+            .collect();
+
+        let col_count = rows.first().map(|r| r.len()).unwrap_or(0);
+        if col_count == 0 {
+            continue;
+        }
+
+        for col_idx in 0..col_count {
+            let col_types: Vec<DataType> = rows
+                .iter()
+                .filter_map(|row| row.get(col_idx))
+                .filter_map(|expr| infer_expression_type(expr, ctx))
+                .filter(|tc| !matches!(tc.data_type, DataType::Unknown | DataType::Null))
+                .map(|tc| tc.data_type)
+                .collect();
+
+            if let Some(diag) = check_mixed_temporal_mismatch(&col_types, values_span) {
+                diags.push(diag);
+            }
+        }
+    }
+
+    diags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics_types::DiagnosticCode;
+
+    fn parse_select(sql: &str) -> smelt_parser::ast::SelectStmt {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        file.select_stmt().expect("no SelectStmt in parsed SQL")
+    }
+
+    #[test]
+    fn values_mixed_tz_is_type_mismatch() {
+        // A VALUES column that mixes naive Timestamp and TIMESTAMPTZ must produce
+        // exactly one TypeMismatch diagnostic (not silent Unknown).
+        let sql = "SELECT * FROM \
+            (VALUES (TIMESTAMP '2020-01-01 00:00:00'), (TIMESTAMPTZ '2020-01-01 00:00:00+00')) \
+            AS v(ts)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let diags = check_mixed_temporal_values_diagnostics(&select, &ctx);
+        assert!(
+            !diags.is_empty(),
+            "expected a TypeMismatch diagnostic for mixed tz VALUES column, got none"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(DiagnosticCode::TypeMismatch)),
+            "diagnostic must have TypeMismatch code, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn values_date_timestamp_mix_is_type_mismatch() {
+        // A VALUES column that mixes Date and Timestamp must produce a TypeMismatch.
+        let sql = "SELECT * FROM \
+            (VALUES (DATE '2020-01-01'), (TIMESTAMP '2020-01-01 00:00:00')) \
+            AS v(dt)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let diags = check_mixed_temporal_values_diagnostics(&select, &ctx);
+        assert!(
+            !diags.is_empty(),
+            "expected a TypeMismatch diagnostic for Date/Timestamp VALUES mix, got none"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(DiagnosticCode::TypeMismatch)),
+            "diagnostic must have TypeMismatch code, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn values_homogeneous_temporal_ok() {
+        // All-naive timestamps: no diagnostic.
+        let sql = "SELECT * FROM \
+            (VALUES (TIMESTAMP '2020-01-01 00:00:00'), (TIMESTAMP '2020-06-15 12:00:00')) \
+            AS v(ts)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let diags = check_mixed_temporal_values_diagnostics(&select, &ctx);
+        assert!(
+            diags.is_empty(),
+            "homogeneous naive-Timestamp VALUES column must not produce diagnostics, \
+             got: {diags:?}"
+        );
+
+        // All tz-aware timestamps: no diagnostic.
+        let sql2 = "SELECT * FROM \
+            (VALUES (TIMESTAMPTZ '2020-01-01 00:00:00+00'), (TIMESTAMPTZ '2020-06-15 12:00:00+01')) \
+            AS v(ts)";
+        let select2 = parse_select(sql2);
+        let diags2 = check_mixed_temporal_values_diagnostics(&select2, &ctx);
+        assert!(
+            diags2.is_empty(),
+            "homogeneous tz-aware-Timestamp VALUES column must not produce diagnostics, \
+             got: {diags2:?}"
+        );
+    }
 }

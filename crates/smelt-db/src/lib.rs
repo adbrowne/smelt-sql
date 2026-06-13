@@ -2097,6 +2097,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 for diag in mixed_tz_arith_diags {
                     DiagnosticAcc(diag).accumulate(db);
                 }
+
+                // VALUES-clause columns (§16 strict temporal mixing rule)
+                let values_temporal_diags =
+                    type_inference::check_mixed_temporal_values_diagnostics(&select_stmt, &tz_ctx);
+                for diag in values_temporal_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
             }
 
             // Meta-language (P6) — `MetaListInScalarPosition`.

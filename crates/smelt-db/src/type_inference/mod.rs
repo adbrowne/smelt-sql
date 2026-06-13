@@ -113,7 +113,8 @@ pub use ternary::{
 };
 
 pub use values::{
-    check_cte_alias_arity, check_table_ref_values_arity, infer_values_columns, ValuesError,
+    check_cte_alias_arity, check_mixed_temporal_values_diagnostics, check_table_ref_values_arity,
+    infer_values_columns, ValuesError,
 };
 
 pub use collation::{check_collation_diagnostics, infer_collate_expr_type};

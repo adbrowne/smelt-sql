@@ -1561,7 +1561,10 @@ impl<'a> super::Parser<'a> {
         let token = self.tokens[self.pos];
         let text = &self.input[self.offset..self.offset + token.len];
         let upper = text.to_uppercase();
-        if !matches!(upper.as_str(), "DATE" | "TIME" | "TIMESTAMP" | "INTERVAL") {
+        if !matches!(
+            upper.as_str(),
+            "DATE" | "TIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "INTERVAL"
+        ) {
             return false;
         }
 

@@ -194,6 +194,14 @@ pub fn infer_literal_type(text: &str) -> Option<TypedColumn> {
             nullable: false,
         });
     }
+    if upper.starts_with("TIMESTAMPTZ ") || upper.starts_with("TIMESTAMPTZ'") {
+        return Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: true,
+            },
+            nullable: false,
+        });
+    }
     if upper.starts_with("TIMESTAMP ") || upper.starts_with("TIMESTAMP'") {
         return Some(TypedColumn {
             data_type: DataType::Timestamp {
