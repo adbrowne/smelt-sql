@@ -7,9 +7,13 @@ owners: [andrew]
 
 # Expansion
 
-> **Scope.** Normative spec for the AST-level expansion mechanics that back `smelt.define` calls: the two senses of "expansion" (type-check-time binding versus codegen-time CST rewrite), the provenance origin tags attached to expanded nodes, the frame-stack data structure consumed by diagnostics, and v1 hygiene (parameters-first lookup at type-check time, CTE-collision diagnostic instead of alpha-rename).
+> **What this is.** Normative spec for the AST-level expansion mechanics that back `smelt.define` calls: the two senses of "expansion" (type-check-time binding versus codegen-time CST rewrite), the provenance origin tags attached to expanded nodes, the frame-stack data structure consumed by diagnostics, and v1 hygiene (parameters-first lookup at type-check time, CTE-collision diagnostic instead of alpha-rename).
 >
 > Most of this spec describes an **implementation invariant**, not a user-visible surface. The user-visible bits are exactly two: the rendered expansion-frame trace on type errors (already specified in `gradual_typing.md` §"LSP stability under broken bodies" and §"Tier 1 — call-site expansion") and the `CteCycle` / future CTE-collision diagnostic. This spec is short on purpose. It exists so future planner work cannot silently drop the provenance contract.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 

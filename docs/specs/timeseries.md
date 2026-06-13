@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Timeseries
 
-> **Scope.** A normative spec for the `timeseries:` frontmatter block — the declaration of a time dimension on a model's or source's output. Out of scope: incremental execution (see `incremental_models.md`), source YAML grammar beyond the timeseries block (see `sources.md`), full model frontmatter schema (see `models.md`).
+> **What this is.** A normative spec for the `timeseries:` frontmatter block — the declaration of a time dimension on a model's or source's output. Out of scope: incremental execution (see `incremental_models.md`), source YAML grammar beyond the timeseries block (see `sources.md`), full model frontmatter schema (see `models.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >

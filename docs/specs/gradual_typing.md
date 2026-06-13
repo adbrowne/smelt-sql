@@ -7,9 +7,13 @@ owners: [andrew]
 
 # Gradual Typing
 
-> **Scope.** Normative spec for the three annotation tiers (Tier 1/2/3), the dispatch rules that send a `smelt.define` body down the right checking path, the error-tracing contract that ties type errors back to the call site, and the LSP-stability guarantees under broken bodies. Type vocabulary, fragment sorts, and the bidirectional rule for argument/parameter checking live in `types.md` (§"Bidirectional checking"). Function declaration grammar and frontmatter live in `functions.md`. Body-scope name resolution lives in `scoping.md`.
+> **What this is.** Normative spec for the three annotation tiers (Tier 1/2/3), the dispatch rules that send a `smelt.define` body down the right checking path, the error-tracing contract that ties type errors back to the call site, and the LSP-stability guarantees under broken bodies. Type vocabulary, fragment sorts, and the bidirectional rule for argument/parameter checking live in `types.md` (§"Bidirectional checking"). Function declaration grammar and frontmatter live in `functions.md`. Body-scope name resolution lives in `scoping.md`.
 >
 > This spec governs the **process** of checking a `smelt.define`: when types push down (checking mode), when they flow up (synthesis mode), how Tier 1 errors are mapped back to call sites, and how tier mixing is handled.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 

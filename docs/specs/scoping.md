@@ -7,7 +7,11 @@ owners: [andrew]
 
 # Scoping
 
-> **Scope.** Normative spec for name resolution inside `smelt.define` bodies and generator-file bodies: the `Expr<T, ctx>` annotation grammar, parameters-first lookup ordering, the no-overlap rule and its escape hatches, splice-point context inference, and the distinct scope rules for generator-file bodies. Surrounding specs: `functions.md` (declaration grammar, frontmatter, function-level diagnostics), `types.md` (fragment sorts, type vocabulary, row polymorphism, `ModelDef`), `gradual_typing.md` (Tier 1/2/3 dispatch), `meta_language.md` (generator-file semantics, `ModelDef` field rules).
+> **What this is.** Normative spec for name resolution inside `smelt.define` bodies and generator-file bodies: the `Expr<T, ctx>` annotation grammar, parameters-first lookup ordering, the no-overlap rule and its escape hatches, splice-point context inference, and the distinct scope rules for generator-file bodies. Surrounding specs: `functions.md` (declaration grammar, frontmatter, function-level diagnostics), `types.md` (fragment sorts, type vocabulary, row polymorphism, `ModelDef`), `gradual_typing.md` (Tier 1/2/3 dispatch), `meta_language.md` (generator-file semantics, `ModelDef` field rules).
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 

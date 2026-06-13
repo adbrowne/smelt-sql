@@ -7,9 +7,11 @@ owners: [andrew]
 
 # Diagnostics
 
-This spec documents the `DiagnosticCode` catalogue for smelt — the set of
-named error/warning/hint codes the compiler emits, their semantics, and where
-they are anchored in the source.
+> **What this is.** The cross-feature diagnostic-code catalogue: the index of every `DiagnosticCode` smelt can emit, with each code's severity and canonical trigger. Per-code *semantics* — when a code fires and what it anchors to — are owned by the feature spec each catalogue row cites; this spec is the registry those specs must agree with, not the owner of any single code's behaviour.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 

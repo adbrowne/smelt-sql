@@ -8,6 +8,10 @@ owners: [andrew]
 # Data Catalog
 
 > **What this is.** A normative spec for `smelt docs generate` — the data catalog output format (markdown and JSON), per-model page contents, column description sources, the tag index, and the embedded CLI docs system (`smelt docs list`, `smelt docs show`, `smelt docs path`).
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 

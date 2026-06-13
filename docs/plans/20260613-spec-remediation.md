@@ -116,8 +116,10 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 | A1 owned-until-lands | done | functions, gradual_typing, incremental_models, planner_integration, scoping, types | c7704007 | 2026-06-13 |
 | A2 call-path spelling | done | diagnostics, lsp | 1932a62a | 2026-06-13 |
 | A3 workspace→project | done | diagnostics, lsp | 23f9511a | 2026-06-13 |
-| A4 template conformance | pending | | | |
+| A4 template conformance | done | 25 specs (all but function_schema_inference, output_fingerprint, run_state, virtual_environments — already conformant) | _pending_ | 2026-06-13 |
 | A5 registry reconcile (edit-only part) | pending | | | |
+
+> **A4 scope grew on sweep.** The review *sampled* template conformance; a full sweep found the gap was corpus-wide, not a handful of specs. User decided (2026-06-13): **full boilerplate sweep** + standardise label **to `**What this is.**`**. See the conformance table in Appendix A4 below. The References flat-vs-nested `### Code`/`### Tests` question (17 specs) was **left untouched** — it is a `design-decision-needed` (Track C, decision D-13).
 
 > **Carried to Track C (decisions surfaced during sweeps):**
 > - `DuplicateFunctionDefinition` scope — directory vs project vs workspace (functions.md name-uniqueness finding); A3 left it scope-neutral. → Theme 6.
@@ -203,3 +205,48 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 - No code edits in this plan (Track D is spawned). The user's directive: group code rollout by subsystem to avoid validate/plan/implement churn touching the same crate per-spec.
 - The 3 completeness-critic review passes are *new review work*, not remediation — deferred to ROADMAP.
 - The 3 refuted findings (appendix of the review) are intentionally not actioned.
+
+---
+
+## Appendix A4 — SPEC_TEMPLATE conformance table (post-sweep)
+
+Corpus-wide sweep of all 29 specs against `SPEC_TEMPLATE.md`, replacing the review's ad-hoc per-spec "missing scope callout" findings. State **after** the A4 commit. Required header blockquotes: scope callout (`**What this is.**`, naming out-of-scope adjacent owners), Spec-first, Timeless-oracle.
+
+| Spec | Callout | Spec-first | Timeless | A4 action taken |
+|------|:------:|:----------:|:--------:|-----------------|
+| architecture (`stable`) | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes (no prose touched) |
+| cli | ✓ | ✓ | ✓ | +2 blockquotes |
+| cumulative_aggregate | ✓ | ✓ | ✓ | label only (blockquotes pre-existing) |
+| data_catalog | ✓ | ✓ | ✓ | +2 blockquotes |
+| datagen | ✓ | ✓ | ✓ | +out-of-scope (seeds/sources/testing); +2 blockquotes |
+| diagnostics | ✓ | ✓ | ✓ | **added** catalogue/index callout (was missing); +2 blockquotes |
+| expansion | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes (2nd callout para kept) |
+| function_schema_inference | ✓ | ✓ | ✓ | already conformant — untouched |
+| functions | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes |
+| gradual_typing | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes |
+| incremental_models | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes (before Status) |
+| lsp | ✓ | ✓ | ✓ | dropped "performance contract"; +out-of-scope (diagnostics/architecture); +2 blockquotes |
+| meta_config_loading | ✓ | ✓ | ✓ | `Map<K,V>`→`Map<Text,S>`; +Timeless |
+| meta_language | ✓ | ✓ | ✓ | +Timeless |
+| model_selection | ✓ | ✓ | ✓ | +out-of-scope (cli/models/meta_language); +2 blockquotes |
+| models | ✓ | ✓ | ✓ | +Timeless |
+| output_fingerprint | ✓ | ✓ | ✓ | already conformant — untouched |
+| planner_integration | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes; References "Phase 42"→"lowering helpers" |
+| python_models | ✓ | ✓ | ✓ | +2 blockquotes |
+| run_state | ✓ | ✓ | ✓ | already conformant — untouched |
+| schema_evolution | ✓ | ✓ | ✓ | +out-of-scope (run_state/virtual_environments/output_fingerprint); +2 blockquotes |
+| scoping | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes |
+| seeds | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes; References "(as of Phase 4)" removed |
+| smelt_yml | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes |
+| sources | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes |
+| testing | ✓ | ✓ | ✓ | +2 blockquotes (before "Naming history." blockquote) |
+| timeseries | ✓ | ✓ | ✓ | label only (blockquotes pre-existing) |
+| types | ✓ | ✓ | ✓ | label→What-this-is; +2 blockquotes |
+| virtual_environments | ✓ | ✓ | ✓ | already conformant — untouched |
+
+**Result: 29/29 specs carry all three required header blockquotes.** Label standardised to `**What this is.**` corpus-wide (was 16/14 split). Two timeless-oracle References-section Phase-vocab cases fixed. Frontmatter and `last_reviewed` deliberately not bumped (mechanical sweep). Body §Semantics/§Design/§Constraints structural gaps (e.g. diagnostics.md has no §Semantics/§Design) are **not** addressed here — they are content work, tracked separately.
+
+**Deferred to Track C (not done in A4):**
+- **References format** — 17 specs use nested `### Code`/`### Tests` headings vs the template's flat bullets. `design-decision-needed` → decision **D-13** (Theme 2). Untouched.
+- **DuplicateAddress ownership** (scoping.md vs architecture.md) — ownership call, not mechanical. → Track C.
+- **List&lt;Unknown&gt; widening discipline** in gradual_typing scope callout (review Minor) — "add to callout vs move section" is a judgment call. → Track C.

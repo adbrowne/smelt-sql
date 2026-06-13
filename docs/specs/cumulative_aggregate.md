@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Cumulative Aggregate Materialization
 
-> **Scope.** A normative spec for the `cumulative_aggregate` materialization — a stateful-merge planner rule that collapses a timeseries source into one row per key, where each row reflects state across all processed source partitions. Covers the frontmatter selector, the classifier, the per-partition delta-SELECT shape, the cross-partition combine semantics, the equivalence contract, and the rules around what may be expressed. Out of scope: incremental DELETE+INSERT (`incremental_models.md`), the `timeseries:` declaration this rule consumes from its source (`timeseries.md`), full model frontmatter schema (`models.md`), the backend `merge_into` primitive (described in `architecture.md` §"Backend primitives" — `cumulative_aggregate` is one caller).
+> **What this is.** A normative spec for the `cumulative_aggregate` materialization — a stateful-merge planner rule that collapses a timeseries source into one row per key, where each row reflects state across all processed source partitions. Covers the frontmatter selector, the classifier, the per-partition delta-SELECT shape, the cross-partition combine semantics, the equivalence contract, and the rules around what may be expressed. Out of scope: incremental DELETE+INSERT (`incremental_models.md`), the `timeseries:` declaration this rule consumes from its source (`timeseries.md`), full model frontmatter schema (`models.md`), the backend `merge_into` primitive (described in `architecture.md` §"Backend primitives" — `cumulative_aggregate` is one caller).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >

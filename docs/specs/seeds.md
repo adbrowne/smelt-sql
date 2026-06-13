@@ -7,7 +7,11 @@ owners: [andrew]
 
 # Seeds
 
-> **Scope.** Normative spec for CSV seed loading: CSV format, type inference, the `smelt seed` lifecycle, ephemeral seed semantics, and seed-specific LSP tooling. The shared YAML grammar (used for both seed sidecars and standalone source declarations) is owned by `sources.md`. Discovery, addressing, default DB-name mapping, and the `Backend::load_table` ingest path are owned by `architecture.md`.
+> **What this is.** Normative spec for CSV seed loading: CSV format, type inference, the `smelt seed` lifecycle, ephemeral seed semantics, and seed-specific LSP tooling. The shared YAML grammar (used for both seed sidecars and standalone source declarations) is owned by `sources.md`. Discovery, addressing, default DB-name mapping, and the `Backend::load_table` ingest path are owned by `architecture.md`.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 
@@ -177,7 +181,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 
 ## References
 
-- **Code** (as of Phase 4):
+- **Code**:
   - `crates/smelt-core/src/seeds/` — module directory: `csv.rs` (strict reader), `infer.rs` (type inferencer), `arrow.rs` (Arrow batch builder), `error.rs` (`SeedError`), `mod.rs` (`discover_seed_infos`, `SeedInfo`).
   - `crates/smelt-cli/src/seed.rs` — `smelt seed` orchestration.
   - `crates/smelt-cli/src/commands/seed.rs` — CLI entry.

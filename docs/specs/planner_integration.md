@@ -7,7 +7,11 @@ owners: [andrew]
 
 # Planner Integration
 
-> **Scope.** Normative spec for how transparent functions, models, and frontmatter properties feed the smelt planner. Defines the three planner levels (L1 logical-to-logical, L2 logical-to-physical, L3 physical-to-execution-plan), the transparent vs black-box optimization boundary, the frontmatter properties the planner consumes, the validation rules the planner emits against declared metadata, and the `smelt build --show-plan` CLI surface. The architectural rule that the planner is value-producing and never mutates CSTs lives in `architecture.md`; the unified-model framing lives there too. The frontmatter keys' grammar lives in `functions.md`. This spec specifies the *consumption* of those keys — what the planner does with `deterministic`, `idempotent`, `append_only`, `backends`, `joins`, and `provenance`.
+> **What this is.** Normative spec for how transparent functions, models, and frontmatter properties feed the smelt planner. Defines the three planner levels (L1 logical-to-logical, L2 logical-to-physical, L3 physical-to-execution-plan), the transparent vs black-box optimization boundary, the frontmatter properties the planner consumes, the validation rules the planner emits against declared metadata, and the `smelt build --show-plan` CLI surface. The architectural rule that the planner is value-producing and never mutates CSTs lives in `architecture.md`; the unified-model framing lives there too. The frontmatter keys' grammar lives in `functions.md`. This spec specifies the *consumption* of those keys — what the planner does with `deterministic`, `idempotent`, `append_only`, `backends`, `joins`, and `provenance`.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 
@@ -176,7 +180,7 @@ The plan that produced this spec acknowledges the wired-vs-aspirational gap expl
 - `crates/smelt-planner/src/logical_plan_rules.rs` — `PlannerRule` trait, `RuleContext`, `apply_rules_to_fixed_point`, `show_plan_rules`, the four L1 rules
 - `crates/smelt-planner/src/plan_printer.rs` — `format_plan` (deterministic renderer used by `--show-plan`)
 - `crates/smelt-planner/src/rules/` — graph-level (model-graph) rules; distinct from logical-plan rules above
-- `crates/smelt-planner/src/lowering/` — Phase 42 lowering helpers (`as_struct_to_sql`, etc.)
+- `crates/smelt-planner/src/lowering/` — lowering helpers (`as_struct_to_sql`, etc.)
 - `crates/smelt-planner/src/analysis/temporal.rs` — temporal-dependency analysis feeding incremental strategy selection
 - `crates/smelt-db/src/lib.rs` — `logical_plan` Salsa query, `DiagnosticCode::{ProvenanceMismatch, JoinsMismatch, DeclaredCardinalityUnverifiable, MissingProvenancePushdownAdvisory}`, the missing-provenance-pushdown emission site
 - `crates/smelt-db/src/provenance_validator.rs` — pure validators for the four diagnostic codes

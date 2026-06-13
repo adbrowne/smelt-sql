@@ -7,7 +7,11 @@ owners: [andrew]
 
 # Sources
 
-> **Scope.** Normative spec for source declarations: externally-managed tables that smelt does not load but can type-check and route in `FROM` positions. Sources share their YAML grammar with seed sidecars (`seeds.md`); this spec owns that shared grammar and the source-only semantics. This is a stub — sections are brief — but every section says something concrete.
+> **What this is.** Normative spec for source declarations: externally-managed tables that smelt does not load but can type-check and route in `FROM` positions. Sources share their YAML grammar with seed sidecars (`seeds.md`); this spec owns that shared grammar and the source-only semantics. This is a stub — sections are brief — but every section says something concrete.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+>
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
 
 ## Surface
 
