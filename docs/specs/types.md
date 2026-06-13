@@ -391,7 +391,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 - **Standing decimal gates.** `cargo test -p smelt-db --test nullability_property_tests` must stay green (no change from §11 gate). The decimal arithmetic growth formulas and division rejection must be covered by the type property oracle (`cargo test -p smelt-db --test type_property_tests`) after the decimal plan lands.
 
-- **Collation is binary in portable code.** Portable string columns carry `Binary` collation; no inference or emission path may produce a non-binary collation in portable code without a `NonPortableCollation` diagnostic (§17). `to_backend_sql()` must pin `COLLATE "C"` on Postgres for portable string comparisons and columns, so portable comparison is byte-wise on every engine regardless of the database's default locale. **Standing collation gate:** `cargo test -p smelt-db --test collation_tests` covers binary-collation string operations (`=`, `<`, `GROUP BY`, `DISTINCT`, `ORDER BY`, `MIN`/`MAX`) against the live DuckDB oracle, asserting that portable binary comparison agrees with DuckDB and that no `NonPortableCollation` diagnostic fires for these operations.
+- **Collation is binary in portable code.** Portable string columns carry `Binary` collation; no inference or emission path may produce a non-binary collation in portable code without a `NonPortableCollation` diagnostic (§17). On the PostgreSQL backend, portable string comparisons and columns will additionally be pinned with `COLLATE "C"` so byte-wise comparison holds regardless of the database's default locale — this emission pin lands with the Postgres runtime backend (see Known Divergences). **Standing collation gate:** `cargo test -p smelt-db --test collation_tests` covers binary-collation string operations (`=`, `<`, `GROUP BY`, `DISTINCT`, `ORDER BY`, `MIN`/`MAX`) against the live DuckDB oracle, asserting that portable binary comparison agrees with DuckDB and that no `NonPortableCollation` diagnostic fires for these operations.
 
 ## Known Divergences / Open Questions
 
@@ -441,6 +441,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - `docs/plans/20260610-nullability-soundness.md`
 - `docs/plans/20260611-decimal-arithmetic.md`
 - `docs/plans/20260612-timezone-axis.md`
+- `docs/plans/20260613-collation-axis.md`
 
 ### Related specs
 
