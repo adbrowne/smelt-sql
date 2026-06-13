@@ -127,8 +127,8 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 ### Track C — decision document
 | Step | Status | Artifact | Date |
 |------|--------|----------|------|
-| C-prep generate markup doc | pending | `docs/research/20260613-spec-remediation-decisions.md` | |
-| C markup returned by user | pending | | |
+| C-prep generate markup doc | done | `docs/research/20260613-spec-remediation-decisions.md` (58 decisions D-01–D-58 + Appendix A/B) | 2026-06-13 |
+| C markup returned by user | pending — **awaiting user** | | |
 
 ### Track B — per-spec no-brainer batches
 | Spec | Status | Findings closed | Commit | Date |
