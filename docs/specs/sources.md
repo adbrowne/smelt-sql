@@ -21,7 +21,7 @@ A **source** is an external table that already exists in the target database, po
 
 ### Filesystem layout
 
-A source is declared by a `.yml` file under any directory listed in `smelt.yml::paths`. The file must **not** have a sibling `.csv` with the same stem in the same directory — that would make the YAML a seed sidecar instead (`architecture.md` §"Resolution").
+A source is declared by a `.yml` file in any non-excluded directory under the project root. (Discovery is project-wide; `smelt.yml::paths` only strips address prefixes, it does not gate which directories are scanned — see `architecture.md` §"Resolution".) The file must **not** have a sibling `.csv` with the same stem in the same directory — that would make the YAML a seed sidecar instead (`architecture.md` §"Resolution").
 
 | File on disk (with `paths: ["models"]`) | Address |
 |---|---|
@@ -84,7 +84,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 
 - A `.yml` file with no sibling `.csv` of the same stem → source.
 - A `.yml` file with a sibling `.csv` → sidecar to that seed (not a source). See `seeds.md`.
-- Two files resolving to the same address (across scan paths) → workspace-load error.
+- Two files resolving to the same address (anywhere in the project) → workspace-load error.
 
 ### LSP surface
 

@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-06-11
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -69,6 +69,7 @@ Owned by `docs/specs/models.md` and the core analysis queries in
 | `UnknownCastType` | Error | A `CAST(x AS T)` uses a type name `T` that smelt does not recognise. |
 | `UnrecognizedFunction` | Error | A SQL function call uses a function name that smelt does not recognise. |
 | `DuplicateAddress` | Error | Two files in the same project resolve to the same `smelt.<path>` address. Anchored at the second (later-discovered) file, offset 0. |
+| `DuplicateEmittedName` | Error | Two persisted entities in the same project resolve to the same `(target schema, joined table name)` for the active target, even though their `smelt.<path>` addresses differ (the `_`-join is not injective — e.g. `smelt.staging.orders` and `smelt.staging_orders` both emit `main.staging_orders`). Prevents a silent table clobber. Anchored at the second entity. See `architecture.md` §"Default materialization name mapping". |
 | `KindMismatch` | Error | A `smelt.<path>` reference resolves to an entity whose kind is invalid in the surrounding position (e.g., a test ref in a `TableExpr` position). |
 
 ---

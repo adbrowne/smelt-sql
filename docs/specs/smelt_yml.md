@@ -1,7 +1,7 @@
 ---
 feature: smelt_yml
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -21,7 +21,7 @@ owners: [andrew]
 |-----|------|----------|---------|---------|
 | `name` | string | yes | — | Project name. Decorative; appears in run logs. |
 | `version` | integer | no | `1` | Schema version of the `smelt.yml` format. Optional to remove the trip-hazard where users wrote a semver string and got a parse error. Currently only `1` is meaningful. |
-| `paths` | list of strings | no | `["models"]` | Workspace-relative directories scanned for project files (`.sql`, `.py`, `.csv`, `.yml`). Kind is determined by file format/content (`architecture.md` §"Resolution"), not by which directory the file lives in. |
+| `paths` | list of strings | no | `["models"]` | Directory prefixes **stripped** from entity addresses (`architecture.md` §"Resolution"). This does **not** gate discovery: smelt scans **every non-excluded subdirectory** under the project root and classifies each file by format/content (`.sql`, `.py`, `.csv`, `.yml`), regardless of which directory it lives in. The default `["models"]` simply strips a leading `models/` so the conventional layout addresses cleanly (`models/marts/x.sql` → `smelt.marts.x`); a project that groups files by domain under another container sets `paths:` to that container (`["src"]`). |
 | `targets` | map of `<name>` → target object | yes | — | Named execution environments. The `--target` CLI flag selects one (default `dev`). |
 | `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts `table`, `view`, `ephemeral`, `materialized_view`, `cumulative_aggregate`, `test`. |
 | `models` | map of `<name>` → model-config object | no | `{}` | Per-model overrides keyed by model name. Each entry may declare `materialization`, `tags`, `target`, `incremental`, etc. |
@@ -46,7 +46,7 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `type` | string | yes | Backend type — `duckdb` or `spark`. |
-| `schema` | string | yes | Schema name used for materialised tables/views and target-schema seeds. |
+| `schema` | string | no | Schema name used for materialised tables/views and target-schema seeds. Defaults to `main` when omitted (matches `architecture.md` §"Default materialization name mapping"). |
 | `database` | string | DuckDB only | Path to the `.duckdb` file (relative to project root). |
 | `connect_url` | string | Spark only | Spark Connect URL (e.g. `sc://localhost:15002`). |
 | `catalog` | string | Spark only | Optional Spark catalog name. |
@@ -82,7 +82,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 2. **`name` is decorative.** It appears in run logs but is not used as a schema name, table name, or namespace component. Renaming the project is safe.
 3. **`version: 1` is the only accepted value today.** Omitting `version` parses as `1`; supplying a string (`"0.1.0"`) is rejected with a deserialisation error so the user-mistake (mirroring `pyproject.toml`) surfaces clearly.
 4. **`default_materialization` is `view` by default.** This is the implementation default in `Config::default_materialization()`. Users who want every model materialised as a table must set `default_materialization: table` explicitly (or annotate per-model).
-5. **`paths` defaults to `["models"]` and is the single scan list.** Smelt walks every listed directory recursively, classifying each file by format/content (`.sql` bare-SELECT → model, `.sql` `smelt.define` → function, `.csv` → seed, `.yml` with sibling `.csv` → sidecar, `.yml` standalone → source). A listed directory that does not exist is silently skipped — no error.
+5. **`paths` is an address strip-list; discovery is project-wide.** Smelt walks **every non-excluded subdirectory** under the project root (the directory containing `smelt.yml`), classifying each file by format/content (`.sql` bare-SELECT → model, `.sql` `smelt.define` → function, `.csv` → seed, `.yml` with sibling `.csv` → sidecar, `.yml` standalone → source). `paths:` does **not** restrict what is discovered — its entries are directory prefixes **stripped** from the resulting `smelt.<path>` addresses (`architecture.md` §"Resolution"). **Excluded** directories — hidden directories (`.`-prefixed, e.g. `.git`, `.smelt`) and the conventional build output `target/` — are not scanned. A `paths:` entry naming a directory that does not exist is harmless: there is simply nothing for it to strip.
 6. **`unstable_schema: true` opts in to gated keys.** The list of currently-gated keys is owned by the feature spec that introduces them (today: `joins:` and `provenance:` in `functions.md`). The flag itself is parsed by a small text-based helper (`parse_unstable_schema_flag`) so even malformed `smelt.yml` files can be probed for the gate.
 7. **Forward compatibility via warnings.** A new release that adds a top-level key produces a warning on older consumers, not an error — the old binary keeps working with the field absent. This invariant means tooling can read newer projects without crashing.
 
@@ -96,7 +96,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 
 **Per-feature config lives in feature specs.** `incremental:` shape, function frontmatter keys (`deterministic`, `idempotent`, …), schema-evolution config, and the per-column `tests:` map are owned by their feature specs (`incremental_models.md`, `functions.md`, future `schema_evolution.md`). This spec lists only the top-level shape and the cross-feature precedence rules; otherwise, the page would have to be re-written every time a new key lands.
 
-**One scan list, not per-kind.** Earlier the config had `model_paths` and `seed_paths` as separate lists, with `sources.yml` declaring sources at the project root regardless. That conflated *where to look* with *what kind of thing is here* — yet `architecture.md` §"Resolution" already says kind is determined by file format/content, not by directory. Collapsing to a single `paths:` list aligns the config with the resolver's actual behaviour: the user picks where their project files live; smelt classifies them on read. Co-locating a `models/payments/seeds/lookup.csv` with the SQL that consumes it is now a layout choice rather than a config fight.
+**`paths:` strips addresses; it does not gate discovery.** Earlier the config had `model_paths` and `seed_paths` as separate scan lists, with `sources.yml` declaring sources at the project root regardless. That conflated *where to look* with *what kind of thing is here* — yet `architecture.md` §"Resolution" already says kind is determined by file format/content, not by directory. The resolution is to make discovery **unconditional** — smelt scans every non-excluded subdirectory and classifies on read — and to repurpose `paths:` as a list of address-prefixes to **strip**. This directly serves large projects organised by *domain* rather than by *kind*: a team can keep `billing/staging/invoices.sql`, `billing/raw/invoices.yml` (a source), and `billing/seeds/tax_rates.csv` side by side under one `billing/` subtree, and they address as `smelt.billing.staging.invoices` / `smelt.billing.raw.invoices` / `smelt.billing.seeds.tax_rates` with no per-kind directory required. A project that wants to hide a single top-level container from the address (the `src/` pattern) lists it in `paths:`. The earlier scan-list design forced files to live under enumerated roots; the strip-list design lets the filesystem hierarchy follow the team's mental model while keeping addresses clean.
 
 ## Constraints & Invariants
 
@@ -112,6 +112,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.
 - **Multi-target precedence with frontmatter `target:`.** The model-level `target:` frontmatter overrides `smelt.yml::models.<name>.target`, which overrides the CLI `--target`. The frontmatter form is a relatively recent addition; whether it should also be allowed to declare a target *not* defined in `smelt.yml::targets` is open (today: hard error before any work begins).
 - **`unstable_schema:` discoverability.** There is no `smelt unstable_schema list` or similar way to enumerate the currently-gated keys. Users find them through individual feature docs; a discoverability mechanism is open.
+- **Configurable discovery exclusions.** Project-wide discovery skips hidden directories (`.`-prefixed) and the conventional build output `target/`. Whether a project can extend this with an explicit `exclude:` key (to omit, say, a `sandbox/` or `archive/` subtree from discovery) is open; today the skip-list is fixed and conventional. The `paths:` strip-list is a separate concern (it renames addresses, it does not hide files).
 
 ## References
 
@@ -120,7 +121,7 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 - **User docs**: `docs-site/docs/reference/smelt-yml.md` — per-key reference; `docs-site/docs/concepts/project-structure.md` — orientation page.
 - **Plans (history)**: `docs/plans/20260502-smelt-loop-findings.md` — the spec-authoring plan that produced this stub (DG-4 close).
 - **Related specs**:
-  - `architecture.md` — `smelt.yml` is the workspace marker; `paths:` is the directory list scanned by the discovery layer; kind-by-content is owned there.
+  - `architecture.md` — `smelt.yml` is the workspace marker; discovery is project-wide and `paths:` is the address strip-list (not a scan gate); kind-by-content is owned there.
   - `incremental_models.md` — `incremental:` shape on `models.<name>`.
   - `functions.md` — `unstable_schema: true` gates `joins:` and `provenance:` frontmatter.
   - `seeds.md` — CSV parsing rules and `smelt seed` lifecycle; consumes `paths:` and `targets.<name>.schema`.

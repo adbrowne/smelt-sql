@@ -148,7 +148,7 @@ Update after every session. Finding IDs reference `docs/research/20260612-spec-r
 ### Track C — decision execution (by theme)
 | Theme | Status | Findings closed | Commit | Date |
 |-------|--------|-----------------|--------|------|
-| 1 architecture resolution/naming | pending | C1,C2,C22,… | | |
+| 1 architecture resolution/naming | done | D-01..D-06 (C1,C2,C22 + schema-default + scan-universe + stem-rule) | _next_ | 2026-06-13 |
 | 2 diagnostics existence/severity | pending | | | |
 | 3 meta-language reflection/precedence | pending | C11,C12,C13,… | | |
 | 4 python↔meta | pending | C14,C15,… | | |

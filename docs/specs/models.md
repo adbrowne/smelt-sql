@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-05-21
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -17,7 +17,7 @@ owners: [andrew]
 
 ### File format
 
-A model is a `.sql` file discovered by recursively walking each directory listed in `paths:` (default: `["models"]`; see `smelt_yml.md`). Files may be:
+A model is a `.sql` file discovered by recursively walking every non-excluded directory under the project root (`paths:` does not gate discovery — it only strips address prefixes; default `["models"]` strips a leading `models/`. See `smelt_yml.md` and `architecture.md` §"Resolution"). Files may be:
 
 **Single-model** — the file contains one SQL query, optionally preceded by YAML frontmatter:
 

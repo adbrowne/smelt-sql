@@ -183,7 +183,7 @@ A single `smelt build` performs these steps, in order:
 
 1. **Load** `smelt.yml` from `--project-dir`. Fail if absent.
 2. **Validate** that the requested `--target` exists in the config.
-3. **Discover** all project files under `paths:` and the dedicated scan paths (functions, sources, tests). The resolver classifies each file by format and content per `architecture.md` §"Resolution": `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone in `sources/`) become seed sidecars or sources respectively.
+3. **Discover** all project files by walking every non-excluded subdirectory under the project root (discovery is project-wide; `paths:` only strips address prefixes — there are no per-kind dedicated scan paths, per `architecture.md` §"Resolution"). The resolver classifies each file by format and content: `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone) become seed sidecars or sources respectively.
 4. **Seed** — run the seed lifecycle per `seeds.md` for each non-ephemeral CSV seed (in deterministic sorted order): smelt parses and type-infers the CSV itself and ingests it via `Backend::load_table(...)` — not a backend-specific `read_csv_auto` recipe. Ephemeral seeds are skipped (they inline as CTEs at compile time); sources are never loaded. Schemas are auto-created if absent.
 5. **Plan** — build the logical dependency graph; apply planner rules; produce the physical execution graph. Models execute in topological order.
 6. **Run** — for each model in topological order, materialize according to its effective materialization:

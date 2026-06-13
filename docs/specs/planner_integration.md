@@ -1,7 +1,7 @@
 ---
 feature: planner_integration
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-06-13
 owners: [andrew]
 ---
 
@@ -176,12 +176,13 @@ The plan that produced this spec acknowledges the wired-vs-aspirational gap expl
 
 ### Code
 
-- `crates/smelt-planner/src/logical.rs` — `LogicalNode`, `FunctionProperties`, `Provenance`, `JoinSpec`, `Cardinality`, `ProvenanceTag`, `parse_function_properties`
-- `crates/smelt-planner/src/logical_plan_rules.rs` — `PlannerRule` trait, `RuleContext`, `apply_rules_to_fixed_point`, `show_plan_rules`, the four L1 rules
+- `crates/smelt-logical/src/logical.rs` — `LogicalNode`, `FunctionProperties`, `Provenance`, `JoinSpec`, `Cardinality`, `ProvenanceTag`, `parse_function_properties` (the logical model lives in `smelt-logical`; `smelt-planner` re-exports it — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
+- `crates/smelt-logical/src/rules/rule_diagnostics.rs` — `RuleContext`, `detect_builtin_rules` (the pure rule-data interface, in `smelt-logical`)
+- `crates/smelt-planner/src/logical_plan_rules.rs` — `PlannerRule` trait, `apply_rules_to_fixed_point`, `show_plan_rules`, the four L1 rules (rule *application* stays in `smelt-planner`)
 - `crates/smelt-planner/src/plan_printer.rs` — `format_plan` (deterministic renderer used by `--show-plan`)
 - `crates/smelt-planner/src/rules/` — graph-level (model-graph) rules; distinct from logical-plan rules above
-- `crates/smelt-planner/src/lowering/` — lowering helpers (`as_struct_to_sql`, etc.)
-- `crates/smelt-planner/src/analysis/temporal.rs` — temporal-dependency analysis feeding incremental strategy selection
+- `crates/smelt-logical/src/lowering/` — lowering helpers (`as_struct_to_sql`, etc.)
+- `crates/smelt-logical/src/analysis/temporal.rs` — temporal-dependency analysis feeding incremental strategy selection
 - `crates/smelt-db/src/lib.rs` — `logical_plan` Salsa query, `DiagnosticCode::{ProvenanceMismatch, JoinsMismatch, DeclaredCardinalityUnverifiable, MissingProvenancePushdownAdvisory}`, the missing-provenance-pushdown emission site
 - `crates/smelt-db/src/provenance_validator.rs` — pure validators for the four diagnostic codes
 - `crates/smelt-db/src/backends.rs` — `infer_body_backends`, `apply_narrow_rule`

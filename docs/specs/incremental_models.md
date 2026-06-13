@@ -324,15 +324,15 @@ This section captures the load-bearing rationale behind the incremental model su
   - `crates/smelt-core/src/config.rs` — `IncrementalConfig`, `Granularity`, `Weekday`
   - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, `ModelMetadata`
   - `crates/smelt-core/src/sources.rs` — `SourceColumnDef` (future home of `data_latency`)
-  - `crates/smelt-planner/src/rules/incremental.rs` — detection + safety checks
-  - `crates/smelt-planner/src/types.rs` — safety-override types
+  - `crates/smelt-logical/src/rules/incremental.rs` — detection + safety checks (in `smelt-logical`; `smelt-planner` re-exports — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
+  - `crates/smelt-logical/src/types.rs` — safety-override types
   - `crates/smelt-cli/src/transformer.rs` — `inject_time_filter()`
   - `crates/smelt-cli/src/executor.rs` — `execute_model_incremental()`, `execute_plan_incremental()`
   - `crates/smelt-cli/src/main.rs` — CLI dispatch (incremental paths around the `run` / `backbuild` subcommands)
   - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions()`, `Backend::insert_into_from_query()`
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
-- **Tests**: 17 optimizer unit tests in `crates/smelt-planner/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; 7 optimizer integration tests; 13 metadata tests
+- **Tests**: 17 optimizer unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; 7 optimizer integration tests; 13 metadata tests
 - **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md)
 - **Plans (history)**:
   - [`docs/plans/20260322-incremental-model-support.md`](../plans/20260322-incremental-model-support.md) — comprehensive plan; many phases still open

@@ -112,7 +112,7 @@ If `.smelt/schemas/` does not exist, `smelt diff` reports all models as `new`.
 
 ### Stale schema cleanup
 
-After a successful `smelt run` or `smelt build`, smelt scans `.smelt/schemas/` and deletes any `.json` entry whose model name is not in the set of models discovered in the current project. A model is discovered if a corresponding `.sql` file exists under `paths:`. Stale entries arise when a model file is deleted without a rebuild.
+After a successful `smelt run` or `smelt build`, smelt scans `.smelt/schemas/` and deletes any `.json` entry whose model name is not in the set of models discovered in the current project. A model is discovered if a corresponding `.sql` file exists anywhere in the project's scanned tree (discovery is project-wide; `paths:` only strips address prefixes — see `architecture.md` §"Resolution"). Stale entries arise when a model file is deleted without a rebuild.
 
 **Why this matters:** without cleanup, `smelt diff` will permanently report deleted models as `REMOVED` even after the user has removed the file and rebuilt. The cleanup runs only after a *successful* build — a failed build does not trigger cleanup so as not to destroy the deployed-schema record for a model whose SQL has a syntax error.
 

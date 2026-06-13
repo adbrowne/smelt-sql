@@ -17,7 +17,7 @@ owners: [andrew]
 
 ### What a seed is
 
-A `.csv` file under any directory listed in `smelt.yml::paths` is a **seed**. Smelt parses the CSV, infers (or reads from a sibling `.yml`) the column schema, and loads the data into the active backend on `smelt seed` / `smelt build`. The address (`smelt.<path>`) and default DB location (`<target_schema>.<path-joined-by-_>`) follow the universal rules in `architecture.md` §"Resolution" and §"Default materialization name mapping".
+A `.csv` file in any non-excluded directory under the project root is a **seed**. (Discovery is project-wide; `smelt.yml::paths` only strips address prefixes, it does not gate which directories are scanned — see `architecture.md` §"Resolution".) Smelt parses the CSV, infers (or reads from a sibling `.yml`) the column schema, and loads the data into the active backend on `smelt seed` / `smelt build`. The address (`smelt.<path>`) and default DB location (`<target_schema>.<path-joined-by-_>`) follow the universal rules in `architecture.md` §"Resolution" and §"Default materialization name mapping".
 
 A `.yml` file with the same stem in the same directory is a **sidecar** to the seed (`architecture.md` §"Resolution"); it declares column types, descriptions, nullability, and `materialization:` for the seed. The shared YAML grammar lives in `sources.md` §"Source YAML shape"; the seed-specific extensions are listed below.
 
@@ -205,6 +205,6 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
   - `architecture.md` §"Backend trait surface" — `load_table(...)` ingest path.
   - `architecture.md` §"Two orthogonal axes" — materialization framework.
   - `sources.md` — owns the shared YAML grammar; the no-load complement of this spec.
-  - `smelt_yml.md` — `paths:` key consumed for discovery.
+  - `smelt_yml.md` — `paths:` key consumed as the address strip-list (discovery is project-wide).
   - `types.md` — `DataType` vocabulary the inferencer produces.
   - `cli.md` — `smelt seed` and `smelt build` lifecycle.

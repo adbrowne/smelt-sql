@@ -249,7 +249,8 @@ This section captures the load-bearing rationale.
 - **Code**:
   - `crates/smelt-core/src/config.rs` — `Materialization` enum (gains `CumulativeAggregate` variant); `IncrementalStrategy::Merge` (variant to drop)
   - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, validation that `timeseries:` / `incremental:` are absent when `materialization: cumulative_aggregate`
-  - `crates/smelt-planner/src/rules/` — host for the cumulative classifier and per-partition step loop
+  - `crates/smelt-logical/src/rules/cumulative.rs` — the cumulative classifier (pure rule-data, in `smelt-logical`; `smelt-planner` re-exports — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
+  - `crates/smelt-planner/src/rules/` — host for the per-partition step loop (rule *application*)
   - `crates/smelt-backend/src/lib.rs` — `merge_into` trait method (physical primitive the rule calls)
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `merge_into` implementation
 - **Tests**:
