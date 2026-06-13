@@ -136,6 +136,16 @@ Owned by `docs/specs/cumulative_aggregate.md`.
 
 ---
 
+### Testing
+
+Owned by `docs/specs/testing.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `UnknownTestInput` | Error | An `inputs:` key in a `materialization: test` model names no compiled dependency of the model under test (catches a typo that would otherwise be silently replaced with an empty CTE → a false-green test). Anchored at the offending key. |
+
+---
+
 ### Types
 
 Owned by `docs/specs/types.md` and the VALUES/alias-column-list analysis.
@@ -164,7 +174,7 @@ Owned by `docs/specs/functions.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `DuplicateFunctionDefinition` | Error | Two `smelt.define` declarations share a function name. Anchored at the second declaration's name span. |
+| `DuplicateFunctionDefinition` | Error | Two `smelt.define` declarations in the same directory share a function name (uniqueness is directory-scoped, matching path-derived addressing). Anchored at the second declaration's name span. A define clashing with a built-in is `ExternCollidesWithBuiltin` instead. |
 | `InvalidFunctionTypeRef` | Error | A `smelt.define` parameter or return-type annotation cannot be parsed into a `SmeltType` (e.g. `Expr<Foo>`, unsupported nesting). |
 | `FunctionBodyTypeMismatch` | Error | A `smelt.define` body contains a type mismatch (e.g. `x + 'text'` when `x: Expr<Integer>`). Anchored at the inner bad subexpression. |
 | `UnknownIdentifier` | Error | A `smelt.define` body references a name that is neither a declared parameter nor resolvable in any enclosing scope. |
@@ -174,7 +184,7 @@ Owned by `docs/specs/functions.md`.
 | `ArgTypeMismatch` | Error | A `smelt.<path>(…)` call passes an argument whose type does not satisfy the declared parameter's `TypeConstraint`. |
 | `ExternCollidesWithBuiltin` | Error | A `smelt.extern` declares a name that already exists in the built-in registry. |
 | `BackendsWideningNotAllowed` | Error | A `smelt.define`'s `backends:` set is broader than what the body implies. (Malformed frontmatter is not this code's concern — it routes to `FrontmatterParseError`.) |
-| `FrontmatterParseError` | Error/Warning | A `smelt.define` or `smelt.extern` frontmatter YAML block could not be parsed (Error) or contained an unknown key/malformed sub-entry (Warning). |
+| `FrontmatterParseError` | Error | A `smelt.define` or `smelt.extern` frontmatter YAML block could not be parsed, or contained an unknown key / malformed sub-entry. Error in all cases — an unknown key is a typo to surface loudly, not tolerate (fail-loud doctrine; `functions.md` Constraint 6). |
 | `WindowInScalarContext` | Error | A window-function expression appears in a splice point that only accepts scalar/aggregate expressions (e.g. WHERE, GROUP BY). |
 | `ParameterShadowsColumn` | Warning | An `Expr<T>`-kinded parameter name overlaps a column in a sibling `TableExpr`-kinded parameter's schema. |
 | `RowRequirementUnsatisfied` | Error | A `TableExpr<{…}>` parameter has a row requirement the caller's schema cannot satisfy. |
@@ -249,6 +259,7 @@ Owned by `docs/specs/meta_language.md`.
 | `LambdaResultTypeMismatch` | Error | The lambda body's synthesised type is incompatible with the HOF's required result shape (e.g. `filter` requires `Boolean`). |
 | `HofExpectsLambda` | Error | The second argument to `map` or `filter` is not a lambda. |
 | `HofExpectsReducer` | Error | The second argument to `reduce` is not a registered reducer. |
+| `HofNamedArgument` | Error | A HOF call (`map`/`filter`/`reduce`) passes its arguments by name; HOFs take positional arguments only. (Mirrors `ReducerNamedArgument`; reserves `HofExpects*` for wrong-kind.) Owned by `meta_language.md`. |
 | `HofNameShadowed` | Error | A `smelt.define` declaration uses a HOF name (`map`, `filter`, `reduce`). |
 
 #### Reducers
