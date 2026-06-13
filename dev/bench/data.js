@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781361042356,
+  "lastUpdate": 1781390708070,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19457,6 +19457,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.727061,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "72c811f0ccdd81c835c70602880d4b36cd6478e9",
+          "message": "test(lsp): update e2e refs to canonical smelt.<path> addressing (#140)\n\nThe e2e LSP tests still used the retired smelt.models.<name> ref form\n(architecture.md §\"Resolution\": kind-prefixed forms are retired; the\ncanonical address strips the matching paths: scan-root prefix). Under\ncanonical addressing a model at models/upstream.sql resolves as\nsmelt.upstream, so smelt.models.upstream is correctly reported undefined\n(\"did you mean 'smelt.upstream'?\"), which broke four tests that expected\nthe path-form ref to resolve:\n  - test_goto_definition_ref\n  - test_goto_definition_smelt_model_ref_still_works\n  - test_diagnostics_clear_after_fix\n  - test_no_stale_diagnostics_after_model_rename\n\nReplace all smelt.models.<name> with the canonical smelt.<name> and\nadjust the two goto-definition cursor columns whose offsets shifted with\nthe shorter path. No production change — the resolver was already correct.\n\nCo-authored-by: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-14T08:43:32+10:00",
+          "tree_id": "a61c101e1a25fd2a4aa59e1d98cbc911b2660bf9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/72c811f0ccdd81c835c70602880d4b36cd6478e9"
+        },
+        "date": 1781390707055,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 45.156796,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 42.696681,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.180699,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.638016,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.315162,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 3024.144529,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 5.735664,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 4.395696,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 4.13142,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.78084,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3337.822761,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.43655,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.74206,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.299808,
             "unit": "ms"
           }
         ]
