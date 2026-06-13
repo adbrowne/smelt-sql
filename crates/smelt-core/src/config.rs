@@ -116,6 +116,10 @@ fn default_materialization() -> Materialization {
     Materialization::View
 }
 
+fn default_schema() -> String {
+    "main".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Target {
     #[serde(rename = "type")]
@@ -123,6 +127,7 @@ pub struct Target {
     // DuckDB fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    #[serde(default = "default_schema")]
     pub schema: String,
     // Spark fields
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1559,6 +1564,43 @@ targets:
             joined.to_lowercase().contains("paths"),
             "warning should refer to the replacement `paths:` key: {}",
             joined
+        );
+    }
+
+    /// D-04: `schema` is optional; omitting it must produce `"main"`.
+    #[test]
+    fn target_schema_defaults_to_main() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("target without schema must parse");
+        assert_eq!(
+            config.targets["dev"].schema, "main",
+            "omitted schema must default to main"
+        );
+    }
+
+    /// D-04: an explicit `schema` value must be preserved as-is.
+    #[test]
+    fn explicit_schema_is_honored() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: analytics
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("config must parse");
+        assert_eq!(
+            config.targets["dev"].schema, "analytics",
+            "explicit schema must be preserved"
         );
     }
 }
