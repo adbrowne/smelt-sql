@@ -51,8 +51,8 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 | P2 | Frontmatter diagnostics: `BackendsWideningNotAllowed` malformed-branch → `FrontmatterParseError`; `FrontmatterParseError` Error in all cases | done | D-14, D-31 | fix(db): route malformed function frontmatter to FrontmatterParseError; Error in all cases (D-14, D-31) | 2026-06-14 |
 | P3 | `DuplicateFunctionDefinition` directory-scoped | done | D-30 | fix(db): scope DuplicateFunctionDefinition to a directory, not the workspace (D-30) | 2026-06-14 |
 | P4 | D-08/D-09 cleanup: confirm bare-path → `UndefinedModelRef`; retire `smelt.source()` call-form | done | D-08, D-09 | refactor(runtime): drop legacy smelt.source() call-form; lock bare-path → UndefinedModelRef (D-08, D-09) | 2026-06-14 |
-| P5 | `ColumnTypeUnresolved` minted live (risk-flagged) | pending | D-07 | feat(db): emit ColumnTypeUnresolved for compiler-resolvable Unknown columns (D-07) | |
-| P6 | Close-out: catalogue gate + registry + ROADMAP | pending | — | docs(spec-impl): close out W3 — diagnostics fixes landed; registry + roadmap | |
+| P5 | `ColumnTypeUnresolved` minted live (risk-flagged) | blocked | D-07 | feat(db): emit ColumnTypeUnresolved for compiler-resolvable Unknown columns (D-07) | |
+| P6 | Close-out: catalogue gate + registry + ROADMAP | blocked | — | docs(spec-impl): close out W3 — diagnostics fixes landed; registry + roadmap | |
 
 **Status values**: `pending`, `done`, `blocked`.
 
@@ -188,7 +188,11 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 
 ## Blocked phases
 
-Append-only log. None yet.
+Append-only log.
+
+**2026-06-14 — P5 (`ColumnTypeUnresolved` minted live):** `DataType::Unknown` is an undiscriminated unit variant — W2 did not add a reason field (`Unresolved`/`Dynamic`/`Propagated`). Without the discriminant it is impossible to distinguish compiler-resolvable Unknowns from legitimately-dynamic `Expr<Any>` unknowns; over-firing `ColumnTypeUnresolved` on dynamic unknowns is a regression. The prerequisite is a separate pass that adds the reason-discriminant to `DataType::Unknown` in `smelt-types`. Options: (A) add the discriminant here as a prerequisite step, expanding this wave's scope into `smelt-types`; (B) defer to a dedicated `D-types-unknown-reason` sub-plan that adds the discriminant and then unblocks P5/P6. Recommendation: B — the discriminant is architecturally significant and deserves its own plan + review. The `function_schema_inference.md` KD also notes the "well-formed signature can't type" case does not currently arise, so `ColumnTypeUnresolved` would not fire even if added — deferring is low cost.
+
+**2026-06-14 — P6 (close-out):** Blocked because P5 is blocked; the catalogue gate, KD retraction, and registry update all depend on P5 landing `ColumnTypeUnresolved`.
 
 ## Verification
 
