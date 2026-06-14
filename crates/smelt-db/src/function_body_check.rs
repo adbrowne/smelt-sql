@@ -2744,7 +2744,7 @@ pub fn check_fragment_context_bindings(
                 if !is_bare_fragment_param_ref(arg_expr, body_ctx) {
                     let found_kind = infer_expression_kind(arg_expr, caller_ctx);
                     let kind_ok = match req_kind {
-                        ExprKind::Scalar => true,
+                        ExprKind::Scalar => matches!(found_kind, ExprKind::Scalar),
                         ExprKind::Agg => matches!(found_kind, ExprKind::Agg | ExprKind::Window),
                         ExprKind::Window => matches!(found_kind, ExprKind::Window),
                     };

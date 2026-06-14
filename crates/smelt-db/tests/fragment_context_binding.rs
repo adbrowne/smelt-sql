@@ -12,6 +12,13 @@
 //!      column set ⊆ inferred → no error.
 //!   5. `agg_kind_context_binding_checks` — scalar arg for `SelectItems<Agg,
 //!      source>` → `FragmentKindMismatch`; aggregate arg → no error.
+//!   6. `scalar_splice_rejects_agg_fragment` — `SelectItems<Scalar>` rejects
+//!      Agg and Window kind args (C17: a higher-kind fragment in a scalar-only
+//!      splice point fires `FragmentKindMismatch`).
+//!   7. `agg_splice_accepts_agg_and_window` — `SelectItems<Agg>` accepts both
+//!      Agg and Window kind args (no false positive).
+//!   8. `scalar_splice_accepts_scalar` — `SelectItems<Scalar>` accepts scalar
+//!      args (no false positive).
 
 use std::collections::HashMap;
 
@@ -305,4 +312,166 @@ fn agg_kind_context_binding_checks() {
             "aggregate arg for SelectItems<Agg> should NOT emit FragmentKindMismatch; got {diags:#?}"
         );
     }
+}
+
+// ─── Test 6 ───────────────────────────────────────────────────────────────────
+
+/// C17: a Scalar-only splice point must reject Agg and Window kind fragments.
+#[test]
+fn scalar_splice_rejects_agg_fragment() {
+    let (sig, select, _) = parse_define_select(
+        "smelt.define scalar_fn(\
+           source: TableExpr, \
+           cols: SelectItems<Scalar, source> \
+         ) -> TableExpr AS (\
+           SELECT cols FROM source\
+         )\n",
+    );
+
+    let mut body_ctx = TypeContext::new();
+    body_ctx.add_tableexpr_param(
+        "source",
+        &[
+            ("id".to_string(), TypedColumn::nullable(DataType::Integer)),
+            (
+                "revenue".to_string(),
+                TypedColumn::nullable(DataType::Double),
+            ),
+        ],
+    );
+    body_ctx.add_function_param("cols", TypedColumn::nullable(DataType::Unknown));
+
+    // Agg arg into Scalar-only splice point → FragmentKindMismatch.
+    {
+        let (arg_expr, arg_range, _) = parse_arg_expr("SUM(revenue)");
+        let bindings: HashMap<String, (Expr, TextRange)> =
+            HashMap::from([("cols".to_string(), (arg_expr, arg_range))]);
+        let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
+        let kind_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+            .collect();
+        assert!(
+            !kind_diags.is_empty(),
+            "agg arg for SelectItems<Scalar> should emit FragmentKindMismatch; got {diags:#?}"
+        );
+    }
+
+    // Window arg into Scalar-only splice point → FragmentKindMismatch.
+    {
+        let (arg_expr, arg_range, _) = parse_arg_expr("ROW_NUMBER() OVER ()");
+        let bindings: HashMap<String, (Expr, TextRange)> =
+            HashMap::from([("cols".to_string(), (arg_expr, arg_range))]);
+        let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
+        let kind_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+            .collect();
+        assert!(
+            !kind_diags.is_empty(),
+            "window arg for SelectItems<Scalar> should emit FragmentKindMismatch; got {diags:#?}"
+        );
+    }
+}
+
+// ─── Test 7 ───────────────────────────────────────────────────────────────────
+
+/// C17: Agg splice point accepts both Agg and Window kind args (no false positive).
+#[test]
+fn agg_splice_accepts_agg_and_window() {
+    let (sig, select, _) = parse_define_select(
+        "smelt.define agg_fn2(\
+           source: TableExpr, \
+           metrics: SelectItems<Agg, source> \
+         ) -> TableExpr AS (\
+           SELECT id, metrics FROM source GROUP BY id\
+         )\n",
+    );
+
+    let mut body_ctx = TypeContext::new();
+    body_ctx.add_tableexpr_param(
+        "source",
+        &[
+            ("id".to_string(), TypedColumn::nullable(DataType::Integer)),
+            (
+                "revenue".to_string(),
+                TypedColumn::nullable(DataType::Double),
+            ),
+        ],
+    );
+    body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
+
+    // Agg arg → no FragmentKindMismatch.
+    {
+        let (arg_expr, arg_range, _) = parse_arg_expr("SUM(revenue)");
+        let bindings: HashMap<String, (Expr, TextRange)> =
+            HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
+        let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
+        let kind_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+            .collect();
+        assert!(
+            kind_diags.is_empty(),
+            "agg arg for SelectItems<Agg> must NOT emit FragmentKindMismatch; got {diags:#?}"
+        );
+    }
+
+    // Window arg → no FragmentKindMismatch (Agg splice accepts Window).
+    {
+        let (arg_expr, arg_range, _) = parse_arg_expr("ROW_NUMBER() OVER ()");
+        let bindings: HashMap<String, (Expr, TextRange)> =
+            HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
+        let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
+        let kind_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+            .collect();
+        assert!(
+            kind_diags.is_empty(),
+            "window arg for SelectItems<Agg> must NOT emit FragmentKindMismatch; got {diags:#?}"
+        );
+    }
+}
+
+// ─── Test 8 ───────────────────────────────────────────────────────────────────
+
+/// C17: Scalar splice point accepts scalar args (no false positive).
+#[test]
+fn scalar_splice_accepts_scalar() {
+    let (sig, select, _) = parse_define_select(
+        "smelt.define scalar_fn2(\
+           source: TableExpr, \
+           cols: SelectItems<Scalar, source> \
+         ) -> TableExpr AS (\
+           SELECT cols FROM source\
+         )\n",
+    );
+
+    let mut body_ctx = TypeContext::new();
+    body_ctx.add_tableexpr_param(
+        "source",
+        &[
+            ("id".to_string(), TypedColumn::nullable(DataType::Integer)),
+            (
+                "revenue".to_string(),
+                TypedColumn::nullable(DataType::Double),
+            ),
+        ],
+    );
+    body_ctx.add_function_param("cols", TypedColumn::nullable(DataType::Unknown));
+
+    // Scalar arg → no FragmentKindMismatch.
+    let (arg_expr, arg_range, _) = parse_arg_expr("revenue + 1");
+    let bindings: HashMap<String, (Expr, TextRange)> =
+        HashMap::from([("cols".to_string(), (arg_expr, arg_range))]);
+    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings);
+    let kind_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+        .collect();
+    assert!(
+        kind_diags.is_empty(),
+        "scalar arg for SelectItems<Scalar> must NOT emit FragmentKindMismatch; got {diags:#?}"
+    );
 }

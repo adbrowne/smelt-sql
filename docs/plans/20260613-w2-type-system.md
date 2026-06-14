@@ -53,7 +53,7 @@ Set the row to `blocked` + one-line reason; append a dated §"Blocked phases" en
 | P2 | VALUES temporal-family LUB + strict tz-mixing | done | D-28 | feat(db): strict temporal/tz mixing in VALUES columns → TypeMismatch (D-28) | 2026-06-14 |
 | P3 | Non-nullable origin for nullary built-ins; signature-nullability reconcile | done | NOW-null, C26 | feat(types): non-nullable origin for NOW/CURRENT_TIMESTAMP; lock bare-stays-nullable (C26) | 2026-06-14 |
 | P4 | Decimal widening predicate + arithmetic lift-trigger lock | done | C16, decimal-arith | feat(types): decimal widening safety predicate (s2≥s ∧ p2−s2≥p−s); lock decimal-arith trigger (C16) | 2026-06-14 |
-| P5 | FragmentKindMismatch direction (Scalar-only rejects Agg/Window) | pending | C17 | fix(db): FragmentKindMismatch fires for higher-kind fragment in scalar-only splice (C17) | |
+| P5 | FragmentKindMismatch direction (Scalar-only rejects Agg/Window) | done | C17 | fix(db): FragmentKindMismatch fires for higher-kind fragment in scalar-only splice (C17) | 2026-06-14 |
 | P6 | Close-out: property oracles green + registry + ROADMAP | pending | — | docs(spec-impl): close out W2 — type-system fixes landed; registry + roadmap | |
 
 **Status values**: `pending`, `done`, `blocked`.
