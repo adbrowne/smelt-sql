@@ -340,15 +340,19 @@ pub fn discover_python_models(
                 }
 
                 let model_id = ModelId::from_path(file_path.clone());
-                // Path-derived address: file stem (after paths: strip) + function name.
-                // Identical rule to SQL models per D-26: py/archive.py::users → smelt.archive.users.
+                // Path-derived address per D-26: py/archive.py::users → smelt.archive.users.
+                // When the file stem equals the function name (e.g. combined_events.py::combined_events),
+                // the stem already IS the leaf — don't push it twice. When stem ≠ function (multi-function
+                // files like archive.py::users), the stem is a namespace prefix and the function is the leaf.
                 let address_segments = {
                     let mut segs = smelt_core::discovery::ModelDiscovery::compute_address_segments(
                         file_path,
                         project_dir,
                         &config.paths,
                     );
-                    segs.push(output.name.clone());
+                    if segs.last().map(|s| s.as_str()) != Some(output.name.as_str()) {
+                        segs.push(output.name.clone());
+                    }
                     segs
                 };
                 new_models.push(ModelFile {
