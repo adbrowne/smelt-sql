@@ -272,7 +272,7 @@ pub enum SyntaxKind {
 
     // Phase B (meta-language): lambda and pipe CST nodes
     // LAMBDA: `fn IDENT => EXPR` or `fn (IDENT, ...) => EXPR`
-    // PIPE_EXPR: `EXPR |> CALL(args...)` — left-associative, lower precedence than ternary
+    // PIPE_EXPR: `EXPR |> CALL(args...)` — left-associative; spread (`...`) is outermost, pipe is next
     LAMBDA,
     PIPE_EXPR,
     // Phase F (meta-language): single parameter node inside LAMBDA_PARAM_LIST.

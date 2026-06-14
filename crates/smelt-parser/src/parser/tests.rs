@@ -4172,6 +4172,76 @@ fn parse_spread_in_values_row() {
     );
 }
 
+// ===== D-15: spread `...` is outermost operator; operand parsed through pipe level =====
+
+#[test]
+fn spread_wraps_pipe_chain() {
+    // `SELECT ...smelt.columns_of(x) |> map(fn c => c.name) FROM t`
+    // must parse as LIST_SPREAD whose operand is the PIPE_EXPR — NOT as
+    // a PIPE_EXPR whose LHS is a LIST_SPREAD.
+    let parse = parse("SELECT ...smelt.columns_of(x) |> map(fn c => c.name) FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "spread_wraps_pipe_chain: unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let spread = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LIST_SPREAD)
+        .expect("must have a LIST_SPREAD node");
+
+    // The LIST_SPREAD's first child node must be the PIPE_EXPR directly.
+    let operand = spread
+        .children()
+        .next()
+        .expect("LIST_SPREAD must have an operand child node");
+    assert_eq!(
+        operand.kind(),
+        PIPE_EXPR,
+        "LIST_SPREAD operand must be PIPE_EXPR directly (spread is outermost operator)"
+    );
+
+    // Negative check: no PIPE_EXPR should have a LIST_SPREAD as its left-hand side.
+    let wrong = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == PIPE_EXPR)
+        .any(|pipe| {
+            pipe.children()
+                .next()
+                .map(|c| c.kind() == LIST_SPREAD)
+                .unwrap_or(false)
+        });
+    assert!(
+        !wrong,
+        "LIST_SPREAD must not be the LHS of a PIPE_EXPR (would mean pipe is outer, spread inner)"
+    );
+}
+
+#[test]
+fn spread_of_plain_value_unchanged() {
+    // `SELECT ...xs FROM t` — a spread of a plain identifier still works
+    // correctly after the precedence change (no regression).
+    let parse = parse("SELECT ...xs FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "spread_of_plain_value_unchanged: unexpected errors: {:?}",
+        parse.errors
+    );
+    let spread = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LIST_SPREAD)
+        .expect("must have a LIST_SPREAD node");
+    // The plain identifier is still wrapped in EXPRESSION by parse_primary_expr.
+    assert!(
+        spread.descendants().any(|n| n.kind() == EXPRESSION),
+        "LIST_SPREAD must still contain an EXPRESSION for a plain identifier operand"
+    );
+}
+
 // ===== Phase B (meta-language): fn keyword + pipe-arrow + lambda + pipe CST =====
 
 #[test]

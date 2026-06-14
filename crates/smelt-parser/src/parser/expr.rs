@@ -957,11 +957,14 @@ impl<'a> super::Parser<'a> {
     /// Valid in any comma-separated grammar position (SELECT list, GROUP BY,
     /// ORDER BY, function args, IN-list, VALUES rows, list-literal elements).
     /// Forbidden-position validation is the type-checker's job (Phase 3).
+    ///
+    /// The operand is parsed at the pipe level so that `...xs |> map(f)` parses
+    /// as `...(xs |> map(f))` — spread is the outermost operator.
     pub(super) fn parse_list_spread(&mut self) {
         self.start_node(LIST_SPREAD);
         self.advance(); // consume `...` (DOT_DOT_DOT)
         self.skip_trivia();
-        self.parse_expression();
+        self.parse_pipe_expr();
         self.finish_node(); // LIST_SPREAD
     }
 

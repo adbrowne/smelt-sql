@@ -50,7 +50,7 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| P1 | Spread `...` outermost: parses after the pipe chain | pending | D-15 | feat(parser): spread is the outermost operator; applies after pipe chains (D-15) | |
+| P1 | Spread `...` outermost: parses after the pipe chain | done | D-15 | feat(parser): spread is the outermost operator; applies after pipe chains (D-15) | 2026-06-14 |
 | P2 | Wide-reflection ordering by `path` then `name` everywhere | pending | D-17 | fix(db): sort with_tag/all wide reflection by path then name (D-17) | |
 | P3 | `ColumnRef` head-constructor predicates (`is_decimal`/`is_string`/`is_temporal`/`is_integer`/`is_boolean`) | pending | D-21 | feat(meta): ColumnRef head-constructor predicates for family tests (D-21) | |
 | P4 | Deferred `m.has(k)` stays Boolean → short-circuit governs | pending | D-18 | fix(db): deferred map has() stays Boolean, never collapses ternary to Unknown (D-18) | |

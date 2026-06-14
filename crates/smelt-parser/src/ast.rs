@@ -1590,7 +1590,12 @@ impl Expr {
             | TYPE_REF | RECORD_TYPE_INLINE
             // P7d: Map API method calls with complex receivers
             // (e.g. `smelt.config.load_yaml(...).keys()`).
-            | MAP_METHOD_CALL => Some(Self(node)),
+            | MAP_METHOD_CALL
+            // Array literals are directly Expr-castable so that LIST_SPREAD operands
+            // (parsed at pipe level, no EXPRESSION wrapper) can be cast when the
+            // operand is an inline list — including the empty-list case `...[]`
+            // whose ARRAY_LITERAL has no child nodes.
+            | ARRAY_LITERAL => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {

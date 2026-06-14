@@ -1403,6 +1403,17 @@ mod tests {
     }
 
     #[test]
+    fn spread_of_piped_list_expands_correctly() {
+        // `...[a, b, c] |> map(fn c => c)` — spread operand is a PIPE_EXPR
+        // (D-15: spread is the outermost operator). The piped list still lowers
+        // to its scalar elements via eval_meta.
+        assert_eq!(
+            spreads("SELECT id, ...[a, b, c] |> map(fn c => c) FROM t"),
+            "SELECT id, a, b, c FROM t"
+        );
+    }
+
+    #[test]
     fn non_literal_spread_operand_left_verbatim() {
         // A `List<T>` variable spread is not yet lowered here; the list is
         // passed through unchanged rather than partially rewritten.
