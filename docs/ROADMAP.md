@@ -90,6 +90,16 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W5 — Python Model Reconciliation~~ ✅ (June 15, 2026)
+
+Five-phase remediation plan ([plan](plans/20260613-w5-python-models.md)) landing the D-python cluster from the 2026-06-13 spec review (D-22/23/25/26/27):
+
+- **Circularity = non-convergence (D-23)** — the self-tag/self-dir check is removed; circularity is now defined as a model set that never stabilises across the 5 bounded rounds. Convergent self-referential generators (a generator tags a model whose tag another generator queries) are legal.
+- **Path-derived Python address (D-26)** — Python model `address_segments` is now path-derived (directory prefix from the `.py` file's workspace-relative path minus any `paths:` prefix, plus function name as the leaf), identical to SQL model addressing. Collapses when the file stem equals the function name. Closes the `test_workspace` pre-flight regression introduced by P2 (stem-equals-function collapse rule).
+- **Full workspace-relative `path` in `find_models` (D-25)** — `ModelInfo.path` exposes the full workspace-relative path (forward-slash normalised); `directory` is now derived from it (final path component). The Python SDK `core.py` and Rust `ProjectModelInfo` are updated; `find_models(directory=…)` unchanged in behavior.
+- **Plain single-model frontmatter + name-mismatch blocking (D-22, D-27)** — Python output is always single-model: `--- name: X ---` section-delimiter format is normalized to plain `---\nname: X\n…` before processing; `FileMetadata::Multi` is never produced from Python output. A `name:` key that mismatches the function name emits `PythonModelNameMismatch` (Error, blocks the build) while retaining all other frontmatter keys (`materialization`, `tags`, `owner`). Frontmatter is now stripped before SQL parsing to eliminate spurious parse errors from YAML keys.
+- **Close-out** — retracted `directory`-implementation divergence note (implementation is now correct); updated note to user-guide gap only.
+
 ### ~~Spec-Remediation W4 — Meta-Language Reflection & Precedence~~ ✅ (June 15, 2026)
 
 Six-phase remediation plan ([plan](plans/20260613-w4-meta-language.md)) landing the D-meta cluster from the 2026-06-13 spec review (D-15/16/17/18/20/21):
