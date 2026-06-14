@@ -110,6 +110,27 @@ impl DataType {
         )
     }
 
+    /// Check if this type is a `Decimal` type (any precision/scale).
+    pub fn is_decimal(&self) -> bool {
+        matches!(self, DataType::Decimal { .. })
+    }
+
+    /// Check if this type is an integer type (`SmallInt`, `Integer`, `BigInt`).
+    ///
+    /// `Float`, `Double`, and `Decimal` are excluded — those belong to the broader
+    /// `is_numeric()` family.
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            DataType::SmallInt | DataType::Integer | DataType::BigInt
+        )
+    }
+
+    /// Check if this type is `Boolean`.
+    pub fn is_boolean(&self) -> bool {
+        matches!(self, DataType::Boolean)
+    }
+
     /// Check if this type is a complex/nested type (Array, Struct, Map)
     pub fn is_complex(&self) -> bool {
         matches!(

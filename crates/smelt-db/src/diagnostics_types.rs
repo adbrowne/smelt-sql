@@ -1049,7 +1049,10 @@ pub fn meta_reflection_diagnostic_message_with_table_expr(
         }
         DiagnosticCode::ColumnRefFieldUnknown => {
             let name = field_name.unwrap_or("?");
-            format!("ColumnRef has no field {name}; expected one of: name, type, is_numeric")
+            format!(
+                "ColumnRef has no field {name}; expected one of: \
+                 name, type, is_numeric, is_decimal, is_string, is_temporal, is_integer, is_boolean"
+            )
         }
         DiagnosticCode::ColumnsOfUnresolvableSchema => {
             let t = table_expr.unwrap_or("t");

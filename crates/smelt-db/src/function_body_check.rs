@@ -1979,10 +1979,10 @@ pub(crate) fn check_function_select_body(
         });
     }
 
-    // 1c. Phase C ColumnRef field validation (Phase C §"ColumnRef field access").
+    // 1c. ColumnRef field validation (§"ColumnRef field access").
     //     For each `<columnref-param>.<field>` expression where `<field>` is NOT
-    //     in the closed field set `{name, type, is_numeric}`, emit
-    //     `ColumnRefFieldUnknown` anchored at the field-name token.
+    //     in the closed field set, emit `ColumnRefFieldUnknown` anchored at the
+    //     field-name token.
     //
     //     This is separate from step 1a (which now suppresses ALL ColumnRef-
     //     qualified references to avoid double-diagnostics) and step 1b (which
@@ -3053,8 +3053,8 @@ pub use smelt_logical::lowering::{as_struct_to_sql, backend_supports_struct_lite
 /// A HOF call whose **first argument** is a `smelt.columns_of(…)` path call
 /// produces a `List<ColumnRef>` source list.  Each lambda bound from that list
 /// receives a `ColumnRef`-typed parameter.  When the lambda body accesses a
-/// field that is not in the closed field set `{name, type, is_numeric}`, this
-/// function emits `ColumnRefFieldUnknown` anchored at the field-name token.
+/// field that is not in the closed field set, this function emits
+/// `ColumnRefFieldUnknown` anchored at the field-name token.
 ///
 /// Algorithm (per spec §ColumnRef field access):
 /// 1. Walk every `FUNCTION_CALL` descendant of `select_stmt`.

@@ -45,12 +45,18 @@ use crate::fn_bodies::FnBodyMap;
 /// mirror the closed `ColumnRef` record (`meta_language.md` §"Reflection") and
 /// are pre-rendered to the Data-World text the meta evaluator splices: `name`
 /// is the column identifier, `is_numeric` is the analyzer's numeric test, and
-/// `type_name` is the column's `DataType` display string.
+/// `type_name` is the column's `DataType` display string. The `is_*` head-constructor
+/// predicates mirror `meta_language.md` §"Reflection: `smelt.columns_of`, `ColumnRef`".
 #[derive(Clone, Debug)]
 pub struct ColumnRefMeta {
     pub name: String,
     pub type_name: String,
     pub is_numeric: bool,
+    pub is_decimal: bool,
+    pub is_string: bool,
+    pub is_temporal: bool,
+    pub is_integer: bool,
+    pub is_boolean: bool,
 }
 
 /// One `ModelRef` / `SourceRef` reflected from the workspace's model / source
@@ -384,6 +390,26 @@ fn eval_columns_of(expr: &Expr, ctx: &MetaEvalContext) -> Option<MetaValue> {
             fields.insert(
                 "is_numeric".to_string(),
                 if c.is_numeric { "true" } else { "false" }.to_string(),
+            );
+            fields.insert(
+                "is_decimal".to_string(),
+                if c.is_decimal { "true" } else { "false" }.to_string(),
+            );
+            fields.insert(
+                "is_string".to_string(),
+                if c.is_string { "true" } else { "false" }.to_string(),
+            );
+            fields.insert(
+                "is_temporal".to_string(),
+                if c.is_temporal { "true" } else { "false" }.to_string(),
+            );
+            fields.insert(
+                "is_integer".to_string(),
+                if c.is_integer { "true" } else { "false" }.to_string(),
+            );
+            fields.insert(
+                "is_boolean".to_string(),
+                if c.is_boolean { "true" } else { "false" }.to_string(),
             );
             fields.insert("type".to_string(), c.type_name.clone());
             MetaElem::Record(fields)
@@ -1570,16 +1596,31 @@ mod tests {
                     name: "id".to_string(),
                     type_name: "INTEGER".to_string(),
                     is_numeric: true,
+                    is_decimal: false,
+                    is_string: false,
+                    is_temporal: false,
+                    is_integer: true,
+                    is_boolean: false,
                 },
                 ColumnRefMeta {
                     name: "label".to_string(),
                     type_name: "VARCHAR".to_string(),
                     is_numeric: false,
+                    is_decimal: false,
+                    is_string: true,
+                    is_temporal: false,
+                    is_integer: false,
+                    is_boolean: false,
                 },
                 ColumnRefMeta {
                     name: "amount".to_string(),
                     type_name: "DOUBLE".to_string(),
                     is_numeric: true,
+                    is_decimal: false,
+                    is_string: false,
+                    is_temporal: false,
+                    is_integer: false,
+                    is_boolean: false,
                 },
             ],
         );
@@ -1652,6 +1693,176 @@ mod tests {
         // context), so the function-call spread operand does not evaluate to a
         // scalar list and the whole spread is left verbatim (analyzer drop-on-error).
         assert_eq!(out, sql, "unresolvable reflection spread is left verbatim");
+    }
+
+    // ── D-21: head-constructor predicates (is_decimal/is_string/…) ─────────────
+
+    /// Columns covering each head-constructor family.
+    ///
+    /// Note: `Interval` is NOT in the `is_temporal` family per `meta_language.md`
+    /// §ColumnRef (the temporal family = Date/Timestamp/Time only, not Interval).
+    fn typed_columns() -> BTreeMap<String, Vec<ColumnRefMeta>> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "typed".to_string(),
+            vec![
+                ColumnRefMeta {
+                    name: "dec_col".to_string(),
+                    type_name: "DECIMAL(10,2)".to_string(),
+                    is_numeric: true,
+                    is_decimal: true,
+                    is_string: false,
+                    is_temporal: false,
+                    is_integer: false,
+                    is_boolean: false,
+                },
+                ColumnRefMeta {
+                    name: "txt_col".to_string(),
+                    type_name: "VARCHAR".to_string(),
+                    is_numeric: false,
+                    is_decimal: false,
+                    is_string: true,
+                    is_temporal: false,
+                    is_integer: false,
+                    is_boolean: false,
+                },
+                ColumnRefMeta {
+                    name: "ts_col".to_string(),
+                    type_name: "TIMESTAMP".to_string(),
+                    is_numeric: false,
+                    is_decimal: false,
+                    is_string: false,
+                    is_temporal: true,
+                    is_integer: false,
+                    is_boolean: false,
+                },
+                ColumnRefMeta {
+                    name: "interval_col".to_string(),
+                    type_name: "INTERVAL".to_string(),
+                    is_numeric: false,
+                    is_decimal: false,
+                    is_string: false,
+                    // Interval is NOT in the temporal family for the ColumnRef predicate
+                    // (meta_language.md §ColumnRef: temporal = Date/Timestamp/Time only).
+                    is_temporal: false,
+                    is_integer: false,
+                    is_boolean: false,
+                },
+                ColumnRefMeta {
+                    name: "int_col".to_string(),
+                    type_name: "INTEGER".to_string(),
+                    is_numeric: true,
+                    is_decimal: false,
+                    is_string: false,
+                    is_temporal: false,
+                    is_integer: true,
+                    is_boolean: false,
+                },
+                ColumnRefMeta {
+                    name: "bool_col".to_string(),
+                    type_name: "BOOLEAN".to_string(),
+                    is_numeric: false,
+                    is_decimal: false,
+                    is_string: false,
+                    is_temporal: false,
+                    is_integer: false,
+                    is_boolean: true,
+                },
+            ],
+        );
+        m
+    }
+
+    #[test]
+    fn is_decimal_predicate_filters_decimal_columns() {
+        let bodies = {
+            let mut m = FnBodyMap::new();
+            m.insert(
+                "decimal_names".to_string(),
+                (
+                    vec![("t".to_string(), None)],
+                    "smelt.columns_of(t) |> filter(fn c => c.is_decimal) |> map(fn c => c.name)"
+                        .to_string(),
+                ),
+            );
+            m
+        };
+        let out = eval_reflect(
+            "SELECT ...smelt.functions.decimal_names(smelt.typed) FROM smelt.typed",
+            typed_columns(),
+            &bodies,
+        );
+        assert_eq!(out, "SELECT dec_col FROM smelt.typed");
+    }
+
+    #[test]
+    fn is_string_predicate_filters_string_columns() {
+        let bodies = {
+            let mut m = FnBodyMap::new();
+            m.insert(
+                "string_names".to_string(),
+                (
+                    vec![("t".to_string(), None)],
+                    "smelt.columns_of(t) |> filter(fn c => c.is_string) |> map(fn c => c.name)"
+                        .to_string(),
+                ),
+            );
+            m
+        };
+        let out = eval_reflect(
+            "SELECT ...smelt.functions.string_names(smelt.typed) FROM smelt.typed",
+            typed_columns(),
+            &bodies,
+        );
+        assert_eq!(out, "SELECT txt_col FROM smelt.typed");
+    }
+
+    #[test]
+    fn is_temporal_predicate_excludes_interval() {
+        // meta_language.md §ColumnRef: temporal family = Date/Timestamp/Time only.
+        // Interval must NOT be included even though DataType::is_temporal() returns true
+        // for Interval (that method is for the type-constraint Temporal set, not this predicate).
+        let bodies = {
+            let mut m = FnBodyMap::new();
+            m.insert(
+                "temporal_names".to_string(),
+                (
+                    vec![("t".to_string(), None)],
+                    "smelt.columns_of(t) |> filter(fn c => c.is_temporal) |> map(fn c => c.name)"
+                        .to_string(),
+                ),
+            );
+            m
+        };
+        let out = eval_reflect(
+            "SELECT ...smelt.functions.temporal_names(smelt.typed) FROM smelt.typed",
+            typed_columns(),
+            &bodies,
+        );
+        // ts_col (TIMESTAMP) → true; interval_col (INTERVAL) → false per spec.
+        assert_eq!(out, "SELECT ts_col FROM smelt.typed");
+    }
+
+    #[test]
+    fn is_integer_predicate_filters_integer_columns() {
+        let bodies = {
+            let mut m = FnBodyMap::new();
+            m.insert(
+                "integer_names".to_string(),
+                (
+                    vec![("t".to_string(), None)],
+                    "smelt.columns_of(t) |> filter(fn c => c.is_integer) |> map(fn c => c.name)"
+                        .to_string(),
+                ),
+            );
+            m
+        };
+        let out = eval_reflect(
+            "SELECT ...smelt.functions.integer_names(smelt.typed) FROM smelt.typed",
+            typed_columns(),
+            &bodies,
+        );
+        assert_eq!(out, "SELECT int_col FROM smelt.typed");
     }
 
     // ── P7b build-path wide reflection (`smelt.models.*` / `smelt.sources.*`) ──

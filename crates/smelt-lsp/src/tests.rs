@@ -1093,8 +1093,9 @@ fn goto_def_from_lifted_identifier_resolves_to_source_column() {
     );
 }
 
-/// Completion at `c.<cursor>` offers exactly the three ColumnRef fields
-/// (`name`, `type`, `is_numeric`) and nothing else.
+/// Completion at `c.<cursor>` offers exactly the eight ColumnRef fields
+/// (`name`, `type`, `is_numeric`, `is_decimal`, `is_string`, `is_temporal`,
+/// `is_integer`, `is_boolean`) and nothing else.
 ///
 /// Tests `column_ref_field_completions` pure helper.
 #[test]
@@ -1102,21 +1103,24 @@ fn completion_at_column_ref_field_offers_closed_set() {
     let names = column_ref_field_completions();
     assert_eq!(
         names.len(),
-        3,
-        "column_ref_field_completions must return exactly 3 items, got: {names:?}"
+        8,
+        "column_ref_field_completions must return exactly 8 items, got: {names:?}"
     );
-    assert!(
-        names.contains(&"name".to_string()),
-        "column_ref_field_completions must include `name`, got: {names:?}"
-    );
-    assert!(
-        names.contains(&"type".to_string()),
-        "column_ref_field_completions must include `type`, got: {names:?}"
-    );
-    assert!(
-        names.contains(&"is_numeric".to_string()),
-        "column_ref_field_completions must include `is_numeric`, got: {names:?}"
-    );
+    for field in &[
+        "name",
+        "type",
+        "is_numeric",
+        "is_decimal",
+        "is_string",
+        "is_temporal",
+        "is_integer",
+        "is_boolean",
+    ] {
+        assert!(
+            names.contains(&field.to_string()),
+            "column_ref_field_completions must include `{field}`, got: {names:?}"
+        );
+    }
 }
 
 /// Completion at `smelt.columns_of(<cursor>)` — calls

@@ -759,6 +759,17 @@ impl SqlCompiler {
                     name: name.clone(),
                     type_name: tc.data_type.to_string(),
                     is_numeric: tc.data_type.is_numeric(),
+                    is_decimal: tc.data_type.is_decimal(),
+                    is_string: tc.data_type.is_string(),
+                    // meta_language.md §ColumnRef: temporal family = Date/Timestamp/Time
+                    // (excludes Interval, unlike DataType::is_temporal() which is for the
+                    // type-constraint Temporal set and includes Interval).
+                    is_temporal: matches!(
+                        tc.data_type,
+                        DataType::Date | DataType::Time | DataType::Timestamp { .. }
+                    ),
+                    is_integer: tc.data_type.is_integer(),
+                    is_boolean: tc.data_type.is_boolean(),
                 })
                 .collect::<Vec<_>>()
         };

@@ -96,8 +96,9 @@ pub fn is_meta_text_value(expr: &Expr, ctx: &TypeContext) -> Option<String> {
     }
 
     // Is the field the Text-typed `name` field (the only Text-typed member of
-    // the closed ColumnRef field set)?  Other fields (`type` → Unknown,
-    // `is_numeric` → Boolean) are NOT meta-Text and do not lift.
+    // the closed ColumnRef field set)?  Other fields (`type` → Unknown;
+    // `is_numeric`, `is_decimal`, `is_string`, `is_temporal`, `is_integer`,
+    // `is_boolean` → Boolean) are NOT meta-Text and do not lift.
     use smelt_types::signatures::{column_ref_field, TypeConstraint};
     let field_ty = column_ref_field(field)?;
     let is_text_field = matches!(
@@ -108,9 +109,8 @@ pub fn is_meta_text_value(expr: &Expr, ctx: &TypeContext) -> Option<String> {
         return None;
     }
 
-    // Return the field name token as the lifted identifier text.  In Phase C
-    // this is always `"name"` because the only Text-typed ColumnRef field is
-    // `name`.  Phase D may introduce additional Text-typed fields; they would
+    // Return the field name token as the lifted identifier text.  `name` is
+    // the only Text-typed ColumnRef field; future Text-typed additions would
     // be handled here automatically.
     Some(field.to_string())
 }

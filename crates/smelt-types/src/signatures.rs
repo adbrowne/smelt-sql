@@ -224,21 +224,25 @@ pub enum SmeltType {
         tail: StructRowTail,
     },
     /// `ColumnRef` — a closed meta-only record type produced by
-    /// `smelt.columns_of` (Phase C, meta-language reflection).
+    /// `smelt.columns_of` (meta-language reflection).
     ///
     /// Values of this type describe a single column from a `TableExpr`'s
-    /// schema. The type has exactly three fields (see [`COLUMN_REF_FIELDS`]):
+    /// schema. The type has eight fields (see [`COLUMN_REF_FIELDS`]):
     ///   - `name: Text` — the column identifier (un-quoted, case-preserved)
     ///   - `type: DataType` (meta literal) — the column's smelt `DataType`
     ///   - `is_numeric: Boolean` — `TRUE` iff `type` is in the `Numeric` constraint set
+    ///   - `is_decimal: Boolean` — `TRUE` iff head constructor is `Decimal`
+    ///   - `is_string: Boolean` — `TRUE` iff head constructor is Text/Varchar/Char
+    ///   - `is_temporal: Boolean` — `TRUE` iff head constructor is Date/Timestamp/Time (not Interval)
+    ///   - `is_integer: Boolean` — `TRUE` iff head constructor is SmallInt/Integer/BigInt
+    ///   - `is_boolean: Boolean` — `TRUE` iff head constructor is Boolean
     ///
     /// **Meta-only**: not user-writable as a `smelt.define` parameter or
-    /// return type. Values originate only from `smelt.columns_of` (Phase C)
-    /// and future reflection accessors (Phase D). No `ColumnRef` value
-    /// reaches the database engine.
+    /// return type. Values originate only from `smelt.columns_of` and
+    /// future reflection accessors. No `ColumnRef` value reaches the
+    /// database engine.
     ///
-    /// **Closed**: the v1 field set is exactly `{name, type, is_numeric}`.
-    /// Adding a field requires a spec edit and a compiler change.
+    /// **Closed**: adding a field requires a spec edit and a compiler change.
     ColumnRef,
     /// `ModelRef` — a closed meta-only record type produced by wide-reflection
     /// accessors `smelt.models.with_tag` and `smelt.models.all` (Phase D,
@@ -3335,36 +3339,62 @@ impl BuiltinRegistry {
 /// fields. Each field maps to a [`SmeltType`].
 pub type ColumnRefFieldType = SmeltType;
 
-/// The closed field set of [`SmeltType::ColumnRef`] (Phase C, meta-language).
+/// The closed field set of [`SmeltType::ColumnRef`] (meta-language).
 ///
-/// Invariant: exactly three entries — `name`, `type`, `is_numeric` — in this order.
-/// This is the single source of truth for the v1 field set. Any future addition
+/// Invariant: exactly eight entries — `name`, `type`, `is_numeric`, `is_decimal`,
+/// `is_string`, `is_temporal`, `is_integer`, `is_boolean` — in this order.
+/// This is the single source of truth for the field set. Any future addition
 /// requires a spec edit AND a change to this constant AND a bump of the field count
 /// in all exhaustiveness checks.
 ///
 /// Field types:
-/// - `name`       → `Expr<Text>`   (the column identifier as plain Text)
-/// - `type`       → `Unknown`      (represents the DataType meta-literal; the
+/// - `name`        → `Expr<Text>`    (the column identifier as plain Text)
+/// - `type`        → `Unknown`       (represents the DataType meta-literal; the
 ///   concrete meta type is not yet in SmeltType v1)
-/// - `is_numeric` → `Expr<Boolean>` (TRUE iff `type` ∈ Numeric constraint set)
+/// - `is_numeric`  → `Expr<Boolean>` (TRUE iff `type` ∈ Numeric constraint set)
+/// - `is_decimal`  → `Expr<Boolean>` (TRUE iff head constructor is `Decimal`)
+/// - `is_string`   → `Expr<Boolean>` (TRUE iff head constructor is Text/Varchar/Char)
+/// - `is_temporal` → `Expr<Boolean>` (TRUE iff head constructor is Date/Timestamp/Time — NOT Interval)
+/// - `is_integer`  → `Expr<Boolean>` (TRUE iff head constructor is SmallInt/Integer/BigInt)
+/// - `is_boolean`  → `Expr<Boolean>` (TRUE iff head constructor is Boolean)
 pub const COLUMN_REF_FIELDS: &[(&str, ColumnRefFieldType)] = &[
     (
         "name",
         SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
     ),
-    // `type` is a DataType meta-literal; Phase C maps it to Unknown as a
-    // forward-compatibility placeholder. Phase D will introduce a proper
-    // meta-DataType representation.
+    // `type` is a DataType meta-literal; maps to Unknown as a forward-compatibility
+    // placeholder until a proper meta-DataType representation is introduced.
     ("type", SmeltType::Unknown),
     (
         "is_numeric",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+    (
+        "is_decimal",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+    (
+        "is_string",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+    (
+        "is_temporal",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+    (
+        "is_integer",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+    (
+        "is_boolean",
         SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
     ),
 ];
 
 /// Look up a [`ColumnRef`] field by name (case-sensitive, exact match).
 ///
-/// Returns `Some(&SmeltType)` for `"name"`, `"type"`, or `"is_numeric"`;
+/// Returns `Some(&SmeltType)` for `"name"`, `"type"`, `"is_numeric"`, `"is_decimal"`,
+/// `"is_string"`, `"is_temporal"`, `"is_integer"`, or `"is_boolean"`;
 /// `None` for any other identifier (the closed-field invariant).
 ///
 /// Pure — no Salsa dependency.
@@ -6129,9 +6159,17 @@ mod tests {
 
     #[test]
     fn column_ref_field_set_is_closed() {
-        // COLUMN_REF_FIELDS must expose exactly {name: Text, type: DataType, is_numeric: Boolean}
-        // and nothing else.
-        let expected = ["name", "type", "is_numeric"];
+        // COLUMN_REF_FIELDS must expose exactly the 8 closed fields and nothing else.
+        let expected = [
+            "name",
+            "type",
+            "is_numeric",
+            "is_decimal",
+            "is_string",
+            "is_temporal",
+            "is_integer",
+            "is_boolean",
+        ];
         for field in &expected {
             assert!(
                 column_ref_field(field).is_some(),
@@ -6147,13 +6185,13 @@ mod tests {
             column_ref_field("column_name").is_none(),
             "COLUMN_REF_FIELDS must not contain 'column_name'"
         );
-        // Exactly three fields in the constant.
+        // Exactly eight fields in the constant.
         assert_eq!(
             COLUMN_REF_FIELDS.len(),
-            3,
-            "COLUMN_REF_FIELDS must have exactly 3 entries"
+            8,
+            "COLUMN_REF_FIELDS must have exactly 8 entries"
         );
-        // Verify field types.
+        // Verify key field types.
         let name_ty = column_ref_field("name").unwrap();
         assert!(
             matches!(
@@ -6163,23 +6201,29 @@ mod tests {
             "name field must be Text (Expr<Text>), got: {name_ty:?}"
         );
         let type_ty = column_ref_field("type").unwrap();
-        // c.type maps to SmeltType::Unknown as the Phase C sentinel for "DataType (meta literal)".
-        // Phase D will introduce a proper meta-DataType representation; for now Unknown
-        // is the documented placeholder per the Phase C plan.
         assert!(
             matches!(type_ty, SmeltType::Unknown),
-            "c.type maps to SmeltType::Unknown as the Phase C sentinel for DataType (meta literal); \
-             Phase D will introduce a proper meta-DataType representation; got: {:?}",
+            "c.type maps to SmeltType::Unknown as the forward-compatibility placeholder; got: {:?}",
             type_ty
         );
-        let is_numeric_ty = column_ref_field("is_numeric").unwrap();
-        assert!(
-            matches!(
-                is_numeric_ty,
-                SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
-            ),
-            "is_numeric field must be Boolean, got: {is_numeric_ty:?}"
-        );
+        // All is_* predicates must be Boolean.
+        for pred in &[
+            "is_numeric",
+            "is_decimal",
+            "is_string",
+            "is_temporal",
+            "is_integer",
+            "is_boolean",
+        ] {
+            let ty = column_ref_field(pred).unwrap();
+            assert!(
+                matches!(
+                    ty,
+                    SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+                ),
+                "{pred} field must be Boolean, got: {ty:?}"
+            );
+        }
     }
 
     // === Phase D (meta-language) TDD tests — ModelRef / SourceRef + wide reflection ===

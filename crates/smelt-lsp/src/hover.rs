@@ -627,7 +627,7 @@ pub fn hover_text_for_column_reference(
 
 /// Render hover text for a `ColumnRef`-typed lambda parameter binding.
 ///
-/// Shows `ColumnRef` as the type and lists the three closed fields with their
+/// Shows `ColumnRef` as the type and lists all closed fields with their
 /// declared types per `COLUMN_REF_FIELDS`.
 ///
 /// Pure — no Salsa dependency.
@@ -654,9 +654,10 @@ pub fn hover_text_for_column_ref_binding(param_name: &str) -> String {
 
 /// Render hover text for a `ColumnRef` field projection `c.<field>`.
 ///
-/// Returns `Some(text)` for the three recognised fields (`name`, `type`,
-/// `is_numeric`) and `None` for any other field name (the closed-field
-/// invariant — callers should emit `ColumnRefFieldUnknown` in that case).
+/// Returns `Some(text)` for any of the eight recognised fields (`name`, `type`,
+/// `is_numeric`, `is_decimal`, `is_string`, `is_temporal`, `is_integer`, `is_boolean`)
+/// and `None` for any other field name (the closed-field invariant — callers
+/// should emit `ColumnRefFieldUnknown` in that case).
 ///
 /// Pure — no Salsa dependency.
 pub fn hover_text_for_column_ref_field(field_name: &str) -> Option<String> {
@@ -742,8 +743,9 @@ pub fn goto_def_for_lifted_identifier(
 /// Return the closed set of `ColumnRef` field names for completion at a
 /// field-projection site (`c.<cursor>`).
 ///
-/// Returns exactly `["name", "type", "is_numeric"]` — the three fields in
-/// declaration order per `COLUMN_REF_FIELDS`.
+/// Returns all fields in declaration order per `COLUMN_REF_FIELDS`:
+/// `name`, `type`, `is_numeric`, `is_decimal`, `is_string`, `is_temporal`,
+/// `is_integer`, `is_boolean`.
 ///
 /// Pure — no Salsa dependency.
 pub fn column_ref_field_completions() -> Vec<String> {

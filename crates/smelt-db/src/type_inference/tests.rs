@@ -2664,6 +2664,69 @@ fn column_ref_field_projection_synthesises_field_type() {
     );
 }
 
+/// Head-constructor predicates `is_decimal`/`is_string`/`is_temporal`/`is_integer`/
+/// `is_boolean` synthesise `Boolean` for a `ColumnRef`-typed binding `c`.
+#[test]
+fn column_ref_head_predicates() {
+    let mut ctx = TypeContext::new();
+    ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+    ctx.add_lambda_param(
+        "c",
+        smelt_types::TypedColumn {
+            data_type: DataType::Unknown,
+            nullable: true,
+        },
+    );
+
+    for field in &[
+        "is_decimal",
+        "is_string",
+        "is_temporal",
+        "is_integer",
+        "is_boolean",
+    ] {
+        let ty = infer_field_on_column_ref("c", field, &ctx);
+        assert!(
+            matches!(
+                ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Boolean)
+                ))
+            ),
+            "c.{field} must synthesise Boolean, got: {:?}",
+            ty
+        );
+    }
+}
+
+/// `c.bogus` emits `ColumnRefFieldUnknown` whose message lists all 8 closed fields
+/// including the new head-constructor predicates.
+#[test]
+fn column_ref_field_unknown_lists_new_fields() {
+    use crate::diagnostics_types::meta_reflection_diagnostic_message;
+    let msg = meta_reflection_diagnostic_message(
+        crate::DiagnosticCode::ColumnRefFieldUnknown,
+        None,
+        Some("bogus"),
+    );
+    // The message must mention all 8 closed fields.
+    for field in &[
+        "name",
+        "type",
+        "is_numeric",
+        "is_decimal",
+        "is_string",
+        "is_temporal",
+        "is_integer",
+        "is_boolean",
+    ] {
+        assert!(
+            msg.contains(field),
+            "ColumnRefFieldUnknown message must mention '{field}'; got: {msg}"
+        );
+    }
+}
+
 /// Given a binding `c: ColumnRef`, `c.foo` emits exactly one
 /// `ColumnRefFieldUnknown` at the `foo` field token span and synthesises `Unknown`.
 #[test]
