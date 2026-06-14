@@ -362,7 +362,7 @@ reason = "model column binding: non-Concrete SmeltType → Unknown; meta-type ha
 
 # ── smelt-db / type_inference/values ──────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/values.rs:80"]
+["crates/smelt-db/src/type_inference/values.rs:81"]
 classification = "legitimate"
 reason = "VALUES row element type inference fallback — infer_expression_type returns None; conservative Unknown"
 
@@ -414,7 +414,7 @@ reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_w
 
 # ── smelt-types / lib ─────────────────────────────────────────────────────────
 
-["crates/smelt-types/src/lib.rs:248"]
+["crates/smelt-types/src/lib.rs:249"]
 classification = "legitimate"
 reason = "TypedColumn::unknown() constructor — this IS the definition of the Unknown sentinel value"
 

@@ -7051,4 +7051,43 @@ mod tests {
             "ModelDef must NOT be a data-world type"
         );
     }
+
+    // === C26 lock-in: signature nullability (bare = nullable, NOT NULL = opt-in) ===
+
+    /// A bare type annotation (`Expr<Integer>`) produces `not_null = false` on the
+    /// parameter — bare annotations are nullable, NOT NULL is the opt-in (C26, §11).
+    #[test]
+    fn bare_annotation_is_nullable() {
+        let (file, text) =
+            parse_file("smelt.define f(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)");
+        let sigs = extract_function_signatures(&file, &text);
+        assert_eq!(sigs.len(), 1);
+        assert!(
+            !sigs[0].params[0].not_null,
+            "bare Expr<Integer> annotation must have not_null=false (nullable by default); got not_null=true"
+        );
+        assert!(
+            !sigs[0].return_not_null,
+            "bare Expr<Integer> return annotation must have return_not_null=false; got true"
+        );
+    }
+
+    /// A `NOT NULL` qualifier on a parameter annotation sets `not_null = true`
+    /// — the opt-in mechanism for non-nullable signatures (C26, §11).
+    #[test]
+    fn not_null_annotation_opts_in() {
+        let (file, text) = parse_file(
+            "smelt.define f(x: Expr<Integer NOT NULL>) -> Expr<Integer NOT NULL> AS (x + 1)",
+        );
+        let sigs = extract_function_signatures(&file, &text);
+        assert_eq!(sigs.len(), 1);
+        assert!(
+            sigs[0].params[0].not_null,
+            "Expr<Integer NOT NULL> annotation must have not_null=true; got false"
+        );
+        assert!(
+            sigs[0].return_not_null,
+            "Expr<Integer NOT NULL> return annotation must have return_not_null=true; got false"
+        );
+    }
 }
