@@ -50,7 +50,7 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| P1 | Circularity = non-convergence (drop self-tag/self-dir rule) | pending | D-23 | fix(cli): Python circularity is non-convergence, not self-tag/self-dir (D-23) | |
+| P1 | Circularity = non-convergence (drop self-tag/self-dir rule) | done | D-23 | fix(cli): Python circularity is non-convergence, not self-tag/self-dir (D-23) | 2026-06-15 |
 | P2 | Python canonical address = directory-prefix + function name | pending | D-26 | feat(cli): path-derive Python model address_segments like SQL models (D-26) | |
 | P3 | `find_models` location = full workspace-relative `path`; `directory` derived | pending | D-25 | feat(python): expose full path on ModelInfo; derive directory from it (D-25) | |
 | P4 | Python frontmatter: plain single-model delimiter; name-mismatch blocks build, keeps other keys | pending | D-22, D-27 | fix(cli): Python single-model frontmatter; PythonModelNameMismatch blocks build, retains other keys (D-22, D-27) | |

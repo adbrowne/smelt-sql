@@ -347,10 +347,10 @@ pub fn discover_python_models(
             }
         }
 
-        // Check convergence: same set of models with same SQL
+        // Check convergence: same set of models with same SQL.
+        // A stable fixed-point is accepted regardless of self-referential
+        // queries — circularity is non-convergence, not self-tag/self-dir (D-23).
         if models_equal(&python_models, &new_models) {
-            // Validate fixed-point: no model matches its own input queries
-            validate_fixed_point(&new_models, config)?;
             return Ok(new_models);
         }
 
@@ -379,50 +379,6 @@ fn models_equal(a: &[ModelFile], b: &[ModelFile]) -> bool {
     a_sorted.sort();
     b_sorted.sort();
     a_sorted == b_sorted
-}
-
-/// Validate that no Python-produced model matches its own input queries.
-/// This prevents meta-level circular dependencies.
-fn validate_fixed_point(models: &[ModelFile], config: &Config) -> Result<()> {
-    for model in models {
-        if let ModelKind::Python { queries, .. } = &model.kind {
-            let model_tags =
-                config.get_tags(&model.name, model.metadata.as_ref().map(|b| b.as_ref()));
-            let model_directory = model
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str());
-
-            for query in queries {
-                if query.kind == "find_models" {
-                    if let Some(ref tag) = query.tag {
-                        if model_tags.contains(tag) {
-                            return Err(anyhow!(
-                                "Python model '{}' calls find_models(tag=\"{}\") but the produced \
-                                 model itself has that tag. This would create a circular dependency \
-                                 at the meta level.",
-                                model.name,
-                                tag
-                            ));
-                        }
-                    }
-                    if let Some(ref dir) = query.directory {
-                        if model_directory == Some(dir.as_str()) {
-                            return Err(anyhow!(
-                                "Python model '{}' calls find_models(directory=\"{}\") but the \
-                                 produced model itself is in that directory. This would create a \
-                                 circular dependency at the meta level.",
-                                model.name,
-                                dir
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 // `PythonModelQuery` is shared with `smelt-core` so the type that flows
@@ -914,8 +870,11 @@ def combined(project):
         assert!(python_models[0].content.contains("clicks"));
     }
 
+    // A generator that emits a model carrying a tag it also queries converges
+    // (the output stabilises after round 2) and must NOT be rejected as circular.
+    // D-23: circularity = non-convergence, not self-tag/self-dir.
     #[test]
-    fn test_circular_meta_dependency() {
+    fn self_referential_convergent_generation_is_legal() {
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -940,7 +899,10 @@ def combined(project):
         let models_dir = project_dir.join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
 
-        // Python model that queries tag "generated" but also produces a model with that tag
+        // A generator that queries a tag it also carries.  It ignores the
+        // children and always returns "SELECT 1", so the output is stable after
+        // the first round — this is the supported self-referential-generation
+        // pattern, not a cycle.
         std::fs::write(
             models_dir.join("circular.py"),
             r#"from smelt import model
@@ -982,10 +944,89 @@ def circular_model(project):
             target: None,
         };
 
+        // Convergent: the model always returns "SELECT 1" regardless of what
+        // find_models returns, so discovery stabilises after round 2.
+        let result = discover_python_models(&python_files, &[], &config, project_dir, None);
+        assert!(
+            result.is_ok(),
+            "convergent self-referential generator should be legal; got: {:?}",
+            result.err()
+        );
+    }
+
+    // A model whose output keeps changing across all rounds triggers the
+    // non-convergence error (the only valid circularity signal per D-23).
+    #[test]
+    fn non_convergent_set_errors() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // A counter file so the model returns different SQL on every call,
+        // preventing convergence across all 5 rounds.
+        let counter_file = tmp.path().join("counter.txt");
+        std::fs::write(&counter_file, "0").unwrap();
+        let counter_path = counter_file.display().to_string();
+
+        let py_content = format!(
+            r#"from smelt import model
+import os
+
+@model
+def unstable(project):
+    counter_file = r"{counter_path}"
+    n = int(open(counter_file).read().strip())
+    n += 1
+    open(counter_file, "w").write(str(n))
+    return f"SELECT {{n}}"
+"#
+        );
+        std::fs::write(models_dir.join("unstable.py"), &py_content).unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+            target: None,
+        };
+
         let result = discover_python_models(&python_files, &[], &config, project_dir, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("circular dependency"), "got: {}", err_msg);
+        assert!(
+            err_msg.contains("converge") || err_msg.contains("circular"),
+            "expected non-convergence error, got: {err_msg}"
+        );
     }
 
     #[test]
@@ -1298,91 +1339,6 @@ def colliding(project):
             result.err()
         );
         // The collision is detected at the Salsa/diagnostic-parity layer, not here.
-    }
-
-    #[test]
-    fn test_validate_fixed_point_detects_circular_tag() {
-        let metadata = crate::metadata::ModelMetadata {
-            tags: vec!["event_source".to_string()],
-            ..Default::default()
-        };
-
-        let model = ModelFile {
-            name: "combined_events".to_string(),
-            path: PathBuf::from("models/combined_events.py"),
-            content: "SELECT 1".to_string(),
-            refs: Vec::new(),
-            parse_errors: Vec::new(),
-            metadata: Some(Box::new(metadata)),
-            kind: ModelKind::Python {
-                source_line: 1,
-                queries: vec![PythonModelQuery {
-                    kind: "find_models".to_string(),
-                    tag: Some("event_source".to_string()),
-                    directory: None,
-                }],
-            },
-            model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
-            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
-            address_segments: Vec::new(),
-        };
-
-        let config = crate::config::Config {
-            name: "test".to_string(),
-            version: 1,
-            paths: vec!["models".to_string()],
-            targets: std::collections::HashMap::new(),
-            default_materialization: crate::config::Materialization::View,
-            models: std::collections::HashMap::new(),
-            python: None,
-            target: None,
-        };
-
-        let result = validate_fixed_point(&[model], &config);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("circular"));
-    }
-
-    #[test]
-    fn test_validate_fixed_point_no_false_positive() {
-        let metadata = crate::metadata::ModelMetadata {
-            tags: vec!["output_model".to_string()],
-            ..Default::default()
-        };
-
-        let model = ModelFile {
-            name: "combined_events".to_string(),
-            path: PathBuf::from("models/combined_events.py"),
-            content: "SELECT 1".to_string(),
-            refs: Vec::new(),
-            parse_errors: Vec::new(),
-            metadata: Some(Box::new(metadata)),
-            kind: ModelKind::Python {
-                source_line: 1,
-                queries: vec![PythonModelQuery {
-                    kind: "find_models".to_string(),
-                    tag: Some("event_source".to_string()),
-                    directory: None,
-                }],
-            },
-            model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
-            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
-            address_segments: Vec::new(),
-        };
-
-        let config = crate::config::Config {
-            name: "test".to_string(),
-            version: 1,
-            paths: vec!["models".to_string()],
-            targets: std::collections::HashMap::new(),
-            default_materialization: crate::config::Materialization::View,
-            models: std::collections::HashMap::new(),
-            python: None,
-            target: None,
-        };
-
-        let result = validate_fixed_point(&[model], &config);
-        assert!(result.is_ok());
     }
 
     #[test]
