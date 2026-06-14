@@ -90,6 +90,17 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W2 — Type-System Correctness Fixes~~ ✅ (June 14, 2026)
+
+Six-phase remediation plan ([plan](plans/20260613-w2-type-system.md)) landing the D-types cluster from the 2026-06-13 spec review (D-28/29, C16/17/26, NOW-null, decimal-arith):
+
+- **`Char(_)` folded into string family (D-29)** — `normalize()` now folds `Char(_)` alongside `Text`/`Varchar(None)` so all three are interchangeable for type-equality.
+- **VALUES temporal-family LUB with strict tz-mixing (D-28)** — a VALUES column that mixes naive `Timestamp` with `Timestamp WITH TIME ZONE`, or `Date` with `Timestamp`, now emits `TypeMismatch` at the VALUES span; no silent `Unknown`.
+- **Non-nullable origin for NOW/CURRENT_TIMESTAMP; signature-nullability lock (NOW-null, C26)** — registry-declared non-nullable nullary built-ins carry a non-nullable origin (§11); bare parameter/return annotations stay nullable, `NOT NULL` is the opt-in (locked with tests).
+- **Decimal widening safety predicate (C16)** — `decimal_widening_is_safe(p1,s1,p2,s2)` enforces `s2≥s ∧ (p2−s2)≥(p−s)` in `types_assignment_compatible`; decimal-arithmetic integer-lift trigger locked with a regression test.
+- **FragmentKindMismatch direction (C17)** — a Scalar-only splice point now rejects Agg/Window fragments; `ExprKind::Scalar` in the kind check no longer admits any kind unconditionally.
+- **Close-out** — property oracles green at 1000 cases; no Known-Divergence retractions needed (specs already describe the correct behavior).
+
 ### ~~Spec-Remediation W1 — Universal Discovery & `paths:`-Strip Addressing~~ ✅ (June 14, 2026)
 
 Five-phase remediation plan ([plan](plans/20260613-w1-resolve-addressing.md)) landing the D-resolve cluster from the 2026-06-13 spec review (D-01/02/04/05/06):
