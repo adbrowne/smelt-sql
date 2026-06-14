@@ -472,6 +472,7 @@ const PHASE_B_CODES: &[smelt_db::DiagnosticCode] = &[
     smelt_db::DiagnosticCode::ReducerArgTypeMismatch,
     smelt_db::DiagnosticCode::ReducerArgNotCompileTime,
     smelt_db::DiagnosticCode::ReducerNamedArgument,
+    smelt_db::DiagnosticCode::HofNamedArgument,
     smelt_db::DiagnosticCode::TernaryConditionNotBoolean,
     smelt_db::DiagnosticCode::TernaryBranchTypeMismatch,
     smelt_db::DiagnosticCode::TernaryKeywordShadowed,
@@ -633,6 +634,17 @@ fn meta_hofs_broken_lambda_result_type_mismatch() {
         "examples/meta_hofs_broken_lambda_result_type_mismatch",
         "models/lambda_result_type_mismatch.sql",
         smelt_db::DiagnosticCode::LambdaResultTypeMismatch,
+    );
+}
+
+/// D-19 TDD: `examples/meta_hofs_broken_hof_named_argument/` produces exactly
+/// one `HofNamedArgument` diagnostic.
+#[test]
+fn meta_hofs_broken_hof_named_argument() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_hof_named_argument",
+        "models/hof_named_argument.sql",
+        smelt_db::DiagnosticCode::HofNamedArgument,
     );
 }
 

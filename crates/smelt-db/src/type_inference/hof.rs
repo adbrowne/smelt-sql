@@ -2117,6 +2117,39 @@ pub fn check_hof_position_diagnostics(
                     continue;
                 };
 
+                // Named-argument guard (D-19): HOFs take positional args only.
+                // Check the ARG_LIST's direct children for NAMED_PARAM before
+                // anything else — `call.arguments()` silently skips them, so a
+                // named-lambda would otherwise pass undetected.
+                let first_named_param = call
+                    .syntax()
+                    .children()
+                    .find(|n| n.kind() == smelt_parser::SyntaxKind::ARG_LIST)
+                    .and_then(|arg_list| {
+                        arg_list
+                            .children()
+                            .find(|n| n.kind() == smelt_parser::SyntaxKind::NAMED_PARAM)
+                    });
+                if let Some(named_node) = first_named_param {
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::HofNamedArgument,
+                            Some(&call_name),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: named_node.text_range(),
+                        code: Some(crate::DiagnosticCode::HofNamedArgument),
+                        data: None,
+                    });
+                    continue;
+                }
+
                 let args = call.arguments();
                 if args.is_empty() {
                     continue;

@@ -329,6 +329,12 @@ pub enum DiagnosticCode {
     /// Anchored at the named argument span.
     /// Introduced in Phase F of the meta-language plan.
     ReducerNamedArgument,
+    /// Emitted when a HOF call (`map`, `filter`, `reduce`) passes any argument
+    /// by name (e.g. `map(list: xs, fn c => c)`). HOFs take positional
+    /// arguments only. Fires before the lambda/kind check so a named-lambda
+    /// still surfaces this code rather than being silently accepted. Anchored
+    /// at the first named-argument span in the HOF's argument list.
+    HofNamedArgument,
     /// Emitted when the ternary condition expression is not Boolean.
     /// Message: "ternary condition expects Boolean; found {actual}".
     /// Anchored at the condition expression span.
@@ -953,6 +959,13 @@ pub fn meta_hof_diagnostic_message(
         DiagnosticCode::ReducerNamedArgument => {
             let r = reducer.unwrap_or("?");
             format!("reducer {} takes positional arguments only", r)
+        }
+        DiagnosticCode::HofNamedArgument => {
+            let h = hof.unwrap_or("HOF");
+            format!(
+                "{} takes positional arguments only; named arguments are not supported",
+                h
+            )
         }
         DiagnosticCode::TernaryConditionNotBoolean => {
             let act = actual.unwrap_or("?");

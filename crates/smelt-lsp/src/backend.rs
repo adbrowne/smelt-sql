@@ -305,6 +305,7 @@ impl Backend {
                 DbCode::ReducerArgTypeMismatch => "reducer-arg-type-mismatch",
                 DbCode::ReducerArgNotCompileTime => "reducer-arg-not-compile-time",
                 DbCode::ReducerNamedArgument => "reducer-named-argument",
+                DbCode::HofNamedArgument => "hof-named-argument",
                 DbCode::TernaryConditionNotBoolean => "ternary-condition-not-boolean",
                 DbCode::TernaryBranchTypeMismatch => "ternary-branch-type-mismatch",
                 DbCode::TernaryKeywordShadowed => "ternary-keyword-shadowed",

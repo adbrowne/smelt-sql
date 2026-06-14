@@ -2199,6 +2199,54 @@ fn reduce_with_non_reducer_second_arg_emits_hof_expects_reducer() {
     );
 }
 
+/// D-19: `map(list => xs, fn c => c)` — named arg to HOF — emits `HofNamedArgument`.
+#[test]
+fn hof_named_arg_emits_hof_named_argument() {
+    let sql = "SELECT map(list => [1, 2, 3], fn c => c * 2)";
+    let select = parse_select_stmt(sql);
+    let ctx = TypeContext::new();
+    let diags = check_hof_position_diagnostics(&select, &ctx, "");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::HofNamedArgument)),
+        "map with named arg must emit HofNamedArgument, got: {:?}",
+        diags
+    );
+}
+
+/// D-19: A named arg that *is* a lambda still fires `HofNamedArgument`, not silently accepted.
+#[test]
+fn hof_named_lambda_arg_emits_hof_named_argument() {
+    let sql = "SELECT map([1, 2, 3], transform => fn c => c * 2)";
+    let select = parse_select_stmt(sql);
+    let ctx = TypeContext::new();
+    let diags = check_hof_position_diagnostics(&select, &ctx, "");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::HofNamedArgument)),
+        "map with named lambda arg must emit HofNamedArgument, got: {:?}",
+        diags
+    );
+}
+
+/// D-19 (positive case): positional args to HOF must not fire `HofNamedArgument`.
+#[test]
+fn hof_positional_args_ok_no_hof_named_argument() {
+    let sql = "SELECT map([1, 2, 3], fn c => c * 2)";
+    let select = parse_select_stmt(sql);
+    let ctx = TypeContext::new();
+    let diags = check_hof_position_diagnostics(&select, &ctx, "");
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::HofNamedArgument)),
+        "map with positional args must not emit HofNamedArgument, got: {:?}",
+        diags
+    );
+}
+
 /// `xs |> 3 + 4` — non-call RHS — emits `PipeRhsNotCall`.
 #[test]
 fn pipe_rhs_not_call_emits_diagnostic() {

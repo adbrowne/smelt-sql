@@ -166,6 +166,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          (upstream source tables not seeded in the standalone build env)",
     ),
     (
+        "architecture_domain_layout",
+        "Catalog Error: Table with name sources_raw_invoices does not exist \
+         (W1 domain-layout fixture: demonstrates billing/finance path prefixes; \
+         stg_invoices references smelt.sources.raw_invoices which is not seeded \
+         in the standalone build env)",
+    ),
+    (
         "seed_source_type_join",
         "Catalog Error: Table with name sources_raw_orders does not exist \
          (D5 probe fixture: seeds+sources type-alias coverage; the seed loads \
