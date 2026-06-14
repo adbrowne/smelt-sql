@@ -90,6 +90,17 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W4 — Meta-Language Reflection & Precedence~~ ✅ (June 15, 2026)
+
+Six-phase remediation plan ([plan](plans/20260613-w4-meta-language.md)) landing the D-meta cluster from the 2026-06-13 spec review (D-15/16/17/18/20/21):
+
+- **Spread `...` outermost (D-15)** — `...expr |> map(f)` now parses as `...(expr |> map(f))`; the spread operand is parsed through the pipe-level grammar so spread is the lowest-precedence (outermost) operator. No parentheses needed.
+- **Wide-reflection ordering by `path` then `name` (D-17)** — all four wide-reflection accessors (`models_with_tag`, `models_all`, `sources_with_tag`, `sources_all`) now sort by generator-file path then model/source name as a tiebreaker, giving co-emitted models a total, deterministic order.
+- **`ColumnRef` head-constructor predicates (D-21)** — five new Boolean fields on `ColumnRef` (`is_decimal`, `is_string`, `is_temporal`, `is_integer`, `is_boolean`) allow family-level column tests without spelling out precision/scale. `c.type` exact-structural equality remains deferred (unlanded meta-`DataType` change; divergence note retained).
+- **Deferred `m.has(k)` stays Boolean (D-18)** — a non-static-key `m.has(k)` resolves to `Boolean` (not `Unknown`), so `if m.has(k) then m.get(k) else default` short-circuits correctly for dynamic keys; `Unknown`-collapse is reserved only for CONDs that surfaced a diagnostic.
+- **`ModelRef`/`SourceRef` name/path carved out of identifier lift (D-16, D-20)** — `m.name` and `m.path` render as SQL string literals in all positions (column-ref, AS-alias, ORDER BY, GROUP BY), never bare identifiers. `ModelRef.path` remains generator-file provenance; path-keyed operations (collision, dedup, goto-def) key on the per-emission `smelt.<path>` address.
+- **Close-out** — no Known-Divergence retractions needed (specs already describe the correct behavior for all D-15/16/17/18/20/21 items; the `c.type`-Unknown divergence is preserved by design).
+
 ### ~~Spec-Remediation W2 — Type-System Correctness Fixes~~ ✅ (June 14, 2026)
 
 Six-phase remediation plan ([plan](plans/20260613-w2-type-system.md)) landing the D-types cluster from the 2026-06-13 spec review (D-28/29, C16/17/26, NOW-null, decimal-arith):
