@@ -1079,3 +1079,59 @@ pub fn validate_map_type_expression(
 
     (sentinels, map_type.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rowan::TextRange;
+    use smelt_types::{
+        signatures::{SmeltType, TypeConstraint},
+        DataType,
+    };
+
+    fn map_text_integer() -> SmeltType {
+        SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+        }
+    }
+
+    fn dynamic_text_arg() -> MapCallArg {
+        MapCallArg::Positional {
+            ty: SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+            literal_value: None,
+        }
+    }
+
+    /// Lock: `m.has(k)` with a non-static (dynamic) key synthesises `Boolean`,
+    /// not `Unknown`.  A deferred `has` must never resolve to `Unknown` — the
+    /// result stays a `Boolean` meta-value whose resolution defers to expansion
+    /// time (spec §"Maps" rule 4; D-18).
+    #[test]
+    fn deferred_has_is_boolean_not_unknown() {
+        let receiver = map_text_integer();
+        let args = [dynamic_text_arg()];
+        let zero = TextRange::new(0.into(), 0.into());
+        let result = infer_map_method_call(&receiver, "has", &args, None, zero);
+
+        assert!(
+            result.sentinels.is_empty(),
+            "m.has(dynamic_k) must emit no diagnostics; got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(
+                result.inferred,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+            ),
+            "m.has(dynamic_k) must synthesise Boolean (not Unknown); got: {:?}",
+            result.inferred
+        );
+        assert_eq!(
+            result.static_resolution,
+            StaticResolution::Deferred,
+            "m.has(dynamic_k) must report Deferred (not a static lookup); got: {:?}",
+            result.static_resolution
+        );
+    }
+}

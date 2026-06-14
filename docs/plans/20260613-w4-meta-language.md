@@ -53,7 +53,7 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 | P1 | Spread `...` outermost: parses after the pipe chain | done | D-15 | feat(parser): spread is the outermost operator; applies after pipe chains (D-15) | 2026-06-14 |
 | P2 | Wide-reflection ordering by `path` then `name` everywhere | done | D-17 | fix(db): sort with_tag/all wide reflection by path then name (D-17) | 2026-06-14 |
 | P3 | `ColumnRef` head-constructor predicates (`is_decimal`/`is_string`/`is_temporal`/`is_integer`/`is_boolean`) | done | D-21 | feat(meta): ColumnRef head-constructor predicates for family tests (D-21) | 2026-06-14 |
-| P4 | Deferred `m.has(k)` stays Boolean → short-circuit governs | pending | D-18 | fix(db): deferred map has() stays Boolean, never collapses ternary to Unknown (D-18) | |
+| P4 | Deferred `m.has(k)` stays Boolean → short-circuit governs | done | D-18 | fix(db): deferred map has() stays Boolean, never collapses ternary to Unknown (D-18) | 2026-06-14 |
 | P5 | `ModelRef`/`SourceRef` `name`/`path` carved out of identifier lift; per-emission identity for path-keyed ops | pending | D-16, D-20 | fix(meta): ModelRef/SourceRef name/path render as string literals, not lifted identifiers (D-16, D-20) | |
 | P6 | Close-out: registry + ROADMAP | pending | — | docs(spec-impl): close out W4 — meta-language reflection/precedence landed; registry + roadmap | |
 
