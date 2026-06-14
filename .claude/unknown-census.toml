@@ -104,15 +104,15 @@ reason = "MissingArgument case — diagnostic already emitted; Unknown param typ
 classification = "legitimate"
 reason = "default_type_lookup fallback — default parameter type unavailable; Unknown is conservative"
 
-["crates/smelt-db/src/function_body_check.rs:2525"]
+["crates/smelt-db/src/function_body_check.rs:2544"]
 classification = "legitimate"
 reason = "lambda body check — column type unavailable (unwrap_or fallback for TypedColumn); conservative"
 
-["crates/smelt-db/src/function_body_check.rs:3148"]
+["crates/smelt-db/src/function_body_check.rs:3167"]
 classification = "legitimate"
 reason = "lambda param registered as Unknown scalar so bare identifier resolves via lookup_identifier"
 
-["crates/smelt-db/src/function_body_check.rs:3363"]
+["crates/smelt-db/src/function_body_check.rs:3382"]
 classification = "legitimate"
 reason = "model-ref lambda param registered as Unknown scalar for identifier resolution"
 

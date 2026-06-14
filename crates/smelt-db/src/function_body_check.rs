@@ -2119,13 +2119,32 @@ fn types_assignment_compatible(expected: &DataType, actual: &DataType) -> bool {
     if expected.normalize() == actual.normalize() {
         return true;
     }
+    use DataType::*;
     // Allow widening an Integer-family actual into a wider Integer-family
     // expected. Do NOT accept Double → BigInt (lossy) or Numeric → Text.
-    use DataType::*;
-    matches!(
+    if matches!(
         (expected, actual),
         (BigInt, SmallInt) | (BigInt, Integer) | (Integer, SmallInt)
-    )
+    ) {
+        return true;
+    }
+    // Decimal widening: Decimal(p2,s2) can hold Decimal(p1,s1) iff s2>=s1 and
+    // (p2-s2)>=(p1-s1) — integer-digit capacity must not shrink (spec §"Safe scalar
+    // type widenings" C16).
+    if let (
+        Decimal {
+            precision: p2,
+            scale: s2,
+        },
+        Decimal {
+            precision: p1,
+            scale: s1,
+        },
+    ) = (expected, actual)
+    {
+        return smelt_types::decimal_widening_is_safe(*p1, *s1, *p2, *s2);
+    }
+    false
 }
 
 // ============================================================================
@@ -4355,5 +4374,58 @@ mod tests {
             frames[1].decl_path.as_deref(),
             Some(Path::new("models/cohorts.gen.sql"))
         );
+    }
+
+    #[test]
+    fn decimal_arg_widens_to_param() {
+        use smelt_types::DataType;
+
+        // Decimal(5,2) argument satisfies Decimal(10,2) parameter (safe widening)
+        assert!(types_assignment_compatible(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2
+            },
+            &DataType::Decimal {
+                precision: 5,
+                scale: 2
+            }
+        ));
+
+        // Same type is trivially compatible
+        assert!(types_assignment_compatible(
+            &DataType::Decimal {
+                precision: 5,
+                scale: 2
+            },
+            &DataType::Decimal {
+                precision: 5,
+                scale: 2
+            }
+        ));
+
+        // Decimal(5,4) into Decimal(5,2) is rejected — integer digits would shrink
+        assert!(!types_assignment_compatible(
+            &DataType::Decimal {
+                precision: 5,
+                scale: 2
+            },
+            &DataType::Decimal {
+                precision: 5,
+                scale: 4
+            }
+        ));
+
+        // Scale shrink: Decimal(10,1) cannot hold Decimal(10,2)
+        assert!(!types_assignment_compatible(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 1
+            },
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        ));
     }
 }

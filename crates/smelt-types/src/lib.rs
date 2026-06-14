@@ -273,6 +273,17 @@ pub fn format_typed_column_display(tc: &TypedColumn) -> String {
     tc.to_string()
 }
 
+/// Returns true iff `Decimal(p2, s2)` can losslessly hold a value from `Decimal(p1, s1)`.
+///
+/// Safe iff:
+///   - `s2 >= s1`       — fractional-digit capacity doesn't shrink
+///   - `(p2 - s2) >= (p1 - s1)` — integer-digit capacity doesn't shrink
+///
+/// Callers must ensure `p >= s` for both arguments (invariant of valid Decimal types).
+pub fn decimal_widening_is_safe(p1: u8, s1: u8, p2: u8, s2: u8) -> bool {
+    s2 >= s1 && (p2 - s2) >= (p1 - s1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +477,20 @@ mod tests {
             max_length: Some(100),
         });
         assert_eq!(col.to_string(), "VARCHAR(100)");
+    }
+
+    #[test]
+    fn decimal_widening_safe_and_unsafe() {
+        // Decimal(10,2) can hold Decimal(5,2): s2=2>=s1=2, (10-2)=8>=(5-2)=3 ✓
+        assert!(decimal_widening_is_safe(5, 2, 10, 2));
+        // Identity: same type holds itself
+        assert!(decimal_widening_is_safe(5, 2, 5, 2));
+        // Decimal(5,4) cannot hold Decimal(5,2): (5-4)=1 < (5-2)=3 — integer digits shrink
+        assert!(!decimal_widening_is_safe(5, 2, 5, 4));
+        // Scale shrinks: Decimal(10,1) cannot hold Decimal(10,2): s2=1 < s1=2
+        assert!(!decimal_widening_is_safe(10, 2, 10, 1));
+        // Both scale and integer digits increase: Decimal(15,3) can hold Decimal(5,2)
+        assert!(decimal_widening_is_safe(5, 2, 15, 3));
     }
 
     #[test]

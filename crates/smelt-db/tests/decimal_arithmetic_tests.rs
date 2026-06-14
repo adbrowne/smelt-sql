@@ -477,3 +477,29 @@ fn abs_decimal_cross_model_schema_resolved() {
         result_col.data_type
     );
 }
+
+/// C16 regression-lock: the decimal-arith integer-lift trigger fires only when ≥1 operand
+/// is already Decimal. Two integer operands must stay integer-family; one integer + one
+/// Decimal must produce a Decimal result.
+#[test]
+fn integer_arith_no_decimal_lift() {
+    // 1 + 1 → integer-family (no lift to Decimal)
+    let types = infer("SELECT 1 + 1 AS result");
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].data_type.is_numeric()
+            && !matches!(types[0].data_type, DataType::Decimal { .. })
+            && !matches!(types[0].data_type, DataType::Float | DataType::Double),
+        "integer + integer must stay integer-family (not Decimal), got {:?}",
+        types[0].data_type
+    );
+
+    // 1 + CAST(1 AS DECIMAL(5,2)) → Decimal (trigger fires because right operand is Decimal)
+    let types = infer("SELECT 1 + CAST(1 AS DECIMAL(5,2)) AS result");
+    assert_eq!(types.len(), 1);
+    assert!(
+        matches!(types[0].data_type, DataType::Decimal { .. }),
+        "integer + Decimal must lift to Decimal, got {:?}",
+        types[0].data_type
+    );
+}
