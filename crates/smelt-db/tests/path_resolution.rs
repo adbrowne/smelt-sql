@@ -198,6 +198,108 @@ fn legacy_smelt_ref_is_parse_error() {
     );
 }
 
+/// D-08/D-09 lock: a bare unresolved `smelt.<path>` that is NOT under the
+/// `smelt.sources.*` namespace routes to `UndefinedModelRef` (the generic
+/// fallback), not to `UndefinedSource`.
+#[test]
+fn bare_unresolved_path_is_undefined_model_ref() {
+    let root = PathBuf::from("/fake/routing");
+    let model_path = root.join("models").join("anchor.sql");
+    let model_src = "SELECT 1 AS id\n";
+    // smelt.a.b.c — not under sources.* → UndefinedModelRef
+    let caller_path = root.join("models").join("caller.sql");
+    let caller_src = "SELECT id FROM smelt.a.b.c\n";
+
+    let (db, ws, files) = build_db(root, &[(model_path, model_src), (caller_path, caller_src)]);
+    let caller_file = files[1];
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    let undef_model: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UndefinedModelRef))
+        .collect();
+    let undef_source: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UndefinedSource))
+        .collect();
+    assert_eq!(
+        undef_model.len(),
+        1,
+        "bare unresolved smelt.a.b.c must emit exactly one UndefinedModelRef; got {diags:#?}"
+    );
+    assert!(
+        undef_source.is_empty(),
+        "bare unresolved smelt.a.b.c must NOT emit UndefinedSource; got {diags:#?}"
+    );
+}
+
+/// D-08/D-09 lock: an unresolved `smelt.sources.<schema>.<table>` path routes
+/// to `UndefinedSource`, not to `UndefinedModelRef`.
+#[test]
+fn sources_namespace_unresolved_is_undefined_source() {
+    let root = PathBuf::from("/fake/sources_routing");
+    let model_path = root.join("models").join("anchor.sql");
+    let model_src = "SELECT 1 AS id\n";
+    // smelt.sources.raw.missing_table — no sources.yml → UndefinedSource
+    let caller_path = root.join("models").join("caller.sql");
+    let caller_src = "SELECT id FROM smelt.sources.raw.missing_table\n";
+
+    let (db, ws, files) = build_db(root, &[(model_path, model_src), (caller_path, caller_src)]);
+    let caller_file = files[1];
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    let undef_source: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UndefinedSource))
+        .collect();
+    let undef_model: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UndefinedModelRef))
+        .collect();
+    assert_eq!(
+        undef_source.len(),
+        1,
+        "smelt.sources.raw.missing_table must emit exactly one UndefinedSource; got {diags:#?}"
+    );
+    assert!(
+        undef_model.is_empty(),
+        "smelt.sources.raw.missing_table must NOT emit UndefinedModelRef; got {diags:#?}"
+    );
+}
+
+/// D-08/D-09 lock: the legacy `smelt.source(...)` call-form is a parse error
+/// (rejected by the parser), not routed to UndefinedSource or UndefinedModelRef.
+#[test]
+fn legacy_smelt_source_is_parse_error() {
+    let root = PathBuf::from("/fake/legacy_source");
+    let model_path = root.join("models").join("anchor.sql");
+    let model_src = "SELECT 1 AS id\n";
+    let caller_path = root.join("models").join("caller.sql");
+    // Legacy call-form: must be a parse error pointing to smelt.sources.*
+    let caller_src = "SELECT * FROM smelt.source('raw.events')\n";
+
+    let (db, ws, files) = build_db(root, &[(model_path, model_src), (caller_path, caller_src)]);
+    let caller_file = files[1];
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    let parse_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ParseError))
+        .collect();
+    let undef_source: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UndefinedSource))
+        .collect();
+    assert!(
+        !parse_errors.is_empty(),
+        "smelt.source('raw.events') must produce a ParseError; got {diags:#?}"
+    );
+    assert!(
+        undef_source.is_empty(),
+        "smelt.source('raw.events') must NOT produce UndefinedSource; got {diags:#?}"
+    );
+}
+
 /// Regression test: `resolve_ref_path` must not do work proportional to
 /// `workspace.files * workspace.files` per call. Earlier, `file_path_tuple`
 /// invoked `smelt_core::Config::load` (which performs disk I/O and YAML

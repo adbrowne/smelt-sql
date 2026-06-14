@@ -358,8 +358,9 @@ fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabil
     }
 }
 
-/// Resolve all smelt.ref() and smelt.source() calls in arbitrary SQL text by replacing
-/// them with qualified table names.
+/// Resolve `smelt.<path>` references in arbitrary SQL text by replacing
+/// them with qualified table names. Legacy `smelt.ref()` / `smelt.source()` call-forms
+/// are now parse errors; only the unified `smelt.<path>` form is handled here.
 pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     let parse = smelt_parser::parse(sql);
     let schema_owned = schema.to_string();
@@ -471,7 +472,7 @@ pub struct SqlCompiler {
     cross_engine_refs: HashMap<String, String>,
     /// Upstream model and seed schemas, used by `apply_type_casts` to build a
     /// populated `TypeContext` so aggregate widening rules apply correctly to
-    /// `smelt.ref()` and `smelt.source()` columns.
+    /// `smelt.<path>` ref and source columns.
     ///
     /// Without this, `apply_type_casts` would build an empty `TypeContext`,
     /// causing column types from refs/sources to resolve as `Unknown` and
@@ -703,7 +704,7 @@ impl SqlCompiler {
     }
 
     /// Provide upstream model/seed/source schemas so `apply_type_casts` can
-    /// resolve `smelt.ref()` and `smelt.source()` column types correctly.
+    /// resolve `smelt.<path>` ref and source column types correctly.
     pub(crate) fn set_upstream_schemas(&mut self, schemas: Arc<UpstreamSchemas>) {
         self.upstream_schemas = schemas;
     }
@@ -1793,7 +1794,7 @@ impl CompilerRegistry {
     /// Set the upstream model/seed/source schemas on every compiler in the
     /// registry. Schemas are computed once per project and shared across
     /// targets, since `apply_type_casts` only needs to know what columns each
-    /// `smelt.ref()` / `smelt.source()` provides — it doesn't care which
+    /// `smelt.<path>` ref or source provides — it doesn't care which
     /// backend ultimately materialises the upstream model.
     pub fn set_upstream_schemas_all(&mut self, schemas: Arc<UpstreamSchemas>) {
         for compiler in self.compilers.values_mut() {

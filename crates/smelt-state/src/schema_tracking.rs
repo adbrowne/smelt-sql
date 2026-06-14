@@ -766,8 +766,12 @@ fn is_safe_type_widening(from: &DataType, to: &DataType) -> bool {
 /// (e.g., from `SchemaChange::ChangeType`). Falls back to `false`
 /// if either type fails to parse.
 fn is_safe_type_widening_str(from: &str, to: &str) -> bool {
+    // Do NOT normalize here: normalize() collapses VARCHAR(n)/TEXT/CHAR into
+    // one canonical type for equality, losing the length information needed to
+    // distinguish safe widenings (VARCHAR(50)→VARCHAR(100)) from narrowings.
+    // is_safe_type_widening has explicit Text/Char arms that handle raw types.
     match (parse_type(from), parse_type(to)) {
-        (Ok(from_dt), Ok(to_dt)) => is_safe_type_widening(&from_dt.normalize(), &to_dt.normalize()),
+        (Ok(from_dt), Ok(to_dt)) => is_safe_type_widening(&from_dt, &to_dt),
         _ => false,
     }
 }

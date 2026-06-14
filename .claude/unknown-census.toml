@@ -118,11 +118,11 @@ reason = "model-ref lambda param registered as Unknown scalar for identifier res
 
 # ── smelt-db / queries/function_diagnostics ───────────────────────────────────
 
-["crates/smelt-db/src/queries/function_diagnostics.rs:1401"]
+["crates/smelt-db/src/queries/function_diagnostics.rs:1439"]
 classification = "legitimate"
 reason = "schema column type fallback — col.data_type.clone().unwrap_or; optional type, not an error"
 
-["crates/smelt-db/src/queries/function_diagnostics.rs:1455"]
+["crates/smelt-db/src/queries/function_diagnostics.rs:1493"]
 classification = "legitimate"
 reason = "argument type inference fallback in function diagnostics — conservative when type can't be determined"
 
@@ -368,7 +368,7 @@ reason = "VALUES row element type inference fallback — infer_expression_type r
 
 # ── smelt-runtime ─────────────────────────────────────────────────────────────
 
-["crates/smelt-runtime/src/compile.rs:559"]
+["crates/smelt-runtime/src/compile.rs:560"]
 classification = "legitimate"
 reason = "compile step model column type fallback — col.data_type unwrap_or; column type may be unresolved"
 
@@ -380,35 +380,35 @@ reason = "compile step model column type fallback — col.data_type unwrap_or; c
 # StructFieldAdded sites (which DID propagate Unknown to operations); these
 # type-comparison sites are safe and classified legitimate.
 
-["crates/smelt-state/src/schema_tracking.rs:922"]
+["crates/smelt-state/src/schema_tracking.rs:926"]
 classification = "legitimate"
 reason = "ChangeType from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:923"]
+["crates/smelt-state/src/schema_tracking.rs:927"]
 classification = "legitimate"
 reason = "ChangeType to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:967"]
+["crates/smelt-state/src/schema_tracking.rs:971"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:968"]
+["crates/smelt-state/src/schema_tracking.rs:972"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:996"]
+["crates/smelt-state/src/schema_tracking.rs:1000"]
 classification = "legitimate"
 reason = "MapValueTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:997"]
+["crates/smelt-state/src/schema_tracking.rs:1001"]
 classification = "legitimate"
 reason = "MapValueTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:1051"]
+["crates/smelt-state/src/schema_tracking.rs:1055"]
 classification = "legitimate"
 reason = "NestedTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:1052"]
+["crates/smelt-state/src/schema_tracking.rs:1056"]
 classification = "legitimate"
 reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
