@@ -2028,6 +2028,61 @@ mod tests {
         assert_eq!(eval_wide(&once, Vec::new(), audit_sources()), once);
     }
 
+    // ── D-16: ModelRef/SourceRef name/path identifier-lift carve-out ─────────────
+
+    #[test]
+    fn model_ref_name_renders_as_string_literal() {
+        // D-16: `m.name` renders as a SQL *string literal* even in a SELECT
+        // expression (column-reference) position — the position where an
+        // unquoted identifier would be a column reference.  Wide-reflection
+        // Text from ModelRef/SourceRef name/path is a data value carved out of
+        // the four-position identifier lift (meta_language.md §"Meta-Text-as-
+        // identifier lift" rule 8).  The quoted form confirms the carve-out:
+        // if `m.name` were lifted to a bare identifier the way `c.name` is, we
+        // would see `SELECT cohort_a, cohort_b` instead.
+        let out = eval_wide(
+            "SELECT ...map(smelt.models.with_tag('cohort'), fn m => m.name)",
+            cohort_models(),
+            Vec::new(),
+        );
+        assert_eq!(
+            out, "SELECT 'cohort_a', 'cohort_b'",
+            "m.name must render as a quoted string literal, not a bare identifier (D-16 carve-out)"
+        );
+
+        // `m.path` likewise: generator-file path is data, not a column name.
+        let out_path = eval_wide(
+            "SELECT ...map(smelt.models.with_tag('cohort'), fn m => m.path)",
+            cohort_models(),
+            Vec::new(),
+        );
+        assert_eq!(
+            out_path, "SELECT 'models/cohort_a.sql', 'models/cohort_b.sql'",
+            "m.path must render as a quoted string literal (D-16)"
+        );
+    }
+
+    #[test]
+    fn column_ref_name_still_lifts_to_identifier() {
+        // D-16 contrast: `ColumnRef.name` in the same SELECT expression
+        // (column-reference) position lifts to a bare identifier.  The carve-
+        // out in rule 8 is specific to ModelRef/SourceRef name/path;
+        // `ColumnRef.name` is a column name and IS subject to the four-
+        // position identifier lift (meta_language.md §"Reflection:
+        // smelt.columns_of, ColumnRef, identifier lift" rule 6).
+        let bodies = FnBodyMap::new();
+        let out = eval_reflect(
+            "SELECT ...map(smelt.columns_of(smelt.base), fn c => c.name)",
+            base_columns(),
+            &bodies,
+        );
+        assert_eq!(
+            out,
+            "SELECT id, label, amount",
+            "ColumnRef.name must lift to a bare identifier in SELECT position (not a quoted string)"
+        );
+    }
+
     // ── P7c build-path config-loader (`smelt.config.load_yaml`) tests ─────────
 
     /// A `cohorts.yaml` with three records (mixed Text / Integer fields).

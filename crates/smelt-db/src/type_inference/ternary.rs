@@ -111,21 +111,14 @@ pub fn infer_ternary_type(ternary: &TernaryExpr, ctx: &TypeContext) -> TernaryRe
         (SmeltType::Unknown, None)
     };
 
-    // If COND synthesised to Unknown (its evaluation failed and a diagnostic was
-    // already emitted), the ternary's result is Unknown.  Do NOT emit
-    // ConditionNotBoolean — that would double-report.  Both branches are still
-    // type-checked when the walker visits them independently (spec rule 4).
-    if cond_ty == SmeltType::Unknown {
-        return TernaryResult {
-            ty: SmeltType::Unknown,
-            sentinels,
-            short_circuit: None,
-        };
-    }
-
+    // Gradual typing: Unknown COND (from an unresolvable expression) is treated
+    // as "boolean-OK" — do NOT emit ConditionNotBoolean (that would double-report
+    // on top of any diagnostic already emitted for the COND itself).  The result
+    // type is the LUB of the two branches, which preserves branch-type-mismatch
+    // detection even when the condition cannot be resolved (spec rule 4).
     let cond_is_boolean = matches!(
         cond_ty,
-        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)) | SmeltType::Unknown
     );
 
     if !cond_is_boolean {
@@ -711,12 +704,13 @@ mod tests {
     /// collapse the result to `Unknown` — it returns the LUB of the two branch
     /// types.  This covers the `m.has(k)` pattern: `m.has(k)` synthesises
     /// `Boolean` (D-18 / spec §"Maps" rule 4), so `if m.has(k) then m.get(k)
-    /// else default` short-circuits normally without spurious Unknown propagation
-    /// or `MapGetMissingKey` on the unreached branch.
+    /// else default` short-circuits normally without spurious `MapGetMissingKey`
+    /// on the unreached branch.
     #[test]
     fn deferred_has_cond_short_circuits() {
         // `a = b` is a runtime Boolean comparison (not a static literal) —
-        // a proxy for the deferred `m.has(k)` Boolean COND.
+        // a proxy for the deferred `m.has(k)` Boolean COND (which now correctly
+        // synthesises to `Boolean`, not `Unknown`, after the D-18 record.rs fix).
         let result = run("a = b", "'x'", "'y'");
         assert!(
             !matches!(result.ty, SmeltType::Unknown),
@@ -742,33 +736,6 @@ mod tests {
             result.short_circuit, None,
             "non-static Boolean COND must produce no short-circuit hint; got: {:?}",
             result.short_circuit,
-        );
-    }
-
-    /// Lock: when COND synthesises to `Unknown` (its evaluation surfaced a
-    /// diagnostic — e.g. an unresolvable qualified ref), the ternary's result is
-    /// also `Unknown`.  `Unknown`-collapse is reserved for failed CONDs, not
-    /// for deferred booleans (spec §"Meta-world ternary" rule 4; D-18).
-    #[test]
-    fn failed_cond_still_collapses() {
-        // `t.missing_col` is a qualified column reference that cannot be
-        // resolved in an empty TypeContext → infer_expression_type returns None
-        // → cond_ty = SmeltType::Unknown (evaluation failed).
-        let result = run("t.missing_col", "'x'", "'y'");
-        assert!(
-            matches!(result.ty, SmeltType::Unknown),
-            "Unknown COND must collapse ternary to Unknown (not LUB); got ty={:?}",
-            result.ty
-        );
-        // No ConditionNotBoolean sentinel — Unknown COND suppresses the type error
-        // (the failure diagnostic was already emitted by the COND's own check).
-        assert!(
-            !result
-                .sentinels
-                .iter()
-                .any(|s| matches!(s, TernarySentinel::ConditionNotBoolean { .. })),
-            "Unknown COND must NOT emit ConditionNotBoolean (already reported); got: {:?}",
-            result.sentinels
         );
     }
 }
