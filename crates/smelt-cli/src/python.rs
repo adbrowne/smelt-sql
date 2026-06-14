@@ -174,6 +174,25 @@ fn build_project_context(
     serde_json::to_string(&context).expect("Failed to serialize project context")
 }
 
+/// Normalize Python model SQL output to plain single-model frontmatter (D-22).
+///
+/// Python output uses `--- name: X ---` section-delimiter format in some cases,
+/// but Python output is always single-model. Rewrite the first line when it is
+/// a section delimiter so downstream code sees standard `---` frontmatter.
+fn normalize_python_sql(sql: &str) -> std::borrow::Cow<'_, str> {
+    let first_line_end = sql.find('\n').unwrap_or(sql.len());
+    let first_line = sql[..first_line_end].trim();
+    if first_line.starts_with("--- name:") && first_line.ends_with("---") && first_line != "---" {
+        let after_prefix = &first_line[9..]; // skip "--- name:"
+        let name_part = &after_prefix[..after_prefix.len() - 3]; // remove " ---"
+        let name = name_part.trim();
+        let rest = &sql[first_line_end..]; // includes leading '\n' or is empty
+        std::borrow::Cow::Owned(format!("---\nname: {name}{rest}"))
+    } else {
+        std::borrow::Cow::Borrowed(sql)
+    }
+}
+
 /// Discover and execute Python models.
 ///
 /// Uses iterative discovery with fixed-point validation:
@@ -233,8 +252,15 @@ pub fn discover_python_models(
                     .map(|&line| line as usize + 1)
                     .unwrap_or(1);
 
-                // Parse the returned SQL through smelt-parser
-                let parse = smelt_parser::parse(&output.sql);
+                // D-22: Python output is always single-model. Normalize
+                // `--- name: X ---` section-delimiter format to plain frontmatter
+                // so downstream code sees a consistent `---` block.
+                let normalized_sql = normalize_python_sql(&output.sql);
+
+                // Strip frontmatter before SQL parsing to avoid spurious parse
+                // errors from YAML keys being interpreted as SQL identifiers.
+                let clean_sql = smelt_parser::strip_frontmatter(&normalized_sql);
+                let parse = smelt_parser::parse(&clean_sql);
 
                 let refs = if let Some(file) = smelt_parser::File::cast(parse.syntax()) {
                     crate::discovery::extract_refs(&file)
@@ -242,12 +268,12 @@ pub fn discover_python_models(
                     Vec::new()
                 };
 
-                // Extract metadata from generated SQL frontmatter, checking for
-                // name mismatches between the frontmatter `name:` field and the
-                // Python function name (BUG-038).
+                // Extract metadata from the normalized SQL frontmatter, checking
+                // for name mismatches between the frontmatter `name:` field and
+                // the Python function name (D-27).
                 let mut name_mismatch_error: Option<smelt_parser::ParseError> = None;
                 let model_metadata = {
-                    let fm_opt = match extract_file_metadata(&output.sql) {
+                    let fm_opt = match extract_file_metadata(&normalized_sql) {
                         Ok(fm) => Some(fm),
                         Err(e) => {
                             tracing::warn!("Python model {}: {}", output.name, e);
@@ -256,11 +282,10 @@ pub fn discover_python_models(
                     };
                     match fm_opt {
                         Some(FileMetadata::Single { metadata, .. }) => {
-                            // If the frontmatter declares a `name:` that differs from
-                            // the function name, emit PythonModelNameMismatch and drop
-                            // the frontmatter so defaults apply.
                             if let Some(ref fm_name) = metadata.name {
                                 if fm_name != &output.name {
+                                    // D-27: emit mismatch error AND retain other
+                                    // frontmatter keys (only `name:` is stripped).
                                     name_mismatch_error = Some(smelt_parser::ParseError {
                                         message: format!(
                                             "PythonModelNameMismatch: frontmatter declares \
@@ -270,7 +295,9 @@ pub fn discover_python_models(
                                         ),
                                         range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                                     });
-                                    None
+                                    let mut retained = metadata;
+                                    retained.name = None;
+                                    Some(retained)
                                 } else {
                                     Some(metadata)
                                 }
@@ -278,44 +305,10 @@ pub fn discover_python_models(
                                 Some(metadata)
                             }
                         }
-                        Some(FileMetadata::Multi { models }) => {
-                            // In multi-section output, each section is identified by
-                            // its `name:` field.  Collect the section names first so
-                            // we can report them on a mismatch, then find the match.
-                            let section_names: Vec<String> = models
-                                .iter()
-                                .filter_map(|s| s.metadata.name.clone())
-                                .collect();
-                            let matched = models
-                                .into_iter()
-                                .find(|s| s.metadata.name.as_deref() == Some(&output.name));
-                            if matched.is_none() {
-                                // No section matched the function name — mismatch.
-                                let declared = if section_names.is_empty() {
-                                    "(none)".to_string()
-                                } else {
-                                    section_names
-                                        .iter()
-                                        .map(|n| format!("'{n}'"))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                };
-                                name_mismatch_error = Some(smelt_parser::ParseError {
-                                    message: format!(
-                                        "PythonModelNameMismatch: frontmatter section \
-                                         name(s) {declared} do not match function name \
-                                         '{}'; the frontmatter name must match the \
-                                         function name",
-                                        output.name
-                                    ),
-                                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
-                                });
-                            }
-                            matched.map(|section| Box::new(section.metadata))
-                        }
+                        // D-22: Multi is unreachable after normalization.
+                        Some(FileMetadata::Multi { .. }) => None,
                         Some(FileMetadata::Empty) | None => None,
-                        // Generator files produce models via meta-language evaluation;
-                        // Python model output is not a generator file.
+                        // Generator files are not valid Python model output.
                         Some(FileMetadata::Generator { .. }) => None,
                     }
                 };
@@ -358,7 +351,7 @@ pub fn discover_python_models(
                 new_models.push(ModelFile {
                     name: output.name.clone(),
                     path: file_path.clone(),
-                    content: output.sql,
+                    content: normalized_sql.into_owned(),
                     refs,
                     parse_errors,
                     metadata: model_metadata,
@@ -1398,19 +1391,13 @@ def colliding(project):
         assert!(python_files.is_empty());
     }
 
-    /// BUG-038: a Python `@model` whose returned SQL starts with
-    /// `--- name: X ---` frontmatter where X ≠ function name must produce a
-    /// `PythonModelNameMismatch` error rather than silently dropping the
-    /// frontmatter (materialization etc.) and registering under the function name
-    /// with view defaults.
+    /// D-27: Python name mismatch must block the build AND retain other frontmatter keys.
+    /// The `name:` field is the only thing flagged; `materialization:`, `tags:` etc. are kept.
     ///
-    /// Before the fix the model would be produced with `metadata = None`
+    /// BUG-038 regression: before the fix the model was produced with `metadata = None`
     /// (view default) and `parse_errors.is_empty()`.
-    /// After the fix the model is produced (not a hard error) but
-    /// `parse_errors` contains exactly one entry whose message starts with
-    /// `"PythonModelNameMismatch"`.
     #[test]
-    fn test_python_model_frontmatter_name_mismatch_emits_diagnostic() {
+    fn python_name_mismatch_blocks_and_retains_other_keys() {
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -1436,10 +1423,9 @@ def colliding(project):
         let models_dir = project_dir.join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
 
-        // Python model that returns SQL with a frontmatter `name:` that
-        // differs from the function name.  Before BUG-038 fix this silently
-        // dropped the `materialization: table` and registered the model as a
-        // view with no diagnostic.
+        // Python model that returns SQL with a frontmatter `name:` that differs
+        // from the function name. Uses `--- name: X ---` section-delimiter format
+        // (D-22: must be treated as single-model, not multi-model sections).
         let py_content = r#"from smelt import model
 
 @model
@@ -1504,12 +1490,186 @@ SELECT 1 AS id
             "error message must mention function name 'my_func'; got: {msg}"
         );
 
-        // The frontmatter metadata must be dropped (mismatch → no metadata
-        // applied; materialisation falls back to project default).
+        // D-27: other frontmatter keys (materialization, tags) must be RETAINED on mismatch.
+        // Only the `name:` key is flagged; the rest is applied to the model.
+        let meta = model
+            .metadata
+            .as_ref()
+            .expect("metadata must be retained (not None) on name mismatch (D-27)");
+        assert_eq!(
+            meta.materialization,
+            Some(crate::config::Materialization::Table),
+            "materialization must be retained from frontmatter despite name mismatch"
+        );
         assert!(
-            model.metadata.is_none(),
-            "metadata must be None when there is a name mismatch; got: {:#?}",
-            model.metadata
+            meta.name.is_none(),
+            "name: field must be stripped from retained metadata; got: {:?}",
+            meta.name
+        );
+    }
+
+    /// D-22: Python output with plain `---` frontmatter (no `name:` key) is always
+    /// treated as single-model. Identity comes from the function name.
+    #[test]
+    fn python_plain_frontmatter_single_model() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let py_content = r#"from smelt import model
+
+@model
+def my_model(project):
+    return """---
+materialization: table
+---
+SELECT 1 AS id
+"""
+"#;
+        std::fs::write(models_dir.join("my_model.py"), py_content).unwrap();
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+            target: None,
+        };
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+        let python_models =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+
+        assert_eq!(python_models.len(), 1);
+        let model = &python_models[0];
+        assert_eq!(model.name, "my_model");
+        assert!(
+            model.parse_errors.is_empty(),
+            "plain frontmatter must produce no errors; got: {:#?}",
+            model.parse_errors
+        );
+        let meta = model
+            .metadata
+            .as_ref()
+            .expect("metadata must be populated from plain frontmatter");
+        assert_eq!(
+            meta.materialization,
+            Some(crate::config::Materialization::Table)
+        );
+    }
+
+    /// D-22: `--- name: X ---` (section-delimiter format) in Python output must NOT
+    /// create a multi-model section — Python output is always single-model.
+    /// When X matches the function name, no error is produced and metadata is retained.
+    #[test]
+    fn python_multimodel_delimiter_not_a_section() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // Output uses `--- name: X ---` section-delimiter format where X matches
+        // the function name. D-22: treated as single-model, not a section list.
+        let py_content = r#"from smelt import model
+
+@model
+def matching_func(project):
+    return """--- name: matching_func ---
+materialization: table
+---
+SELECT 1 AS id
+"""
+"#;
+        std::fs::write(models_dir.join("matching_func.py"), py_content).unwrap();
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+            target: None,
+        };
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+        let python_models =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+
+        // D-22: exactly 1 model, not multiple from multi-model parsing.
+        assert_eq!(
+            python_models.len(),
+            1,
+            "section-delimiter format must produce exactly 1 model (D-22), not multiple"
+        );
+        let model = &python_models[0];
+        assert_eq!(model.name, "matching_func");
+        // D-22: when name matches, no PythonModelNameMismatch error.
+        assert!(
+            model.parse_errors.is_empty(),
+            "matching name must produce no errors; got: {:#?}",
+            model.parse_errors
+        );
+        // D-22: metadata from the frontmatter body is retained.
+        let meta = model
+            .metadata
+            .as_ref()
+            .expect("metadata must be populated from section-delimiter format (D-22)");
+        assert_eq!(
+            meta.materialization,
+            Some(crate::config::Materialization::Table),
+            "materialization must be retained"
         );
     }
 
