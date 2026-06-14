@@ -2554,9 +2554,9 @@ fn make_model_ref_value(
 }
 
 /// Return every model in the workspace whose merged tag set contains `tag`,
-/// sorted ascending by workspace-relative `path` (byte-lexicographic, `/`
-/// separators). Salsa-cached; invalidated when the workspace file list or any
-/// file's content/frontmatter changes.
+/// sorted ascending by workspace-relative `path` then `name`
+/// (byte-lexicographic, `/` separators). Salsa-cached; invalidated when the
+/// workspace file list or any file's content/frontmatter changes.
 ///
 /// Includes both hand-authored models and generator-emitted models.
 #[salsa::tracked]
@@ -2571,7 +2571,7 @@ pub fn models_with_tag(
         .filter(|m| m.tags.contains(&tag))
         .cloned()
         .collect();
-    result.sort_by(|a, b| a.path.cmp(&b.path));
+    result.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.name.cmp(&b.name)));
     Arc::new(result)
 }
 
@@ -2607,8 +2607,9 @@ fn make_source_ref_value(project_root: &Path, source: &smelt_core::SourceInfo) -
 }
 
 /// Return every source in the project whose `tags:` list contains `tag`,
-/// sorted ascending by workspace-relative `path` (byte-lexicographic, `/`
-/// separators). Salsa-cached; invalidated when the `ProjectInput` changes.
+/// sorted ascending by workspace-relative `path` then `name`
+/// (byte-lexicographic, `/` separators). Salsa-cached; invalidated when the
+/// `ProjectInput` changes.
 #[salsa::tracked]
 pub fn sources_with_tag(
     db: &dyn salsa::Database,
@@ -2622,13 +2623,13 @@ pub fn sources_with_tag(
         .filter(|s| s.tags.contains(&tag))
         .map(|s| make_source_ref_value(&root, s))
         .collect();
-    result.sort_by(|a, b| a.path.cmp(&b.path));
+    result.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.name.cmp(&b.name)));
     Arc::new(result)
 }
 
 /// Return every source in the project, sorted ascending by workspace-relative
-/// `path` (byte-lexicographic, `/` separators). Salsa-cached; invalidated
-/// when the `ProjectInput` changes.
+/// `path` then `name` (byte-lexicographic, `/` separators). Salsa-cached;
+/// invalidated when the `ProjectInput` changes.
 #[salsa::tracked]
 pub fn sources_all(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SourceRefValue>> {
     let root = project.root(db).clone();
@@ -2637,7 +2638,7 @@ pub fn sources_all(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<S
         .iter()
         .map(|s| make_source_ref_value(&root, s))
         .collect();
-    result.sort_by(|a, b| a.path.cmp(&b.path));
+    result.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.name.cmp(&b.name)));
     Arc::new(result)
 }
 
@@ -3456,6 +3457,108 @@ mod tests {
         assert_eq!(
             ts.event_time_column, "dt",
             "inherited event_time_column must be 'dt'"
+        );
+    }
+
+    // ─── Test Phase P2 (D-17): wide-reflection path+name ordering ────────────
+
+    /// `models_with_tag` returns models sorted ascending by `path` then `name`
+    /// (byte-lexicographic), not by `path` alone — so co-emitted models sharing
+    /// a generator path are deterministically ordered.
+    #[test]
+    fn with_tag_orders_by_path_then_name() {
+        // Two models in different directories (so paths differ), both tagged.
+        // We register them in reverse path order to confirm the sort re-orders them.
+        let model_sql = "---\ntags: [my_tag]\n---\nSELECT 1";
+        let (db, _root, workspace) = db_with_files(&[
+            ("models/z_dir/model.sql", model_sql),
+            ("models/a_dir/model.sql", model_sql),
+        ]);
+
+        let result = models_with_tag(&db, workspace, "my_tag".to_string());
+        assert_eq!(result.len(), 2, "expected 2 tagged models");
+        assert!(
+            result[0].path < result[1].path,
+            "models_with_tag must sort by path: expected a_dir before z_dir, got {:?}",
+            result.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// `models_all_with_generators` sorts by `path` then `name`; `models_with_tag`
+    /// must preserve that tiebreaker when two models share the same generator path.
+    /// Verify via two generator-emitted models in reverse name order — the tagged
+    /// query must return them in name order.
+    #[test]
+    fn with_tag_uses_name_tiebreaker_for_same_path() {
+        // Generator emitting z_model before a_model (reverse name order).
+        // Both get the same tag so models_with_tag must return a_model first.
+        let generator = concat!(
+            "---\n",
+            "generates: models\n",
+            "---\n",
+            "[ModelDef { name: 'z_model', tags: ['my_tag'], body: SELECT 1 },\n",
+            " ModelDef { name: 'a_model', tags: ['my_tag'], body: SELECT 2 }]"
+        );
+        let (db, _root, workspace) = db_with_files(&[("models/cohorts.gen.sql", generator)]);
+
+        let result = models_with_tag(&db, workspace, "my_tag".to_string());
+        assert_eq!(result.len(), 2, "expected 2 tagged co-emitted models");
+        // Emitted model names are full smelt paths (e.g. "models.cohorts.a_model").
+        // Both share the same generator path; within that path, name sort must give
+        // a_model before z_model.
+        assert!(
+            result[0].name.ends_with("a_model"),
+            "within same generator path, name sort must give a_model first; got: {:?}",
+            result.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert!(result[1].name.ends_with("z_model"));
+    }
+
+    /// `sources_all` returns sources sorted ascending by `path` then `name`.
+    #[test]
+    fn sources_all_orders_by_path_then_name() {
+        let col = "columns:\n- name: id\n  type: INTEGER\n";
+        let (db, root, workspace) = db_with_files(&[]);
+
+        // Create source YAML files in reverse path order.
+        let z_dir = root.join("models/z_dir");
+        let a_dir = root.join("models/a_dir");
+        std::fs::create_dir_all(&z_dir).unwrap();
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(z_dir.join("source.yml"), col).unwrap();
+        std::fs::write(a_dir.join("source.yml"), col).unwrap();
+
+        let project = workspace.projects(&db)[0];
+        let result = sources_all(&db, project);
+        assert_eq!(result.len(), 2, "expected 2 sources, got: {}", result.len());
+        // a_dir/source.yml must sort before z_dir/source.yml by path.
+        assert!(
+            result[0].path < result[1].path,
+            "sources_all must sort by path: expected a_dir before z_dir, got {:?}",
+            result.iter().map(|s| &s.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// `sources_with_tag` returns sources sorted by `path` then `name`.
+    #[test]
+    fn sources_with_tag_orders_by_path_then_name() {
+        let tagged = "tags: [my_tag]\ncolumns:\n- name: id\n  type: INTEGER\n";
+        let (db, root, workspace) = db_with_files(&[]);
+
+        let z_dir = root.join("models/z_dir");
+        let a_dir = root.join("models/a_dir");
+        std::fs::create_dir_all(&z_dir).unwrap();
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(z_dir.join("source.yml"), tagged).unwrap();
+        std::fs::write(a_dir.join("source.yml"), tagged).unwrap();
+
+        let project = workspace.projects(&db)[0];
+        let result = sources_with_tag(&db, project, "my_tag".to_string());
+        assert_eq!(result.len(), 2, "expected 2 tagged sources");
+        assert!(
+            result[0].path < result[1].path,
+            "sources_with_tag must sort by path: expected a_dir before z_dir, got {:?}",
+            result.iter().map(|s| &s.path).collect::<Vec<_>>()
         );
     }
 
