@@ -532,8 +532,10 @@ fn body_inferred_backends(
 /// `smelt.define` in `file` whose frontmatter declares a `backends:`
 /// set broader than the body's inferred set, emit
 /// [`DiagnosticCode::BackendsWideningNotAllowed`] anchored at the
-/// declaration's name range. Also surfaces malformed-frontmatter errors
-/// under the same code.
+/// declaration's name range.
+///
+/// Malformed-frontmatter errors (e.g. a `backends:` key with no value) are
+/// routed to [`DiagnosticCode::FrontmatterParseError`] — not this code.
 pub fn backends_widening_diagnostics_for_file(
     db: &dyn salsa::Database,
     workspace: Workspace,
@@ -547,7 +549,7 @@ pub fn backends_widening_diagnostics_for_file(
                 severity: DiagnosticSeverity::Error,
                 message: format!("Invalid frontmatter for `{}`: {}", sig.name, msg),
                 range: sig.name_range,
-                code: Some(DiagnosticCode::BackendsWideningNotAllowed),
+                code: Some(DiagnosticCode::FrontmatterParseError),
                 data: None,
             });
             continue;
@@ -2383,6 +2385,64 @@ mod tests {
              file: {:?}, pure: {:?}",
             file_diags,
             diags
+        );
+    }
+
+    // ── backends_widening_diagnostics_for_file ────────────────────────────────
+
+    /// D-14 TDD: a `smelt.define` with a malformed `backends:` value (empty
+    /// after the colon) must produce `FrontmatterParseError`, not
+    /// `BackendsWideningNotAllowed`.
+    #[test]
+    fn malformed_frontmatter_is_frontmatter_parse_error() {
+        let sql = "---\nbackends:\n---\nsmelt.define my_fn(x INT) -> INT AS (SELECT x * 2)";
+        let (mut db, path) = setup(sql);
+        let diags = db.file_diagnostics(path);
+        let widening: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::BackendsWideningNotAllowed))
+            .collect();
+        assert!(
+            widening.is_empty(),
+            "malformed backends frontmatter must not emit BackendsWideningNotAllowed; got: {widening:?}"
+        );
+        let parse_err: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::FrontmatterParseError))
+            .collect();
+        assert!(
+            !parse_err.is_empty(),
+            "malformed backends frontmatter must emit FrontmatterParseError; got all diags: {diags:?}"
+        );
+        let error_diags: Vec<_> = parse_err
+            .iter()
+            .filter(|d| d.severity == crate::DiagnosticSeverity::Error)
+            .collect();
+        assert!(
+            !error_diags.is_empty(),
+            "FrontmatterParseError for malformed backends must be Error severity; got: {parse_err:?}"
+        );
+    }
+
+    /// D-14 TDD: a genuine `backends:` widening (declared set broader than
+    /// body-inferred set) still fires `BackendsWideningNotAllowed`.
+    #[test]
+    fn backends_widening_still_fires_on_real_widening() {
+        // Body has no backend-specific calls → inferred = All; but if we
+        // declare only `[duckdb, spark]` and the body infers [duckdb] from a
+        // duckdb-specific call, that's a widening.  Use the existing broken-
+        // fixture pattern: call duckdb.read_parquet → infers [duckdb]; declare
+        // [duckdb, spark] → widening.
+        let sql = "---\nbackends: [duckdb, spark]\n---\nsmelt.define load_broken(path Expr<Text>) -> Expr<Text> AS (duckdb.read_parquet(path))";
+        let (mut db, path) = setup(sql);
+        let diags = db.file_diagnostics(path);
+        let widening: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::BackendsWideningNotAllowed))
+            .collect();
+        assert!(
+            !widening.is_empty(),
+            "genuine backends widening must emit BackendsWideningNotAllowed; got all diags: {diags:?}"
         );
     }
 }
