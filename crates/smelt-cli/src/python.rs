@@ -328,6 +328,17 @@ pub fn discover_python_models(
                 }
 
                 let model_id = ModelId::from_path(file_path.clone());
+                // Path-derived address: file stem (after paths: strip) + function name.
+                // Identical rule to SQL models per D-26: py/archive.py::users → smelt.archive.users.
+                let address_segments = {
+                    let mut segs = smelt_core::discovery::ModelDiscovery::compute_address_segments(
+                        file_path,
+                        project_dir,
+                        &config.paths,
+                    );
+                    segs.push(output.name.clone());
+                    segs
+                };
                 new_models.push(ModelFile {
                     name: output.name.clone(),
                     path: file_path.clone(),
@@ -340,9 +351,7 @@ pub fn discover_python_models(
                         queries: output.queries.clone(),
                     },
                     model_id,
-                    // Python model address is the function name (a single-segment address).
-                    // This enables `resolve_address_map` to detect Python-vs-SQL collisions.
-                    address_segments: vec![output.name.clone()],
+                    address_segments,
                 });
             }
         }
@@ -420,9 +429,10 @@ mod tests {
         let models_dir = project_dir.join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
 
-        // Create a Python model
+        // Create a Python model in gen.py (stem "gen") with function "dynamic_model".
+        // With paths: ["models"], D-26 address = smelt.gen.dynamic_model.
         std::fs::write(
-            models_dir.join("dynamic_model.py"),
+            models_dir.join("gen.py"),
             r#"
 from smelt import model
 
@@ -433,10 +443,10 @@ def dynamic_model(project):
         )
         .unwrap();
 
-        // Create a SQL model that refs the Python model (using canonical path syntax).
+        // Create a SQL model that refs the Python model at its canonical D-26 address.
         std::fs::write(
             models_dir.join("downstream.sql"),
-            "SELECT id FROM smelt.dynamic_model",
+            "SELECT id FROM smelt.gen.dynamic_model",
         )
         .unwrap();
 
@@ -479,8 +489,8 @@ def dynamic_model(project):
 
         let order = graph.execution_order().unwrap();
         assert_eq!(order.len(), 2);
-        // dynamic_model should come before downstream
-        let dm_pos = order.iter().position(|n| n == "dynamic_model").unwrap();
+        // gen.dynamic_model (canonical path) should come before downstream
+        let dm_pos = order.iter().position(|n| n == "gen.dynamic_model").unwrap();
         let ds_pos = order.iter().position(|n| n == "downstream").unwrap();
         assert!(dm_pos < ds_pos);
     }
@@ -562,7 +572,6 @@ def union_model(project):
 
     #[test]
     fn test_models_equal_order_independent() {
-        // Fix #1: models_equal should not depend on order
         let model_a = ModelFile {
             name: "alpha".to_string(),
             path: PathBuf::from("a.py"),
@@ -572,7 +581,6 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
-            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
         let model_b = ModelFile {
@@ -584,7 +592,6 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
-            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -604,7 +611,6 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
-            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
         let model_b = ModelFile {
@@ -616,7 +622,6 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
-            // TODO Phase 5: compute address_segments from model path so canonical_path() is correct.
             address_segments: Vec::new(),
         };
 
@@ -1319,7 +1324,16 @@ def colliding(project):
         let python_models =
             discover_python_models(&python_files, &sql_models, &config, project_dir, None).unwrap();
 
-        // Both exist in the combined Vec before graph build.
+        // D-26: Python model in gen_colliding.py::colliding → path-derived segments.
+        assert_eq!(python_models.len(), 1);
+        assert_eq!(
+            python_models[0].address_segments,
+            vec!["gen_colliding", "colliding"],
+            "Python model address should be [file_stem, func_name] = ['gen_colliding', 'colliding']"
+        );
+
+        // Both exist in the combined Vec before graph build (they have DIFFERENT
+        // addresses: SQL = ["colliding"], Python = ["gen_colliding", "colliding"]).
         let mut all_models = sql_models;
         all_models.extend(python_models);
         let colliding_count = all_models.iter().filter(|m| m.name == "colliding").count();
@@ -1329,16 +1343,17 @@ def colliding(project):
         );
 
         // DependencyGraph::build silently deduplicates (last wins) when there's a canonical-path
-        // collision between Python and SQL models. The collision itself is detected by
-        // smelt_core::resolver::resolve_address_map (used at the Salsa layer), not the
-        // graph builder. The graph still builds successfully but has only 1 of the 2 models.
+        // collision between Python and SQL models. With path-derived Python addresses, these two
+        // no longer share a canonical path, so both survive in the graph.
         let result = smelt_core::graph::DependencyGraph::build(all_models, None);
         assert!(
             result.is_ok(),
-            "DependencyGraph::build with collision should still succeed (last wins): {:?}",
+            "DependencyGraph::build should succeed: {:?}",
             result.err()
         );
-        // The collision is detected at the Salsa/diagnostic-parity layer, not here.
+        // True Python↔SQL address collisions (same path-derived address) are detected by
+        // smelt_core::resolver::resolve_address_map (Salsa layer); see
+        // python_sql_address_collision_is_duplicate_address for the unit test.
     }
 
     #[test]
@@ -1480,5 +1495,153 @@ SELECT 1 AS id
             "metadata must be None when there is a name mismatch; got: {:#?}",
             model.metadata
         );
+    }
+
+    // D-26: discover_python_models must produce path-derived address_segments.
+    // Integration test — uses actual Python model execution.
+    #[test]
+    fn python_discover_address_segments_are_path_derived() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        // File `models/gen.py` containing function `output` — stem ≠ function name.
+        // With paths: ["models"], expected address = ["gen", "output"] = smelt.gen.output.
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::write(
+            models_dir.join("gen.py"),
+            r#"from smelt import model
+
+@model
+def output(project):
+    return "SELECT 1"
+"#,
+        )
+        .unwrap();
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+            target: None,
+        };
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+
+        let models = discover_python_models(&python_files, &[], &config, project_dir, None)
+            .expect("discover_python_models failed");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "output");
+        assert_eq!(
+            models[0].address_segments,
+            vec!["gen", "output"],
+            "Python model address should be path-derived: file stem 'gen' + function name 'output'"
+        );
+    }
+
+    // D-26: Python address = directory-prefix (file stem after paths: strip) + function name.
+    // Pure unit test — no Python interpreter needed.
+    #[test]
+    fn python_address_is_path_derived() {
+        use smelt_core::discovery::ModelDiscovery;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from("/project");
+        let paths = vec!["py".to_string()];
+
+        // archive.py in py/ → compute_address_segments gives ["archive"] (stem after stripping py/)
+        // + function name "users" → ["archive", "users"]
+        let file = root.join("py").join("archive.py");
+        let mut segs = ModelDiscovery::compute_address_segments(&file, &root, &paths);
+        segs.push("users".to_string());
+        assert_eq!(
+            segs,
+            vec!["archive", "users"],
+            "py/archive.py::users should address as smelt.archive.users"
+        );
+
+        // root-level file in the paths dir: py/util.py + function "helper" → ["util", "helper"]
+        let file2 = root.join("py").join("util.py");
+        let mut segs2 = ModelDiscovery::compute_address_segments(&file2, &root, &paths);
+        segs2.push("helper".to_string());
+        assert_eq!(segs2, vec!["util", "helper"]);
+
+        // subdirectory case: py/staging/stg.py + function "events" → ["staging", "stg", "events"]
+        let file3 = root.join("py").join("staging").join("stg.py");
+        let mut segs3 = ModelDiscovery::compute_address_segments(&file3, &root, &paths);
+        segs3.push("events".to_string());
+        assert_eq!(segs3, vec!["staging", "stg", "events"]);
+    }
+
+    // D-26: after the fix, a Python model whose path-derived address equals a SQL model's
+    // address is a DuplicateAddress collision detectable via resolve_address_map.
+    #[test]
+    fn python_sql_address_collision_is_duplicate_address() {
+        use smelt_core::resolver::resolve_address_map;
+
+        // SQL model with address ["archive", "users"]
+        let sql_model = ModelFile {
+            name: "users".to_string(),
+            path: PathBuf::from("/project/py/archive.sql"),
+            content: "SELECT 1".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+            model_id: ModelId::from_path(PathBuf::from("/project/py/archive.sql")),
+            address_segments: vec!["archive".to_string(), "users".to_string()],
+        };
+
+        // Python model with the same path-derived address ["archive", "users"]
+        let python_model = ModelFile {
+            name: "users".to_string(),
+            path: PathBuf::from("/project/py/archive.py"),
+            content: "SELECT 2".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Python {
+                source_line: 1,
+                queries: vec![],
+            },
+            model_id: ModelId::from_path(PathBuf::from("/project/py/archive.py")),
+            address_segments: vec!["archive".to_string(), "users".to_string()],
+        };
+
+        let all_models = vec![sql_model, python_model];
+        let (_map, collisions) = resolve_address_map(&all_models, &[], &[]);
+        assert_eq!(
+            collisions.len(),
+            1,
+            "Python model with same path-derived address as SQL model should produce DuplicateAddress collision"
+        );
+        assert_eq!(collisions[0].address, vec!["archive", "users"]);
     }
 }
