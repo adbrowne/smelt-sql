@@ -414,28 +414,28 @@ reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_w
 
 # ── smelt-types / lib ─────────────────────────────────────────────────────────
 
-["crates/smelt-types/src/lib.rs:249"]
+["crates/smelt-types/src/lib.rs:270"]
 classification = "legitimate"
 reason = "TypedColumn::unknown() constructor — this IS the definition of the Unknown sentinel value"
 
 # ── smelt-types / signatures ──────────────────────────────────────────────────
 
-["crates/smelt-types/src/signatures.rs:2322"]
+["crates/smelt-types/src/signatures.rs:2326"]
 classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 
-["crates/smelt-types/src/signatures.rs:3160"]
+["crates/smelt-types/src/signatures.rs:3164"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 
-["crates/smelt-types/src/signatures.rs:3161"]
+["crates/smelt-types/src/signatures.rs:3165"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 
-["crates/smelt-types/src/signatures.rs:4011"]
+["crates/smelt-types/src/signatures.rs:4041"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 
-["crates/smelt-types/src/signatures.rs:4510"]
+["crates/smelt-types/src/signatures.rs:4540"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"

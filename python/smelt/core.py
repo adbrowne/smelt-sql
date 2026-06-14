@@ -2,10 +2,18 @@ _registered_models = {}
 
 
 class ModelInfo:
-    def __init__(self, name, tags=None, directory=None):
+    def __init__(self, name, tags=None, directory=None, path=None):
         self.name = name
         self.tags = tags or []
-        self.directory = directory
+        self.path = path
+        # directory is derived from path (final component of parent dir) when not provided (D-25).
+        if directory is not None:
+            self.directory = directory
+        elif path is not None:
+            parts = path.split('/')
+            self.directory = parts[-2] if len(parts) >= 2 else None
+        else:
+            self.directory = None
 
 
 class ProjectContext:

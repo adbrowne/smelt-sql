@@ -139,22 +139,34 @@ fn build_project_context(
     sql_models: &[ModelFile],
     python_models: &[ModelFile],
     config: &Config,
+    project_dir: &Path,
 ) -> String {
     let mut models = Vec::new();
 
     for model in sql_models.iter().chain(python_models.iter()) {
         let tags = config.get_tags(&model.name, model.metadata.as_ref().map(|b| b.as_ref()));
-        let directory = model
-            .path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+
+        // Full workspace-relative path, forward-slash normalised (D-25).
+        let path = model.path.strip_prefix(project_dir).ok().map(|rel| {
+            rel.to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        });
+
+        // directory = final component of the parent directory, derived from path (D-25).
+        let directory = path.as_deref().and_then(|p| {
+            let slash = p.rfind('/')?;
+            p[..slash]
+                .split('/')
+                .next_back()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
 
         models.push(ProjectModelInfo {
             name: model.name.clone(),
             tags,
             directory,
+            path,
         });
     }
 
@@ -206,7 +218,7 @@ pub fn discover_python_models(
         .collect();
 
     for _round in 0..max_rounds {
-        let context_json = build_project_context(sql_models, &python_models, config);
+        let context_json = build_project_context(sql_models, &python_models, config, project_dir);
         let mut new_models = Vec::new();
 
         for ((file_path, _decorator_lines, _file_content), decorator_map) in
@@ -1643,5 +1655,162 @@ def output(project):
             "Python model with same path-derived address as SQL model should produce DuplicateAddress collision"
         );
         assert_eq!(collisions[0].address, vec!["archive", "users"]);
+    }
+
+    // D-25: build_project_context exposes full workspace-relative path; directory is derived
+    // from path (never disagrees).
+    #[test]
+    fn project_context_exposes_full_path() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        // Model at models/staging/stg_events.sql
+        let model_path = project_dir
+            .join("models")
+            .join("staging")
+            .join("stg_events.sql");
+        let sql_model = ModelFile {
+            name: "stg_events".to_string(),
+            path: model_path,
+            content: "SELECT 1".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+            model_id: ModelId::from_path(
+                project_dir
+                    .join("models")
+                    .join("staging")
+                    .join("stg_events.sql"),
+            ),
+            address_segments: vec!["staging".to_string(), "stg_events".to_string()],
+        };
+        // Root-level model at models/flat.sql
+        let flat_path = project_dir.join("models").join("flat.sql");
+        let flat_model = ModelFile {
+            name: "flat".to_string(),
+            path: flat_path,
+            content: "SELECT 2".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+            model_id: ModelId::from_path(project_dir.join("models").join("flat.sql")),
+            address_segments: vec!["flat".to_string()],
+        };
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+            target: None,
+        };
+
+        let context_json =
+            build_project_context(&[sql_model, flat_model], &[], &config, project_dir);
+        let context: smelt_core::python_utils::ProjectContextData =
+            serde_json::from_str(&context_json).unwrap();
+
+        assert_eq!(context.models.len(), 2);
+
+        let staging_model = context
+            .models
+            .iter()
+            .find(|m| m.name == "stg_events")
+            .unwrap();
+        // Full workspace-relative path, forward-slash normalised
+        assert_eq!(
+            staging_model.path.as_deref(),
+            Some("models/staging/stg_events.sql")
+        );
+        // directory derived from path (containing directory's final component)
+        assert_eq!(staging_model.directory.as_deref(), Some("staging"));
+
+        let flat = context.models.iter().find(|m| m.name == "flat").unwrap();
+        assert_eq!(flat.path.as_deref(), Some("models/flat.sql"));
+        // Containing dir of models/flat.sql is "models"
+        assert_eq!(flat.directory.as_deref(), Some("models"));
+    }
+
+    // D-25: find_models(directory=...) still matches on the derived directory (no regression).
+    #[test]
+    fn find_models_directory_filter_uses_path_derived_directory() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        // SQL model in a subdirectory "staging"
+        let staging_dir = project_dir.join("models").join("staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(staging_dir.join("stg_orders.sql"), "SELECT 1 as order_id").unwrap();
+
+        // Python model at the root of models/ that queries find_models(directory="staging")
+        let models_dir = project_dir.join("models");
+        std::fs::write(
+            models_dir.join("gen.py"),
+            r#"from smelt import model
+
+@model
+def combined(project):
+    # D-25: directory filter should match models in "staging/"
+    children = project.find_models(directory="staging")
+    names = [m.name for m in children]
+    if "stg_orders" in names:
+        return "SELECT 'found' as result"
+    return "SELECT 'not_found' as result"
+"#,
+        )
+        .unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let sql_models = discovery.discover_models().unwrap();
+        let python_files = discovery.discover_python_files().unwrap();
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+            target: None,
+        };
+
+        let python_models =
+            discover_python_models(&python_files, &sql_models, &config, project_dir, None).unwrap();
+
+        assert_eq!(python_models.len(), 1);
+        // If directory filter works, the model found "stg_orders" and returns "found"
+        assert!(
+            python_models[0].content.contains("found"),
+            "find_models(directory='staging') should find stg_orders; got: {}",
+            python_models[0].content
+        );
+        assert!(!python_models[0].content.contains("not_found"));
     }
 }

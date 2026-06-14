@@ -924,7 +924,7 @@ impl Backend {
                     python: None,
                     target: None,
                 });
-            build_python_context(&all_files, &config)
+            build_python_context(&all_files, &config, &project_root)
         };
 
         // Spawn background task for subprocess execution
@@ -1221,7 +1221,7 @@ impl LanguageServer for Backend {
                     let config = &loaded.config;
                     for model_path in &config.paths {
                         let models_path = project_root.join(model_path);
-                        let context_json = build_python_context(&all_files, config);
+                        let context_json = build_python_context(&all_files, config, &project_root);
                         let mut cache = self.python_cache.lock().await;
                         *cache = PythonModelCache::load(&project_root);
                         let scan_result = crate::python_scan::discover_python_models(

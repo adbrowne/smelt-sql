@@ -646,30 +646,43 @@ fn trace_upstream_column_chain(
 
 /// Build project context JSON from discovered files for Python model execution.
 /// Extracts model names, tags, and directories from the file paths registered in Salsa.
-pub(crate) fn build_python_context(all_files: &[PathBuf], config: &smelt_core::Config) -> String {
+pub(crate) fn build_python_context(
+    all_files: &[PathBuf],
+    config: &smelt_core::Config,
+    project_root: &std::path::Path,
+) -> String {
     use smelt_core::python_utils::{ProjectContextData, ProjectModelInfo};
 
     let mut models = Vec::new();
-    for path in all_files {
-        let path_str = path.to_string_lossy();
+    for file_path in all_files {
+        let path_str = file_path.to_string_lossy();
 
         // Extract model name: for virtual paths like "file.sql::model_name", use the segment
         // after "::". For regular paths, use the file stem.
         let name = if let Some(pos) = path_str.find("::") {
             path_str[pos + 2..].to_string()
         } else {
-            match path.file_stem().and_then(|s| s.to_str()) {
+            match file_path.file_stem().and_then(|s| s.to_str()) {
                 Some(stem) => stem.to_string(),
                 None => continue,
             }
         };
 
-        // Extract directory from parent path's file name
-        let directory = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+        // Full workspace-relative path, forward-slash normalised (D-25).
+        let path = file_path.strip_prefix(project_root).ok().map(|rel| {
+            rel.to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        });
+
+        // directory derived from path (final component of parent dir) (D-25).
+        let directory = path.as_deref().and_then(|p| {
+            let slash = p.rfind('/')?;
+            p[..slash]
+                .split('/')
+                .next_back()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
 
         let tags = config.get_tags(&name, None);
 
@@ -677,6 +690,7 @@ pub(crate) fn build_python_context(all_files: &[PathBuf], config: &smelt_core::C
             name,
             tags,
             directory,
+            path,
         });
     }
 

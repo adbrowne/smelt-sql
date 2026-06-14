@@ -186,6 +186,8 @@ pub struct ProjectModelInfo {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[cfg(test)]
