@@ -42,7 +42,11 @@ pub fn workspace_function_diagnostics(
     let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
     files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
 
-    let mut seen: HashMap<String, PathBuf> = HashMap::new();
+    // D-30: `smelt.define` uniqueness is directory-scoped; `smelt.extern`
+    // uniqueness is workspace-wide. Two defines in different directories may
+    // share a name; two defines in the same directory may not.
+    let mut seen_defines: HashMap<(PathBuf, String), PathBuf> = HashMap::new();
+    let mut seen_externs: HashMap<String, PathBuf> = HashMap::new();
     let mut diagnostics: Vec<(PathBuf, Diagnostic)> = Vec::new();
 
     for f in files {
@@ -71,27 +75,59 @@ pub fn workspace_function_diagnostics(
                         data: None,
                     },
                 ));
-                // Still fall through to the seen-map tracking so a second
-                // extern with the same name also flags DuplicateFunctionDefinition.
+                // Fall through to extern seen-map so a second extern with the
+                // same name also flags DuplicateFunctionDefinition.
             }
 
-            if let Some(first_path) = seen.get(&sig.name) {
-                diagnostics.push((
-                    path.clone(),
-                    Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format!(
-                            "Function `{}` is already defined in {}",
-                            sig.name,
-                            first_path.display()
-                        ),
-                        range: sig.name_range,
-                        code: Some(DiagnosticCode::DuplicateFunctionDefinition),
-                        data: None,
-                    },
-                ));
-            } else {
-                seen.insert(sig.name.clone(), path.clone());
+            match sig.origin {
+                smelt_types::SigOrigin::Define => {
+                    // Directory-scoped: two defines collide only within the
+                    // same parent directory.
+                    let dir = path
+                        .parent()
+                        .unwrap_or(std::path::Path::new(""))
+                        .to_path_buf();
+                    let key = (dir, sig.name.clone());
+                    if let Some(first_path) = seen_defines.get(&key) {
+                        diagnostics.push((
+                            path.clone(),
+                            Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message: format!(
+                                    "Function `{}` is already defined in {}",
+                                    sig.name,
+                                    first_path.display()
+                                ),
+                                range: sig.name_range,
+                                code: Some(DiagnosticCode::DuplicateFunctionDefinition),
+                                data: None,
+                            },
+                        ));
+                    } else {
+                        seen_defines.insert(key, path.clone());
+                    }
+                }
+                smelt_types::SigOrigin::Extern => {
+                    // Workspace-wide: externs occupy a flat namespace.
+                    if let Some(first_path) = seen_externs.get(&sig.name) {
+                        diagnostics.push((
+                            path.clone(),
+                            Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message: format!(
+                                    "Function `{}` is already defined in {}",
+                                    sig.name,
+                                    first_path.display()
+                                ),
+                                range: sig.name_range,
+                                code: Some(DiagnosticCode::DuplicateFunctionDefinition),
+                                data: None,
+                            },
+                        ));
+                    } else {
+                        seen_externs.insert(sig.name.clone(), path.clone());
+                    }
+                }
             }
         }
     }
@@ -2443,6 +2479,119 @@ mod tests {
         assert!(
             !widening.is_empty(),
             "genuine backends widening must emit BackendsWideningNotAllowed; got all diags: {diags:?}"
+        );
+    }
+
+    // ── D-30: DuplicateFunctionDefinition directory-scoped ────────────────
+
+    /// Build a TestDb with multiple files and return (db, workspace).
+    fn setup_multi(files: &[(PathBuf, &str)], project_root: PathBuf) -> TestDb {
+        let mut db = TestDb::default();
+        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
+        let mut paths = Vec::new();
+        for (path, sql) in files {
+            db.set_file_project_root(path.clone(), project_root.clone());
+            db.set_file_text(path.clone(), Arc::new((*sql).to_string()));
+            paths.push(path.clone());
+        }
+        db.set_all_files(Arc::new(paths));
+        db
+    }
+
+    /// D-30 TDD: two `smelt.define helper` in *different* directories must NOT
+    /// produce `DuplicateFunctionDefinition` — uniqueness is directory-scoped.
+    #[test]
+    fn same_name_different_dirs_ok() {
+        use super::workspace_function_diagnostics;
+        let root = PathBuf::from("/fake/project");
+        let a = root.join("a").join("util.sql");
+        let b = root.join("b").join("util.sql");
+        let mut db = setup_multi(
+            &[
+                (a.clone(), "smelt.define helper(x INT) AS (x)\n"),
+                (b.clone(), "smelt.define helper(x INT) AS (x)\n"),
+            ],
+            root,
+        );
+        let ws = db.sync_workspace();
+        let diags = workspace_function_diagnostics(&db.db, ws);
+        let dup: Vec<_> = diags
+            .iter()
+            .filter(|(_, d)| d.code == Some(DiagnosticCode::DuplicateFunctionDefinition))
+            .collect();
+        assert!(
+            dup.is_empty(),
+            "same name in different directories must NOT emit DuplicateFunctionDefinition; got: {dup:?}"
+        );
+    }
+
+    /// D-30 TDD: two `smelt.define helper` in the *same* directory must produce
+    /// exactly one `DuplicateFunctionDefinition`, anchored at the second file
+    /// (sorted by path).
+    #[test]
+    fn same_name_same_dir_collides() {
+        use super::workspace_function_diagnostics;
+        let root = PathBuf::from("/fake/project");
+        let a = root.join("shared").join("first.sql");
+        let b = root.join("shared").join("second.sql");
+        let mut db = setup_multi(
+            &[
+                (a.clone(), "smelt.define helper(x INT) AS (x)\n"),
+                (b.clone(), "smelt.define helper(x INT) AS (x)\n"),
+            ],
+            root,
+        );
+        let ws = db.sync_workspace();
+        let diags = workspace_function_diagnostics(&db.db, ws);
+        let dup: Vec<_> = diags
+            .iter()
+            .filter(|(_, d)| d.code == Some(DiagnosticCode::DuplicateFunctionDefinition))
+            .collect();
+        assert_eq!(
+            dup.len(),
+            1,
+            "same name in same directory must emit exactly one DuplicateFunctionDefinition; got: {diags:?}"
+        );
+        assert_eq!(
+            &dup[0].0, &b,
+            "diagnostic must attach to the second file (sorted by path)"
+        );
+    }
+
+    /// D-30 TDD: `smelt.extern` whose name matches a built-in routes to
+    /// `ExternCollidesWithBuiltin`, not `DuplicateFunctionDefinition` — the
+    /// extern/built-in workspace-wide check is unchanged by directory scoping.
+    #[test]
+    fn extern_collides_with_builtin_unchanged() {
+        use super::workspace_function_diagnostics;
+        let root = PathBuf::from("/fake/project");
+        let path = root.join("functions").join("ext.sql");
+        // `count` is a well-known built-in.
+        let mut db = setup_multi(
+            &[(
+                path.clone(),
+                "smelt.extern count(x: Expr<Integer>) -> Expr<Integer>;\n",
+            )],
+            root,
+        );
+        let ws = db.sync_workspace();
+        let diags = workspace_function_diagnostics(&db.db, ws);
+        let extern_col: Vec<_> = diags
+            .iter()
+            .filter(|(_, d)| d.code == Some(DiagnosticCode::ExternCollidesWithBuiltin))
+            .collect();
+        assert!(
+            !extern_col.is_empty(),
+            "smelt.extern shadowing a built-in must emit ExternCollidesWithBuiltin; got: {diags:?}"
+        );
+        let dup: Vec<_> = diags
+            .iter()
+            .filter(|(_, d)| d.code == Some(DiagnosticCode::DuplicateFunctionDefinition))
+            .collect();
+        assert!(
+            dup.is_empty(),
+            "ExternCollidesWithBuiltin case must not also emit DuplicateFunctionDefinition; got: {dup:?}"
         );
     }
 }
