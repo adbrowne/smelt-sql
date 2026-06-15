@@ -71,7 +71,7 @@ class, not just the reported instance.
 | Phase | Status | Commit | Date |
 |-------|--------|--------|------|
 | 1 | done | | 2026-06-16 |
-| 2 | done | | 2026-06-16 |
+| 2 | done | 378a37ca | 2026-06-16 |
 | 3 | pending | | |
 | 4 | pending | | |
 | 5 | pending | | |
