@@ -402,6 +402,9 @@ impl Backend {
                 DbCode::UnknownStructFieldType => "unknown-struct-field-type",
                 DbCode::DecimalPrecisionOverflow => "decimal-precision-overflow",
                 DbCode::NonPortableCollation => "non-portable-collation",
+                DbCode::EventTimeColumnNotVisibleAtOuterSelect => {
+                    "event-time-column-not-visible-at-outer-select"
+                }
             };
             NumberOrString::String(code_str.to_string())
         });

@@ -21,6 +21,9 @@ use crate::rules::cumulative::{classify_cumulative, CumulativeDiagnostic, Source
 use crate::rules::incremental;
 use crate::types::IncrementalConfig;
 
+// ── Parser imports for event-time injectability check ──────────────────────
+use smelt_parser::{parse, File};
+
 /// Severity of a planner-rule diagnostic. `smelt-db` maps this onto its own
 /// `DiagnosticSeverity`. Only `Error` blocks the build (Diagnostic parity
 /// rule); `Warning` is advisory.
@@ -45,6 +48,11 @@ pub enum RuleDiagnosticCode {
     CumulativeMultipleDrivingSources,
     CumulativeSqlNotParseable,
     IncrementalNotBatchSafe,
+    /// An incremental model's `event_time_column` is not accessible at the
+    /// outermost SELECT where the time filter is injected — either because the
+    /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
+    /// clause is a subquery that does not project the column. Error severity.
+    EventTimeColumnNotVisibleAtOuterSelect,
 }
 
 /// A diagnostic produced by a planner rule's `detect` phase, in rule-native
@@ -124,6 +132,17 @@ impl PlannerRule for IncrementalRule {
         let (Some(ts), Some(inc)) = (ctx.timeseries_config, ctx.incremental_config) else {
             return Vec::new();
         };
+
+        // Check event-time injectability first. If the event_time_column is not
+        // reachable at the outermost SELECT (UNION query or subquery-FROM that
+        // doesn't project it), return an Error immediately — no point running
+        // batch-safety checks on a query that can't be time-filtered at all.
+        if let Some(diag) =
+            check_event_time_injectable(ctx.sql, &ts.event_time_column, ctx.model_name)
+        {
+            return vec![diag];
+        }
+
         let model = ModelInfo {
             name: ctx.model_name.to_string(),
             sql: ctx.sql.to_string(),
@@ -140,6 +159,132 @@ impl PlannerRule for IncrementalRule {
             }],
         }
     }
+}
+
+/// Returns `Some(Error)` when the `event_time_column` cannot be injected at
+/// the outermost SELECT of `sql`, `None` when it is safe (or when we cannot
+/// determine safety, to be conservative).
+///
+/// Two cases trigger the error:
+/// 1. The query is a set operation (UNION/INTERSECT/EXCEPT) — injecting a
+///    WHERE clause would only filter the first branch, producing incorrect
+///    data.
+/// 2. The FROM clause is a bare subquery that does **not** project
+///    `event_time_column` — the column is therefore invisible to a WHERE
+///    clause added to the outer SELECT.
+fn check_event_time_injectable(
+    sql: &str,
+    event_time_column: &str,
+    model_name: &str,
+) -> Option<RuleDiagnostic> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse_result = parse(stripped);
+    let file = File::cast(parse_result.syntax())?;
+    let stmt = file.select_stmt()?;
+
+    // Case 1: set operation (UNION/INTERSECT/EXCEPT)
+    if stmt.has_set_operation() {
+        return Some(RuleDiagnostic {
+            code: RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect,
+            severity: RuleSeverity::Error,
+            message: format!(
+                "Model '{}': `event_time_column` '{}' cannot be injected into a \
+                 UNION/INTERSECT/EXCEPT query — a WHERE clause on the outer query \
+                 only filters the first branch. Rewrite as a CTE or subquery that \
+                 projects '{}' through all branches.",
+                model_name, event_time_column, event_time_column
+            ),
+        });
+    }
+
+    // Case 2: bare subquery in FROM that doesn't project event_time_column
+    if let Some(from_clause) = stmt.from_clause() {
+        let from_text = from_clause.text();
+        // Strip the "FROM" keyword and leading whitespace to get the table expression.
+        let table_expr = from_text
+            .trim()
+            .strip_prefix("FROM")
+            .or_else(|| from_text.trim().strip_prefix("from"))
+            .unwrap_or(&from_text)
+            .trim();
+        if table_expr.starts_with('(') {
+            // Extract the inner SQL from the balanced parentheses.
+            if let Some(inner_sql) = extract_balanced_parens(table_expr) {
+                if !is_column_projected_in_sql(inner_sql, event_time_column) {
+                    return Some(RuleDiagnostic {
+                        code: RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect,
+                        severity: RuleSeverity::Error,
+                        message: format!(
+                            "Model '{}': `event_time_column` '{}' is not projected by the \
+                             subquery in the FROM clause — it cannot be filtered at the outer \
+                             SELECT. Add '{}' to the subquery's SELECT list.",
+                            model_name, event_time_column, event_time_column
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Returns `true` if `sql` projects `col` (case-insensitive) in its outermost
+/// SELECT list — either via a wildcard (`*`) or by an explicit column or alias
+/// whose name matches `col`. Returns `true` conservatively when the SQL cannot
+/// be parsed.
+fn is_column_projected_in_sql(sql: &str, col: &str) -> bool {
+    let col_lower = col.to_lowercase();
+    let parse_result = parse(sql);
+    let Some(file) = File::cast(parse_result.syntax()) else {
+        return true; // conservative
+    };
+    let Some(stmt) = file.select_stmt() else {
+        return true; // conservative
+    };
+    let Some(select_list) = stmt.select_list() else {
+        return true; // conservative
+    };
+    for item in select_list.items() {
+        if item.is_wildcard() {
+            return true;
+        }
+        if let Some(name) = item.column_name() {
+            if name.to_lowercase() == col_lower {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Extracts the content inside the outermost balanced parentheses from `text`,
+/// which must start with `(`. Returns `None` if the parens are unbalanced.
+fn extract_balanced_parens(text: &str) -> Option<&str> {
+    let mut depth: usize = 0;
+    let mut start: Option<usize> = None;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '(' => {
+                if depth == 0 {
+                    start = Some(i + 1);
+                }
+                depth += 1;
+            }
+            ')' => {
+                if depth == 0 {
+                    return None; // unmatched close
+                }
+                depth -= 1;
+                if depth == 0 {
+                    let s = start?;
+                    return Some(&text[s..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Run every built-in rule applicable to `ctx` and collect their diagnostics.
@@ -400,5 +545,146 @@ mod tests {
             incremental_config: Some(&inc),
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
+    }
+
+    #[test]
+    fn event_time_not_injectable_into_union_model() {
+        // UNION model: inject_time_filter only touches first branch → wrong data
+        let sql = "SELECT event_date, COUNT(*) AS n \
+                   FROM smelt.orders GROUP BY event_date \
+                   UNION ALL \
+                   SELECT event_date, COUNT(*) AS n \
+                   FROM smelt.returns GROUP BY event_date";
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+        };
+        let inc_cfg = inc_config();
+        let ts_map: SourceTimeseriesMap = HashMap::new();
+        let ctx = RuleContext {
+            model_name: "union_mart",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            diags.iter().any(|d| d.code
+                == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
+                && d.severity == RuleSeverity::Error),
+            "UNION incremental model must produce EventTimeColumnNotVisibleAtOuterSelect Error; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn event_time_not_visible_in_subquery_from() {
+        // Subquery FROM that doesn't project the event_time_column
+        let sql = "SELECT month_start, SUM(amount) AS total \
+                   FROM (SELECT DATE_TRUNC('month', event_ts) AS month_start, amount \
+                         FROM smelt.orders) sub \
+                   GROUP BY 1";
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_ts".to_string(), // NOT projected by subquery
+            partition_column: "month_start".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+        };
+        let inc_cfg = IncrementalConfig {
+            enabled: true,
+            unique_key: vec!["month_start".to_string()],
+            safety_overrides: Default::default(),
+        };
+        let ts_map: SourceTimeseriesMap = HashMap::new();
+        let ctx = RuleContext {
+            model_name: "monthly_mart",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            diags.iter().any(|d| d.code
+                == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
+                && d.severity == RuleSeverity::Error),
+            "subquery-FROM model must produce EventTimeColumnNotVisibleAtOuterSelect Error; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn event_time_visible_in_single_select_is_clean() {
+        // Simple single-SELECT incremental — event_date appears directly
+        let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.src GROUP BY event_date";
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+        };
+        let inc_cfg = inc_config();
+        let ts_map: SourceTimeseriesMap = HashMap::new();
+        let ctx = RuleContext {
+            model_name: "daily_mart",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+        };
+        assert!(
+            detect_builtin_rules(&ctx).is_empty(),
+            "simple incremental model must be clean; got: {:?}",
+            detect_builtin_rules(&ctx)
+        );
+    }
+
+    #[test]
+    fn event_time_visible_when_subquery_projects_it() {
+        // Subquery that DOES project event_ts → EventTimeColumnNotVisibleAtOuterSelect must NOT fire
+        let sql = "SELECT event_ts, SUM(amount) AS total \
+                   FROM (SELECT event_ts, amount FROM smelt.orders) sub \
+                   GROUP BY 1";
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_ts".to_string(),
+            partition_column: "event_ts".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+        };
+        let inc_cfg = IncrementalConfig {
+            enabled: true,
+            unique_key: vec!["event_ts".to_string()],
+            safety_overrides: Default::default(),
+        };
+        let ts_map: SourceTimeseriesMap = HashMap::new();
+        let ctx = RuleContext {
+            model_name: "proj_mart",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+        };
+        // Note: IncrementalNotBatchSafe Warning may fire (subquery in FROM),
+        // but EventTimeColumnNotVisibleAtOuterSelect must NOT fire.
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "must not fire when subquery projects the event_time_column; got: {diags:?}"
+        );
     }
 }
