@@ -79,6 +79,7 @@ class, not just the reported instance.
 | 7 | pending | | |
 | 8 | pending | | |
 | 9 | pending | | |
+| 10 | pending | | |
 
 ---
 
@@ -375,6 +376,73 @@ a threshold. Pairs with Phase 8 (memory_limit spill) as the real guard.
 - [ ] `cargo test -p smelt-runtime` green
 
 **Commit.** `feat(incremental): warn when a single-batch build spans many partitions`
+
+---
+
+### Phase 10 — Parser proptests: close the vacuous-pass gap + widen generators (test soundness)
+**Goal.** Make the parser property tests genuinely able to catch the
+"valid SQL the parser wrongly rejects" class — the exact failure mode of #1
+(WINDOW-in-CTE) and #2 (INTERVAL). Today `assert_round_trip`
+(`crates/smelt-parser/tests/proptest_round_trip.rs:22-28`) early-`return`s when
+the *initial* parse has errors, so a wrongly-rejected construct passes
+**vacuously**. The Phase 5 generators therefore could not have caught the
+original parser bugs (the Phase 3/4 unit tests are what actually guard them).
+This phase adds a direct "valid SQL must parse clean" property and widens the
+generators so coverage is more than a handful of fixed shapes.
+
+**Pre-conditions.** Phases 3, 4, 5 done (constructs parse; generators exist).
+
+**Why this is a real bug, demonstrated (write the demonstration into the test
+file as a doc comment).** A property routed only through `assert_round_trip`
+over `arb_cte_with_window()` passes on the *pre-fix* parser, because the pre-fix
+parser returns a non-empty `parse.errors` for WINDOW-in-CTE and the helper skips
+on `!errors.is_empty()`. The new property below removes that skip for
+contractually-valid generators.
+
+**TDD tests first (red on a parser that rejects the construct, green now).**
+- `prop_valid_sql_parses_clean` — for `sql in` each of
+  `arb_select_with_window_clause()`, `arb_select_with_interval()`,
+  `arb_cte_wrapped_select()`, `arb_cte_with_window()`, `arb_cte_with_interval()`:
+  assert **directly** `prop_assert!(parse(&sql).errors.is_empty(), …)` — NOT via
+  `assert_round_trip`. This is the property that would have gone red on the
+  pre-fix parser.
+- A deterministic unit guard documenting the harness contract: a hand-written
+  WINDOW-in-CTE string asserts `parse(sql).errors.is_empty()` (mirrors
+  `test_named_window_clause_in_cte`, but lives with the proptest harness so the
+  invariant is co-located).
+
+**Generator-breadth widening.**
+- `arb_named_window_def`: vary the frame (PARTITION-only, ORDER-only,
+  PARTITION+ORDER, multiple partition/order cols), and feed it into
+  `arb_select_with_window_clause` (not just the fixed `sum(col) OVER w` shape) —
+  multiple windows, different aggregate/window functions.
+- `arb_cte_wrapped_select`: allow ≥2 levels of nesting and a non-`SELECT *`
+  outer projection, so constructs are exercised more than one boundary deep.
+- Wire the new arms into `arb_any_select()` (currently it omits the WINDOW /
+  INTERVAL / CTE-wrapping strategies — `proptest_generators.rs:409-419`) so the
+  *existing* round-trip properties exercise them too.
+
+**Decision (in-scope, surgical).** Add the dedicated `prop_valid_sql_parses_clean`
+property; do **not** flip `assert_round_trip`'s skip-on-error into a hard assert
+in this phase (that has a wider blast radius — it would surface pre-existing
+not-yet-supported-SQL gaps across unrelated generators). If the clean-parse
+property surfaces such a pre-existing gap in an unrelated generator, log it under
+"## Blocked phases" / "## Deferred" rather than expanding scope here.
+
+**Critical files.** `crates/smelt-parser/tests/proptest_round_trip.rs`,
+`crates/smelt-parser/tests/proptest_generators.rs`.
+
+**Docs.** None (test-only).
+
+**Review checklist.**
+- [ ] `prop_valid_sql_parses_clean` asserts `parse(sql).errors.is_empty()` directly (no round-trip skip)
+- [ ] New property covers WINDOW, INTERVAL, and CTE-nested forms
+- [ ] Generators widened (varied window frames, ≥2-level nesting, non-`SELECT *` outer); new arms wired into `arb_any_select`
+- [ ] Demonstrated rationale recorded (why the old round-trip property was vacuous for the rejection class)
+- [ ] Any pre-existing gap surfaced in an unrelated generator is logged, not silently widened-around
+- [ ] `cargo test -p smelt-parser` green
+
+**Commit.** `test(parser): direct clean-parse property + wider WINDOW/INTERVAL/CTE generators (close vacuous-pass gap)`
 
 ---
 
