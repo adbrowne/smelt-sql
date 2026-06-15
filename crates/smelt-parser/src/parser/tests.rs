@@ -6288,3 +6288,103 @@ fn test_named_window_clause_malformed_no_panic() {
     let _ = parse.errors; // may or may not be empty — not asserted
     let _ = parse.syntax(); // must be accessible
 }
+
+// ===== Phase 4: numeric INTERVAL forms =====
+
+fn assert_interval_parses_complete(sql: &str) {
+    // Check that the SELECT_STMT spans the whole input (no orphaned tokens)
+    // and that a FROM clause is reachable inside the select.
+    let parse = parse(sql);
+    assert_eq!(
+        parse.errors.len(),
+        0,
+        "parse errors for {sql}: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).expect("FILE node");
+    let select = file
+        .select_stmt()
+        .unwrap_or_else(|| panic!("no SelectStmt found for {sql}"));
+    assert!(
+        select.from_clause().is_some(),
+        "FROM clause was orphaned (not inside SelectStmt) for: {sql}"
+    );
+}
+
+#[test]
+fn test_interval_numeric_simple() {
+    // INTERVAL 1 DAY — numeric form: FROM clause must not be orphaned
+    assert_interval_parses_complete("SELECT INTERVAL 1 DAY FROM t");
+}
+
+#[test]
+fn test_interval_numeric_other_units() {
+    // Various unit keywords
+    for sql in &[
+        "SELECT INTERVAL 1 MONTH FROM t",
+        "SELECT INTERVAL 2 YEAR FROM t",
+        "SELECT INTERVAL 3 HOUR FROM t",
+        "SELECT INTERVAL 30 SECOND FROM t",
+    ] {
+        assert_interval_parses_complete(sql);
+    }
+}
+
+#[test]
+fn test_interval_numeric_parenthesized() {
+    // INTERVAL (1) DAY — parenthesized numeric form
+    assert_interval_parses_complete("SELECT INTERVAL (1) DAY FROM t");
+}
+
+#[test]
+fn test_interval_multiplied() {
+    // n * INTERVAL 1 DAY — multiplier form (binary with numeric INTERVAL as RHS)
+    assert_interval_parses_complete("SELECT 3 * INTERVAL 1 DAY FROM t");
+}
+
+#[test]
+fn test_interval_string_form_unchanged() {
+    // INTERVAL '1 day' — existing string form must still parse correctly
+    assert_interval_parses_complete("SELECT d - INTERVAL '1 day' AS x FROM t");
+}
+
+#[test]
+fn test_interval_numeric_in_expression() {
+    // INTERVAL used inside an arithmetic expression
+    assert_interval_parses_complete("SELECT ts + INTERVAL 1 DAY AS next_day FROM events");
+    assert_interval_parses_complete("SELECT ts - INTERVAL 7 DAY AS week_ago FROM events");
+}
+
+#[test]
+fn test_interval_numeric_round_trip() {
+    // parse → print → parse stability for all three numeric INTERVAL forms
+    for sql in &[
+        "SELECT INTERVAL 1 DAY FROM t",
+        "SELECT INTERVAL (1) DAY FROM t",
+        "SELECT 3 * INTERVAL 1 DAY FROM t",
+    ] {
+        let parse1 = parse(sql);
+        assert_eq!(
+            parse1.errors.len(),
+            0,
+            "original parse failed for {sql}: {:?}",
+            parse1.errors
+        );
+        let file = File::cast(parse1.syntax()).expect("FILE node");
+        let printed = file.to_string();
+        let parse2 = parse(&printed);
+        assert_eq!(
+            parse2.errors.len(),
+            0,
+            "round-trip failed for {sql}: printed={printed:?}, errors={:?}",
+            parse2.errors
+        );
+        // Verify FROM clause still in the right place after round-trip
+        let file2 = File::cast(parse2.syntax()).expect("FILE2 node");
+        let select2 = file2.select_stmt().expect("SelectStmt after round-trip");
+        assert!(
+            select2.from_clause().is_some(),
+            "FROM clause orphaned after round-trip for: {sql} (printed as: {printed})"
+        );
+    }
+}
