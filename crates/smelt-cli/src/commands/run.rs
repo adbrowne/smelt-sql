@@ -64,7 +64,6 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
     info!("Found {} models total", models.len());
-    check_parse_errors(&models)?;
     validate_materialization_configs(&models, &config)?;
 
     // 4. Build dependency graph + resolve selectors.
@@ -102,6 +101,24 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         &args.exclude,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Scope parse-error gating: when --select is active, only gate on models
+    // in the selected subgraph + their transitive deps. An unrelated broken
+    // model must not abort a scoped run.
+    {
+        let gate_names = parse_error_gate_set(&graph, &resolved_select, &config);
+        match gate_names {
+            Some(ref names) => {
+                let scoped: Vec<smelt_cli::ModelFile> = models
+                    .iter()
+                    .filter(|m| names.contains(&m.canonical_path()))
+                    .cloned()
+                    .collect();
+                check_parse_errors(&scoped)?;
+            }
+            None => check_parse_errors(&models)?,
+        }
+    }
 
     // Reject directly-selected ephemeral models.
     if !resolved_select.is_empty() {
