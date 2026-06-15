@@ -180,6 +180,204 @@ fn test_validate_run_window_alignment_weekly() {
         .contains("not aligned to weekly granularity"));
 }
 
+// ── Calendar-aligned per-partition tiling (Month/Quarter/Year) ───────────────
+
+#[test]
+fn test_per_partition_monthly_calendar_aligned() {
+    // per_partition=true with monthly granularity must produce calendar-month
+    // batches (28/29/30/31 days) instead of fixed 30-day steps.  Over 24 months
+    // the fixed-day path drifts several days off the true month start; this test
+    // verifies every batch lands exactly on the 1st of each month.
+    let sql = "SELECT event_time, amount FROM events";
+    let ts = make_ts("event_time", "month_start", Granularity::Month);
+    let inc = make_inc();
+    // 24 months: 2025-01-01 to 2027-01-01
+    let range = make_range("2025-01-01", "2027-01-01");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+
+    // Must be exactly 24 batches
+    assert_eq!(
+        windows.batches.len(),
+        24,
+        "expected 24 monthly batches, got {}",
+        windows.batches.len()
+    );
+
+    // Every batch must start and end on the 1st of a month (true calendar alignment)
+    use chrono::Datelike;
+    for (i, b) in windows.batches.iter().enumerate() {
+        assert_eq!(
+            b.partition_start.day(),
+            1,
+            "batch {} start {} is not the 1st of a month",
+            i,
+            b.partition_start
+        );
+        assert_eq!(
+            b.partition_end.day(),
+            1,
+            "batch {} end {} is not the 1st of a month",
+            i,
+            b.partition_end
+        );
+    }
+
+    // Span is contiguous: each batch's end equals the next batch's start
+    for i in 0..windows.batches.len() - 1 {
+        assert_eq!(
+            windows.batches[i].partition_end,
+            windows.batches[i + 1].partition_start,
+            "gap between batch {} and {}",
+            i,
+            i + 1
+        );
+    }
+
+    // First and last boundaries correct
+    use chrono::NaiveDate;
+    assert_eq!(
+        windows.batches[0].partition_start,
+        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+    );
+    assert_eq!(
+        windows.batches[23].partition_end,
+        NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+    );
+}
+
+#[test]
+fn test_per_partition_monthly_feb_boundary() {
+    // Crossing a February validates the calendar logic against 28/29-day months.
+    let sql = "SELECT event_time, amount FROM events";
+    let ts = make_ts("event_time", "month_start", Granularity::Month);
+    let inc = make_inc();
+    // Jan-Mar 2024 (Feb has 29 days — leap year)
+    let range = make_range("2024-01-01", "2024-04-01");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+
+    assert_eq!(windows.batches.len(), 3);
+    use chrono::NaiveDate;
+    assert_eq!(
+        windows.batches[0].partition_start,
+        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+    );
+    assert_eq!(
+        windows.batches[0].partition_end,
+        NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+    );
+    // Feb 1 → Mar 1 (29 days in a leap year)
+    assert_eq!(
+        windows.batches[1].partition_start,
+        NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+    );
+    assert_eq!(
+        windows.batches[1].partition_end,
+        NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+    );
+    // Mar 1 → Apr 1 (31 days)
+    assert_eq!(
+        windows.batches[2].partition_start,
+        NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+    );
+    assert_eq!(
+        windows.batches[2].partition_end,
+        NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()
+    );
+}
+
+#[test]
+fn test_per_partition_quarterly_calendar_aligned() {
+    // Quarterly per-partition batches must step by true calendar quarters.
+    let sql = "SELECT event_time, amount FROM events";
+    let ts = make_ts("event_time", "quarter_start", Granularity::Quarter);
+    let inc = make_inc();
+    // 4 quarters: 2025-01-01 to 2026-01-01
+    let range = make_range("2025-01-01", "2026-01-01");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+
+    assert_eq!(
+        windows.batches.len(),
+        4,
+        "expected 4 quarterly batches, got {}",
+        windows.batches.len()
+    );
+
+    use chrono::NaiveDate;
+    let expected_starts = [
+        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 10, 1).unwrap(),
+    ];
+    let expected_ends = [
+        NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 10, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    ];
+    for (i, b) in windows.batches.iter().enumerate() {
+        assert_eq!(b.partition_start, expected_starts[i], "batch {} start", i);
+        assert_eq!(b.partition_end, expected_ends[i], "batch {} end", i);
+    }
+}
+
+#[test]
+fn test_per_partition_yearly_calendar_aligned() {
+    // Yearly per-partition batches must step by true calendar years.
+    let sql = "SELECT event_time, amount FROM events";
+    let ts = make_ts("event_time", "year_start", Granularity::Year);
+    let inc = make_inc();
+    // 3 years: 2023-01-01 to 2026-01-01
+    let range = make_range("2023-01-01", "2026-01-01");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+
+    assert_eq!(
+        windows.batches.len(),
+        3,
+        "expected 3 yearly batches, got {}",
+        windows.batches.len()
+    );
+
+    use chrono::NaiveDate;
+    let expected_starts = [
+        NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+    ];
+    let expected_ends = [
+        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    ];
+    for (i, b) in windows.batches.iter().enumerate() {
+        assert_eq!(b.partition_start, expected_starts[i], "batch {} start", i);
+        assert_eq!(b.partition_end, expected_ends[i], "batch {} end", i);
+    }
+}
+
+#[test]
+fn test_per_partition_daily_and_weekly_unchanged() {
+    // Day/Week granularity still use fixed-step tiling (unchanged by the calendar fix).
+    let sql = "SELECT event_time, amount FROM events";
+
+    // 3 days with per_partition → 3 day batches
+    let ts_day = make_ts("event_time", "day", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-03-01", "2026-03-04");
+    let windows = compute_incremental_windows(&ts_day, &inc, sql, 0, &range, None, true);
+    assert_eq!(windows.batches.len(), 3, "expected 3 daily batches");
+
+    // 2 weeks with per_partition → 2 weekly batches
+    let ts_week = make_ts("event_time", "week_start", Granularity::Week);
+    let range_w = make_range("2026-03-02", "2026-03-16"); // 14 days, 2 Mon→Mon
+    let windows_w = compute_incremental_windows(&ts_week, &inc, sql, 0, &range_w, None, true);
+    assert_eq!(windows_w.batches.len(), 2, "expected 2 weekly batches");
+}
+
 // ── No-latency baseline ───────────────────────────────────────────────────────
 
 #[test]

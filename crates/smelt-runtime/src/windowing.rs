@@ -116,7 +116,8 @@ pub fn compute_incremental_windows(
     let granularity_period = granularity_days(&timeseries.granularity);
 
     let batch_days = if per_partition {
-        // Force one batch per granularity period regardless of safety.
+        // Calendar granularities use calendar stepping (see tiling loop below).
+        // Fixed-day granularities (Day/Week) still use the period in days.
         granularity_period
     } else if let Some(override_days) = batch_size_days {
         override_days.max(1)
@@ -129,10 +130,25 @@ pub fn compute_incremental_windows(
     };
 
     // Split full_range into partition batches; widen each into a filter batch.
+    //
+    // When per_partition=true for Month/Quarter/Year we advance by calendar
+    // units (1 month, 3 months, 12 months) rather than a fixed day count.
+    // A fixed 30-day step drifts off true calendar-month boundaries and grows
+    // with the month index — eventually dropping an entire day's worth of rows.
+    let use_calendar_stepping = per_partition
+        && matches!(
+            timeseries.granularity,
+            Granularity::Month | Granularity::Quarter | Granularity::Year
+        );
+
     let mut batches = Vec::new();
     let mut batch_start = start_date;
     while batch_start < end_date {
-        let batch_end = (batch_start + Duration::days(batch_days as i64)).min(end_date);
+        let batch_end = if use_calendar_stepping {
+            calendar_next_partition_start(batch_start, &timeseries.granularity).min(end_date)
+        } else {
+            (batch_start + Duration::days(batch_days as i64)).min(end_date)
+        };
         let filter_start = batch_start - Duration::days(filter_lookback as i64);
         let filter_end = batch_end + Duration::days(filter_lookahead as i64);
         batches.push(IncrementalBatch {
@@ -258,6 +274,22 @@ pub fn validate_run_window_alignment(
             }
             Ok(())
         }
+    }
+}
+
+/// Advance `current` by exactly one partition step for the given granularity.
+///
+/// For Month/Quarter/Year this is a true calendar step (chrono `Months`), not a
+/// fixed-day count — necessary because months have varying lengths.  Day/Week
+/// continue to use fixed 1-day / 7-day steps.
+fn calendar_next_partition_start(current: NaiveDate, granularity: &Granularity) -> NaiveDate {
+    use chrono::Months;
+    match granularity {
+        Granularity::Month => current + Months::new(1),
+        Granularity::Quarter => current + Months::new(3),
+        Granularity::Year => current + Months::new(12),
+        Granularity::Week => current + Duration::days(7),
+        Granularity::Day | Granularity::Hour => current + Duration::days(1),
     }
 }
 

@@ -120,6 +120,10 @@ A first run (no existing output table) and a backfill (a re-run of a range that 
 | `BoundedSafe(n)`     | Auto-sized sub-ranges (the existing 3× context, clamped 7–90 partitions rule). Each sub-range is one DELETE+INSERT pair, executed sequentially in temporal order. |
 | `PerPartitionOnly`   | One partition per iteration, sequential, temporal order. Each partition is one DELETE+INSERT pair. |
 
+**Per-partition batching is calendar-aligned for Month/Quarter/Year.** When the model's batch-safety class forces per-partition execution (or `smelt backbuild --per-partition` is requested), batches for `Month`/`Quarter`/`Year` granularities advance by true calendar units — 1 calendar month, 3 calendar months, or 1 calendar year respectively — rather than a fixed number of days. This ensures every batch lands exactly on a month/quarter/year boundary regardless of month length (February has 28 or 29 days; some months have 31). `Day` and `Week` granularities continue to use fixed 1-day / 7-day steps.
+
+**Output grain may be finer than partition grain.** A model whose `partition_column` holds monthly boundaries (e.g., `month_start`) may emit rows at daily or hourly granularity within those boundaries. The batch-splitting logic operates on the *partition* grain; rows at a finer grain are written and read in their entirety within each partition batch. A `--per-partition` run over 24 months with a daily-grain output table therefore writes all daily rows for each month in a single DELETE+INSERT — not one DELETE+INSERT per day.
+
 **Per-chunk transaction boundary.** Each chunk's DELETE+INSERT is one backend transaction. INSERT failure rolls back the chunk's DELETE. Earlier committed chunks **do not** roll back — partial-progress is intentional, since each chunk is idempotent under the same `[start, end)`.
 
 **Failure mode.** A run halts at the first failed chunk and exits non-zero. Re-running the same `[start, end)` resumes correctly because every committed chunk is idempotent: the next attempt will re-DELETE+INSERT the failed (or any later) range from the same input data and converge to the same final state.
