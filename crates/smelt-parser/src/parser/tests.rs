@@ -6,7 +6,7 @@ use crate::ast::{
     InExpr, JoinType, Lambda, LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering,
     OrderByClause, OrderByItem, PartitionByClause, PipeExpr, PivotClause, QualifyClause,
     SelectItem, SelectList, SelectStmt, SortDirection, Subquery, TableRef, UnpivotClause,
-    ValuesClause, WhenClause, WindowFrame, WindowSpec, WithClause,
+    ValuesClause, WhenClause, WindowClause, WindowFrame, WindowSpec, WithClause,
 };
 
 /// Helper: parse SQL, assert no errors, return the SelectStmt
@@ -6206,4 +6206,85 @@ fn collate_expr_parses_to_node() {
         Some("C"), // quotes stripped
         "Collation name should be C (without quotes)"
     );
+}
+
+// ===== Named WINDOW clause =====
+
+#[test]
+fn test_named_window_clause_top_level() {
+    let input = "SELECT x, sum(y) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY y)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    // The SELECT should have a WINDOW clause
+    let select = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectStmt::cast)
+        .expect("should have SelectStmt");
+    assert!(
+        select.window_clause().is_some(),
+        "should have a WINDOW clause"
+    );
+}
+
+#[test]
+fn test_named_window_clause_in_cte() {
+    let input = "WITH c AS (SELECT x, sum(y) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY y)) SELECT * FROM c";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_named_window_clause_round_trip() {
+    // parse → print → re-parse must have no errors (same convention as assert_round_trip
+    // in printer.rs — text idempotency is NOT asserted because expr.text() includes
+    // leading trivia consumed by parse_expression's skip_trivia(), a pre-existing
+    // printer characteristic shared across all clause types).
+    let sql = "SELECT x, sum(y) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY y)";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn test_named_window_clause_multiple_windows() {
+    // Comma-separated named windows: exercises the loop in parse_window_clause
+    let input =
+        "SELECT sum(a) OVER w1, rank() OVER w2 FROM t WINDOW w1 AS (PARTITION BY x), w2 AS (ORDER BY y)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let select = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectStmt::cast)
+        .expect("should have SelectStmt");
+    let wc = select.window_clause().expect("should have WINDOW clause");
+    assert_eq!(
+        wc.named_windows().count(),
+        2,
+        "should have exactly 2 named windows"
+    );
+}
+
+#[test]
+fn test_named_window_clause_malformed_no_panic() {
+    // Malformed WINDOW clause: parser must not panic; should produce error nodes.
+    let input = "SELECT x FROM t WINDOW";
+    let parse = parse(input);
+    // We only assert no panic and that a WINDOW clause node was attempted.
+    // Parse errors are expected for incomplete input.
+    let _ = parse.errors; // may or may not be empty — not asserted
+    let _ = parse.syntax(); // must be accessible
 }

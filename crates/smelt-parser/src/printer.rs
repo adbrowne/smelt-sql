@@ -133,6 +133,11 @@ impl Display for SelectStmt {
             write!(f, " QUALIFY {}", qualify_clause)?;
         }
 
+        // WINDOW clause
+        if let Some(window_clause) = self.window_clause() {
+            write!(f, " WINDOW {}", window_clause)?;
+        }
+
         // ORDER BY clause
         if let Some(order_by_clause) = self.order_by_clause() {
             write!(f, " {}", order_by_clause)?;
@@ -303,6 +308,55 @@ impl Display for QualifyClause {
         if let Some(expr) = self.expression() {
             write!(f, "{}", expr.text())?;
         }
+        Ok(())
+    }
+}
+
+impl Display for WindowClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let windows: Vec<_> = self.named_windows().collect();
+        for (i, nw) in windows.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", nw)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for NamedWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // name AS (body)
+        if let Some(name) = self.name() {
+            write!(f, "{} AS (", name)?;
+        } else {
+            write!(f, "? AS (")?;
+        }
+
+        let mut needs_space = false;
+
+        if let Some(partition_by) = self.partition_by() {
+            write!(f, "{}", partition_by)?;
+            needs_space = true;
+        }
+
+        if let Some(order_by) = self.order_by() {
+            if needs_space {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", order_by)?;
+            needs_space = true;
+        }
+
+        if let Some(frame) = self.window_frame() {
+            if needs_space {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", frame)?;
+        }
+
+        write!(f, ")")?;
         Ok(())
     }
 }
