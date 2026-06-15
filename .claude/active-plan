@@ -51,14 +51,17 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 master_plan: docs/plans/20260530-feature-sweep.md
-active_subplan: docs/plans/20260530-feature-sweep.md
+active_subplan: docs/plans/20260616-smelt-feedback-fixes.md
 
 # Back-compat aliases (older fresh-context flows read these names). In probe mode
 # they mirror master_plan (the in-repo probe backlog); the across-session probe
 # routine lives in the meta-plan ~/.claude/plans/we-now-have-a-idempotent-torvalds.md.
-in_repo_plan: docs/plans/20260530-feature-sweep.md
+in_repo_plan: docs/plans/20260616-smelt-feedback-fixes.md
 meta_plan: docs/plans/20260530-feature-sweep.md
 
 # Completed sub-plans (rolled up): docs/plans/20260531-diagnostic-parity.md (done 2026-06-03),
 # docs/plans/20260604-frontmatter-parity.md (done 2026-06-04),
 # docs/plans/20260604-codegen-soundness.md (done 2026-06-05).
+#
+# Ready sub-plan (registered 2026-06-16): docs/plans/20260616-smelt-feedback-fixes.md
+# — Sherlock-feedback fixes; the loop runs it first under unified-priority mode.
