@@ -74,7 +74,7 @@ class, not just the reported instance.
 | 2 | done | 378a37ca | 2026-06-16 |
 | 3 | done | fbf9f0f0 | 2026-06-16 |
 | 4 | done | b5ebe1d2 | 2026-06-16 |
-| 5 | pending | | |
+| 5 | done | | 2026-06-16 |
 | 6 | pending | | |
 | 7 | pending | | |
 | 8 | pending | | |

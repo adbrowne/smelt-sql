@@ -303,6 +303,108 @@ pub fn arb_select_distinct() -> impl Strategy<Value = String> {
         .prop_map(|(select_list, table)| format!("SELECT DISTINCT {} FROM {}", select_list, table))
 }
 
+/// Generate window spec names (simple identifiers used as window aliases)
+#[allow(dead_code)]
+pub fn arb_window_spec_name() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("w".to_string()),
+        Just("w1".to_string()),
+        Just("win".to_string()),
+    ]
+}
+
+/// Generate a named window definition: `w AS (PARTITION BY col ORDER BY col)`
+#[allow(dead_code)]
+pub fn arb_named_window_def() -> impl Strategy<Value = String> {
+    (arb_window_spec_name(), arb_column_ref(), arb_column_ref()).prop_map(
+        |(name, part_col, ord_col)| {
+            format!(
+                "{} AS (PARTITION BY {} ORDER BY {})",
+                name, part_col, ord_col
+            )
+        },
+    )
+}
+
+/// Generate a SELECT with a named WINDOW clause
+/// Example: `SELECT sum(col) OVER w FROM t WINDOW w AS (PARTITION BY col ORDER BY col)`
+pub fn arb_select_with_window_clause() -> impl Strategy<Value = String> {
+    (
+        arb_identifier(),
+        arb_column_ref(),
+        arb_column_ref(),
+        arb_column_ref(),
+    )
+        .prop_map(|(table, func_col, part_col, ord_col)| {
+            format!(
+                "SELECT sum({}) OVER w FROM {} WINDOW w AS (PARTITION BY {} ORDER BY {})",
+                func_col, table, part_col, ord_col
+            )
+        })
+}
+
+/// Generate valid INTERVAL unit keywords
+pub fn arb_interval_unit() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("DAY"),
+        Just("MONTH"),
+        Just("YEAR"),
+        Just("HOUR"),
+        Just("MINUTE"),
+        Just("SECOND"),
+        Just("WEEK"),
+    ]
+    .prop_map(|s| s.to_string())
+}
+
+/// Generate a numeric INTERVAL expression in one of three forms:
+/// - `INTERVAL n UNIT`
+/// - `INTERVAL (n) UNIT`
+/// - `n * INTERVAL 1 UNIT`
+pub fn arb_numeric_interval() -> impl Strategy<Value = String> {
+    (1u32..30, arb_interval_unit()).prop_flat_map(|(n, unit)| {
+        let unit2 = unit.clone();
+        let unit3 = unit.clone();
+        prop_oneof![
+            Just(format!("INTERVAL {} {}", n, unit)),
+            Just(format!("INTERVAL ({}) {}", n, unit2)),
+            Just(format!("{} * INTERVAL 1 {}", n, unit3)),
+        ]
+    })
+}
+
+/// Generate a SELECT using a numeric INTERVAL in an expression
+/// Example: `SELECT col + INTERVAL 1 DAY AS alias FROM t`
+pub fn arb_select_with_interval() -> impl Strategy<Value = String> {
+    (
+        arb_identifier(),
+        arb_column_ref(),
+        arb_numeric_interval(),
+        arb_identifier(),
+    )
+        .prop_map(|(table, col, interval, alias)| {
+            format!("SELECT {} + {} AS {} FROM {}", col, interval, alias, table)
+        })
+}
+
+/// Generate a CTE-wrapped SELECT: `WITH cte AS (SELECT ...) SELECT * FROM cte`
+/// This guards the "works top-level, breaks in CTE" class of regressions.
+pub fn arb_cte_wrapped_select() -> impl Strategy<Value = String> {
+    arb_any_select().prop_map(|inner| format!("WITH cte AS ({}) SELECT * FROM cte", inner))
+}
+
+/// Generate a CTE whose inner SELECT has a WINDOW clause
+pub fn arb_cte_with_window() -> impl Strategy<Value = String> {
+    arb_select_with_window_clause()
+        .prop_map(|inner| format!("WITH cte AS ({}) SELECT * FROM cte", inner))
+}
+
+/// Generate a CTE whose inner SELECT uses numeric INTERVAL
+pub fn arb_cte_with_interval() -> impl Strategy<Value = String> {
+    arb_select_with_interval()
+        .prop_map(|inner| format!("WITH cte AS ({}) SELECT * FROM cte", inner))
+}
+
 /// Generate any valid SELECT statement
 pub fn arb_any_select() -> impl Strategy<Value = String> {
     prop_oneof![

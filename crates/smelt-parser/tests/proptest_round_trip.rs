@@ -110,6 +110,40 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property: SELECT with named WINDOW clause round-trips correctly
+    #[test]
+    fn prop_window_clause_round_trip(sql in arb_select_with_window_clause()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: SELECT with numeric INTERVAL round-trips correctly
+    #[test]
+    fn prop_numeric_interval_round_trip(sql in arb_select_with_interval()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: CTE-wrapped SELECT round-trips correctly (guards "works top-level, breaks in CTE" class)
+    #[test]
+    fn prop_cte_wrapped_select_round_trip(sql in arb_cte_wrapped_select()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: WINDOW clause inside a CTE round-trips correctly
+    #[test]
+    fn prop_cte_with_window_round_trip(sql in arb_cte_with_window()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: numeric INTERVAL inside a CTE round-trips correctly
+    #[test]
+    fn prop_cte_with_interval_round_trip(sql in arb_cte_with_interval()) {
+        assert_round_trip(&sql);
+    }
+}
+
 // ===== Property tests for parser robustness =====
 
 proptest! {
