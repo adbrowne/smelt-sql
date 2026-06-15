@@ -18,7 +18,7 @@ use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergen
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
     self, assemble_cte_query, generate_expr, join_scenario_strategy, multi_model_scenario_strategy,
-    test_scenario_strategy, three_model_scenario_strategy, TypedExpr,
+    test_scenario_strategy, three_model_scenario_strategy, wrap_in_outer_cte, TypedExpr,
 };
 use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
@@ -266,6 +266,52 @@ fn smoke_binary_add() {
         let divergences = known_divergences();
         check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
     }
+}
+
+#[test]
+fn smoke_binary_division() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST(7 AS INTEGER) AS x) SELECT x / x AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Integer,
+        cast_sql: "CAST(7 AS INTEGER)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    // Integer / Integer returns Double — smelt and DuckDB agree.
+    assert_eq!(
+        inferred[0].1,
+        DataType::Double,
+        "smelt division should be Double"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Double,
+        "DuckDB division should be Double"
+    );
+
+    if let Some(spark) = SPARK.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+    }
+}
+
+#[test]
+fn smoke_nested_cte_division() {
+    let oracle = DuckDbOracle::new();
+    let inner = "WITH data AS (SELECT CAST(7 AS INTEGER) AS x) SELECT x / x AS expr_0 FROM data";
+    let sql = wrap_in_outer_cte(inner);
+    let actual = oracle.query_types(&sql).unwrap();
+
+    // Integer / Integer returns Double through a nested CTE boundary.
+    assert_eq!(
+        actual[0].1,
+        DataType::Double,
+        "DuckDB nested-CTE division should be Double"
+    );
 }
 
 #[test]
