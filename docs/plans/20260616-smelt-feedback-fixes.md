@@ -73,7 +73,7 @@ class, not just the reported instance.
 | 1 | done | | 2026-06-16 |
 | 2 | done | 378a37ca | 2026-06-16 |
 | 3 | done | fbf9f0f0 | 2026-06-16 |
-| 4 | done | HEAD | 2026-06-16 |
+| 4 | done | b5ebe1d2 | 2026-06-16 |
 | 5 | pending | | |
 | 6 | pending | | |
 | 7 | pending | | |
