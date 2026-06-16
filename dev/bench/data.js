@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781582629139,
+  "lastUpdate": 1781582631586,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25679,6 +25679,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.242920800059668,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bb258e44dfe684d31711ef1feca10ada8b549274",
+          "message": "Sherlock-feedback fixes: parser, type inference, incremental execution, config (#141)",
+          "timestamp": "2026-06-16T14:01:06+10:00",
+          "tree_id": "860b4f741d5675a87c0dd2101fa222548568e776",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bb258e44dfe684d31711ef1feca10ada8b549274"
+        },
+        "date": 1781582630761,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.31320262177703,
             "unit": "MB/s"
           }
         ]
