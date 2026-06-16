@@ -7,9 +7,174 @@ use proptest::prelude::*;
 
 // ===== Basic building blocks =====
 
-/// Generate valid SQL identifiers
+/// SQL reserved keywords that must not be generated as bare identifiers.
+///
+/// This list covers the most common keywords that the smelt lexer assigns a
+/// dedicated token (e.g. `IF_KW`, `AND`, `OR`) and therefore refuses to accept
+/// as a plain `IDENT` in column/table positions.
+const RESERVED_KEYWORDS: &[&str] = &[
+    "and",
+    "or",
+    "not",
+    "in",
+    "is",
+    "as",
+    "on",
+    "by",
+    "to",
+    "of",
+    "at",
+    "do",
+    "if",
+    "no",
+    "up",
+    "be",
+    "go",
+    "my",
+    "us",
+    "we",
+    "all",
+    "any",
+    "are",
+    "but",
+    "can",
+    "did",
+    "end",
+    "few",
+    "for",
+    "get",
+    "got",
+    "had",
+    "has",
+    "him",
+    "his",
+    "how",
+    "its",
+    "let",
+    "may",
+    "new",
+    "now",
+    "off",
+    "old",
+    "one",
+    "our",
+    "out",
+    "own",
+    "set",
+    "she",
+    "the",
+    "two",
+    "use",
+    "was",
+    "way",
+    "who",
+    "why",
+    "yet",
+    "you",
+    "add",
+    "asc",
+    "avg",
+    "bit",
+    "day",
+    "dec",
+    "del",
+    "div",
+    "dup",
+    "eof",
+    "era",
+    "fix",
+    "get",
+    "got",
+    "hex",
+    "key",
+    "lag",
+    "max",
+    "min",
+    "mod",
+    "neg",
+    "net",
+    "nil",
+    "nor",
+    "not",
+    "now",
+    "null",
+    "or",
+    "ord",
+    "out",
+    "per",
+    "raw",
+    "rec",
+    "ref",
+    "row",
+    "run",
+    "sec",
+    "sql",
+    "sub",
+    "sum",
+    "sys",
+    "tab",
+    "top",
+    "try",
+    "uid",
+    "url",
+    "val",
+    "var",
+    "via",
+    "win",
+    "select",
+    "from",
+    "where",
+    "join",
+    "inner",
+    "outer",
+    "left",
+    "right",
+    "full",
+    "cross",
+    "on",
+    "group",
+    "order",
+    "having",
+    "limit",
+    "offset",
+    "distinct",
+    "union",
+    "intersect",
+    "except",
+    "with",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "between",
+    "like",
+    "ilike",
+    "similar",
+    "escape",
+    "exists",
+    "some",
+    "every",
+    "over",
+    "partition",
+    "rows",
+    "range",
+    "window",
+    "interval",
+    "current",
+    "preceding",
+    "following",
+    "unbounded",
+    "true",
+    "false",
+    "null",
+];
+
+/// Generate valid SQL identifiers that are not reserved keywords.
 pub fn arb_identifier() -> impl Strategy<Value = String> {
-    "[a-z][a-z0-9_]{0,10}".prop_map(|s| s)
+    "[a-z][a-z0-9_]{2,10}".prop_filter("must not be a reserved keyword", |s| {
+        !RESERVED_KEYWORDS.contains(&s.as_str())
+    })
 }
 
 /// Generate valid SQL numbers
@@ -116,8 +281,10 @@ pub fn arb_select_item() -> impl Strategy<Value = String> {
     prop_oneof![
         3 => arb_simple_expr(),
         1 => arb_function_call(),
-        // With alias
-        1 => (arb_simple_expr(), arb_identifier())
+        // With alias: only alias non-star expressions, since `* AS alias` is invalid.
+        1 => (arb_column_ref(), arb_identifier())
+            .prop_map(|(expr, alias)| format!("{} AS {}", expr, alias)),
+        1 => (arb_function_call(), arb_identifier())
             .prop_map(|(expr, alias)| format!("{} AS {}", expr, alias)),
     ]
 }
@@ -313,33 +480,67 @@ pub fn arb_window_spec_name() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Generate a named window definition: `w AS (PARTITION BY col ORDER BY col)`
-#[allow(dead_code)]
+/// Generate a named window definition with varied frame shapes:
+/// PARTITION-only, ORDER-only, PARTITION+ORDER, multiple columns.
+///
+/// The window alias is always `w` so that SELECT...OVER w and WINDOW w AS (...) agree.
 pub fn arb_named_window_def() -> impl Strategy<Value = String> {
-    (arb_window_spec_name(), arb_column_ref(), arb_column_ref()).prop_map(
-        |(name, part_col, ord_col)| {
-            format!(
-                "{} AS (PARTITION BY {} ORDER BY {})",
-                name, part_col, ord_col
-            )
-        },
+    (
+        arb_column_ref(),
+        arb_column_ref(),
+        arb_column_ref(),
+        arb_column_ref(),
     )
+        .prop_flat_map(|(p1, p2, o1, o2)| {
+            let p1b = p1.clone();
+            let p2b = p2.clone();
+            let o1b = o1.clone();
+            let o2b = o2.clone();
+            prop_oneof![
+                // PARTITION BY only
+                Just(format!("w AS (PARTITION BY {})", p1)),
+                // ORDER BY only
+                Just(format!("w AS (ORDER BY {})", o1b)),
+                // PARTITION BY + ORDER BY (single cols)
+                Just(format!("w AS (PARTITION BY {} ORDER BY {})", p1b, o1)),
+                // PARTITION BY multiple + ORDER BY multiple
+                Just(format!(
+                    "w AS (PARTITION BY {}, {} ORDER BY {}, {})",
+                    p2b, p2, o2b, o2
+                )),
+            ]
+        })
 }
 
-/// Generate a SELECT with a named WINDOW clause
-/// Example: `SELECT sum(col) OVER w FROM t WINDOW w AS (PARTITION BY col ORDER BY col)`
+/// Generate a SELECT with a named WINDOW clause using varied aggregate functions
+/// and window frame shapes (PARTITION-only, ORDER-only, PARTITION+ORDER).
+///
+/// The window alias is always `w` in both `OVER w` and `WINDOW w AS (...)` to
+/// avoid alias-mismatch parse errors.
 pub fn arb_select_with_window_clause() -> impl Strategy<Value = String> {
     (
-        arb_identifier(),
-        arb_column_ref(),
-        arb_column_ref(),
-        arb_column_ref(),
+        arb_identifier(), // table
+        arb_column_ref(), // column for aggregate
+        arb_named_window_def(),
     )
-        .prop_map(|(table, func_col, part_col, ord_col)| {
-            format!(
-                "SELECT sum({}) OVER w FROM {} WINDOW w AS (PARTITION BY {} ORDER BY {})",
-                func_col, table, part_col, ord_col
-            )
+        .prop_flat_map(|(table, col, window_def)| {
+            let col2 = col.clone();
+            let col3 = col.clone();
+            let table2 = table.clone();
+            let table3 = table.clone();
+            let wd2 = window_def.clone();
+            let wd3 = window_def.clone();
+            prop_oneof![
+                Just(format!(
+                    "SELECT SUM({col}) OVER w FROM {table} WINDOW {window_def}"
+                )),
+                Just(format!(
+                    "SELECT AVG({col2}) OVER w FROM {table2} WINDOW {wd2}"
+                )),
+                Just(format!(
+                    "SELECT MAX({col3}) OVER w FROM {table3} WINDOW {wd3}"
+                )),
+            ]
         })
 }
 
@@ -387,10 +588,37 @@ pub fn arb_select_with_interval() -> impl Strategy<Value = String> {
         })
 }
 
-/// Generate a CTE-wrapped SELECT: `WITH cte AS (SELECT ...) SELECT * FROM cte`
-/// This guards the "works top-level, breaks in CTE" class of regressions.
+/// Generate any "base" SELECT (no CTE wrapping) — used as the inner of CTE generators
+/// to avoid infinite recursion.
+pub fn arb_any_select_basic() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => arb_simple_select(),
+        1 => arb_select_with_where(),
+        1 => arb_select_with_join(),
+        1 => arb_select_with_group_by(),
+        1 => arb_select_with_order_by(),
+        1 => arb_select_with_limit(),
+        1 => arb_select_distinct(),
+        1 => arb_select_with_window_clause(),
+        1 => arb_select_with_interval(),
+    ]
+}
+
+/// Generate a CTE-wrapped SELECT supporting 1 or 2 CTE levels and non-`SELECT *` outer.
+///
+/// Uses `arb_simple_select()` (not `arb_any_select()`) for the inner to keep the
+/// strategy tree shallow and avoid stack overflows in debug builds.
 pub fn arb_cte_wrapped_select() -> impl Strategy<Value = String> {
-    arb_any_select().prop_map(|inner| format!("WITH cte AS ({}) SELECT * FROM cte", inner))
+    (arb_simple_select(), arb_select_list(), 0usize..3usize).prop_map(
+        |(inner, outer_list, variant)| match variant {
+            // 1-level, SELECT *
+            0 => format!("WITH cte AS ({inner}) SELECT * FROM cte"),
+            // 1-level, non-SELECT * outer projection
+            1 => format!("WITH cte AS ({inner}) SELECT {outer_list} FROM cte"),
+            // 2-level chained CTEs (use a fixed inner for the second level)
+            _ => format!("WITH a AS ({inner}), b AS (SELECT * FROM a) SELECT {outer_list} FROM b"),
+        },
+    )
 }
 
 /// Generate a CTE whose inner SELECT has a WINDOW clause
@@ -405,15 +633,12 @@ pub fn arb_cte_with_interval() -> impl Strategy<Value = String> {
         .prop_map(|inner| format!("WITH cte AS ({}) SELECT * FROM cte", inner))
 }
 
-/// Generate any valid SELECT statement
+/// Generate any valid SELECT statement, including CTE-wrapped forms.
 pub fn arb_any_select() -> impl Strategy<Value = String> {
     prop_oneof![
-        2 => arb_simple_select(),
-        1 => arb_select_with_where(),
-        1 => arb_select_with_join(),
-        1 => arb_select_with_group_by(),
-        1 => arb_select_with_order_by(),
-        1 => arb_select_with_limit(),
-        1 => arb_select_distinct(),
+        3 => arb_any_select_basic(),
+        1 => arb_cte_wrapped_select(),
+        1 => arb_cte_with_window(),
+        1 => arb_cte_with_interval(),
     ]
 }
