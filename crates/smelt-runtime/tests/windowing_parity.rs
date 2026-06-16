@@ -378,6 +378,88 @@ fn test_per_partition_daily_and_weekly_unchanged() {
     assert_eq!(windows_w.batches.len(), 2, "expected 2 weekly batches");
 }
 
+// ── Wide single-batch warning ─────────────────────────────────────────────────
+
+#[test]
+fn test_wide_single_batch_warns() {
+    // A FullyBatchSafe model (simple GROUP BY, no temporal deps) over 90 days
+    // should warn because it creates a single query covering 90 partition periods.
+    let sql = "SELECT date_trunc('day', event_time) as d, COUNT(*) FROM events GROUP BY 1";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    // 90 days > 30-period threshold
+    let range = make_range("2026-01-01", "2026-04-01");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, false);
+
+    // FullyBatchSafe → single batch
+    assert_eq!(
+        windows.batches.len(),
+        1,
+        "expected single batch for FullyBatchSafe"
+    );
+    // Warning should be present for wide range
+    assert!(
+        windows.wide_batch_warning.is_some(),
+        "expected a wide-batch warning for 90-day single batch"
+    );
+    let msg = windows.wide_batch_warning.unwrap();
+    assert!(
+        msg.contains("--per-partition") || msg.contains("--batch-size"),
+        "warning should recommend --per-partition or --batch-size, got: {msg}"
+    );
+}
+
+#[test]
+fn test_narrow_single_batch_no_warn() {
+    // A FullyBatchSafe model over 7 days should NOT warn (well within threshold).
+    let sql = "SELECT date_trunc('day', event_time) as d, COUNT(*) FROM events GROUP BY 1";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-01-08"); // 7 days
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, false);
+
+    assert!(
+        windows.wide_batch_warning.is_none(),
+        "no warning expected for 7-day single batch"
+    );
+}
+
+#[test]
+fn test_per_partition_no_wide_batch_warn() {
+    // per_partition=true means the user already opted into safe batching;
+    // no warning should fire even for a wide range.
+    let sql = "SELECT date_trunc('day', event_time) as d, COUNT(*) FROM events GROUP BY 1";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-04-01"); // 90 days
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+
+    assert!(
+        windows.wide_batch_warning.is_none(),
+        "no warning expected when per_partition=true"
+    );
+}
+
+#[test]
+fn test_batch_size_override_no_wide_batch_warn() {
+    // If the user supplied --batch-size, they already made an explicit choice;
+    // no additional warning is needed.
+    let sql = "SELECT date_trunc('day', event_time) as d, COUNT(*) FROM events GROUP BY 1";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-04-01"); // 90 days
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, Some(30), false);
+
+    assert!(
+        windows.wide_batch_warning.is_none(),
+        "no warning expected when batch_size_days is set"
+    );
+}
+
 // ── No-latency baseline ───────────────────────────────────────────────────────
 
 #[test]

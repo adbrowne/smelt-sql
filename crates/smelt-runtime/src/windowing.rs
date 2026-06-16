@@ -40,7 +40,16 @@ pub struct IncrementalBatch {
 pub struct IncrementalWindows {
     pub batches: Vec<IncrementalBatch>,
     pub effective_window: EffectiveWindow,
+    /// Present when `FullyBatchSafe` causes a single-batch build spanning
+    /// many partition periods. The message recommends `--per-partition` or
+    /// `--batch-size` to avoid OOM on large backfills.
+    pub wide_batch_warning: Option<String>,
 }
+
+/// Warn when a single FullyBatchSafe batch spans more than this many
+/// partition periods. Above this count the single-query footprint can be
+/// large enough to OOM a development machine.
+const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 
 /// Compute incremental execution windows for an entire run range.
 ///
@@ -66,6 +75,7 @@ pub fn compute_incremental_windows(
             return IncrementalWindows {
                 batches: vec![],
                 effective_window: zero_effective_window(),
+                wide_batch_warning: None,
             }
         }
     };
@@ -75,6 +85,7 @@ pub fn compute_incremental_windows(
             return IncrementalWindows {
                 batches: vec![],
                 effective_window: zero_effective_window(),
+                wide_batch_warning: None,
             }
         }
     };
@@ -83,6 +94,7 @@ pub fn compute_incremental_windows(
         return IncrementalWindows {
             batches: vec![],
             effective_window: zero_effective_window(),
+            wide_batch_warning: None,
         };
     }
 
@@ -115,6 +127,8 @@ pub fn compute_incremental_windows(
     let safety = analyze_batch_safety(&model_info);
     let granularity_period = granularity_days(&timeseries.granularity);
 
+    let mut wide_batch_warning: Option<String> = None;
+
     let batch_days = if per_partition {
         // Calendar granularities use calendar stepping (see tiling loop below).
         // Fixed-day granularities (Day/Week) still use the period in days.
@@ -123,7 +137,20 @@ pub fn compute_incremental_windows(
         override_days.max(1)
     } else {
         match &safety {
-            BatchSafety::FullyBatchSafe => (end_date - start_date).num_days() as u32,
+            BatchSafety::FullyBatchSafe => {
+                let total_days = (end_date - start_date).num_days() as u32;
+                let period_count = total_days / granularity_period.max(1);
+                if period_count > WIDE_BATCH_PERIOD_THRESHOLD {
+                    wide_batch_warning = Some(format!(
+                        "model spans {} {}{} in a single batch; \
+                         consider `--per-partition` or `--batch-size` to reduce memory usage",
+                        period_count,
+                        granularity_display(&timeseries.granularity),
+                        if period_count == 1 { "" } else { "s" },
+                    ));
+                }
+                total_days
+            }
             BatchSafety::BoundedSafe { max_chunk_days, .. } => *max_chunk_days,
             BatchSafety::PerPartitionOnly { .. } => granularity_period,
         }
@@ -163,6 +190,7 @@ pub fn compute_incremental_windows(
     IncrementalWindows {
         batches,
         effective_window,
+        wide_batch_warning,
     }
 }
 
@@ -295,6 +323,17 @@ fn calendar_next_partition_start(current: NaiveDate, granularity: &Granularity) 
 
 fn parse_date(s: &str) -> Result<NaiveDate, chrono::ParseError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
+}
+
+fn granularity_display(g: &Granularity) -> &'static str {
+    match g {
+        Granularity::Hour => "hour",
+        Granularity::Day => "day",
+        Granularity::Week => "week",
+        Granularity::Month => "month",
+        Granularity::Quarter => "quarter",
+        Granularity::Year => "year",
+    }
 }
 
 fn granularity_days(g: &Granularity) -> u32 {
