@@ -36,6 +36,7 @@ fn make_config() -> Arc<Config> {
             catalog: None,
             warehouse: None,
             format: None,
+            settings: None,
         },
     );
     Arc::new(Config {

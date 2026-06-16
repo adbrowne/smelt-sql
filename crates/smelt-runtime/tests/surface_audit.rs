@@ -50,6 +50,7 @@ fn test_no_compiler_internals_exposed() {
             catalog: None,
             warehouse: None,
             format: None,
+            settings: None,
         },
     );
     let config = Config {

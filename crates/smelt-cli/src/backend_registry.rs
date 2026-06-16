@@ -103,9 +103,13 @@ async fn create_backend(
                 tracing::info!("Database: {}", db_path.display());
 
                 Ok(Box::new(
-                    DuckDbBackend::new(&db_path, &target_config.schema)
-                        .await
-                        .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
+                    DuckDbBackend::new_with_settings(
+                        &db_path,
+                        &target_config.schema,
+                        target_config.settings.as_ref(),
+                    )
+                    .await
+                    .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
                 ))
             }
             #[cfg(not(feature = "duckdb"))]
