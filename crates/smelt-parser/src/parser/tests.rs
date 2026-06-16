@@ -6,7 +6,7 @@ use crate::ast::{
     InExpr, JoinType, Lambda, LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering,
     OrderByClause, OrderByItem, PartitionByClause, PipeExpr, PivotClause, QualifyClause,
     SelectItem, SelectList, SelectStmt, SortDirection, Subquery, TableRef, UnpivotClause,
-    ValuesClause, WhenClause, WindowFrame, WindowSpec, WithClause,
+    ValuesClause, WhenClause, WindowClause, WindowFrame, WindowSpec, WithClause,
 };
 
 /// Helper: parse SQL, assert no errors, return the SelectStmt
@@ -6206,4 +6206,185 @@ fn collate_expr_parses_to_node() {
         Some("C"), // quotes stripped
         "Collation name should be C (without quotes)"
     );
+}
+
+// ===== Named WINDOW clause =====
+
+#[test]
+fn test_named_window_clause_top_level() {
+    let input = "SELECT x, sum(y) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY y)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    // The SELECT should have a WINDOW clause
+    let select = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectStmt::cast)
+        .expect("should have SelectStmt");
+    assert!(
+        select.window_clause().is_some(),
+        "should have a WINDOW clause"
+    );
+}
+
+#[test]
+fn test_named_window_clause_in_cte() {
+    let input = "WITH c AS (SELECT x, sum(y) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY y)) SELECT * FROM c";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_named_window_clause_round_trip() {
+    // parse → print → re-parse must have no errors (same convention as assert_round_trip
+    // in printer.rs — text idempotency is NOT asserted because expr.text() includes
+    // leading trivia consumed by parse_expression's skip_trivia(), a pre-existing
+    // printer characteristic shared across all clause types).
+    let sql = "SELECT x, sum(y) OVER w FROM t WINDOW w AS (PARTITION BY x ORDER BY y)";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn test_named_window_clause_multiple_windows() {
+    // Comma-separated named windows: exercises the loop in parse_window_clause
+    let input =
+        "SELECT sum(a) OVER w1, rank() OVER w2 FROM t WINDOW w1 AS (PARTITION BY x), w2 AS (ORDER BY y)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let select = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectStmt::cast)
+        .expect("should have SelectStmt");
+    let wc = select.window_clause().expect("should have WINDOW clause");
+    assert_eq!(
+        wc.named_windows().count(),
+        2,
+        "should have exactly 2 named windows"
+    );
+}
+
+#[test]
+fn test_named_window_clause_malformed_no_panic() {
+    // Malformed WINDOW clause: parser must not panic; should produce error nodes.
+    let input = "SELECT x FROM t WINDOW";
+    let parse = parse(input);
+    // We only assert no panic and that a WINDOW clause node was attempted.
+    // Parse errors are expected for incomplete input.
+    let _ = parse.errors; // may or may not be empty — not asserted
+    let _ = parse.syntax(); // must be accessible
+}
+
+// ===== Phase 4: numeric INTERVAL forms =====
+
+fn assert_interval_parses_complete(sql: &str) {
+    // Check that the SELECT_STMT spans the whole input (no orphaned tokens)
+    // and that a FROM clause is reachable inside the select.
+    let parse = parse(sql);
+    assert_eq!(
+        parse.errors.len(),
+        0,
+        "parse errors for {sql}: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).expect("FILE node");
+    let select = file
+        .select_stmt()
+        .unwrap_or_else(|| panic!("no SelectStmt found for {sql}"));
+    assert!(
+        select.from_clause().is_some(),
+        "FROM clause was orphaned (not inside SelectStmt) for: {sql}"
+    );
+}
+
+#[test]
+fn test_interval_numeric_simple() {
+    // INTERVAL 1 DAY — numeric form: FROM clause must not be orphaned
+    assert_interval_parses_complete("SELECT INTERVAL 1 DAY FROM t");
+}
+
+#[test]
+fn test_interval_numeric_other_units() {
+    // Various unit keywords
+    for sql in &[
+        "SELECT INTERVAL 1 MONTH FROM t",
+        "SELECT INTERVAL 2 YEAR FROM t",
+        "SELECT INTERVAL 3 HOUR FROM t",
+        "SELECT INTERVAL 30 SECOND FROM t",
+    ] {
+        assert_interval_parses_complete(sql);
+    }
+}
+
+#[test]
+fn test_interval_numeric_parenthesized() {
+    // INTERVAL (1) DAY — parenthesized numeric form
+    assert_interval_parses_complete("SELECT INTERVAL (1) DAY FROM t");
+}
+
+#[test]
+fn test_interval_multiplied() {
+    // n * INTERVAL 1 DAY — multiplier form (binary with numeric INTERVAL as RHS)
+    assert_interval_parses_complete("SELECT 3 * INTERVAL 1 DAY FROM t");
+}
+
+#[test]
+fn test_interval_string_form_unchanged() {
+    // INTERVAL '1 day' — existing string form must still parse correctly
+    assert_interval_parses_complete("SELECT d - INTERVAL '1 day' AS x FROM t");
+}
+
+#[test]
+fn test_interval_numeric_in_expression() {
+    // INTERVAL used inside an arithmetic expression
+    assert_interval_parses_complete("SELECT ts + INTERVAL 1 DAY AS next_day FROM events");
+    assert_interval_parses_complete("SELECT ts - INTERVAL 7 DAY AS week_ago FROM events");
+}
+
+#[test]
+fn test_interval_numeric_round_trip() {
+    // parse → print → parse stability for all three numeric INTERVAL forms
+    for sql in &[
+        "SELECT INTERVAL 1 DAY FROM t",
+        "SELECT INTERVAL (1) DAY FROM t",
+        "SELECT 3 * INTERVAL 1 DAY FROM t",
+    ] {
+        let parse1 = parse(sql);
+        assert_eq!(
+            parse1.errors.len(),
+            0,
+            "original parse failed for {sql}: {:?}",
+            parse1.errors
+        );
+        let file = File::cast(parse1.syntax()).expect("FILE node");
+        let printed = file.to_string();
+        let parse2 = parse(&printed);
+        assert_eq!(
+            parse2.errors.len(),
+            0,
+            "round-trip failed for {sql}: printed={printed:?}, errors={:?}",
+            parse2.errors
+        );
+        // Verify FROM clause still in the right place after round-trip
+        let file2 = File::cast(parse2.syntax()).expect("FILE2 node");
+        let select2 = file2.select_stmt().expect("SelectStmt after round-trip");
+        assert!(
+            select2.from_clause().is_some(),
+            "FROM clause orphaned after round-trip for: {sql} (printed as: {printed})"
+        );
+    }
 }

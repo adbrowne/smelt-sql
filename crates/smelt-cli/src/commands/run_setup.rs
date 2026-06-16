@@ -123,6 +123,39 @@ pub(super) fn check_parse_errors(models: &[ModelFile]) -> Result<()> {
     Ok(())
 }
 
+/// Compute the set of model canonical names that should be checked for parse
+/// errors, given the current --select argument.
+///
+/// Returns `None` when no `--select` is active (check every model).
+/// Returns `Some(gate_set)` where gate_set = selected models + all transitive
+/// upstream dependencies — any model whose parse error could affect the run.
+pub(super) fn parse_error_gate_set(
+    graph: &DependencyGraph,
+    resolved_select: &[String],
+    config: &Config,
+) -> Option<std::collections::HashSet<String>> {
+    if resolved_select.is_empty() {
+        return None;
+    }
+
+    let selectors: Vec<smelt_core::Selector> = resolved_select
+        .iter()
+        .filter_map(|s| smelt_core::parse_selector(s).ok())
+        .collect();
+
+    let expanded = match graph.select_models(&selectors, config) {
+        Ok(e) => e,
+        Err(_) => return None, // conservative: gate all models
+    };
+    let mut gate_set = std::collections::HashSet::new();
+    for name in &expanded {
+        gate_set.insert(name.clone());
+        gate_set.extend(graph.all_upstream(name));
+    }
+
+    Some(gate_set)
+}
+
 /// Validate materialization configs for the discovered model set.
 pub(super) fn validate_materialization_configs(
     models: &[ModelFile],

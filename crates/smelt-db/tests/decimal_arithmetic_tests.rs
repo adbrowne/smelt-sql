@@ -278,9 +278,9 @@ fn integer_decimal_division_rejected() {
     );
 }
 
-/// Phase 3 TDD test 3: Integer / Integer is still truncating division — no TypeMismatch.
+/// Integer / Integer division emits no TypeMismatch.
 #[test]
-fn integer_division_still_truncating() {
+fn integer_division_no_type_mismatch() {
     let model_src = "SELECT CAST(7 AS INTEGER) / CAST(2 AS INTEGER) AS result\n";
     let all_diags = diags_for_model(model_src);
     let type_mismatch_diags: Vec<_> = all_diags
@@ -293,18 +293,47 @@ fn integer_division_still_truncating() {
         "Integer / Integer should not emit TypeMismatch; got: {:?}",
         all_diags
     );
+}
 
-    // The result type should be Integer (truncating division — spec §3)
+/// Integer / Integer returns Double (DuckDB/Spark-aligned, spec §3).
+#[test]
+fn integer_division_returns_double() {
     let sql = "SELECT CAST(7 AS INTEGER) / CAST(2 AS INTEGER) AS result";
-    let parse = smelt_parser::parse(sql);
-    let file = File::cast(parse.syntax()).expect("parse File");
-    let select = file.select_stmt().expect("parse SELECT");
-    let types = infer_select_column_types(&select, &TypeContext::new());
-    assert_eq!(types.len(), 1, "expected exactly one output column");
+    let types = infer(sql);
+    assert_eq!(types.len(), 1);
     assert_eq!(
         types[0].data_type,
-        DataType::Integer,
-        "Integer / Integer should yield Integer (truncating division)"
+        DataType::Double,
+        "Integer/Integer should infer Double"
+    );
+
+    let sql2 = "SELECT CAST(7 AS BIGINT) / CAST(2 AS BIGINT) AS result";
+    let types2 = infer(sql2);
+    assert_eq!(
+        types2[0].data_type,
+        DataType::Double,
+        "BigInt/BigInt should infer Double"
+    );
+
+    let sql3 = "SELECT CAST(7 AS SMALLINT) / CAST(2 AS SMALLINT) AS result";
+    let types3 = infer(sql3);
+    assert_eq!(
+        types3[0].data_type,
+        DataType::Double,
+        "SmallInt/SmallInt should infer Double"
+    );
+}
+
+/// Integer / NULLIF(SUM(Integer), 0) returns Double.
+#[test]
+fn integer_over_agg_division_returns_double() {
+    let sql = "SELECT CAST(7 AS INTEGER) / NULLIF(SUM(CAST(2 AS INTEGER)), 0) AS result";
+    let types = infer(sql);
+    assert_eq!(types.len(), 1);
+    assert_eq!(
+        types[0].data_type,
+        DataType::Double,
+        "Integer / NULLIF(SUM(Integer),0) should infer Double"
     );
 }
 

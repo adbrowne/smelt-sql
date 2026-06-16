@@ -214,6 +214,8 @@ pub enum SyntaxKind {
     WITHIN_GROUP_CLAUSE, // WITHIN GROUP (ORDER BY ...)
     FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
     FETCH_CLAUSE,        // FETCH FIRST N ROWS ONLY
+    WINDOW_CLAUSE,       // WINDOW w AS (...), w2 AS (...) — named window definitions
+    NAMED_WINDOW,        // Single named window definition: w AS (...)
 
     // smelt.define top-level declaration
     SMELT_DEFINE,  // smelt.define name(params) [-> TypeRef] AS (body)

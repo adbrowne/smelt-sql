@@ -435,6 +435,10 @@ pub async fn execute_project(
                     request.per_partition,
                 );
 
+                if let Some(ref warning) = inc_windows.wide_batch_warning {
+                    warn!("model '{model_name}': {warning}");
+                }
+
                 let batches = inc_windows.batches;
                 total_batches += batches.len();
                 model_plans.push(ModelPlan {

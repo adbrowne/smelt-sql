@@ -24,6 +24,7 @@ fn make_target(name: &str) -> Target {
         catalog: None,
         warehouse: None,
         format: None,
+        settings: None,
     }
 }
 

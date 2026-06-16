@@ -307,10 +307,13 @@ async fn create_backend_inner(
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
                 let db_path = project_dir.join(database);
-                let backend =
-                    smelt_backend_duckdb::DuckDbBackend::new(&db_path, &target_config.schema)
-                        .await
-                        .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?;
+                let backend = smelt_backend_duckdb::DuckDbBackend::new_with_settings(
+                    &db_path,
+                    &target_config.schema,
+                    target_config.settings.as_ref(),
+                )
+                .await
+                .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?;
                 Ok(Box::new(backend))
             }
             #[cfg(not(feature = "duckdb"))]

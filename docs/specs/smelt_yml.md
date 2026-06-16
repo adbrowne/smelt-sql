@@ -48,6 +48,7 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 | `catalog` | string | Spark only | Optional Spark catalog name. |
 | `warehouse` | string | Spark only | Base directory for file-based output (Parquet warehouse). |
 | `format` | string | Spark only | `delta` (default) or `parquet`. Affects schema-evolution capabilities. |
+| `settings` | map of string → string | DuckDB only | Connection-time settings applied as `SET key = value` on open. Unknown keys are rejected with an error. Common keys: `memory_limit`, `threads`, `temp_directory`. |
 
 ### Model-config shape (per `models.<name>`)
 

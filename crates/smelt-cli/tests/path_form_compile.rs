@@ -44,6 +44,7 @@ fn duckdb_target(schema: &str) -> Target {
         catalog: None,
         warehouse: None,
         format: None,
+        settings: None,
     }
 }
 

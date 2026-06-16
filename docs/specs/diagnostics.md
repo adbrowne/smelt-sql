@@ -110,6 +110,7 @@ Owned by `docs/specs/incremental_models.md` and `docs/specs/timeseries.md`.
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `IncrementalNotBatchSafe` | Warning | An `incremental` model's SQL is not batch-safe under the planner's incremental safety classifier; execution falls back to a safe chunking strategy. |
+| `EventTimeColumnNotVisibleAtOuterSelect` | Error | An incremental model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 | `CumulativeRequiresGroupBy` | Error | A `cumulative_aggregate` SELECT has no GROUP BY (key columns are required). |
 | `CumulativeUnknownAggregator` | Error | A `cumulative_aggregate` projection uses a non-allowlisted aggregator or composite expression over aggregates. |
 | `CumulativeGroupByContainsPartitionColumn` | Error | The `cumulative_aggregate` GROUP BY contains the driving source's `partition_column`. |
@@ -132,6 +133,7 @@ Owned by `docs/specs/types.md` and the VALUES/alias-column-list analysis.
 | `AliasColumnArityMismatch` | Error | An alias column list in `(VALUES …) AS t(c₁, …)` or `WITH cte(c₁, …) AS (…)` has a different length from the relation's actual column count. |
 | `EmptyValuesClause` | Error | A `(VALUES …)` derived table contains no rows and cannot produce a typed schema. |
 | `DecimalPrecisionOverflow` | Error | A decimal arithmetic expression (`+`, `-`, `*`, `%`) produces a result whose precision exceeds the 38-digit portable maximum. |
+| `NonPortableCollation` | Error | A portable-code model declares or uses a non-binary collation on a string. Only `COLLATE "C"` / `COLLATE BINARY` / `COLLATE UTF8_BINARY` / `COLLATE POSIX` (binary collations) are part of the portable surface. Anchored at the `COLLATE` clause span; the expression type degrades to `Unknown`. |
 
 ---
 

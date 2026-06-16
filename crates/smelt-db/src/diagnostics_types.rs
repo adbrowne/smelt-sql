@@ -687,6 +687,11 @@ pub enum DiagnosticCode {
     /// under the planner's incremental safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).
     IncrementalNotBatchSafe,
+    /// An incremental model's `event_time_column` is not accessible at the
+    /// outermost SELECT where the time filter is injected — either because the
+    /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
+    /// clause is a subquery that does not project the column. Error severity.
+    EventTimeColumnNotVisibleAtOuterSelect,
     /// Emitted when two files in the same project resolve to the same
     /// `smelt.<path>` address across any entity kind (model, function, seed,
     /// source). Hard workspace-load error; the colliding entities do not load.
