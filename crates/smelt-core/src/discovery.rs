@@ -264,6 +264,47 @@ impl ModelDiscovery {
         Ok(models)
     }
 
+    /// Scan model paths for Python files containing `@model` decorators.
+    ///
+    /// Returns `(file_path, decorator_line_numbers, file_content)` tuples.
+    /// Files without `@model` decorators are excluded.
+    pub fn discover_python_files(&self) -> Result<Vec<(std::path::PathBuf, Vec<u32>, String)>> {
+        use crate::python_utils;
+        use walkdir::WalkDir;
+
+        let mut python_files = Vec::new();
+
+        for model_path in &self.paths {
+            let search_path = self.project_root.join(model_path);
+
+            if !search_path.exists() {
+                continue;
+            }
+
+            for entry in WalkDir::new(&search_path)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path();
+
+                if path.extension().and_then(|s| s.to_str()) == Some("py") {
+                    let content = std::fs::read_to_string(path).with_context(|| {
+                        format!("Failed to read Python file: {}", path.display())
+                    })?;
+
+                    let decorator_lines = python_utils::scan_for_model_decorators(&content);
+
+                    if !decorator_lines.is_empty() {
+                        python_files.push((path.to_path_buf(), decorator_lines, content));
+                    }
+                }
+            }
+        }
+
+        Ok(python_files)
+    }
+
     /// Compute address segments for a file at `path` using the D-01 strip-list rule.
     ///
     /// Algorithm:

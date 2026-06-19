@@ -107,23 +107,58 @@ pub fn start_watcher(
 
 fn is_relevant_file(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    matches!(ext, "sql" | "yml" | "yaml")
+    matches!(ext, "sql" | "yml" | "yaml" | "py")
 }
 
 async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -> Result<()> {
     // Re-discover models from disk
     let discovery = ModelDiscovery::new(project_dir.to_path_buf(), paths.to_vec());
-    let models = discovery
+    let sql_models = discovery
         .discover_models()
         .with_context(|| "Failed to rediscover models")?;
+
+    // Discover Python models via the shared runtime entry point (Run Pipeline
+    // Parity rule — the UI now includes Python models just like the CLI).
+    let mut all_models = sql_models.clone();
+    if let Ok(python_files) = discovery.discover_python_files() {
+        if !python_files.is_empty() {
+            match smelt_runtime::discover_python_models(
+                &python_files,
+                &sql_models,
+                &state.config,
+                project_dir,
+                state.config.python.as_deref(),
+            ) {
+                Ok(python_models) => {
+                    if !python_models.is_empty() {
+                        tracing::info!(
+                            "File watcher: discovered {} Python model(s)",
+                            python_models.len()
+                        );
+                        all_models.extend(python_models);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to discover Python models on file change: {}", e);
+                }
+            }
+        }
+    }
 
     // Update Salsa database
     {
         let mut db = state.db.lock().await;
-        let mut source_files: Vec<SourceFile> = Vec::with_capacity(models.len());
-        for model in &models {
-            let content = std::fs::read_to_string(&model.path).unwrap_or_default();
-            let sf = db.set_source_file(model.path.clone(), content, project_dir.to_path_buf());
+        let mut source_files: Vec<SourceFile> = Vec::with_capacity(all_models.len());
+        for model in &all_models {
+            // Use model.content directly: SQL models carry the file text read
+            // during discovery; Python models carry the normalized SQL produced
+            // by discover_python_models. Reading the .py path from disk here
+            // would store raw Python syntax where Salsa expects generated SQL.
+            let sf = db.set_source_file(
+                model.path.clone(),
+                model.content.clone(),
+                project_dir.to_path_buf(),
+            );
             source_files.push(sf);
         }
         // Register function files so smelt.functions.* calls resolve.
@@ -143,13 +178,11 @@ async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -
         db.set_workspace(source_files, vec![project]);
     }
 
-    // Rebuild dependency graph. `models` is `Vec<smelt_core::ModelFile>` so
-    // the previous field-by-field rebuild is redundant since the type was
-    // unified; just clone the slice.
+    // Rebuild dependency graph including Python models.
     let sources = smelt_core::SourcesConfig::load(project_dir).ok();
-    let core_models: Vec<smelt_core::ModelFile> = models.to_vec();
+    let model_count = all_models.len();
 
-    if let Ok(new_graph) = DependencyGraph::build(core_models, sources.as_ref()) {
+    if let Ok(new_graph) = DependencyGraph::build(all_models, sources.as_ref()) {
         let mut graph = state.graph.lock().await;
         *graph = new_graph;
     }
@@ -157,7 +190,7 @@ async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -
     // Notify WebSocket clients
     let _ = state.change_tx.send(ChangeEvent::ModelsUpdated);
 
-    tracing::info!("State refreshed: {} models", models.len());
+    tracing::info!("State refreshed: {} models", model_count);
     Ok(())
 }
 

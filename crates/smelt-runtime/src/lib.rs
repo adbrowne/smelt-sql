@@ -22,6 +22,7 @@ pub mod execute;
 pub mod fn_bodies;
 pub mod gate;
 pub mod meta_eval;
+pub mod python;
 pub mod reporter;
 pub mod safety;
 pub mod schema_evolution;
@@ -41,6 +42,7 @@ pub use cumulative::{
 pub use execute::{build_source_timeseries_map, execute_project, BackendFactory, BackendFuture};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use gate::{format_gate_errors, gate_diagnostics, GateDiagnostic};
+pub use python::discover_python_models;
 pub use reporter::{NoOpReporter, RunReporter};
 pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{

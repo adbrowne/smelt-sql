@@ -459,6 +459,134 @@ async fn test_cli_ui_manifest_parity_with_test_models() {
     assert_outcomes_equivalent(&outcome_a, &outcome_b, "test-model-filter");
 }
 
+/// P1 / BUG-077 gate: the UI/`execute_project` path now surfaces Python-derived
+/// models.  Before this migration, Python model discovery only lived in `smelt-cli`
+/// so the UI path omitted Python models entirely.
+///
+/// This test calls `smelt_runtime::discover_python_models` (the moved entry point)
+/// to build the Python `ModelFile` set, includes those models in the
+/// `DependencyGraph` passed to `execute_project`, and asserts the Python model
+/// appears in the `RunOutcome` — i.e., the shared runtime path handles it.
+#[tokio::test]
+async fn ui_path_runs_python_models() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    // Create Python SDK inside the temp project
+    let sdk_dir = project_dir.join("python").join("smelt");
+    std::fs::create_dir_all(&sdk_dir).unwrap();
+    let repo_sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("python")
+        .join("smelt");
+    for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+        }
+    }
+
+    // A minimal SQL model (required because `discover_models` errors on empty projects).
+    // The Python model will also be in the graph alongside it.
+    write_model(project_dir, "sql_base", "SELECT 1 AS anchor_id");
+
+    // Python model that returns a simple SQL string
+    std::fs::write(
+        project_dir.join("models").join("gen.py"),
+        r#"
+from smelt import model
+
+@model
+def py_model(project):
+    return "SELECT 1 as id, 'from_python' as source"
+"#,
+    )
+    .unwrap();
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: ui_python_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: view\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(smelt_core::config::Config::load(project_dir).expect("load config"));
+
+    // Discover SQL models
+    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+    let sql_models = discovery.discover_models().expect("discover_models");
+    let python_files = discovery
+        .discover_python_files()
+        .expect("discover_python_files");
+
+    // Call discover_python_models via the runtime entry point (not smelt-cli)
+    let python_models = smelt_runtime::discover_python_models(
+        &python_files,
+        &sql_models,
+        &config,
+        project_dir,
+        config.python.as_deref(),
+    )
+    .expect("discover_python_models must succeed");
+
+    assert_eq!(
+        python_models.len(),
+        1,
+        "runtime discovery must find the Python model; got: {:?}",
+        python_models.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    assert_eq!(python_models[0].name, "py_model");
+
+    // Build the Salsa DB + DependencyGraph including the Python models
+    let mut all_models = sql_models;
+    all_models.extend(python_models);
+
+    let mut db = smelt_db::Database::default();
+    let project = db.set_project_input(project_dir.to_path_buf(), String::new());
+    let source_files: Vec<_> = all_models
+        .iter()
+        .map(|m| db.set_source_file(m.path.clone(), m.content.clone(), project_dir.to_path_buf()))
+        .collect();
+    db.set_workspace(source_files, vec![project]);
+
+    let graph = DependencyGraph::build(all_models, None).expect("build graph");
+
+    let db_arc = Arc::new(tokio::sync::Mutex::new(db));
+    let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
+
+    // Execute via the shared `execute_project` (the UI-style path)
+    let outcome = execute_project(
+        "run-ui-python".to_string(),
+        make_request("dev"),
+        Arc::clone(&config),
+        Arc::clone(&graph_arc),
+        Arc::clone(&db_arc),
+        project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute_project must succeed for Python model");
+
+    // Assert: Python model appears in the RunOutcome (BUG-077 fix)
+    assert!(
+        outcome.models.contains_key("py_model")
+            || outcome
+                .models
+                .keys()
+                .any(|k| k.ends_with("py_model") || k.contains("py_model")),
+        "Python model 'py_model' must appear in RunOutcome.models; got: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+}
+
 /// Verify that ephemeral models are inlined as CTEs and do NOT appear as
 /// top-level entries in `RunOutcome.models`.
 #[tokio::test]
