@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781906668418,
+  "lastUpdate": 1781906670523,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25802,6 +25802,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.31320262177703,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "be8d5e4cb67576ca7558215e62bdfb581a66fdfc",
+          "message": "perf(smelt-db): hoist workspace signature gather into a workspace-keyed query\n\ntype_context is computed per file, but its body re-walked every workspace\nfile gathering smelt.define signatures (and build_type_context did the same\nwalk again via SalsaRefSchemaProvider::all_function_signatures). At N models\nthat is O(N^2) per cold diagnostics pass in both wall-clock and Salsa\ndependency edges — the dominant term behind the Salsa / Initial Load and\nSalsa / Full Diagnostics benchmark regressions.\n\nAdd workspace_function_signatures(workspace): one tracked query that scans\nonce per workspace, and route both hot consumers through it. Cold passes drop\nfrom O(N^2) to O(N) — locally Initial Load 1306->~860ms (-34%), Full\nDiagnostics 1449->~897ms (-38%) on the 2000-model bench. Aggregating\nfile_signature_inputs preserves the §20H hinge, so body-only edits still\nbackdate and do not invalidate signature consumers.\n\nAlso harden the bench harness against silent creep: save-results reports\nbest-of-3 runs and fails on an absolute SMELT_BENCH_MAX_SALSA_MS ceiling\n(catastrophic-regression gate). Adds tests/workspace_signatures.rs guarding\naggregation, per-workspace memoization, and body-edit backdating.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T08:02:24+10:00",
+          "tree_id": "e1ae25201fda2c6193d15572cc2bbe73a297f2c5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/be8d5e4cb67576ca7558215e62bdfb581a66fdfc"
+        },
+        "date": 1781906669953,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.07590531796579,
             "unit": "MB/s"
           }
         ]
