@@ -100,6 +100,16 @@ Five-phase remediation plan ([plan](plans/20260613-w5-python-models.md)) landing
 - **Plain single-model frontmatter + name-mismatch blocking (D-22, D-27)** — Python output is always single-model: `--- name: X ---` section-delimiter format is normalized to plain `---\nname: X\n…` before processing; `FileMetadata::Multi` is never produced from Python output. A `name:` key that mismatches the function name emits `PythonModelNameMismatch` (Error, blocks the build) while retaining all other frontmatter keys (`materialization`, `tags`, `owner`). Frontmatter is now stripped before SQL parsing to eliminate spurious parse errors from YAML keys.
 - **Close-out** — retracted `directory`-implementation divergence note (implementation is now correct); updated note to user-guide gap only.
 
+### ~~Spec-Remediation W5b — Combined SQL↔Python Fixed-Point Evaluation (D-24, ISOLATED)~~ ✅ (June 20, 2026)
+
+Five-phase remediation plan ([plan](plans/20260613-w5b-combined-eval.md)) implementing D-24 (B) from the 2026-06-13 spec review: a single fully-interleaved fixed-point loop where SQL `generates: models` generators and Python `@model` generators run together, each observing the other's emissions across rounds:
+
+- **Python discovery migrated to `smelt-runtime` (P1)** — `discover_python_models` and its iterative evaluation moved from `smelt-cli/src/python.rs` into `smelt-runtime/src/python.rs` so both CLI and UI consume it via the shared pipeline (`execute_project`). Closes the UI-omits-Python gap (BUG-077 class). `smelt-cli/src/python.rs` kept as a thin re-export shim.
+- **Combined fixed-point loop driver (P2)** — one bounded loop in `smelt-runtime/src/combined_loop.rs` runs the SQL-generator Salsa pass and Python discovery each round against the accumulated model set, stopping when the set is byte-identical to the prior round; within-round order is `path` then `name`; bound is 5 rounds.
+- **Inter-round bidirectional visibility (P3)** — generator literal `smelt.<path>` references resolve to models emitted by either family in a prior round (`workspace_shape_includes_generators` inter-round half); Python `find_models` already observed SQL emissions. Intra-round `smelt.models.*` forbid (`GeneratorBodyForbidsModelReflection`) unchanged.
+- **Cross-type tests + non-convergence error (P4)** — bidirectional e2e fixtures (`sql_generator_consumes_python_emission`, `python_consumes_sql_generator_emission`), oscillating-set non-convergence error anchored at the combined loop's round bound.
+- **Close-out (P5)** — `execute_parity` gate green (CLI and UI both run the combined loop via `execute_project`); `architecture.md` crate table and KD updated (Python discovery now in `smelt-runtime`); `python_models.md` References updated.
+
 ### ~~Spec-Remediation W4 — Meta-Language Reflection & Precedence~~ ✅ (June 15, 2026)
 
 Six-phase remediation plan ([plan](plans/20260613-w4-meta-language.md)) landing the D-meta cluster from the 2026-06-13 spec review (D-15/16/17/18/20/21):

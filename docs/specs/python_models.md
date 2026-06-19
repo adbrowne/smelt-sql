@@ -180,7 +180,8 @@ When a `name:` key appears in the frontmatter, it must equal the function name. 
 - **Code**:
   - `python/smelt/core.py` — `@model` decorator, `ProjectContext`, `ModelInfo`
   - `python/smelt/runner.py` — subprocess entry point (`python -m smelt.runner`)
-  - `crates/smelt-cli/src/python.rs` — discovery orchestration, iterative evaluation, subprocess mode
+  - `crates/smelt-runtime/src/python.rs` — discovery orchestration, iterative evaluation, subprocess mode (migrated from `smelt-cli` for CLI↔UI parity)
+  - `crates/smelt-runtime/src/combined_loop.rs` — combined SQL-generator ↔ Python fixed-point loop
   - `crates/smelt-core/src/python_models.rs` — in-process PyO3 execution
   - `crates/smelt-core/src/python_utils.rs` — interpreter resolution, `build_decorator_map()`
   - `crates/smelt-lsp/src/python_scan.rs` — LSP decorator scanning for go-to-definition
