@@ -294,6 +294,144 @@ fn select_strips_leading_smelt_prefix() {
     );
 }
 
+// ── D-40: No cwd-scope fall-through ───────────────────────────────────────────
+
+/// Scoped shorthand resolves only as `<scope>.<arg>`; when `<scope>.<arg>` does
+/// not exist but a top-level `<arg>` does, the command **errors** — no silent
+/// fall-through (D-40).
+#[test]
+fn scoped_shorthand_no_fall_through() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+
+    fs::write(
+        project_dir.join("smelt.yml"),
+        "name: nofallthrough_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+
+    // Top-level model: `events_parsed` (address = `events_parsed`, no sub-dir).
+    let models_dir = project_dir.join("models");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::write(
+        models_dir.join("events_parsed.sql"),
+        "SELECT 1 AS event_id\n",
+    )
+    .unwrap();
+    // No `models/silver/events_parsed.sql` — only the top-level one exists.
+
+    let output = Command::new(smelt_bin())
+        .arg("--scope")
+        .arg("silver")
+        .args(["type", "--project-dir"])
+        .arg(&project_dir)
+        .arg("events_parsed")
+        .current_dir(&project_dir)
+        .output()
+        .expect("smelt binary should be runnable");
+
+    assert!(
+        !output.status.success(),
+        "scoped shorthand 'events_parsed' under scope 'silver' must error when \
+         'silver.events_parsed' does not exist — no fall-through to bare 'events_parsed'\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("silver.events_parsed"),
+        "stderr should indicate 'silver.events_parsed' not found\nstderr: {stderr}"
+    );
+}
+
+/// Scoped shorthand resolves successfully when `<scope>.<arg>` exists (D-40).
+#[test]
+fn scoped_shorthand_resolves_under_scope() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+
+    fs::write(
+        project_dir.join("smelt.yml"),
+        "name: scoped_resolve_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+
+    let silver_dir = project_dir.join("models").join("silver");
+    fs::create_dir_all(&silver_dir).unwrap();
+    fs::write(
+        silver_dir.join("events_parsed.sql"),
+        "SELECT 1 AS event_id\n",
+    )
+    .unwrap();
+
+    let output = Command::new(smelt_bin())
+        .arg("--scope")
+        .arg("silver")
+        .args(["type", "--project-dir"])
+        .arg(&project_dir)
+        .arg("events_parsed")
+        .current_dir(&project_dir)
+        .output()
+        .expect("smelt binary should be runnable");
+
+    assert!(
+        output.status.success(),
+        "scoped shorthand 'events_parsed' under scope 'silver' should resolve to \
+         'silver.events_parsed'\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("silver.events_parsed"),
+        "stdout should reference 'silver.events_parsed', got:\n{stdout}"
+    );
+}
+
+/// A full-path argument (`bronze.raw_events`) resolves regardless of the active
+/// scope — full paths bypass scope narrowing (D-40 invariant).
+#[test]
+fn full_path_honored_regardless_of_scope() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+
+    fs::write(
+        project_dir.join("smelt.yml"),
+        "name: fullpath_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+
+    let bronze_dir = project_dir.join("models").join("bronze");
+    fs::create_dir_all(&bronze_dir).unwrap();
+    fs::write(bronze_dir.join("raw_events.sql"), "SELECT 1 AS event_id\n").unwrap();
+
+    // Scope is `silver`, but the full path `bronze.raw_events` must still resolve.
+    let output = Command::new(smelt_bin())
+        .arg("--scope")
+        .arg("silver")
+        .args(["type", "--project-dir"])
+        .arg(&project_dir)
+        .arg("bronze.raw_events")
+        .current_dir(&project_dir)
+        .output()
+        .expect("smelt binary should be runnable");
+
+    assert!(
+        output.status.success(),
+        "full-path arg 'bronze.raw_events' with scope 'silver' must succeed — full \
+         paths bypass scope narrowing\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("bronze.raw_events"),
+        "stdout should reference 'bronze.raw_events', got:\n{stdout}"
+    );
+}
+
 /// `smelt --scope "" run --select events --dry-run` against a project that has
 /// both `models/silver/events.sql` and `models/bronze/events.sql` should fail
 /// with non-zero exit and stderr mentioning BOTH `silver.events` and

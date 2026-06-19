@@ -165,9 +165,14 @@ fn strip_smelt_prefix(path: &str) -> &str {
 /// Resolve a CLI argument to a canonical path string.
 ///
 /// Implements `docs/specs/cli.md` §"Argument resolution algorithm":
-/// 1. Determine the active scope.
-/// 2. Build candidates: if scope is `Some(s)`, candidates are
-///    `[s ++ arg_segs, arg_segs]`; if `None`, only `arg_segs`.
+/// 1. Strip an optional `smelt.` prefix (step 0).
+/// 2. Build the candidate path tuple:
+///    - Scope active + bare leaf (1 segment): only `[scope ++ arg]` — no
+///      fall-through to bare `arg` (D-40: scoped shorthand resolves only under
+///      its scope; a full path must be passed to reach an entity elsewhere).
+///    - Scope active + full path (2+ segments): only `[arg]` — full paths bypass
+///      scope narrowing (spec §"Cross-scope full paths").
+///    - No scope: only `[arg]`.
 /// 3. Resolve each candidate against the workspace via
 ///    [`smelt_db::resolve_ref_path`]. First match wins.
 /// 4. No candidate resolves → "not found" diagnostic with hints via
@@ -189,16 +194,22 @@ pub fn resolve_argument(
     let arg = strip_smelt_prefix(arg);
     let arg_segs: Vec<&str> = arg.split('.').collect();
 
-    // Build candidate segment lists
+    // Build candidate segment list (step 2).
     let candidates: Vec<Vec<String>> = if let Some(s) = scope {
-        let scoped: Vec<String> = s
-            .segments
-            .iter()
-            .map(|seg| seg.as_str())
-            .chain(arg_segs.iter().copied())
-            .map(|seg| seg.to_string())
-            .collect();
-        vec![scoped, arg_segs.iter().map(|s| s.to_string()).collect()]
+        if arg_segs.len() == 1 {
+            // Scoped shorthand (bare leaf): ONLY `<scope>.<arg>`, no fall-through.
+            let scoped: Vec<String> = s
+                .segments
+                .iter()
+                .map(|seg| seg.as_str())
+                .chain(arg_segs.iter().copied())
+                .map(|seg| seg.to_string())
+                .collect();
+            vec![scoped]
+        } else {
+            // Full path (2+ segments): resolve as-is; scope doesn't apply.
+            vec![arg_segs.iter().map(|seg| seg.to_string()).collect()]
+        }
     } else {
         vec![arg_segs.iter().map(|s| s.to_string()).collect()]
     };
@@ -503,8 +514,8 @@ mod tests {
     #[test]
     fn resolve_arg_full_path_always_works() {
         // workspace has silver.events_parsed; with scope=marts,
-        // arg=silver.events_parsed → first candidate marts.silver.events_parsed fails,
-        // second candidate silver.events_parsed succeeds.
+        // arg=silver.events_parsed is a full path (2 segs) → resolves as-is,
+        // scope doesn't apply.
         let root = PathBuf::from("/test/full_path");
         let (db, ws, proj) = build_db(
             root.clone(),
