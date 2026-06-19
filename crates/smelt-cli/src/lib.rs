@@ -36,9 +36,9 @@ pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError
 pub use smelt_core::RefInfo;
 pub use smelt_runtime::{
     build_fn_body_map, build_fn_body_map_from_model_files, build_source_bound_map,
-    inject_source_filters, inject_time_filter, resolve_refs_in_sql, CompiledModel,
-    CompilerRegistry, EphemeralResolver, FnBodyMap, SourceBound, SqlCompiler, TimeRange,
-    TransformError, UpstreamSchemas,
+    inject_source_filters, inject_time_filter, resolve_refs_in_sql, run_combined_discovery_loop,
+    CompiledModel, CompilerRegistry, EphemeralResolver, FnBodyMap, SourceBound, SqlCompiler,
+    TimeRange, TransformError, UpstreamSchemas,
 };
 pub use temporal::{
     compute_incremental_windows, compute_single_window, validate_run_window_alignment,

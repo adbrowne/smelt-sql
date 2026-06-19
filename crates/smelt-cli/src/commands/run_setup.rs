@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use smelt_cli::{
-    discover_emitted_model_files, discover_python_models, executor, init_db, Config,
-    ModelDiscovery, ModelFile, SourcesConfig,
+    executor, init_db, run_combined_discovery_loop, Config, ModelDiscovery, ModelFile,
+    SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_state::file_store::FileStore;
@@ -27,49 +27,25 @@ pub(super) fn discover_models_for_run(
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    let mut gen_salsa_db = init_db(project_dir, &raw_sql_models);
-    gen_salsa_db.set_active_target(Some(std::sync::Arc::from(target)));
-
-    let (emitted_model_files, _origins) =
-        discover_emitted_model_files(&gen_salsa_db, project_dir, &config.paths);
-    if !emitted_model_files.is_empty() {
-        info!(
-            "Generator pipeline produced {} emitted model(s)",
-            emitted_model_files.len()
-        );
-    }
-
-    let mut models: Vec<ModelFile> = raw_sql_models
-        .into_iter()
-        // Skip generator files: by filename convention (.gen.sql) or by
-        // `generates: models` frontmatter (spec: the filename is not load-bearing).
-        .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
-        .filter(|m| m.metadata.as_ref().is_none_or(|md| md.generates.is_none()))
-        .filter(|m| !m.is_test())
-        .collect();
-    models.extend(emitted_model_files);
-
     let python_files = discovery
         .discover_python_files()
         .with_context(|| "Failed to scan for Python models")?;
 
-    if !python_files.is_empty() {
-        let python_models = discover_python_models(
-            &python_files,
-            &models,
-            config,
-            project_dir,
-            config.python.as_deref(),
-        )
-        .with_context(|| "Failed to discover Python models")?;
-        if !python_models.is_empty() {
-            info!(
-                "Found {} Python model(s) from {} file(s)",
-                python_models.len(),
-                python_files.len()
-            );
-            models.extend(python_models);
-        }
+    let mut models = run_combined_discovery_loop(
+        raw_sql_models,
+        python_files,
+        project_dir,
+        config,
+        config.python.as_deref(),
+        Some(target),
+    )
+    .with_context(|| "Failed to run combined discovery loop")?;
+
+    // Filter test models (CLI-level concern; combined loop doesn't know about them).
+    models.retain(|m| !m.is_test());
+
+    if !models.is_empty() {
+        info!("Discovery complete: {} model(s)", models.len());
     }
 
     let function_files = discovery

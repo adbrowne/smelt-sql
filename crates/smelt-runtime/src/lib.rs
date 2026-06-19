@@ -16,6 +16,7 @@
 //! See `docs/specs/architecture.md` → "Run pipeline parity rule (CLI ↔ UI)"
 //! for the normative invariant.
 
+pub mod combined_loop;
 pub mod compile;
 pub mod cumulative;
 pub mod execute;
@@ -31,6 +32,7 @@ pub mod transformer;
 pub mod types;
 pub mod windowing;
 
+pub use combined_loop::run_combined_discovery_loop;
 pub use compile::{
     build_source_bound_map, expand_function_calls, resolve_refs_in_sql,
     substitute_params_with_named, CompiledModel, CompilerRegistry, EphemeralResolver, SqlCompiler,
