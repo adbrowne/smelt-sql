@@ -656,8 +656,9 @@ fn smoke_decimal_plus_integer() {
 
 #[test]
 fn smoke_integer_div_integer() {
-    // smelt uses truncating integer division (returns Integer)
-    // DuckDB v1.5+ uses non-truncating division (returns Double)
+    // Both smelt and DuckDB return Double for integer/integer division.
+    // Smelt was aligned to DuckDB/Spark behaviour in the Sherlock-feedback
+    // pass (binary.rs: non-Decimal division always returns Double).
     let duckdb = DuckDbOracle::new();
     let divergences = known_divergences();
     let sql = "WITH data AS (SELECT CAST(10 AS INTEGER) AS l, CAST(3 AS INTEGER) AS r) SELECT l / r AS expr_0 FROM data";
@@ -665,9 +666,8 @@ fn smoke_integer_div_integer() {
     let inferred = run_smelt_inference(sql, &columns);
     let actual = duckdb.query_types(sql).unwrap();
 
-    // smelt infers Integer (truncating division by design)
-    assert_eq!(inferred[0].1, DataType::Integer);
-    // DuckDB returns Double — known divergence
+    // smelt and DuckDB both return Double — no divergence
+    assert_eq!(inferred[0].1, DataType::Double);
     let m = compare_types(&inferred[0].1, &actual[0].1);
     if matches!(m, TypeMatch::Mismatch) {
         assert!(
