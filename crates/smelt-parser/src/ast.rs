@@ -927,6 +927,10 @@ impl SelectStmt {
         self.0.children().find_map(QualifyClause::cast)
     }
 
+    pub fn window_clause(&self) -> Option<WindowClause> {
+        self.0.children().find_map(WindowClause::cast)
+    }
+
     pub fn order_by_clause(&self) -> Option<OrderByClause> {
         self.0.children().find_map(OrderByClause::cast)
     }
@@ -2878,6 +2882,67 @@ impl QualifyClause {
 
     pub fn expression(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+}
+
+/// WINDOW clause — holds one or more named window definitions
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WindowClause(SyntaxNode);
+
+impl WindowClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == WINDOW_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn named_windows(&self) -> impl Iterator<Item = NamedWindow> + '_ {
+        self.0.children().filter_map(NamedWindow::cast)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// A single named window definition: `name AS (window-body)`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedWindow(SyntaxNode);
+
+impl NamedWindow {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == NAMED_WINDOW {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// The window name (the identifier before `AS`).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    pub fn partition_by(&self) -> Option<PartitionByClause> {
+        self.0.children().find_map(PartitionByClause::cast)
+    }
+
+    pub fn order_by(&self) -> Option<OrderByClause> {
+        self.0.children().find_map(OrderByClause::cast)
+    }
+
+    pub fn window_frame(&self) -> Option<WindowFrame> {
+        self.0.children().find_map(WindowFrame::cast)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 }
 

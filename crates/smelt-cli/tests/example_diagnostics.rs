@@ -3601,3 +3601,138 @@ fn collation_broken_non_binary() {
 fn collation_clean_binary_groupby_orderby() {
     check_workspace_no_diagnostics("examples/collation_clean");
 }
+
+// ===== EventTimeColumnNotVisibleAtOuterSelect TDD tests =====
+//
+// Fixture: `examples/incremental_broken_union_event_time/`
+//   — one broken incremental model that declares `timeseries:` with
+//     `event_time_column: event_date` but uses a UNION ALL query, so the
+//     time filter cannot be injected at the outermost SELECT.
+
+/// Helper: loads `example_dir` as a workspace and asserts that exactly one
+/// `EventTimeColumnNotVisibleAtOuterSelect` diagnostic fires for the file
+/// ending in `expected_file`, and no such diagnostic fires in any other file
+/// in the workspace.
+fn check_workspace_emits_event_time_not_visible_diagnostic(example_dir: &str, expected_file: &str) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let target_code = smelt_db::DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_target_code = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| *c == target_code)
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target_file = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_target_code(d.code.as_ref()) {
+                continue;
+            }
+            if is_target_file {
+                target_diags.push(d.clone());
+            } else {
+                other_diags.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_target_code(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target_file {
+                target_diags.push(d.0.clone());
+            } else {
+                other_diags.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_diags.is_empty(),
+        "expected zero EventTimeColumnNotVisibleAtOuterSelect diagnostics from files other \
+         than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_diags.len(),
+        other_diags
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags.len(),
+        1,
+        "expected exactly 1 EventTimeColumnNotVisibleAtOuterSelect diagnostic from '{}' in \
+         {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_diags.len(),
+        target_diags
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_diags[0].code,
+        Some(target_code),
+        "unexpected diagnostic code from '{}' in {}: {:?}: {}",
+        expected_file,
+        example_dir,
+        target_diags[0].code,
+        target_diags[0].message
+    );
+}
+
+/// Phase 6 TDD: `examples/incremental_broken_union_event_time/` produces
+/// exactly one `EventTimeColumnNotVisibleAtOuterSelect` Error diagnostic
+/// anchored at `models/union_mart.sql`.
+///
+/// The model declares `event_time_column: event_date` but uses a UNION ALL
+/// query: injecting a WHERE clause would only filter the first branch and
+/// produce incorrect results.
+#[test]
+fn incremental_broken_union_event_time() {
+    check_workspace_emits_event_time_not_visible_diagnostic(
+        "examples/incremental_broken_union_event_time",
+        "models/union_mart.sql",
+    );
+}

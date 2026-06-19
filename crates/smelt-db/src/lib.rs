@@ -1022,6 +1022,9 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::CumulativeMultipleDrivingSources => DiagnosticCode::CumulativeMultipleDrivingSources,
         R::CumulativeSqlNotParseable => DiagnosticCode::CumulativeSqlNotParseable,
         R::IncrementalNotBatchSafe => DiagnosticCode::IncrementalNotBatchSafe,
+        R::EventTimeColumnNotVisibleAtOuterSelect => {
+            DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
+        }
     }
 }
 

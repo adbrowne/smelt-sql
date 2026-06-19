@@ -92,6 +92,12 @@ impl<'a> super::Parser<'a> {
             self.parse_qualify_clause();
         }
 
+        // WINDOW clause (after QUALIFY, before ORDER BY)
+        self.skip_trivia();
+        if self.at(WINDOW_KW) {
+            self.parse_window_clause();
+        }
+
         // ORDER BY clause
         self.skip_trivia();
         if self.at(ORDER_KW) {
@@ -748,6 +754,72 @@ impl<'a> super::Parser<'a> {
         self.start_node(QUALIFY_CLAUSE);
         self.expect(QUALIFY_KW);
         self.parse_expression();
+        self.finish_node();
+    }
+
+    pub(super) fn parse_window_clause(&mut self) {
+        self.start_node(WINDOW_CLAUSE);
+        self.expect(WINDOW_KW);
+
+        // Comma-separated named window definitions
+        loop {
+            self.skip_trivia();
+            self.parse_named_window();
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
+    fn parse_named_window(&mut self) {
+        self.start_node(NAMED_WINDOW);
+
+        // Window name (IDENT)
+        if !self.expect(IDENT) {
+            self.finish_node();
+            return;
+        }
+
+        // AS keyword
+        self.skip_trivia();
+        if !self.expect(AS_KW) {
+            self.finish_node();
+            return;
+        }
+
+        // Window body in parentheses
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        self.skip_trivia();
+
+        // Optional PARTITION BY
+        if self.at(PARTITION_KW) {
+            self.parse_partition_by();
+        }
+
+        // Optional ORDER BY
+        self.skip_trivia();
+        if self.at(ORDER_KW) {
+            self.parse_order_by_clause();
+        }
+
+        // Optional window frame (ROWS/RANGE/GROUPS)
+        self.skip_trivia();
+        if self.at_any(&[ROWS_KW, RANGE_KW, GROUPS_KW]) {
+            self.parse_window_frame();
+        }
+
+        self.expect(RPAREN);
         self.finish_node();
     }
 

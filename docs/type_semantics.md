@@ -33,21 +33,24 @@ Type family membership (`is_numeric()`, `is_string()`, `is_temporal()`) gates pr
 
 ---
 
-## Integer Division is Truncating
+## Division Returns Double
 
-smelt preserves integer types through division:
+smelt uses float-division: every non-Decimal numeric division returns `Double`,
+matching DuckDB and Spark.
 
 | Expression | smelt | DuckDB |
 |-----------|-------|--------|
-| `SmallInt / SmallInt` | SmallInt | Double |
-| `Integer / Integer` | Integer | Double |
-| `BigInt / BigInt` | BigInt | Double |
-| `Decimal / Decimal` | Decimal(38,10) | Double |
-| `Float / Float` | Float | Double |
+| `SmallInt / SmallInt` | Double | Double |
+| `Integer / Integer` | Double | Double |
+| `BigInt / BigInt` | Double | Double |
+| `Float / Float` | Double | Double |
+| `Decimal / T` | rejected (Unknown) | Double |
 
-**Rationale:** DuckDB v1.5+ switched to non-truncating division where all division returns Double. smelt intentionally uses truncating integer division (`5 / 2 = 2`) and preserves the numeric type family. This matches traditional SQL semantics and avoids surprising type changes when dividing integers.
-
-Backend compilation can insert explicit casts if the target engine uses different division semantics.
+**Rationale:** All non-Decimal division returns `Double`, so `5 / 2 = 2.5` rather
+than the truncated `2`. This avoids silent precision loss and aligns smelt's
+inferred type with both DuckDB (v1.5+) and Spark. Division where any operand is a
+`Decimal` is rejected as non-portable (engines disagree on the result family); the
+diagnostic directs the user to cast the Decimal operand to `Double`.
 
 ## SUM of Integers Returns BigInt
 
@@ -268,11 +271,6 @@ All intentional differences from backends are tracked in `crates/smelt-db/tests/
 
 | Name | smelt | Backend | Reason |
 |------|-------|---------|--------|
-| `integer_division` | SmallInt | Double (DuckDB) | Truncating division |
-| `smallint_division` | SmallInt | Double (DuckDB) | Truncating division |
-| `bigint_division` | BigInt | Double (DuckDB) | Truncating division |
-| `decimal_division` | Decimal(38,10) | Double (DuckDB) | Preserve decimal type |
-| `float_division` | Float | Double (DuckDB) | Preserve float type |
 | `string_concat` | Text | Varchar (DuckDB) | Unified string type |
 | `string_functions` | Text | Varchar (DuckDB) | Unified string type |
 | `cross_family_rejection` | Unknown | Varies (DuckDB) | Strict type families |

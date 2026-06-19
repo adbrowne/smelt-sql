@@ -542,6 +542,29 @@ impl<'a> super::Parser<'a> {
             self.skip_trivia();
             self.advance(); // string literal
             self.finish_node();
+        } else if self.at(IDENT) && self.is_numeric_interval() {
+            // Numeric INTERVAL forms: `INTERVAL 1 DAY`, `INTERVAL (n) DAY`.
+            // (The `n * INTERVAL 1 DAY` form falls out of binary-expression
+            // grammar once this primary parses correctly.)
+            self.start_node(EXPRESSION);
+            self.advance(); // INTERVAL keyword
+            self.skip_trivia();
+            if self.at(LPAREN) {
+                // INTERVAL (expr) unit-kw
+                self.advance(); // (
+                self.skip_trivia();
+                self.parse_expression();
+                self.skip_trivia();
+                self.expect(RPAREN);
+            } else {
+                // INTERVAL number unit-kw
+                self.advance(); // NUMBER literal
+            }
+            self.skip_trivia();
+            if self.at(IDENT) {
+                self.advance(); // unit keyword (DAY, MONTH, YEAR, HOUR, …)
+            }
+            self.finish_node();
         } else if self.at(IDENT) && self.at_smelt_as_struct_trigger() {
             // smelt.as_struct(alias [EXCEPT col1, col2]) — Phase 38.
             // Must be checked BEFORE the generic IDENT branch.
@@ -1584,6 +1607,25 @@ impl<'a> super::Parser<'a> {
             .get(self.pos + lookahead)
             .map(|t| t.kind == STRING)
             .unwrap_or(false)
+    }
+
+    /// Check if current IDENT is `INTERVAL` followed by a NUMBER or `(` (numeric forms).
+    /// Covers: `INTERVAL 1 DAY`, `INTERVAL (n) DAY`, and the RHS of `n * INTERVAL 1 DAY`.
+    pub(super) fn is_numeric_interval(&self) -> bool {
+        let token = self.tokens[self.pos];
+        let text = &self.input[self.offset..self.offset + token.len];
+        if !text.eq_ignore_ascii_case("INTERVAL") {
+            return false;
+        }
+        let mut la = 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                return matches!(t.kind, NUMBER | LPAREN);
+            }
+        }
+        false
     }
     // ===== Phase 12: Window Function Support =====
 

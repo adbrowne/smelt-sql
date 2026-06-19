@@ -114,6 +114,7 @@ Owned by `docs/specs/incremental_models.md`.
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `IncrementalNotBatchSafe` | Warning | An `incremental` model's SQL is not batch-safe under the planner's incremental safety classifier; execution falls back to a safe chunking strategy. |
+| `EventTimeColumnNotVisibleAtOuterSelect` | Error | An incremental model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 
 ---
 

@@ -6,6 +6,7 @@ use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
 use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -49,10 +50,29 @@ impl DuckDbBackend {
     /// Create a new DuckDB backend.
     ///
     /// Opens or creates a database file at the given path and ensures the schema exists.
+    /// Equivalent to `new_with_settings(database_path, schema, None)`.
     pub async fn new(database_path: &Path, schema: &str) -> Result<Self, BackendError> {
+        Self::new_with_settings(database_path, schema, None).await
+    }
+
+    /// Create a new DuckDB backend with optional connection-time settings.
+    ///
+    /// Opens or creates a database file at the given path, applies each entry in
+    /// `settings` as `SET key = 'value';` immediately after the connection is opened,
+    /// then ensures the schema exists. Settings are applied in sorted key order.
+    ///
+    /// DuckDB rejects unrecognised keys natively — errors are propagated as
+    /// `BackendError::connection_failed` (fail-loud discipline).
+    pub async fn new_with_settings(
+        database_path: &Path,
+        schema: &str,
+        settings: Option<&BTreeMap<String, String>>,
+    ) -> Result<Self, BackendError> {
         let database_path = database_path.to_owned();
         let schema = schema.to_string();
         let schema_for_init = schema.clone();
+        // Clone settings into an owned map so it can cross the spawn_blocking boundary.
+        let settings_owned: BTreeMap<String, String> = settings.cloned().unwrap_or_default();
 
         // Run blocking DuckDB operations in spawn_blocking
         let connection = tokio::task::spawn_blocking(move || {
@@ -65,6 +85,16 @@ impl DuckDbBackend {
             // Open file-based connection (persistent)
             let connection = Connection::open(&database_path)
                 .with_context(|| format!("Failed to open DuckDB database: {:?}", database_path))?;
+
+            // Apply connection-time settings. Keys are iterated in BTreeMap order
+            // (sorted) for deterministic application. DuckDB rejects unknown keys.
+            for (key, value) in &settings_owned {
+                connection
+                    .execute(&format!("SET {} = '{}'", key, value), [])
+                    .with_context(|| {
+                        format!("Failed to apply DuckDB setting '{}' = '{}'", key, value)
+                    })?;
+            }
 
             // Ensure schema exists
             connection

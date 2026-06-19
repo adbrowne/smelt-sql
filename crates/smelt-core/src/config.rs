@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::warn;
@@ -141,6 +141,13 @@ pub struct Target {
     /// Ignored for DuckDB targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<TableFormat>,
+    /// Connection-time settings applied as `SET key = value` on open (DuckDB only).
+    ///
+    /// Each entry is applied in sorted key order immediately after the connection
+    /// is opened and before the schema is created. Unknown keys are rejected with
+    /// an error (fail-loud). Common keys: `memory_limit`, `threads`, `temp_directory`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<BTreeMap<String, String>>,
 }
 
 impl Target {
@@ -1601,6 +1608,56 @@ targets:
         assert_eq!(
             config.targets["dev"].schema, "analytics",
             "explicit schema must be preserved"
+        );
+    }
+
+    /// `settings:` map on a DuckDB target parses from YAML and round-trips.
+    #[test]
+    fn target_settings_parses_from_yaml() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+    settings:
+      memory_limit: "1GB"
+      threads: "2"
+      temp_directory: /tmp/duckdb
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("dev").unwrap();
+        let settings = target.settings.as_ref().expect("settings must be present");
+        assert_eq!(
+            settings.get("memory_limit").map(String::as_str),
+            Some("1GB")
+        );
+        assert_eq!(settings.get("threads").map(String::as_str), Some("2"));
+        assert_eq!(
+            settings.get("temp_directory").map(String::as_str),
+            Some("/tmp/duckdb")
+        );
+    }
+
+    /// `settings:` is optional — absent from config means `None`.
+    #[test]
+    fn target_settings_defaults_to_none() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("dev").unwrap();
+        assert!(
+            target.settings.is_none(),
+            "settings must be None when absent"
         );
     }
 }

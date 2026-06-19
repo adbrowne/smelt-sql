@@ -145,9 +145,11 @@ SmallInt < Integer < BigInt < Decimal < Double
 
 `Float` collapses into `Double` for promotion purposes. When the LUB involves `Decimal`, the specific `(p, s)` is governed by §15 "Decimal arithmetic" — integer-family members are lifted to their natural decimal equivalents there, and the growth formula or UNION coercion rule determines the result `(p, s)`.
 
-### 3. Integer division is truncating
+### 3. Division returns Double
 
-`Integer / Integer → Integer`. The integer family is preserved through `/` (no widening to Double). Backend SQL generation may insert casts to match an engine's native semantics, but the smelt-internal type is the truncating result.
+`T / T → Double` for all numeric operand families (SmallInt, Integer, BigInt, Float). Division is float-division: the smelt-internal result type is always `Double`, matching DuckDB and Spark semantics. The earlier behavior of preserving the integer type ("truncating division") is retired — it produced silent precision loss (`5 / 2 = 2`) and diverged from both DuckDB and Spark.
+
+`Decimal / T` is rejected as non-portable (§15); the diagnostic directs the user to cast to Double.
 
 ### 4. String unification
 
@@ -450,4 +452,4 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 ### Backend divergence appendix
 
-`docs/type_semantics.md` documents intentional smelt-vs-backend choices (truncating int division, `BigInt` vs `Decimal(38,0)` for `SUM`, `Text` vs `Varchar`) and the divergence registry at `crates/smelt-db/tests/prop_helpers/divergences.rs`. Treat that document as the backend-divergence appendix to this spec; `docs/specs/types.md` is the canonical source for normative type rules.
+`docs/type_semantics.md` documents intentional smelt-vs-backend choices (`BigInt` vs `Decimal(38,0)` for `SUM`, `Text` vs `Varchar`) and the divergence registry at `crates/smelt-db/tests/prop_helpers/divergences.rs`. Treat that document as the backend-divergence appendix to this spec; `docs/specs/types.md` is the canonical source for normative type rules.

@@ -110,6 +110,132 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property: SELECT with named WINDOW clause round-trips correctly
+    #[test]
+    fn prop_window_clause_round_trip(sql in arb_select_with_window_clause()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: SELECT with numeric INTERVAL round-trips correctly
+    #[test]
+    fn prop_numeric_interval_round_trip(sql in arb_select_with_interval()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: CTE-wrapped SELECT round-trips correctly (guards "works top-level, breaks in CTE" class)
+    #[test]
+    fn prop_cte_wrapped_select_round_trip(sql in arb_cte_wrapped_select()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: WINDOW clause inside a CTE round-trips correctly
+    #[test]
+    fn prop_cte_with_window_round_trip(sql in arb_cte_with_window()) {
+        assert_round_trip(&sql);
+    }
+
+    /// Property: numeric INTERVAL inside a CTE round-trips correctly
+    #[test]
+    fn prop_cte_with_interval_round_trip(sql in arb_cte_with_interval()) {
+        assert_round_trip(&sql);
+    }
+}
+
+// ===== Direct clean-parse property (closes the vacuous-pass gap) =====
+//
+// WHY THIS PROPERTY EXISTS
+// ─────────────────────────
+// `assert_round_trip` skips SQL that the parser rejects (errors.is_empty() == false).
+// This means a property based on `assert_round_trip` passes VACUOUSLY when the
+// generator emits SQL the parser wrongly rejects — the test never reaches the
+// assertion.
+//
+// Demonstration: before Phase 3 fixed named WINDOW clause parsing inside CTEs,
+// `arb_cte_with_window()` routed through `assert_round_trip` and passed on every
+// case (all 100 were skipped) because the pre-fix parser returned non-empty
+// `parse.errors` for WINDOW-in-CTE. This property closes that gap: it asserts
+// `parse.errors.is_empty()` directly, with no early-return skip, so a parser that
+// wrongly rejects the construct goes RED immediately.
+//
+// These tests are GREEN on the current (post-fix) parser. They document what
+// SHOULD have caught the original regression.
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Direct clean-parse: generated WINDOW SQL must parse with no errors (no round-trip skip).
+    #[test]
+    fn prop_valid_sql_parses_clean_window(sql in arb_select_with_window_clause()) {
+        let result = parse(&sql);
+        prop_assert!(
+            result.errors.is_empty(),
+            "parser rejected valid WINDOW SQL: {}\nerrors: {:?}",
+            sql, result.errors
+        );
+    }
+
+    /// Direct clean-parse: generated INTERVAL SQL must parse with no errors.
+    #[test]
+    fn prop_valid_sql_parses_clean_interval(sql in arb_select_with_interval()) {
+        let result = parse(&sql);
+        prop_assert!(
+            result.errors.is_empty(),
+            "parser rejected valid INTERVAL SQL: {}\nerrors: {:?}",
+            sql, result.errors
+        );
+    }
+
+    /// Direct clean-parse: generated CTE-wrapped SQL must parse with no errors.
+    #[test]
+    fn prop_valid_sql_parses_clean_cte_wrapped(sql in arb_cte_wrapped_select()) {
+        let result = parse(&sql);
+        prop_assert!(
+            result.errors.is_empty(),
+            "parser rejected valid CTE-wrapped SQL: {}\nerrors: {:?}",
+            sql, result.errors
+        );
+    }
+
+    /// Direct clean-parse: generated CTE+WINDOW SQL must parse with no errors.
+    #[test]
+    fn prop_valid_sql_parses_clean_cte_with_window(sql in arb_cte_with_window()) {
+        let result = parse(&sql);
+        prop_assert!(
+            result.errors.is_empty(),
+            "parser rejected valid CTE+WINDOW SQL: {}\nerrors: {:?}",
+            sql, result.errors
+        );
+    }
+
+    /// Direct clean-parse: generated CTE+INTERVAL SQL must parse with no errors.
+    #[test]
+    fn prop_valid_sql_parses_clean_cte_with_interval(sql in arb_cte_with_interval()) {
+        let result = parse(&sql);
+        prop_assert!(
+            result.errors.is_empty(),
+            "parser rejected valid CTE+INTERVAL SQL: {}\nerrors: {:?}",
+            sql, result.errors
+        );
+    }
+}
+
+/// Deterministic unit guard: a hand-written WINDOW-in-CTE string must parse clean.
+/// Co-located with the proptest harness so the "no vacuous pass" invariant is visible
+/// alongside the property that enforces it.
+#[test]
+fn test_cte_with_window_parses_clean_unit_guard() {
+    let sql = "WITH ranked AS (SELECT id, score, RANK() OVER w FROM events WINDOW w AS (PARTITION BY user_id ORDER BY score DESC)) SELECT * FROM ranked";
+    let result = parse(sql);
+    assert!(
+        result.errors.is_empty(),
+        "WINDOW-in-CTE must parse with no errors; errors: {:?}",
+        result.errors
+    );
+}
+
 // ===== Property tests for parser robustness =====
 
 proptest! {

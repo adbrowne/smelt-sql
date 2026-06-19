@@ -41,8 +41,35 @@ targets:
 | `type` | Yes | Must be `duckdb`. |
 | `database` | Yes | Path to the DuckDB database file. Created automatically if it does not exist. |
 | `schema` | Yes | Default schema for created tables and views. |
+| `settings` | No | Map of DuckDB connection settings applied on open. See below. |
 
 DuckDB is the recommended backend for local development and testing. The database file is portable and can be inspected with the DuckDB CLI or any tool that supports DuckDB.
+
+#### DuckDB `settings`
+
+The optional `settings:` map applies DuckDB configuration keys immediately after the connection opens, before any model executes. Each entry becomes a `SET key = value` statement. Unknown keys are rejected with an error at startup.
+
+```yaml
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+    settings:
+      memory_limit: "4GB"
+      threads: "4"
+      temp_directory: /tmp/duckdb_scratch
+```
+
+Common settings:
+
+| Key | Description |
+|---|---|
+| `memory_limit` | Maximum memory DuckDB may use (e.g. `"1GB"`, `"512MB"`). |
+| `threads` | Number of worker threads for parallel query execution. |
+| `temp_directory` | Directory for temporary spill files when memory is exceeded. |
+
+For the full list of DuckDB settings, see the [DuckDB configuration reference](https://duckdb.org/docs/configuration/overview).
 
 ### Spark
 

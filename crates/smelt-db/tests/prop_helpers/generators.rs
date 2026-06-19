@@ -997,24 +997,30 @@ pub fn generate_expr(
         }
 
         ExprKind::BinaryOp => {
+            // Exclude Decimal operands: Decimal / T is rejected as non-portable
+            // (spec §15 "Division rejection"), and the other operators have their
+            // own Decimal coverage. Excluding Decimal here keeps "/" generation safe.
             let num_cols: Vec<&TypedSource> = columns
                 .iter()
-                .filter(|c| c.data_type.is_numeric())
+                .filter(|c| {
+                    c.data_type.is_numeric() && !matches!(c.data_type, DataType::Decimal { .. })
+                })
                 .collect();
 
-            // Rotate through arithmetic operators that share numeric promotion rules.
-            // "/" is intentionally absent: Decimal / T is rejected as non-portable
-            // (spec §15 "Division rejection"), so generating it would produce
-            // TypeMismatch diagnostics rather than testing type inference. Integer
-            // and Float division are not generated here to keep the oracle focused.
-            let ops = ["+", "-", "*", "%"];
+            // Rotate through arithmetic operators. "/" is included: smelt now returns
+            // Double for non-Decimal division (DuckDB/Spark-aligned).
+            let ops = ["+", "-", "*", "%", "/"];
             let op = ops[expr_idx % ops.len()];
 
             if num_cols.len() >= 2 && func_idx.is_multiple_of(3) {
                 // Mixed-type binary op: pick two different numeric columns
                 let col_a = num_cols[expr_idx % num_cols.len()];
                 let col_b = num_cols[(expr_idx + 1) % num_cols.len()];
-                let expected = promote_numeric_type(&col_a.data_type, &col_b.data_type);
+                let expected = if op == "/" {
+                    DataType::Double
+                } else {
+                    promote_numeric_type(&col_a.data_type, &col_b.data_type)
+                };
                 Some(TypedExpr {
                     sql: format!("{} {} {}", col_a.name, op, col_b.name),
                     alias,
@@ -1022,7 +1028,11 @@ pub fn generate_expr(
                 })
             } else if let Some(num_col) = num_cols.first() {
                 // Same-type arithmetic
-                let expected = num_col.data_type.clone();
+                let expected = if op == "/" {
+                    DataType::Double
+                } else {
+                    num_col.data_type.clone()
+                };
                 Some(TypedExpr {
                     sql: format!("{} {} {}", num_col.name, op, num_col.name),
                     alias,
@@ -1583,6 +1593,14 @@ pub fn assemble_cte_query(
             )
         }
     }
+}
+
+/// Wraps a generated query in a nested CTE, exercising the "inner query in CTE"
+/// pattern. The inner query's output columns are preserved unchanged by the
+/// outer `SELECT *`, so the expected output types are identical to the inner
+/// query's. This stresses type propagation through a nested CTE boundary.
+pub fn wrap_in_outer_cte(inner_sql: &str) -> String {
+    format!("WITH wrapped AS ({inner_sql}) SELECT * FROM wrapped")
 }
 
 /// Generate a HAVING predicate for GROUP BY queries.

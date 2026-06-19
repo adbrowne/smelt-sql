@@ -1846,6 +1846,7 @@ mod tests {
             catalog: None,
             warehouse: None,
             format: None,
+            settings: None,
         }
     }
 
@@ -1871,6 +1872,7 @@ mod tests {
                 catalog: None,
                 warehouse: None,
                 format: None,
+                settings: None,
             },
         );
 

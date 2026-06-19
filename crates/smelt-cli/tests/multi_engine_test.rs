@@ -28,6 +28,7 @@ fn make_duckdb_target(schema: &str) -> Target {
         catalog: None,
         warehouse: None,
         format: None,
+        settings: None,
     }
 }
 
@@ -40,6 +41,7 @@ fn make_spark_target(schema: &str, warehouse: &str) -> Target {
         catalog: None,
         warehouse: Some(warehouse.to_string()),
         format: None,
+        settings: None,
     }
 }
 

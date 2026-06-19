@@ -107,6 +107,22 @@ fn promote_numeric_operands_for_op(
         }
     }
 
+    // Non-Decimal division: return Double (DuckDB/Spark-aligned).
+    // Decimal division was already rejected above with an early return.
+    // Float/Double promotion falls through to the match arms below, but
+    // Integer-family division must be caught here before the integer arms
+    // at the bottom of the match return the integer type unchanged.
+    if op == "/" {
+        if let (Some(ref l), Some(ref r)) = (&left, &right) {
+            if l.is_numeric() && r.is_numeric() {
+                return Some(TypedColumn {
+                    data_type: DataType::Double,
+                    nullable: true,
+                });
+            }
+        }
+    }
+
     // Decimal-family path: if either operand is Decimal or an integer that
     // would be lifted to Decimal, apply the spec §15 growth formula.
     if let (Some(ref l), Some(ref r)) = (&left, &right) {

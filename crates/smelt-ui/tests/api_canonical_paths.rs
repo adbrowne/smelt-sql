@@ -81,6 +81,7 @@ fn state_from_project(project_root: PathBuf) -> Arc<AppState> {
             catalog: None,
             warehouse: None,
             format: None,
+            settings: None,
         },
     );
 
