@@ -7,12 +7,12 @@
 //! the prior round. Within a round, generators are evaluated in ascending path order
 //! (python_models spec §"Determinism and termination").
 //!
-//! # P2 scope
-//!
-//! SQL generators still operate with `workspace_shape_includes_generators = false`
-//! — they cannot observe Python emissions until P3 adds inter-round literal-ref
-//! resolution. In P2, SQL generator output is constant across rounds; convergence
-//! is driven by Python stabilising.
+//! Each round, the Salsa DB is rebuilt with `base_sql_models + prev_python` so
+//! that SQL generators can resolve literal refs to Python-emitted models from the
+//! prior round (inter-round visibility). Python receives the same accumulated set
+//! so Python models can reference prior-round SQL generator output. Intra-round
+//! `smelt.models.*` reflection remains forbidden (enforced by AST check in
+//! `smelt-db`'s `check_generator_body_reflection_forbid`).
 
 use anyhow::Result;
 use smelt_core::config::{Config, Materialization};
@@ -27,10 +27,13 @@ use tracing::debug;
 
 /// Run the combined SQL-generator + Python fixed-point discovery loop.
 ///
-/// Each round: (1) run the Salsa SQL-generator pass against the current model set;
-/// (2) run Python discovery against the same set; (3) compare the resulting model
-/// set (address, frontmatter, SQL content — keyed by name) to the prior round.
-/// Loop terminates when byte-identical; errors after MAX_ROUNDS if unstable.
+/// Each round: (1) rebuild the Salsa DB with `base_sql_models + prev_python`;
+/// (2) run the SQL-generator pass so generators can resolve literal refs against
+/// prior-round Python emissions; (3) run Python discovery against the full
+/// accumulated set (`non_gen_sql + emitted_sql + prev_python`); (4) compare the
+/// resulting model set (address, frontmatter, SQL content — keyed by name) to the
+/// prior round. Loop terminates when byte-identical; errors after MAX_ROUNDS if
+/// unstable.
 ///
 /// Within a round, Python files are evaluated in ascending path order
 /// (spec §"Determinism and termination"). SQL generators are similarly ordered
@@ -41,12 +44,6 @@ use tracing::debug;
 /// DB falls back to the `target:` field in `smelt.yml`. The CLI passes the
 /// `--target` flag value here; the UI typically leaves it `None` (relying on
 /// the smelt.yml default).
-///
-/// # P2 scope
-/// SQL generators still operate with `workspace_shape_includes_generators = false`
-/// — they cannot observe Python emissions until P3 adds inter-round literal-ref
-/// resolution. In P2, SQL generator output is constant across rounds; convergence
-/// is driven by Python stabilising.
 pub fn run_combined_discovery_loop(
     base_sql_models: Vec<ModelFile>,
     python_files: Vec<(PathBuf, Vec<u32>, String)>,
@@ -57,27 +54,24 @@ pub fn run_combined_discovery_loop(
 ) -> Result<Vec<ModelFile>> {
     const MAX_ROUNDS: usize = 5;
 
-    // Build Salsa DB and run SQL generator pass.
-    // In P2, generators can't see Python emissions (workspace_shape_includes_generators
-    // = false); so generator output is constant and we run the pass once.
-    let db = build_generator_db(project_dir, &base_sql_models, active_target);
-    let emitted_sql = run_sql_generator_pass(&db, project_dir, &config.paths);
-
-    if !emitted_sql.is_empty() {
-        debug!(
-            "Combined loop: SQL generator pass produced {} emitted model(s)",
-            emitted_sql.len()
-        );
-    }
-
     // Non-generator SQL models: exclude .gen. files and models with generates: frontmatter.
     let non_gen_sql: Vec<ModelFile> = base_sql_models
-        .into_iter()
+        .iter()
         .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
         .filter(|m| m.metadata.as_ref().is_none_or(|md| md.generates.is_none()))
+        .cloned()
         .collect();
 
     if python_files.is_empty() {
+        // Fast path: no Python. Run the SQL generator pass once against base models only.
+        let db = build_generator_db(project_dir, &base_sql_models, active_target);
+        let emitted_sql = run_sql_generator_pass(&db, project_dir, &config.paths);
+        if !emitted_sql.is_empty() {
+            debug!(
+                "Combined loop (no Python): SQL generator pass produced {} emitted model(s)",
+                emitted_sql.len()
+            );
+        }
         let mut result = non_gen_sql;
         result.extend(emitted_sql);
         return Ok(result);
@@ -89,17 +83,51 @@ pub fn run_combined_discovery_loop(
     sorted_python_files.sort_by(|(a, ..), (b, ..)| a.to_string_lossy().cmp(&b.to_string_lossy()));
 
     // Combined fixed-point loop.
+    // prev_python: Python-emitted models from the prior round, fed to the Salsa DB
+    // each round so SQL generators can resolve literal refs against them.
+    let mut prev_python: Vec<ModelFile> = Vec::new();
     let mut prev_set_key: Vec<(String, String, String)> = Vec::new();
 
     for round in 0..MAX_ROUNDS {
         debug!("Combined loop: round {}", round + 1);
 
-        // Context for Python discovery: non-gen SQL + emitted SQL.
-        // (Python-to-Python references are handled inside discover_python_models's
-        // own inner loop; SQL-to-Python inter-round visibility is added in P3.)
+        // Rebuild Salsa DB each round: seed with base SQL models + prior-round Python
+        // so generators can resolve literal refs to Python-emitted names.
+        //
+        // Python models from the same .py file share a physical path; build_generator_db
+        // deduplicates by path, so we assign each Python model a unique virtual path
+        // (same pattern as emitted SQL models in model_file_from_emitted_def).
+        let db_models: Vec<ModelFile> = base_sql_models
+            .iter()
+            .cloned()
+            .chain(prev_python.iter().map(|m| {
+                let mut m = m.clone();
+                m.path = m.path.with_file_name(format!(
+                    "{}::{}",
+                    m.path.file_name().and_then(|n| n.to_str()).unwrap_or("py"),
+                    m.name
+                ));
+                m
+            }))
+            .collect();
+        let db = build_generator_db(project_dir, &db_models, active_target);
+        let emitted_sql = run_sql_generator_pass(&db, project_dir, &config.paths);
+
+        if !emitted_sql.is_empty() {
+            debug!(
+                "Combined loop: round {} SQL generator pass produced {} emitted model(s)",
+                round + 1,
+                emitted_sql.len()
+            );
+        }
+
+        // Context for Python discovery: non-gen SQL + emitted SQL + prior-round Python.
+        // This lets Python models reference SQL generator output AND each other's prior
+        // emissions; discover_python_models handles its own intra-round inner loop.
         let sql_context: Vec<ModelFile> = non_gen_sql
             .iter()
             .chain(emitted_sql.iter())
+            .chain(prev_python.iter())
             .cloned()
             .collect();
 
@@ -118,13 +146,13 @@ pub fn run_combined_discovery_loop(
             new_python.len()
         );
 
-        // Compute a byte-equal key for the full model set.
+        // Compute a byte-equal key for the full model set of this round.
         // The spec requires byte-equality of canonical address, frontmatter, AND SQL content
-        // (python_models.md §"Determinism and termination"). For emitted SQL models, SQL
-        // content lives in `content` but frontmatter lives in `metadata`; the key must
-        // cover both so a materialization/tags change is detected even with the same SQL body.
-        let mut new_key: Vec<(String, String, String)> = sql_context
+        // (python_models.md §"Determinism and termination"). The key covers non_gen_sql +
+        // emitted_sql + new_python (not prev_python — that was the prior round's output).
+        let mut new_key: Vec<(String, String, String)> = non_gen_sql
             .iter()
+            .chain(emitted_sql.iter())
             .chain(new_python.iter())
             .map(|m| {
                 let meta_key = format!("{:?}", m.metadata.as_deref());
@@ -137,13 +165,18 @@ pub fn run_combined_discovery_loop(
             debug!("Combined loop: converged after {} round(s)", round + 1);
             // Sort the final result by (path, name) for deterministic output order
             // (spec §"Determinism and termination": path-then-name within a round).
-            let mut result = sql_context;
-            result.extend(new_python);
+            let mut result: Vec<ModelFile> = non_gen_sql
+                .iter()
+                .chain(emitted_sql.iter())
+                .chain(new_python.iter())
+                .cloned()
+                .collect();
             result.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.name.cmp(&b.name)));
             return Ok(result);
         }
 
         prev_set_key = new_key;
+        prev_python = new_python;
     }
 
     Err(anyhow::anyhow!(

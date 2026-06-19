@@ -3070,6 +3070,39 @@ mod tests {
         );
     }
 
+    // ─── Test 13b: intra-round smelt.models.* reflection still forbidden ─────
+
+    #[test]
+    fn intra_round_models_reflection_still_forbidden() {
+        // Even when the Salsa DB has non-generator source files registered
+        // (simulating prior-round Python emissions), a generator body that uses
+        // smelt.models.all() must still fire GeneratorBodyForbidsModelReflection.
+        let gen_body = concat!(
+            "---\ngenerates: models\n---\n",
+            "smelt.models.all() |> map(fn m => ModelDef { name: m.name, body: SELECT 1 })"
+        );
+        let non_gen = "SELECT 1 AS id";
+
+        // Register both a generator and a plain model (simulating prior-round Python
+        // emissions that have been added to the Salsa DB as source files).
+        let (db, _root, workspace) = db_with_files(&[
+            ("models/gen.gen.sql", gen_body),
+            ("models/some_model.sql", non_gen),
+        ]);
+
+        let gen_files = generator_files(&db, workspace);
+        assert_eq!(gen_files.len(), 1);
+
+        let result = evaluate_generator(&db, workspace, gen_files[0]);
+
+        assert!(
+            result.diagnostics.iter().any(|d| d.code == Some(crate::DiagnosticCode::GeneratorBodyForbidsModelReflection)),
+            "smelt.models.all() inside a generator body must fire GeneratorBodyForbidsModelReflection \
+             even when the DB contains prior-round models; diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
     // ─── Test 14: Salsa cache invalidates on generator file edit ─────────────
 
     #[test]
