@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781582631586,
+  "lastUpdate": 1781906668418,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19645,6 +19645,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 10.389747,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "be8d5e4cb67576ca7558215e62bdfb581a66fdfc",
+          "message": "perf(smelt-db): hoist workspace signature gather into a workspace-keyed query\n\ntype_context is computed per file, but its body re-walked every workspace\nfile gathering smelt.define signatures (and build_type_context did the same\nwalk again via SalsaRefSchemaProvider::all_function_signatures). At N models\nthat is O(N^2) per cold diagnostics pass in both wall-clock and Salsa\ndependency edges — the dominant term behind the Salsa / Initial Load and\nSalsa / Full Diagnostics benchmark regressions.\n\nAdd workspace_function_signatures(workspace): one tracked query that scans\nonce per workspace, and route both hot consumers through it. Cold passes drop\nfrom O(N^2) to O(N) — locally Initial Load 1306->~860ms (-34%), Full\nDiagnostics 1449->~897ms (-38%) on the 2000-model bench. Aggregating\nfile_signature_inputs preserves the §20H hinge, so body-only edits still\nbackdate and do not invalidate signature consumers.\n\nAlso harden the bench harness against silent creep: save-results reports\nbest-of-3 runs and fails on an absolute SMELT_BENCH_MAX_SALSA_MS ceiling\n(catastrophic-regression gate). Adds tests/workspace_signatures.rs guarding\naggregation, per-workspace memoization, and body-edit backdating.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T08:02:24+10:00",
+          "tree_id": "e1ae25201fda2c6193d15572cc2bbe73a297f2c5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/be8d5e4cb67576ca7558215e62bdfb581a66fdfc"
+        },
+        "date": 1781906667279,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 45.402989,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 43.116501,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.0555549999999998,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.611521,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.296887,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1990.159557,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.79366,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.17072,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 3.104011,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.716585,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2092.526057,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.00692,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.32291,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.38839,
             "unit": "ms"
           }
         ]
