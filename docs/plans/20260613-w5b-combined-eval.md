@@ -63,7 +63,7 @@ This is the isolated high-risk wave: **when in doubt, block with options rather 
 | P1 | Migrate Python discovery `smelt-cli` → `smelt-runtime` (CLI + UI consume via shared pipeline) | done (3c846c6d) | D-24 (1/5) | refactor(runtime): move Python @model discovery into smelt-runtime; CLI + UI consume it (D-24) | 2026-06-19 |
 | P2 | Combined fixed-point loop driver in runtime (rounds, growing set, byte-equal convergence, path-then-name order) | done (e8a9cbd1) | D-24 (2/5) | feat(runtime): combined SQL-generator + Python fixed-point evaluation loop (D-24) | 2026-06-20 |
 | P3 | Inter-round visibility: generator literal refs resolve to prior-round emissions; intra-round smelt.models.* forbid kept | done | D-24 (3/5) | feat(runtime): generators resolve literal refs to prior-round emissions in the combined loop (D-24) | 2026-06-20 |
-| P4 | Bidirectional cross-type tests + non-convergence/circular error | pending | D-24 (4/5) | test(runtime): bidirectional Python↔SQL-generator references; combined-loop non-convergence error (D-24) | |
+| P4 | Bidirectional cross-type tests + non-convergence/circular error | done | D-24 (4/5) | test(runtime): bidirectional Python↔SQL-generator references; combined-loop non-convergence error (D-24) | 2026-06-20 |
 | P5 | Close-out: CLI↔UI parity gate + architecture note + registry + ROADMAP | pending | D-24 (5/5) | docs(spec-impl): close out W5b — combined evaluation landed; parity gate, registry, roadmap | |
 
 **Status values**: `pending`, `done`, `blocked`. Given the risk, a `blocked` phase here is an expected outcome, not a failure — it surfaces a design call for the owner.

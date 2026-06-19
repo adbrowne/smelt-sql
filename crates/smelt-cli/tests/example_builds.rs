@@ -204,6 +204,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
         "Error: Dependency validation failed \
          (probe/demo fixture; not a clean standalone build target)",
     ),
+    (
+        "combined_generators",
+        "Error: Failed to run combined discovery loop: smelt Python SDK not found \
+         (D-24 bidirectional fixture; contains a Python @model that requires the \
+         smelt Python SDK adjacent to the project root; verified e2e via \
+         crates/smelt-cli/tests/combined_generators_e2e.rs)",
+    ),
     // NOTE: `huge` and `multi_engine` are NOT here — they are in `NEVER_BUILD`
     // below (the gate does not even attempt to build them; see that doc).
 ];

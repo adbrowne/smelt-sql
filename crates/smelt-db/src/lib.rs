@@ -743,11 +743,19 @@ pub fn resolve_ref_path(
         for file in workspace.files(db).iter().copied() {
             let file_path = file.path(db);
             // Accept .sql files, .py files (Python models whose content is
-            // generated SQL), and virtual `*.sql::model_name` paths created
-            // by multi-model file splitting.
+            // generated SQL), virtual `*.sql::model_name` paths created by
+            // multi-model file splitting, and `*.py::model_name` virtual paths
+            // created for Python-emitted models in the combined discovery loop.
+            // Note: Path::extension() on `source.py::model_name` returns
+            // `py::model_name` (everything after the last dot), not `py`, so
+            // the bare `ext != "py"` check is insufficient for virtual paths.
             let path_str = file_path.to_str().unwrap_or("");
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext != "sql" && ext != "py" && !path_str.contains(".sql::") {
+            if ext != "sql"
+                && ext != "py"
+                && !path_str.contains(".sql::")
+                && !path_str.contains(".py::")
+            {
                 continue;
             }
             // Match if file_path lives under project_root.
@@ -926,11 +934,15 @@ pub fn leaf_did_you_mean(
             }
         }
 
-        // Only SQL files can be models.
+        // Only SQL or Python-emitted model files can be models.
         let file_path = file.path(db);
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let path_str = file_path.to_str().unwrap_or("");
-        if ext != "sql" && !path_str.contains(".sql::") {
+        if ext != "sql"
+            && ext != "py"
+            && !path_str.contains(".sql::")
+            && !path_str.contains(".py::")
+        {
             continue;
         }
 

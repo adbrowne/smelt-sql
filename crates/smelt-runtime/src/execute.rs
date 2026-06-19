@@ -140,7 +140,22 @@ pub async fn execute_project(
     {
         let mut model_paths: Vec<std::path::PathBuf> = selected
             .iter()
-            .filter_map(|name| graph_lock.get_model(name).ok().map(|m| m.path.clone()))
+            .filter_map(|name| {
+                graph_lock.get_model(name).ok().map(|m| {
+                    // Python-emitted models are stored in the Salsa DB under a virtual path
+                    // (e.g. `py_source.py::py_source`) so parse_model derives the correct name.
+                    // But the DependencyGraph retains the original `.py` path.  Recompute the
+                    // virtual path here so gate_diagnostics can look them up.
+                    let path = m.path.clone();
+                    if path.to_string_lossy().ends_with(".py") {
+                        let filename =
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or("py");
+                        path.with_file_name(format!("{}::{}", filename, m.name))
+                    } else {
+                        path
+                    }
+                })
+            })
             .collect();
         model_paths.extend(smelt_core::discover_function_file_paths(project_dir));
         let db_guard = db.lock().await;

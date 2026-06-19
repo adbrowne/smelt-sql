@@ -254,7 +254,18 @@ pub(super) fn build_execute_salsa_db(
     for m in models {
         let is_raw = all_files.iter().any(|f| f.path == m.path);
         if !is_raw && !m.path.to_string_lossy().ends_with(".gen.sql") {
-            all_files.push(m.clone());
+            let mut model_to_add = m.clone();
+            // Python-emitted models carry the function name in `m.name` but their
+            // path is the source `.py` file (e.g. `models/source.py` for a function
+            // named `py_source`).  `parse_model` in smelt-db derives the model name
+            // from the path stem when no `::` separator is present, which would give
+            // "source" instead of "py_source".  Apply the same virtual-path pattern
+            // used by combined_loop.rs so the Salsa name derivation is correct.
+            if m.path.to_string_lossy().ends_with(".py") {
+                let filename = m.path.file_name().and_then(|n| n.to_str()).unwrap_or("py");
+                model_to_add.path = m.path.with_file_name(format!("{}::{}", filename, m.name));
+            }
+            all_files.push(model_to_add);
         }
     }
     let mut salsa_db = init_db(project_dir, &all_files);
