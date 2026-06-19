@@ -61,6 +61,38 @@ pub fn functions_in_file(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<
     file_signature_inputs(db, file)
 }
 
+/// Every `smelt.define` function signature declared anywhere in the workspace,
+/// gathered once per [`Workspace`] in sorted-file order.
+///
+/// Keyed on the **workspace** (not a file), so the scan over all workspace
+/// files runs a single time per revision and is shared by every per-file
+/// consumer — `type_context` and
+/// `SalsaRefSchemaProvider::all_function_signatures`. Without this aggregation
+/// each of the N per-file `type_context` computations re-walked all N files
+/// calling `file_signature_inputs`, making a cold diagnostics pass O(N^2) in
+/// both wall-clock and Salsa dependency edges (each `type_context` recorded a
+/// dependency on every file's signatures). Routing through one workspace-keyed
+/// query collapses that to O(N): one scan, N dependents.
+///
+/// Aggregating `file_signature_inputs` (rather than re-parsing) preserves the
+/// §20H invalidation hinge — body-only edits backdate at the per-file boundary
+/// and do not re-run this query.
+#[salsa::tracked]
+pub fn workspace_function_signatures(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+) -> Arc<Vec<FunctionSig>> {
+    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
+    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    let mut sigs = Vec::new();
+    for f in &files {
+        for sig in file_signature_inputs(db, *f).iter() {
+            sigs.push(sig.clone());
+        }
+    }
+    Arc::new(sigs)
+}
+
 /// Look up a single function's signature by name within one file.
 ///
 /// Memoized by `(file, name)`. Re-uses `file_signature_inputs` so edits to

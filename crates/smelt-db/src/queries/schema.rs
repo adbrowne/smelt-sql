@@ -15,7 +15,9 @@ use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
 use smelt_types::{DataType, TypedColumn};
 
 use crate::function_body_check::{self, infer_tableexpr_return_schema};
-use crate::queries::functions::{file_signature_inputs, resolve_function};
+use crate::queries::functions::{
+    file_signature_inputs, resolve_function, workspace_function_signatures,
+};
 use crate::queries::parse::parse_file;
 use crate::queries::project::{project_seeds, project_sources, sources_config};
 use crate::schema::{self, Column, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema};
@@ -743,16 +745,13 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
     }
 
     fn all_function_signatures(&self) -> Vec<smelt_types::signatures::FunctionSig> {
-        use crate::queries::functions::file_signature_inputs;
-        let mut sigs = Vec::new();
-        let mut files: Vec<_> = self.workspace.files(self.db).to_vec();
-        files.sort_by(|a, b| a.path(self.db).cmp(b.path(self.db)));
-        for f in &files {
-            for sig in file_signature_inputs(self.db, *f).iter() {
-                sigs.push(sig.clone());
-            }
-        }
-        sigs
+        // One workspace-keyed scan shared across all per-file consumers; see
+        // `workspace_function_signatures` for why this must not be a per-file
+        // walk (avoids O(N^2) cold diagnostics passes).
+        workspace_function_signatures(self.db, self.workspace)
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -1359,13 +1358,8 @@ pub fn type_context(
     // inference can resolve declared return types when a SELECT projects a
     // `smelt.functions.*` call. Kept pure — we only hand the signature data to
     // the `TypeContext`; analysis logic doesn't call back into Salsa.
-    let mut wsp_files: Vec<SourceFile> = workspace.files(db).to_vec();
-    wsp_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
-    for f in &wsp_files {
-        let sigs = file_signature_inputs(db, *f);
-        for sig in sigs.iter() {
-            ctx.add_function_signature(&sig.name, sig.clone());
-        }
+    for sig in workspace_function_signatures(db, workspace).iter() {
+        ctx.add_function_signature(&sig.name, sig.clone());
     }
 
     Arc::new(ctx)

@@ -262,7 +262,7 @@ pub use queries::function_diagnostics::{
 };
 pub use queries::functions::{
     file_signature_inputs, function_body, function_signature, functions_in_file, resolve_function,
-    resolve_function_path, BodyRange, NameRange,
+    resolve_function_path, workspace_function_signatures, BodyRange, NameRange,
 };
 pub use queries::loader::{
     loader_call_diagnostics_for_file, loader_call_diagnostics_for_file_with_content,
