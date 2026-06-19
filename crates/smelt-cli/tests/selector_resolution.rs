@@ -124,6 +124,153 @@ fn plus_both_resolves_and_traverses_all() {
     );
 }
 
+// ── D-37: entity-name selector not found → hard error; method selectors
+//          that match nothing → exit 0 no-op ──────────────────────────────────
+
+/// `--select typo_name` where `typo_name` resolves to no entity → non-zero
+/// exit with "not found" in stderr.  A typo'd model name must fail loudly.
+/// (`cli.md` §"No-op vs unresolvable selector"; `model_selection.md` Constraint 4)
+#[test]
+fn unresolvable_entity_select_is_hard_error() {
+    let tmp = TempDir::new().unwrap();
+    let root = stage_base_derived(&tmp, "entity_notfound");
+
+    let output = run_dry(&root, "definitely_does_not_exist_typo");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "--select <unknown entity> should exit non-zero\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("not found") || stderr.contains("definitely_does_not_exist_typo"),
+        "stderr should contain 'not found' or the unknown name; got:\n{stderr}"
+    );
+}
+
+/// `--select tag:nonexistent` — a `tag:` selector that matches no models is a
+/// *valid empty selection* (Constraint 4 of `model_selection.md`): exit 0 with
+/// a "no models matched" message to stderr.
+#[test]
+fn empty_tag_selection_is_noop_exit_0() {
+    let tmp = TempDir::new().unwrap();
+    let root = stage_base_derived(&tmp, "tag_noop");
+
+    let output = run_dry(&root, "tag:definitely_nonexistent_tag");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "--select tag:<nonexistent> should exit 0 (no-op)\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("no models matched"),
+        "stderr should contain 'no models matched'; got:\n{stderr}"
+    );
+}
+
+/// `--select generator_file:<missing path>` — a `generator_file:` selector
+/// pointing at a non-existent file is a valid empty selection: exit 0, no
+/// error diagnostic.
+#[test]
+fn generator_file_no_match_is_noop() {
+    let tmp = TempDir::new().unwrap();
+    let root = stage_base_derived(&tmp, "gen_file_noop");
+
+    let output = run_dry(&root, "generator_file:/nonexistent/path/generator.sql");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "--select generator_file:<missing> should exit 0 (no-op)\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    // No hard error expected — the selection is valid but empty.
+    assert!(
+        !stderr.contains("error") && !stderr.contains("Error"),
+        "stderr should not contain an error message; got:\n{stderr}"
+    );
+}
+
+/// Bare leaf `events_parsed` with no scope, where two models in different
+/// directories share that leaf name → non-zero ambiguity diagnostic listing
+/// both full paths.
+#[test]
+fn bare_leaf_ambiguous_is_error() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("ambiguous_leaf");
+    fs::create_dir_all(root.join("models/alpha")).unwrap();
+    fs::create_dir_all(root.join("models/beta")).unwrap();
+    write_smelt_yml(&root, "ambiguous_leaf");
+    // Two models with the same leaf name in different sub-directories.
+    fs::write(
+        root.join("models/alpha/events_parsed.sql"),
+        "SELECT 1 AS id\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models/beta/events_parsed.sql"),
+        "SELECT 2 AS id\n",
+    )
+    .unwrap();
+
+    let output = run_dry(&root, "events_parsed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "bare ambiguous leaf 'events_parsed' should exit non-zero\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("events_parsed"),
+        "stderr should mention the ambiguous name; got:\n{stderr}"
+    );
+    // Both full paths should appear in the error.
+    assert!(
+        stderr.contains("alpha.events_parsed") && stderr.contains("beta.events_parsed"),
+        "stderr should list ALL matching candidates; got:\n{stderr}"
+    );
+}
+
+/// Bare leaf `events_parsed` with a single match `silver.events_parsed` →
+/// non-zero exit with a "did you mean" hint naming the full path.
+/// (`cli.md` §"Argument resolution algorithm" step 4)
+#[test]
+fn unresolvable_entity_select_did_you_mean_hint() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("did_you_mean");
+    fs::create_dir_all(root.join("models/silver")).unwrap();
+    write_smelt_yml(&root, "did_you_mean");
+    // One model inside a subdirectory; full path is `silver.events_parsed`.
+    fs::write(
+        root.join("models/silver/events_parsed.sql"),
+        "SELECT 1 AS id\n",
+    )
+    .unwrap();
+
+    // `events_parsed` (bare leaf) has no exact match; the only entity that
+    // matches by leaf is `silver.events_parsed` → NotFound with a single hint.
+    let output = run_dry(&root, "events_parsed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "--select events_parsed (bare leaf, one subdirectory match) should exit non-zero\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("did you mean"),
+        "stderr should contain a 'did you mean' hint; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("silver.events_parsed"),
+        "stderr 'did you mean' hint should include the full path 'silver.events_parsed'; got:\n{stderr}"
+    );
+}
+
 /// `path:` is NOT a recognised selection method — a `path:models/silver`
 /// selector is treated as a model-name reference that fails to resolve,
 /// confirming no `path:` method was added (D-38).

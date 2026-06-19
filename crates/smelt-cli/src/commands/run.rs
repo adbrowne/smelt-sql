@@ -252,6 +252,9 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
                     .count()
             })
             .unwrap_or(0);
+        if !args.select.is_empty() && planned == 0 {
+            eprintln!("smelt: no models matched the selector(s)");
+        }
         info!(
             "[DRY RUN] Compiled {} model(s); no execution performed.",
             planned
