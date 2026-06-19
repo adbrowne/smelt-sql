@@ -183,6 +183,10 @@ pub fn resolve_argument(
     scope: Option<&Scope>,
     arg: &str,
 ) -> Result<String, ResolutionError> {
+    // Step 0: strip leading `smelt.` prefix so the canonical printed form
+    // (`smelt.silver.events_parsed`) round-trips back into the same entity
+    // as the bare form (`silver.events_parsed`).
+    let arg = strip_smelt_prefix(arg);
     let arg_segs: Vec<&str> = arg.split('.').collect();
 
     // Build candidate segment lists
@@ -551,5 +555,61 @@ mod tests {
             }
             other => panic!("expected NotFound, got {:?}", other),
         }
+    }
+
+    // ── D-36: canonical smelt. prefix strip tests ───────────────────────────
+
+    #[test]
+    fn resolve_arg_strips_smelt_prefix() {
+        // smelt.silver.events_parsed and silver.events_parsed resolve to the same entity.
+        let root = PathBuf::from("/test/smelt_prefix");
+        let (db, ws, proj) = build_db(
+            root.clone(),
+            &[(
+                root.join("silver/events_parsed.sql"),
+                "SELECT 1 AS event_id\n",
+            )],
+        );
+        let with_prefix = resolve_argument(&db, ws, proj, None, "smelt.silver.events_parsed");
+        let without_prefix = resolve_argument(&db, ws, proj, None, "silver.events_parsed");
+        assert_eq!(with_prefix, Ok("silver.events_parsed".to_string()));
+        assert_eq!(with_prefix, without_prefix);
+    }
+
+    #[test]
+    fn resolve_arg_smelt_prefix_stripped_before_scope_expansion() {
+        // With scope=silver, smelt.bronze.x should resolve bronze.x (a full path),
+        // not silver.smelt.bronze.x or silver.bronze.x.
+        let root = PathBuf::from("/test/smelt_prefix_scope");
+        let (db, ws, proj) = build_db(
+            root.clone(),
+            &[
+                (root.join("bronze/raw_events.sql"), "SELECT 1 AS id\n"),
+                (
+                    root.join("silver/events_parsed.sql"),
+                    "SELECT 1 AS event_id\n",
+                ),
+            ],
+        );
+        let s = scope("silver");
+        // smelt.bronze.raw_events → strip prefix → bronze.raw_events (full path, bypasses scope)
+        let result = resolve_argument(&db, ws, proj, Some(&s), "smelt.bronze.raw_events");
+        assert_eq!(result, Ok("bronze.raw_events".to_string()));
+    }
+
+    #[test]
+    fn resolve_selector_args_strips_smelt_prefix() {
+        // --select smelt.silver.events_parsed resolves the same as silver.events_parsed
+        let root = PathBuf::from("/test/smelt_prefix_selector");
+        let (db, ws, proj) = build_db(
+            root.clone(),
+            &[(
+                root.join("silver/events_parsed.sql"),
+                "SELECT 1 AS event_id\n",
+            )],
+        );
+        let selectors = vec!["smelt.silver.events_parsed".to_string()];
+        let result = resolve_selector_args(&db, ws, proj, None, &selectors);
+        assert_eq!(result, Ok(vec!["silver.events_parsed".to_string()]));
     }
 }

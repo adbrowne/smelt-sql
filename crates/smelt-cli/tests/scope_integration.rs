@@ -245,6 +245,55 @@ fn smelt_run_select_no_scope_bare_leaf_errors() {
     );
 }
 
+/// `smelt type smelt.silver.events_parsed` (canonical form with `smelt.` prefix)
+/// should resolve identically to `smelt type silver.events_parsed` (D-36).
+#[test]
+fn arg_strips_leading_smelt_prefix() {
+    let project_dir = web_analytics_dir();
+
+    let output = Command::new(smelt_bin())
+        .args(["type", "--project-dir"])
+        .arg(&project_dir)
+        .arg("smelt.silver.events_parsed")
+        .current_dir(&project_dir)
+        .output()
+        .expect("smelt binary should be runnable");
+
+    assert!(
+        output.status.success(),
+        "smelt type smelt.silver.events_parsed should succeed (smelt. prefix is stripped)\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("silver.events_parsed:"),
+        "stdout should start with 'silver.events_parsed:', got:\n{stdout}"
+    );
+}
+
+/// `smelt run --select smelt.silver.events_parsed --dry-run` should resolve the
+/// same as `--select silver.events_parsed` (D-36 round-trip for selectors).
+#[test]
+fn select_strips_leading_smelt_prefix() {
+    let project_dir = web_analytics_dir();
+
+    let output = Command::new(smelt_bin())
+        .args(["run", "--project-dir"])
+        .arg(&project_dir)
+        .args(["--select", "smelt.silver.events_parsed", "--dry-run"])
+        .current_dir(&project_dir)
+        .output()
+        .expect("smelt binary should be runnable");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stderr.contains("not found"),
+        "smelt run --select smelt.silver.events_parsed should not fail with 'not found'\nstderr: {stderr}\nstdout: {stdout}"
+    );
+}
+
 /// `smelt --scope "" run --select events --dry-run` against a project that has
 /// both `models/silver/events.sql` and `models/bronze/events.sql` should fail
 /// with non-zero exit and stderr mentioning BOTH `silver.events` and

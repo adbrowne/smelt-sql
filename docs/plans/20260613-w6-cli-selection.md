@@ -49,7 +49,7 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
-| P1 | Entity arguments accept & strip a leading `smelt.` prefix (canonical round-trip) | pending | D-36 | feat(cli): entity arguments accept and strip a leading `smelt.` prefix (D-36) | |
+| P1 | Entity arguments accept & strip a leading `smelt.` prefix (canonical round-trip) | done | D-36 | feat(cli): entity arguments accept and strip a leading `smelt.` prefix (D-36) | 2026-06-20 |
 | P2 | No cwd-scope fall-through: scoped shorthand resolves only `<scope>.<arg>` | pending | D-40 | feat(cli): scoped shorthand resolves only `<scope>.<arg>`, no fall-through (D-40) | |
 | P3 | Strip leading/trailing `+` graph operators before entity resolution; re-attach to full path | pending | D-38 | feat(core): strip `+` graph operators before selector entity resolution (D-38) | |
 | P4 | Unresolvable entity selector = hard "not found" error; empty method selector = exit 0 no-op | pending | D-37 | feat(cli): unresolvable entity-name selector is a hard not-found error (D-37) | |
