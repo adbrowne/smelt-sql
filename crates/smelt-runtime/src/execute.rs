@@ -148,8 +148,7 @@ pub async fn execute_project(
                     // virtual path here so gate_diagnostics can look them up.
                     let path = m.path.clone();
                     if path.to_string_lossy().ends_with(".py") {
-                        let filename =
-                            path.file_name().and_then(|n| n.to_str()).unwrap_or("py");
+                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("py");
                         path.with_file_name(format!("{}::{}", filename, m.name))
                     } else {
                         path

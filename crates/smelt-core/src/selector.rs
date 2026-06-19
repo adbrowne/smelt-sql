@@ -228,6 +228,38 @@ mod tests {
         assert!(s.include_downstream);
     }
 
+    /// `+name+` parses to `ModelName("name")` with both upstream and downstream
+    /// flags set — the bare identifier contains no `+` characters (D-38).
+    #[test]
+    fn both_directions_model_name_value_has_no_plus() {
+        let s = parse_selector("+daily_revenue+").unwrap();
+        assert_eq!(
+            s.method,
+            SelectionMethod::ModelName("daily_revenue".to_string())
+        );
+        assert!(s.include_upstream);
+        assert!(s.include_downstream);
+        // Confirm the model name itself contains no `+`.
+        match &s.method {
+            SelectionMethod::ModelName(name) => assert!(!name.contains('+')),
+            _ => panic!("expected ModelName"),
+        }
+    }
+
+    /// `path:` is not a recognised method prefix — `path:foo` parses as
+    /// `ModelName("path:foo")`, confirming no `path:` method was added (D-38).
+    #[test]
+    fn no_path_method_path_colon_is_model_name() {
+        let s = parse_selector("path:models/silver").unwrap();
+        assert_eq!(
+            s.method,
+            SelectionMethod::ModelName("path:models/silver".to_string()),
+            "path: should not be a recognised method — it must parse as ModelName"
+        );
+        assert!(!s.include_upstream);
+        assert!(!s.include_downstream);
+    }
+
     #[test]
     fn test_empty_selector() {
         assert_eq!(parse_selector(""), Err(SelectorParseError::Empty));
