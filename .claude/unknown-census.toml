@@ -166,11 +166,11 @@ reason = "non-numeric binary expression (e.g. text+int before BUG-017 fix path) 
 classification = "legitimate"
 reason = "decimal division early-return: Decimal / T or Integer / Decimal → Unknown; TypeMismatch diagnostic emitted separately by check_decimal_division_diagnostics"
 
-["crates/smelt-db/src/type_inference/binary.rs:131"]
+["crates/smelt-db/src/type_inference/binary.rs:147"]
 classification = "legitimate"
 reason = "decimal precision overflow: p' > 38 → Unknown; DecimalPrecisionOverflow diagnostic emitted separately by check_decimal_precision_overflow_diagnostics"
 
-["crates/smelt-db/src/type_inference/binary.rs:388"]
+["crates/smelt-db/src/type_inference/binary.rs:404"]
 classification = "error"
 reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown; TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
 
