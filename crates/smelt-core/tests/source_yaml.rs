@@ -388,3 +388,93 @@ name: raw_cdc.users
         other => panic!("expected Literal, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// D-35 P2: db_name_for_target resolution
+// ---------------------------------------------------------------------------
+
+/// D-35 P2: PerTarget map resolves to the matching target's value.
+#[test]
+fn per_target_map_resolves_matching_target() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: raw_dev.u
+  prod: raw.u
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    let result = info.db_name_for_target("dev", "main");
+    assert_eq!(
+        result, "raw_dev.u",
+        "PerTarget with matching key should return that value"
+    );
+}
+
+/// D-35 P2: PerTarget map falls back to default mapping when target is absent.
+#[test]
+fn per_target_map_falls_back_on_missing_target() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  prod: raw.u
+"#,
+    )
+    .unwrap();
+
+    let mut info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    // Simulate full address segments as set by discover_source_infos.
+    info.address_segments = vec![
+        "sources".to_string(),
+        "raw".to_string(),
+        "users".to_string(),
+    ];
+    let result = info.db_name_for_target("dev", "main");
+    assert_eq!(
+        result, "main.sources_raw_users",
+        "PerTarget with no matching key should fall back to default mapping"
+    );
+}
+
+/// D-35 P2: Literal ignores target_name and returns the literal verbatim.
+#[test]
+fn literal_ignores_target_name() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name: raw_cdc.u
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    // Any target_name should return the same literal.
+    assert_eq!(info.db_name_for_target("dev", "main"), "raw_cdc.u");
+    assert_eq!(info.db_name_for_target("prod", "staging"), "raw_cdc.u");
+    assert_eq!(info.db_name_for_target("", "main"), "raw_cdc.u");
+}

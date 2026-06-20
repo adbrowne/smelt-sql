@@ -62,21 +62,38 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
-    /// Returns the fully-qualified database name for this source.
+    /// Returns the fully-qualified database name for this source given the active
+    /// target name and schema.
     ///
-    /// For `Literal` overrides, returns the literal verbatim (any target).
-    /// For `PerTarget` overrides or `None`, returns the default mapping
-    /// `<target_schema>.<address_segments.join("_")>`.
-    ///
-    /// For per-target resolution with the active target name, use
-    /// `db_name_for_target` (introduced in P2).
-    pub fn db_name(&self, target_schema: &str) -> String {
+    /// Resolution rules (spec: `docs/specs/sources.md` §"Target-aware `name:` override"):
+    /// - `Literal(s)` — returns `s` verbatim regardless of `target_name`.
+    /// - `PerTarget(map)` — looks up `target_name`; if found returns that value;
+    ///   if absent falls back to the default mapping
+    ///   `<target_schema>.<address_segments.join("_")>`.
+    /// - `None` — default mapping.
+    pub fn db_name_for_target(&self, target_name: &str, target_schema: &str) -> String {
         match &self.name_override {
             Some(SourceNameOverride::Literal(s)) => s.clone(),
-            Some(SourceNameOverride::PerTarget(_)) | None => {
-                format!("{}.{}", target_schema, self.address_segments.join("_"))
+            Some(SourceNameOverride::PerTarget(map)) => {
+                if let Some(v) = map.get(target_name) {
+                    v.clone()
+                } else {
+                    format!("{}.{}", target_schema, self.address_segments.join("_"))
+                }
             }
+            None => format!("{}.{}", target_schema, self.address_segments.join("_")),
         }
+    }
+
+    /// Returns the fully-qualified database name for this source.
+    ///
+    /// This is a shim for callers that do not yet pass the active target name.
+    /// For `Literal` overrides it returns the literal verbatim; for all other
+    /// cases it returns the default mapping `<target_schema>.<segs.join("_")>`.
+    ///
+    /// Prefer `db_name_for_target` when the active target name is available.
+    pub fn db_name(&self, target_schema: &str) -> String {
+        self.db_name_for_target("", target_schema)
     }
 }
 
