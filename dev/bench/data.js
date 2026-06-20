@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781925253585,
+  "lastUpdate": 1781925255533,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -25925,6 +25925,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.07590531796579,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "30bceeaf3f47a835cc539049b434a1380c4a8a03",
+          "message": "docs(plans): phased plan to cut cold initial-load path/diagnostic overhead\n\nFollow-up to d28a26ba. Flamegraph attribution + three research passes\n(sort-site inventory, path-identity options, CST-rewalk inventory) distilled\ninto a subagent-executable plan: sorted_workspace_files hoist, per-file\nfile_classification skip-gate, unified CST walk, and a re-profile-gated\ncheap-path-identity stretch. Behavior-preserving; equivalence gates are the\noracle.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T13:01:56+10:00",
+          "tree_id": "1594b95fbbb59a47ddd66d98ddbaf0c0c84e5282",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/30bceeaf3f47a835cc539049b434a1380c4a8a03"
+        },
+        "date": 1781925255030,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.579427463029198,
             "unit": "MB/s"
           }
         ]
