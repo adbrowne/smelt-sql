@@ -9,6 +9,7 @@ use smelt_parser::{self, File as AstFile};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
 
 use crate::queries::parse::parse_file;
+use crate::queries::project::sorted_workspace_files;
 use crate::{SourceFile, Workspace};
 
 // ============================================================================
@@ -82,10 +83,9 @@ pub fn workspace_function_signatures(
     db: &dyn salsa::Database,
     workspace: Workspace,
 ) -> Arc<Vec<FunctionSig>> {
-    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    let files = sorted_workspace_files(db, workspace);
     let mut sigs = Vec::new();
-    for f in &files {
+    for f in files.iter() {
         for sig in file_signature_inputs(db, *f).iter() {
             sigs.push(sig.clone());
         }
@@ -173,14 +173,12 @@ pub fn resolve_function(
     name: String,
 ) -> Option<Arc<FunctionSig>> {
     let project_root = project.root(db);
-    let mut files: Vec<SourceFile> = workspace
-        .files(db)
+    let files = sorted_workspace_files(db, workspace);
+    for f in files
         .iter()
         .copied()
         .filter(|f| f.project_root(db) == project_root)
-        .collect();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
-    for f in files {
+    {
         let sigs = file_signature_inputs(db, f);
         if let Some(sig) = sigs.iter().find(|s| s.name == name) {
             return Some(Arc::new(sig.clone()));
@@ -214,14 +212,12 @@ pub fn resolve_function_path(
     name: String,
 ) -> Option<(SourceFile, NameRange)> {
     let project_root = project.root(db);
-    let mut files: Vec<SourceFile> = workspace
-        .files(db)
+    let files = sorted_workspace_files(db, workspace);
+    for f in files
         .iter()
         .copied()
         .filter(|f| f.project_root(db) == project_root)
-        .collect();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
-    for f in files {
+    {
         let parse = parse_file(db, f);
         let Some(ast) = AstFile::cast(parse.syntax()) else {
             continue;

@@ -51,7 +51,7 @@ Run each phase via `/smelt:implement`-style pairs: an **implementer** subagent d
 
 ---
 
-## Phase 1 — `sorted_workspace_files`: hoist the per-file re-sorts  *(status: pending)*
+## Phase 1 — `sorted_workspace_files`: hoist the per-file re-sorts  *(status: done — Initial Load 663 → 297 ms)*
 
 **Highest-confidence win, lowest risk; mirrors the `workspace_function_signatures` / `project_sql_address_index` pattern.**
 
@@ -178,7 +178,7 @@ Re-run the flamegraph + `decompose`, record the new Initial Load number and the 
 | Phase | Description | Status |
 |---|---|---|
 | 0 | `project_sql_address_index` (resolve_ref_path O(N²) scan) | **done** (`d28a26ba`) |
-| 1 | `sorted_workspace_files` hoist | pending |
+| 1 | `sorted_workspace_files` hoist | **done** (Initial Load 663 → 297 ms) |
 | 2 | `file_classification` skip-gate | pending |
 | 3 | Unified CST walk + single parse handle | pending |
 | 4 | Cheap path identity (gated on re-profile) | pending |
