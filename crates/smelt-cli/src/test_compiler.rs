@@ -449,7 +449,11 @@ fn compile_whole_model_test_inner(
     // Collect all smelt.<path> refs and their text ranges (in reverse order for replacement).
     // The CTE name is the path segments joined by "_" (e.g. smelt.users → "users",
     // smelt.staging.orders → "staging_orders").
+    // The public `inputs` key uses dot-separation (D-42: "silver.orders", not "silver_orders").
     let mut ref_replacements: Vec<(usize, usize, String)> = Vec::new();
+    // Map CTE name → dot-separated inputs key for the mock-CTE lookup below.
+    let mut cte_name_to_dot_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for path_ref in file
         .syntax()
         .descendants()
@@ -459,11 +463,15 @@ fn compile_whole_model_test_inner(
         if segments.is_empty() {
             continue;
         }
-        let name = segments.join("_");
+        let cte_name = segments.join("_");
+        let dot_key = segments.join(".");
+        cte_name_to_dot_key
+            .entry(cte_name.clone())
+            .or_insert(dot_key);
         let range = path_ref.text_range();
         let start: usize = range.start().into();
         let end: usize = range.end().into();
-        ref_replacements.push((start, end, name));
+        ref_replacements.push((start, end, cte_name));
     }
 
     // Sort by start position descending so replacements don't shift offsets
@@ -488,11 +496,16 @@ fn compile_whole_model_test_inner(
     }
 
     // Build mock CTEs — every smelt.<path> ref in the model gets a CTE.
-    // Refs present in `inputs` get the provided rows; unlisted refs get an
-    // empty CTE (zero rows) per spec Semantics §Whole-model tests.
+    // Refs present in `inputs` (keyed by dot-separated address, D-42) get the
+    // provided rows; unlisted refs get an empty CTE (zero rows) per spec
+    // Semantics §Whole-model tests.
     let mut mock_cte_parts: Vec<String> = Vec::new();
     for ref_name in &ref_names {
-        let rows = inputs.get(ref_name).map(|v| v.as_slice()).unwrap_or(&[]);
+        let dot_key = cte_name_to_dot_key
+            .get(ref_name)
+            .map(String::as_str)
+            .unwrap_or(ref_name.as_str());
+        let rows = inputs.get(dot_key).map(|v| v.as_slice()).unwrap_or(&[]);
         mock_cte_parts.push(yaml_rows_to_sql(ref_name, rows));
     }
 
@@ -1020,6 +1033,37 @@ GROUP BY u.user_id
         assert!(
             validate_test_expect(&[row]).is_none(),
             "non-empty expect list must be valid"
+        );
+    }
+
+    #[test]
+    fn test_compile_whole_model_test_dot_key_inputs() {
+        // D-42: `inputs` keys must use dot-separated bare address paths
+        // (e.g. "silver.orders"), not underscore-joined CTE names ("silver_orders").
+        let model_sql = "SELECT SUM(amount) AS total FROM smelt.silver.orders";
+        let mut inputs = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+        // Key uses dot-separation (the public API).
+        inputs.insert("silver.orders".to_string(), vec![row]);
+        let result = compile_whole_model_test(model_sql, &inputs, None).unwrap();
+        // The CTE name in generated SQL uses underscore (valid SQL identifier).
+        assert!(
+            result.contains("silver_orders AS"),
+            "CTE name must use underscore form; got:\n{result}"
+        );
+        // The row data must appear — this proves the dot-key lookup found the rows.
+        assert!(
+            result.contains("100"),
+            "rows from inputs must be injected under the dot-key; got:\n{result}"
+        );
+        // Must not be an empty CTE (WHERE 1=0 signals empty mock).
+        assert!(
+            !result.contains("WHERE 1=0"),
+            "dot-key lookup must not produce an empty CTE; got:\n{result}"
         );
     }
 }
