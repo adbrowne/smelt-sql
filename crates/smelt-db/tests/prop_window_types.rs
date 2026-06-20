@@ -346,7 +346,7 @@ fn check_window_against_oracle(
         };
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 
@@ -728,7 +728,7 @@ fn smoke_sum_window_integer() {
     // Just verify smelt infers something reasonable
     let inferred = run_smelt_inference(sql);
     assert!(!inferred.is_empty());
-    assert_ne!(inferred[0], DataType::Unknown);
+    assert_ne!(inferred[0], DataType::unknown_dynamic());
     // Check against DuckDB (may diverge on SUM return type)
     match check_window_against_oracle(&duckdb, sql, &divergences) {
         Ok(()) | Err(_) => {} // Known divergence for SUM types is acceptable
@@ -753,7 +753,7 @@ fn smoke_partition_by_order_by_frame() {
                SELECT SUM(val) OVER (PARTITION BY grp ORDER BY ord ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum FROM data";
     let inferred = run_smelt_inference(sql);
     assert!(!inferred.is_empty());
-    assert_ne!(inferred[0], DataType::Unknown);
+    assert_ne!(inferred[0], DataType::unknown_dynamic());
     match check_window_against_oracle(&duckdb, sql, &divergences) {
         Ok(()) | Err(_) => {}
     }

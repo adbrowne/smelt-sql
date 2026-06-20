@@ -213,7 +213,7 @@ fn spark_type_to_smelt(type_str: &str) -> DataType {
         },
         "interval" => DataType::Interval,
         "void" | "null" => DataType::Null,
-        _ => DataType::Unknown,
+        _ => DataType::unknown_dynamic(),
     }
 }
 

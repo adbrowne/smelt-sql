@@ -272,7 +272,7 @@ fn full_reproducer_five_columns() {
     for (name, dt) in &types {
         assert_ne!(
             dt,
-            &DataType::Unknown,
+            &DataType::unknown_dynamic(),
             "column {name} must not be Unknown; full map: {:?}",
             types
         );

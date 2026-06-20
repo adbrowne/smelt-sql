@@ -187,7 +187,7 @@ fn check_against_oracle(
         };
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 

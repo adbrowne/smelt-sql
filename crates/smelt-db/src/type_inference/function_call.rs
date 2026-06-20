@@ -64,7 +64,9 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
             .map(|s| s.eq_ignore_ascii_case("models") || s.eq_ignore_ascii_case("sources"))
             .unwrap_or(false)
         {
-            return Some(TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)));
+            return Some(TypedColumn::nullable(DataType::Unknown(
+                smelt_types::UnknownReason::Dynamic,
+            )));
         }
     }
 
@@ -78,15 +80,21 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
         // (§16 #14) — Phase 8 adds the inference machinery. In the monomorphic
         // `smelt.define` path we stay conservative: no precise return type
         // known yet, surface `Unknown` like `Any`.
-        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
-        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => {
+            DataType::Unknown(smelt_types::UnknownReason::Dynamic)
+        }
+        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => {
+            DataType::Unknown(smelt_types::UnknownReason::Dynamic)
+        }
         // `TableExpr` return (Phase 15) — scalar inference has no
         // DataType for a whole row set. Downstream Phase 17 plumbs the
         // inferred output schema; for now the call-site sees an opaque
         // Unknown.
         Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `SelectItems<Kind>` (Phase 21) is not a scalar type.
-        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::SelectItems { .. })) => {
+            DataType::Unknown(smelt_types::UnknownReason::Dynamic)
+        }
         // Phase 37: `Struct<{declared_fields, ..r}>` return type — resolve
         // the row variable `r` by examining the call-site argument that
         // corresponds to the first struct parameter.  When the extras can
@@ -98,16 +106,22 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
         })) => resolve_struct_return_type(call, ctx, sig, ret_fields, tail),
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // scalar DataType equivalent in Phase A.
-        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => {
+            DataType::Unknown(smelt_types::UnknownReason::Dynamic)
+        }
         // `Lambda<params, U>` (Phase B/F meta-language) — meta-only; not a valid return type.
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ModelRef` / `SourceRef` (Phase D meta-language) — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => {
+            DataType::Unknown(smelt_types::UnknownReason::Dynamic)
+        }
         // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
         // Inference wiring lands in Phase 3/5.
-        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => {
+            DataType::Unknown(smelt_types::UnknownReason::Dynamic)
+        }
         // `ModelDef` — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ModelDef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         Some(Err(_)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
@@ -208,7 +222,7 @@ fn resolve_struct_return_type(
         // intentionally ignored: binding failure means the argument struct is
         // incompatible; returning Unknown lets the call-site check emit
         // RowRequirementUnsatisfied rather than cascading inference errors.
-        Err(_) => return DataType::Unknown,
+        Err(_) => return DataType::unknown_dynamic(),
     };
 
     // Check that the row var name matches between param and return type.
@@ -462,7 +476,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         }),
 
         SqlFunction::Min | SqlFunction::Max => {
-            first_arg_type_or(func, ctx, DataType::Unknown, true)
+            first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true)
         }
 
         SqlFunction::Coalesce => {
@@ -483,14 +497,15 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
                     }
                 }
             }
-            let data_type = result_type.unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+            let data_type =
+                result_type.unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
             Some(TypedColumn {
                 data_type,
                 nullable: !has_non_nullable_arg,
             })
         }
 
-        SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::Unknown, true),
+        SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 
         SqlFunction::Ifnull => {
             // IFNULL(a, b) is equivalent to COALESCE(a, b).
@@ -529,7 +544,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         | SqlFunction::Lead
         | SqlFunction::FirstValue
         | SqlFunction::LastValue
-        | SqlFunction::NthValue => first_arg_type_or(func, ctx, DataType::Unknown, true),
+        | SqlFunction::NthValue => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 
         SqlFunction::Now | SqlFunction::CurrentTimestamp => Some(TypedColumn {
             data_type: DataType::Timestamp {
@@ -760,7 +775,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
                     }
                 }
             }
-            first_arg_type_or(func, ctx, DataType::Unknown, true)
+            first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true)
         }
 
         SqlFunction::ArrayAgg => {
@@ -773,7 +788,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
                 }
             }
             Some(TypedColumn {
-                data_type: DataType::Array(Box::new(DataType::Unknown)),
+                data_type: DataType::Array(Box::new(DataType::unknown_dynamic())),
                 nullable: true,
             })
         }
@@ -826,7 +841,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
 
         SqlFunction::Median => first_arg_type_or(func, ctx, DataType::Double, true),
 
-        SqlFunction::Mode => first_arg_type_or(func, ctx, DataType::Unknown, true),
+        SqlFunction::Mode => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 
         SqlFunction::PercentileCont | SqlFunction::PercentileDisc => Some(TypedColumn {
             data_type: DataType::Double,
@@ -839,7 +854,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         }),
 
         SqlFunction::AnyValue | SqlFunction::ArgMax | SqlFunction::First | SqlFunction::Last => {
-            first_arg_type_or(func, ctx, DataType::Unknown, true)
+            first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true)
         }
 
         SqlFunction::GroupConcat => Some(TypedColumn {

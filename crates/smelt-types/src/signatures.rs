@@ -2323,7 +2323,8 @@ fn struct_expr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
         // concrete in v1 — constraints like `Numeric` are not yet supported
         // inside struct field positions). Fall back to Unknown for unrecognised
         // names so diagnostics don't cascade.
-        let dt = crate::parse_type(inner_text.trim()).unwrap_or(DataType::Unknown(crate::UnknownReason::Dynamic));
+        let dt = crate::parse_type(inner_text.trim())
+            .unwrap_or(DataType::Unknown(crate::UnknownReason::Dynamic));
         fields.push((name, dt));
     }
 
@@ -3161,7 +3162,9 @@ pub fn unify_call_with_expected(
     let return_type = match &sig.return_type {
         TypeExpr::Concrete(TypeConstraint::Concrete(dt)) => dt.clone(),
         TypeExpr::Concrete(TypeConstraint::Numeric) => DataType::Double,
-        TypeExpr::Concrete(TypeConstraint::Ordered) => DataType::Unknown(crate::UnknownReason::Dynamic),
+        TypeExpr::Concrete(TypeConstraint::Ordered) => {
+            DataType::Unknown(crate::UnknownReason::Dynamic)
+        }
         TypeExpr::Concrete(TypeConstraint::Any) => DataType::Unknown(crate::UnknownReason::Dynamic),
         TypeExpr::Var(var_name) => bindings
             .get(var_name)
@@ -4038,7 +4041,9 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![tp("T", TypeConstraint::Any)],
             vec![var("T")],
             // Array<T> cannot be expressed as a TypeExpr::Var directly; use Unknown for v1.
-            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(crate::UnknownReason::Dynamic))),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(
+                crate::UnknownReason::Dynamic,
+            ))),
         )
         .with_kind(ExprKind::Agg),
     );
@@ -4537,7 +4542,9 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         "CAST",
         vec![tp("T", TypeConstraint::Any)],
         vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(crate::UnknownReason::Dynamic))),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(
+            crate::UnknownReason::Dynamic,
+        ))),
     ));
 
     m

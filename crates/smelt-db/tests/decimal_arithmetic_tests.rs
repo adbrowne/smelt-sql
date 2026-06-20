@@ -141,7 +141,7 @@ fn decimal_overflow_check_emits_diagnostic() {
     assert_eq!(types.len(), 1, "expected exactly one output column");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "overflow result should be Unknown"
     );
 }
@@ -198,7 +198,7 @@ fn decimal_division_emits_type_mismatch() {
     assert_eq!(types.len(), 1, "expected exactly one output column");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "Decimal / Decimal result should be Unknown"
     );
 }
@@ -234,7 +234,7 @@ fn decimal_integer_division_rejected() {
     assert_eq!(types.len(), 1, "expected exactly one output column");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "Decimal / Integer result should be Unknown"
     );
 }
@@ -273,7 +273,7 @@ fn integer_decimal_division_rejected() {
     assert_eq!(types.len(), 1, "expected exactly one output column");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "Integer / Decimal result should be Unknown"
     );
 }

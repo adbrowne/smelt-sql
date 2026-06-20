@@ -109,10 +109,10 @@ generates: models
             .data_type
             .as_ref()
             .map(|tc| tc.data_type.clone())
-            .unwrap_or(DataType::Unknown);
+            .unwrap_or(DataType::unknown_dynamic());
         assert_ne!(
             dt,
-            DataType::Unknown,
+            DataType::unknown_dynamic(),
             "consumer column '{}' should be concrete (from emission), got Unknown",
             col.name
         );
@@ -220,10 +220,10 @@ SELECT id, region FROM smelt.cohorts.eu
             .data_type
             .as_ref()
             .map(|tc| tc.data_type.clone())
-            .unwrap_or(DataType::Unknown);
+            .unwrap_or(DataType::unknown_dynamic());
         assert_ne!(
             dt,
-            DataType::Unknown,
+            DataType::unknown_dynamic(),
             "consumer column '{}' in UNION ALL should be concrete, got Unknown",
             col.name
         );
@@ -277,10 +277,10 @@ generates: models
             .data_type
             .as_ref()
             .map(|tc| tc.data_type.clone())
-            .unwrap_or(DataType::Unknown);
+            .unwrap_or(DataType::unknown_dynamic());
         assert_ne!(
             dt,
-            DataType::Unknown,
+            DataType::unknown_dynamic(),
             "aliased consumer column '{}' should be concrete, got Unknown",
             col.name
         );

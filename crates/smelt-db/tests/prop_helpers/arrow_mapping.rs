@@ -58,7 +58,7 @@ pub fn arrow_to_smelt(arrow: &ArrowType) -> DataType {
         ArrowType::Null => DataType::Null,
 
         // Fallback for types we don't map (maps, unions, etc.)
-        _ => DataType::Unknown,
+        _ => DataType::unknown_dynamic(),
     }
 }
 

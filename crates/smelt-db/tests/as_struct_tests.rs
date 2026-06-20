@@ -111,7 +111,7 @@ fn as_struct_except_filters_columns() {
         .data_type
         .as_ref()
         .map(|tc| tc.data_type.clone())
-        .unwrap_or(DataType::Unknown);
+        .unwrap_or(DataType::unknown_dynamic());
 
     match &s_type {
         DataType::Struct(fields) => {
@@ -247,7 +247,7 @@ JOIN smelt.sources.source.customers AS c \
         .data_type
         .as_ref()
         .map(|tc| tc.data_type.clone())
-        .unwrap_or(DataType::Unknown);
+        .unwrap_or(DataType::unknown_dynamic());
     match &order_type {
         DataType::Struct(fields) => {
             let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();

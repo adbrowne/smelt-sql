@@ -557,7 +557,7 @@ impl UpstreamSchemas {
                 .iter()
                 .map(|c| {
                     let typed = c.data_type.clone().unwrap_or(TypedColumn {
-                        data_type: DataType::Unknown,
+                        data_type: DataType::unknown_dynamic(),
                         nullable: true,
                     });
                     (c.name.clone(), typed)
@@ -1063,7 +1063,7 @@ impl SqlCompiler {
         // Only apply casts if we have concrete types for at least one column
         let has_concrete = column_types
             .iter()
-            .any(|tc| !matches!(tc.data_type, DataType::Unknown | DataType::Null));
+            .any(|tc| !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null));
         if !has_concrete {
             return sql.to_string();
         }

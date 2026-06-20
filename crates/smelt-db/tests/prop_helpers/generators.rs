@@ -467,14 +467,14 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyAggregate,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         FuncDesc {
             name: "MAX",
             input: FuncInput::AnyAggregate,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         // Null-handling / scalar functions that accept any type
         FuncDesc {
@@ -482,7 +482,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyScalar,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         // Comparison functions
         FuncDesc {
@@ -490,14 +490,14 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyScalar,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         FuncDesc {
             name: "LEAST",
             input: FuncInput::AnyScalar,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         // Statistical aggregates -> return Double
         FuncDesc {
@@ -578,21 +578,21 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::IntegerAggregate,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         FuncDesc {
             name: "BIT_OR",
             input: FuncInput::IntegerAggregate,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         FuncDesc {
             name: "BIT_XOR",
             input: FuncInput::IntegerAggregate,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         // Multi-arg functions
         FuncDesc {
@@ -642,7 +642,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::Numeric,
             extra_args: &[ExtraArg::IntLiteral("0")],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         FuncDesc {
             name: "POWER",
@@ -656,7 +656,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::Numeric,
             extra_args: &[ExtraArg::SameAsFirst],
             prepend_literal: None,
-            output_type: DataType::Unknown, // arg-dependent
+            output_type: DataType::unknown_dynamic(), // arg-dependent
         },
         FuncDesc {
             name: "ATAN2",
@@ -747,7 +747,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyAggregate,
             extra_args: &[],
             prepend_literal: None,
-            output_type: DataType::Unknown, // uses input type
+            output_type: DataType::unknown_dynamic(), // uses input type
         },
         FuncDesc {
             name: "APPROX_COUNT_DISTINCT",
@@ -835,7 +835,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         | "JSON_EXTRACT_STRING"
         | "JSON_EXTRACT_TEXT" => DataType::Text,
         "JSON_ARRAY_LENGTH" => DataType::BigInt,
-        _ => DataType::Unknown,
+        _ => DataType::unknown_dynamic(),
     }
 }
 
@@ -1801,7 +1801,7 @@ pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenar
                                 // DuckDB: SUM(INT) -> HUGEINT (mapped to Decimal), SUM(BIGINT) -> HUGEINT
                                 // smelt: SUM(numeric) -> varies
                                 // Use expected_smelt_type from the SUM inference
-                                expected_smelt_type: DataType::Unknown, // will be checked via DuckDB
+                                expected_smelt_type: DataType::unknown_dynamic(), // will be checked via DuckDB
                             });
                         }
                     }

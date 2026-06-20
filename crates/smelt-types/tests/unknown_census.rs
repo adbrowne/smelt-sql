@@ -3,8 +3,8 @@
 ///
 /// A "construction site" is a line that *produces* `DataType::Unknown` — struct
 /// field initialiser, `unwrap_or` fallback, return value, match arm body, etc.
-/// Pattern-match arms (`DataType::Unknown =>`), comparison guards (`matches!`,
-/// `== DataType::Unknown`), and test code are excluded.
+/// Pattern-match arms (`DataType::Unknown(_) =>`), comparison guards (`matches!`,
+/// `== DataType::unknown_dynamic()`), and test code are excluded.
 ///
 /// An unclassified new site fails this test (prevent silent-Unknown growth).
 /// A missing allowlist entry (debt was paid) also fails (force tightening).

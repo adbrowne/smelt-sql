@@ -332,7 +332,7 @@ fn check_types_against_oracle(
         let smelt_type = &inferred.1;
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 

@@ -4,155 +4,145 @@
 #   legitimate: deliberate conservatism — meta-type/polymorphic/already-diagnosed
 #   error: should eventually emit a diagnostic (tracked in the hardening plan)
 #
-# Maintained by: Phase 2 of docs/plans/20260608-silent-failures-hardening.md
+# Maintained by: Phase 1 of docs/plans/20260620-unknown-reason-discriminant.md
 # Guard test:    crates/smelt-types/tests/unknown_census.rs
 # Census script: .claude/scripts/unknown-census.sh
 
-# ── smelt-cli ─────────────────────────────────────────────────────────────────
-
-["crates/smelt-cli/src/test_property.rs:57"]
-classification = "legitimate"
-reason = "property-test YAML-to-DataType helper: unrecognized YAML node kind → Unknown is correct conservatism"
-
 # ── smelt-db / function_body_check ────────────────────────────────────────────
-
-["crates/smelt-db/src/function_body_check.rs:529"]
-classification = "legitimate"
-reason = "param_binding_type: Ordered constraint has no SQL scalar equivalent — Unknown is the correct stand-in"
-
-["crates/smelt-db/src/function_body_check.rs:534"]
-classification = "legitimate"
-reason = "param_binding_type: Any constraint intentionally declines type-checking — Unknown is the correct stand-in"
-
-["crates/smelt-db/src/function_body_check.rs:536"]
-classification = "legitimate"
-reason = "param_binding_type: TableExpr params are bound as FROM-scope entries, not scalars — no DataType exists"
-
-["crates/smelt-db/src/function_body_check.rs:538"]
-classification = "legitimate"
-reason = "param_binding_type: SelectItems params are list-typed, not scalar — no DataType exists"
 
 ["crates/smelt-db/src/function_body_check.rs:530"]
 classification = "legitimate"
-reason = "param_binding_type: Struct param type deferred until runtime binding — Unknown is the correct placeholder"
+reason = "param_binding_type: Ordered constraint has no SQL scalar equivalent — Unknown is the correct stand-in"
+
+["crates/smelt-db/src/function_body_check.rs:533"]
+classification = "legitimate"
+reason = "param_binding_type: Any constraint intentionally declines type-checking — Unknown is the correct stand-in"
+
+["crates/smelt-db/src/function_body_check.rs:538"]
+classification = "legitimate"
+reason = "param_binding_type: TableExpr params are bound as FROM-scope entries, not scalars — no DataType exists"
 
 ["crates/smelt-db/src/function_body_check.rs:541"]
 classification = "legitimate"
-reason = "param_binding_type: meta-language List/Unknown types are compile-time only — no SQL DataType equivalent"
-
-["crates/smelt-db/src/function_body_check.rs:543"]
-classification = "legitimate"
-reason = "param_binding_type: Lambda is meta-only — not a valid SQL parameter sort"
-
-["crates/smelt-db/src/function_body_check.rs:547"]
-classification = "legitimate"
-reason = "param_binding_type: ColumnRef is meta-only — not a SQL DataType"
-
-["crates/smelt-db/src/function_body_check.rs:550"]
-classification = "legitimate"
-reason = "param_binding_type: ModelRef/SourceRef are meta-only — not SQL DataTypes"
-
-["crates/smelt-db/src/function_body_check.rs:552"]
-classification = "legitimate"
-reason = "param_binding_type: Record/Map are meta-only — not SQL DataTypes"
-
-["crates/smelt-db/src/function_body_check.rs:553"]
-classification = "legitimate"
-reason = "param_binding_type: ModelDef is meta-only — not a SQL DataType"
+reason = "param_binding_type: SelectItems params are list-typed, not scalar — no DataType exists"
 
 ["crates/smelt-db/src/function_body_check.rs:545"]
 classification = "legitimate"
+reason = "param_binding_type: Struct param type deferred until runtime binding — Unknown is the correct placeholder"
+
+["crates/smelt-db/src/function_body_check.rs:550"]
+classification = "legitimate"
+reason = "param_binding_type: meta-language List/Unknown types are compile-time only — no SQL DataType equivalent"
+
+["crates/smelt-db/src/function_body_check.rs:553"]
+classification = "legitimate"
+reason = "param_binding_type: Lambda is meta-only — not a valid SQL parameter sort"
+
+["crates/smelt-db/src/function_body_check.rs:555"]
+classification = "legitimate"
+reason = "param_binding_type: ColumnRef is meta-only — not a SQL DataType"
+
+["crates/smelt-db/src/function_body_check.rs:558"]
+classification = "legitimate"
+reason = "param_binding_type: ModelRef/SourceRef are meta-only — not SQL DataTypes"
+
+["crates/smelt-db/src/function_body_check.rs:563"]
+classification = "legitimate"
+reason = "param_binding_type: Record/Map are meta-only — not SQL DataTypes"
+
+["crates/smelt-db/src/function_body_check.rs:566"]
+classification = "legitimate"
+reason = "param_binding_type: ModelDef is meta-only — not a SQL DataType"
+
+["crates/smelt-db/src/function_body_check.rs:567"]
+classification = "legitimate"
 reason = "param_binding_type: Err case — parse error already surfaced by earlier phase; avoiding cascading body errors"
 
-["crates/smelt-db/src/function_body_check.rs:554"]
+["crates/smelt-db/src/function_body_check.rs:568"]
 classification = "legitimate"
 reason = "param_binding_type: None case — unannotated parameter is deliberately polymorphic"
 
-["crates/smelt-db/src/function_body_check.rs:1090"]
+["crates/smelt-db/src/function_body_check.rs:1104"]
 classification = "legitimate"
 reason = "argument type inference fallback — infer_expression_type returns None; Unknown prevents false body errors"
 
-["crates/smelt-db/src/function_body_check.rs:1374"]
+["crates/smelt-db/src/function_body_check.rs:1388"]
 classification = "legitimate"
 reason = "struct param binding — concrete fields not yet available; Unknown placeholder for body-checker scope"
 
-["crates/smelt-db/src/function_body_check.rs:1383"]
+["crates/smelt-db/src/function_body_check.rs:1399"]
 classification = "legitimate"
 reason = "struct param binding after row-var unification — struct param gets Unknown scalar for body scope"
 
-["crates/smelt-db/src/function_body_check.rs:1409"]
+["crates/smelt-db/src/function_body_check.rs:1428"]
 classification = "legitimate"
 reason = "struct param binding when fields can't be parsed — Unknown placeholder, diagnostic already emitted"
 
-["crates/smelt-db/src/function_body_check.rs:1434"]
+["crates/smelt-db/src/function_body_check.rs:1458"]
 classification = "legitimate"
 reason = "argument type inference fallback — Unknown when call-site arg type cannot be determined"
 
-["crates/smelt-db/src/function_body_check.rs:1474"]
+["crates/smelt-db/src/function_body_check.rs:1499"]
 classification = "legitimate"
 reason = "ArgTypeMismatch case — diagnostic already emitted; Unknown param type avoids cascading body errors"
 
-["crates/smelt-db/src/function_body_check.rs:1498"]
+["crates/smelt-db/src/function_body_check.rs:1527"]
 classification = "legitimate"
 reason = "ArgTypeMismatch (NOT NULL nullability check) — diagnostic already emitted; Unknown param type avoids cascading body errors"
 
-["crates/smelt-db/src/function_body_check.rs:1519"]
+["crates/smelt-db/src/function_body_check.rs:1552"]
 classification = "legitimate"
 reason = "MissingArgument case — diagnostic already emitted; Unknown param type avoids cascading body errors"
 
-["crates/smelt-db/src/function_body_check.rs:1522"]
+["crates/smelt-db/src/function_body_check.rs:1559"]
 classification = "legitimate"
 reason = "default_type_lookup fallback — default parameter type unavailable; Unknown is conservative"
 
-["crates/smelt-db/src/function_body_check.rs:2544"]
+["crates/smelt-db/src/function_body_check.rs:2580"]
 classification = "legitimate"
 reason = "lambda body check — column type unavailable (unwrap_or fallback for TypedColumn); conservative"
 
-["crates/smelt-db/src/function_body_check.rs:3167"]
+["crates/smelt-db/src/function_body_check.rs:3206"]
 classification = "legitimate"
 reason = "lambda param registered as Unknown scalar so bare identifier resolves via lookup_identifier"
 
-["crates/smelt-db/src/function_body_check.rs:3382"]
-classification = "legitimate"
-reason = "model-ref lambda param registered as Unknown scalar for identifier resolution"
-
 # ── smelt-db / queries/function_diagnostics ───────────────────────────────────
 
-["crates/smelt-db/src/queries/function_diagnostics.rs:1439"]
+["crates/smelt-db/src/queries/function_diagnostics.rs:1435"]
 classification = "legitimate"
 reason = "schema column type fallback — col.data_type.clone().unwrap_or; optional type, not an error"
 
-["crates/smelt-db/src/queries/function_diagnostics.rs:1493"]
+["crates/smelt-db/src/queries/function_diagnostics.rs:1491"]
 classification = "legitimate"
 reason = "argument type inference fallback in function diagnostics — conservative when type can't be determined"
 
 # ── smelt-db / queries/schema ─────────────────────────────────────────────────
 
-["crates/smelt-db/src/queries/schema.rs:534"]
+["crates/smelt-db/src/queries/schema.rs:536"]
 classification = "legitimate"
 reason = "param type resolution: non-Concrete SmeltType constraints have no SQL DataType; Unknown is correct"
 
-["crates/smelt-db/src/queries/schema.rs:597"]
+["crates/smelt-db/src/queries/schema.rs:599"]
 classification = "legitimate"
 reason = "schema column type fallback — col.data_type is optional; Unknown for columns with no inferred type"
 
-["crates/smelt-db/src/queries/schema.rs:623"]
+["crates/smelt-db/src/queries/schema.rs:625"]
 classification = "legitimate"
 reason = "schema column type fallback — resolved model column type unavailable; Unknown is conservative"
 
-["crates/smelt-db/src/queries/schema.rs:722"]
+["crates/smelt-db/src/queries/schema.rs:724"]
 classification = "legitimate"
 reason = "recursive CTE column bootstrap — types unknown until recursive reference resolves; Unknown is correct"
 
-["crates/smelt-db/src/queries/schema.rs:806"]
+["crates/smelt-db/src/queries/schema.rs:808"]
 classification = "legitimate"
 reason = "source column type fallback — sources.yml column type is optional; Unknown when absent"
 
-["crates/smelt-db/src/queries/schema.rs:834"]
+["crates/smelt-db/src/queries/schema.rs:836"]
 classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 
-["crates/smelt-db/src/queries/schema.rs:1059"]
+["crates/smelt-db/src/queries/schema.rs:1063"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 
@@ -166,19 +156,15 @@ reason = "non-numeric binary expression (e.g. text+int before BUG-017 fix path) 
 classification = "legitimate"
 reason = "decimal division early-return: Decimal / T or Integer / Decimal → Unknown; TypeMismatch diagnostic emitted separately by check_decimal_division_diagnostics"
 
-["crates/smelt-db/src/type_inference/binary.rs:147"]
-classification = "legitimate"
-reason = "decimal precision overflow: p' > 38 → Unknown; DecimalPrecisionOverflow diagnostic emitted separately by check_decimal_precision_overflow_diagnostics"
-
 ["crates/smelt-db/src/type_inference/binary.rs:404"]
 classification = "error"
-reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown; TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
+reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown(Unresolved); TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
 
-# ── smelt-db / type_inference/composite ───────────────────────────────────────
+# ── smelt-db / type_inference/collation ──────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/composite.rs:32"]
-classification = "legitimate"
-reason = "empty array literal — element type unknown; Array<Unknown> is the correct inference"
+["crates/smelt-db/src/type_inference/collation.rs:90"]
+classification = "error"
+reason = "non-binary COLLATE expression: NonPortableCollation diagnostic is emitted by check_collation_diagnostics; Unknown(Unresolved) is the recovery type (§17)"
 
 # ── smelt-db / type_inference/dispatch ────────────────────────────────────────
 
@@ -189,10 +175,6 @@ reason = "SELECT item expression type inference fallback — infer_expression_ty
 ["crates/smelt-db/src/type_inference/dispatch.rs:514"]
 classification = "legitimate"
 reason = "SELECT item has no expression (star-expand or syntax error) — Unknown placeholder for column"
-
-["crates/smelt-db/src/type_inference/dispatch.rs:732"]
-classification = "error"
-reason = "mixed tz promotion: Timestamp{naive} + Timestamp{tz-aware} → Unknown; TypeMismatch diagnostic emitted by check_mixed_tz_setop_diagnostics / check_mixed_tz_case_diagnostics (spec §16 strict mixing rule)"
 
 ["crates/smelt-db/src/type_inference/dispatch.rs:744"]
 classification = "legitimate"
@@ -210,129 +192,91 @@ reason = "UNION branch SELECT item fallback — expression type unknown; conserv
 classification = "legitimate"
 reason = "UNION branch SELECT item (no expression) fallback — Unknown placeholder"
 
-# ── smelt-db / type_inference/collation ──────────────────────────────────────
-
-["crates/smelt-db/src/type_inference/collation.rs:90"]
-classification = "error"
-reason = "non-binary COLLATE expression: NonPortableCollation diagnostic is emitted by check_collation_diagnostics; Unknown is the recovery type (§17)"
-
 # ── smelt-db / type_inference/function_call ───────────────────────────────────
 
 ["crates/smelt-db/src/type_inference/function_call.rs:67"]
 classification = "legitimate"
 reason = "smelt.ref()-style path (models/sources prefix) — whole model reference, no scalar DataType"
 
-["crates/smelt-db/src/type_inference/function_call.rs:81"]
+["crates/smelt-db/src/type_inference/function_call.rs:84"]
 classification = "legitimate"
 reason = "smelt.define return type: Ordered constraint has no SQL scalar — Unknown is the correct stand-in"
 
-["crates/smelt-db/src/type_inference/function_call.rs:82"]
+["crates/smelt-db/src/type_inference/function_call.rs:87"]
 classification = "legitimate"
 reason = "smelt.define return type: Any constraint — Unknown is the correct stand-in (no constraint)"
 
-["crates/smelt-db/src/type_inference/function_call.rs:87"]
+["crates/smelt-db/src/type_inference/function_call.rs:93"]
 classification = "legitimate"
 reason = "smelt.define return type: TableExpr — not a scalar return; Unknown is correct"
 
-["crates/smelt-db/src/type_inference/function_call.rs:89"]
+["crates/smelt-db/src/type_inference/function_call.rs:96"]
 classification = "legitimate"
 reason = "smelt.define return type: SelectItems — not a scalar return; Unknown is correct"
 
-["crates/smelt-db/src/type_inference/function_call.rs:101"]
+["crates/smelt-db/src/type_inference/function_call.rs:110"]
 classification = "legitimate"
 reason = "smelt.define return type: meta-language List/Unknown — compile-time only, no SQL DataType"
 
-["crates/smelt-db/src/type_inference/function_call.rs:103"]
+["crates/smelt-db/src/type_inference/function_call.rs:113"]
 classification = "legitimate"
 reason = "smelt.define return type: Lambda — meta-only; not a valid SQL return type"
 
-["crates/smelt-db/src/type_inference/function_call.rs:105"]
+["crates/smelt-db/src/type_inference/function_call.rs:115"]
 classification = "legitimate"
 reason = "smelt.define return type: ColumnRef — meta-only; not a SQL DataType"
 
-["crates/smelt-db/src/type_inference/function_call.rs:107"]
+["crates/smelt-db/src/type_inference/function_call.rs:118"]
 classification = "legitimate"
 reason = "smelt.define return type: ModelRef/SourceRef — meta-only; not SQL DataTypes"
 
-["crates/smelt-db/src/type_inference/function_call.rs:110"]
+["crates/smelt-db/src/type_inference/function_call.rs:123"]
 classification = "legitimate"
 reason = "smelt.define return type: Record/Map — meta-only; not SQL DataTypes"
 
-["crates/smelt-db/src/type_inference/function_call.rs:112"]
+["crates/smelt-db/src/type_inference/function_call.rs:126"]
 classification = "legitimate"
 reason = "smelt.define return type: ModelDef — meta-only; not a SQL DataType"
 
-["crates/smelt-db/src/type_inference/function_call.rs:113"]
+["crates/smelt-db/src/type_inference/function_call.rs:127"]
 classification = "legitimate"
 reason = "smelt.define return type: Err case — parse error already surfaced upstream; avoiding cascade"
 
-["crates/smelt-db/src/type_inference/function_call.rs:114"]
+["crates/smelt-db/src/type_inference/function_call.rs:128"]
 classification = "legitimate"
 reason = "smelt.define return type: None — no return type annotation; deliberate polymorphism"
 
-["crates/smelt-db/src/type_inference/function_call.rs:156"]
+["crates/smelt-db/src/type_inference/function_call.rs:170"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: no struct param in signature — can't resolve return type; conservative"
 
-["crates/smelt-db/src/type_inference/function_call.rs:181"]
+["crates/smelt-db/src/type_inference/function_call.rs:195"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: no arg expression for struct param — can't resolve return type"
 
-["crates/smelt-db/src/type_inference/function_call.rs:187"]
+["crates/smelt-db/src/type_inference/function_call.rs:201"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: empty qualifier — struct arg can't be resolved to columns"
 
-["crates/smelt-db/src/type_inference/function_call.rs:195"]
+["crates/smelt-db/src/type_inference/function_call.rs:209"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: qualifier has no columns — struct return type unresolvable"
 
-["crates/smelt-db/src/type_inference/function_call.rs:201"]
+["crates/smelt-db/src/type_inference/function_call.rs:215"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: can't extract struct param fields — conservative fallback"
 
-["crates/smelt-db/src/type_inference/function_call.rs:211"]
-classification = "legitimate"
-reason = "resolve_struct_return_type: row-var unification error — conservative fallback"
-
-["crates/smelt-db/src/type_inference/function_call.rs:220"]
+["crates/smelt-db/src/type_inference/function_call.rs:234"]
 classification = "legitimate"
 reason = "resolve_struct_return_type: row-var name mismatch between param and return — unresolvable"
 
-["crates/smelt-db/src/type_inference/function_call.rs:465"]
-classification = "legitimate"
-reason = "Min/Max: first_arg_type_or fallback — type depends on argument; Unknown when arg type is unresolved"
-
-["crates/smelt-db/src/type_inference/function_call.rs:486"]
+["crates/smelt-db/src/type_inference/function_call.rs:501"]
 classification = "legitimate"
 reason = "Coalesce: all args Unknown/Null — result type genuinely unknown; Unknown is correct"
 
-["crates/smelt-db/src/type_inference/function_call.rs:493"]
-classification = "legitimate"
-reason = "Nullif: first_arg_type_or fallback — type mirrors first arg; Unknown when arg type unresolved"
-
-["crates/smelt-db/src/type_inference/function_call.rs:506"]
+["crates/smelt-db/src/type_inference/function_call.rs:521"]
 classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
-
-["crates/smelt-db/src/type_inference/function_call.rs:532"]
-classification = "legitimate"
-reason = "Lag/Lead/FirstValue/NthValue: first_arg_type_or — type mirrors first arg; Unknown when unresolved"
-
-["crates/smelt-db/src/type_inference/function_call.rs:763"]
-classification = "legitimate"
-reason = "first_arg_type_or fallback for aggregate functions — Unknown when arg type unresolved"
-
-["crates/smelt-db/src/type_inference/function_call.rs:776"]
-classification = "legitimate"
-reason = "ListAgg/ArrayAgg: Array<Unknown> when element type can't be inferred — correct inference"
-
-["crates/smelt-db/src/type_inference/function_call.rs:829"]
-classification = "legitimate"
-reason = "Mode: first_arg_type_or fallback — type mirrors first arg; Unknown when arg type unresolved"
-
-["crates/smelt-db/src/type_inference/function_call.rs:842"]
-classification = "legitimate"
-reason = "window/analytic functions: first_arg_type_or fallback — Unknown when arg type unresolved"
 
 # ── smelt-db / type_inference/hof ─────────────────────────────────────────────
 
@@ -366,12 +310,6 @@ reason = "model column binding: non-Concrete SmeltType → Unknown; meta-type ha
 classification = "legitimate"
 reason = "VALUES row element type inference fallback — infer_expression_type returns None; conservative Unknown"
 
-# ── smelt-runtime ─────────────────────────────────────────────────────────────
-
-["crates/smelt-runtime/src/compile.rs:560"]
-classification = "legitimate"
-reason = "compile step model column type fallback — col.data_type unwrap_or; column type may be unresolved"
-
 # ── smelt-state ───────────────────────────────────────────────────────────────
 # Type-comparison sites: parse_type failure → Unknown → is_safe_type_widening(Unknown, *) = false
 # (catch-all `_ => false` arm) → full_refresh_reasons path taken.
@@ -380,62 +318,78 @@ reason = "compile step model column type fallback — col.data_type unwrap_or; c
 # StructFieldAdded sites (which DID propagate Unknown to operations); these
 # type-comparison sites are safe and classified legitimate.
 
-["crates/smelt-state/src/schema_tracking.rs:926"]
+["crates/smelt-state/src/schema_tracking.rs:927"]
 classification = "legitimate"
 reason = "ChangeType from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:927"]
+["crates/smelt-state/src/schema_tracking.rs:929"]
 classification = "legitimate"
 reason = "ChangeType to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:971"]
+["crates/smelt-state/src/schema_tracking.rs:974"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:972"]
+["crates/smelt-state/src/schema_tracking.rs:976"]
 classification = "legitimate"
 reason = "ArrayElementTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenColumnType"
 
-["crates/smelt-state/src/schema_tracking.rs:1000"]
+["crates/smelt-state/src/schema_tracking.rs:1005"]
 classification = "legitimate"
 reason = "MapValueTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:1001"]
+["crates/smelt-state/src/schema_tracking.rs:1007"]
 classification = "legitimate"
 reason = "MapValueTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:1055"]
+["crates/smelt-state/src/schema_tracking.rs:1062"]
 classification = "legitimate"
 reason = "NestedTypeChange from-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
-["crates/smelt-state/src/schema_tracking.rs:1056"]
+["crates/smelt-state/src/schema_tracking.rs:1064"]
 classification = "legitimate"
 reason = "NestedTypeChange to-type: parse failure → Unknown → is_safe_type_widening returns false → full refresh; Unknown never reaches WidenNestedType"
 
 # ── smelt-types / lib ─────────────────────────────────────────────────────────
 
-["crates/smelt-types/src/lib.rs:270"]
+["crates/smelt-types/src/lib.rs:183"]
 classification = "legitimate"
-reason = "TypedColumn::unknown() constructor — this IS the definition of the Unknown sentinel value"
+reason = "unknown_reason() accessor: destructures DataType::Unknown(r) to extract the reason; not a construction site"
+
+["crates/smelt-types/src/lib.rs:192"]
+classification = "legitimate"
+reason = "unknown_unresolved() canonical constructor body — the authoritative production site for Unknown(Unresolved)"
+
+["crates/smelt-types/src/lib.rs:197"]
+classification = "legitimate"
+reason = "unknown_dynamic() canonical constructor body — the authoritative production site for Unknown(Dynamic)"
+
+["crates/smelt-types/src/lib.rs:202"]
+classification = "legitimate"
+reason = "unknown_propagated() canonical constructor body — the authoritative production site for Unknown(Propagated)"
+
+["crates/smelt-types/src/lib.rs:325"]
+classification = "legitimate"
+reason = "TypedColumn::unknown() constructor — sentinel Unknown(Dynamic) value for error recovery"
 
 # ── smelt-types / signatures ──────────────────────────────────────────────────
 
-["crates/smelt-types/src/signatures.rs:2326"]
+["crates/smelt-types/src/signatures.rs:2327"]
 classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 
-["crates/smelt-types/src/signatures.rs:3164"]
+["crates/smelt-types/src/signatures.rs:3166"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 
-["crates/smelt-types/src/signatures.rs:3165"]
+["crates/smelt-types/src/signatures.rs:3168"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 
-["crates/smelt-types/src/signatures.rs:4041"]
+["crates/smelt-types/src/signatures.rs:4044"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 
-["crates/smelt-types/src/signatures.rs:4540"]
+["crates/smelt-types/src/signatures.rs:4545"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"

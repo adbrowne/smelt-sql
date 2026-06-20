@@ -124,7 +124,7 @@ fn check_conformance(
         };
 
         // Skip Unknown types (smelt couldn't infer)
-        if *expected == DataType::Unknown {
+        if *expected == DataType::unknown_dynamic() {
             continue;
         }
 
@@ -243,7 +243,7 @@ fn conformance_smoke_binary_add() {
         cast_sql: "CAST(1 AS INTEGER)".into(),
     }];
     let inferred = run_smelt_inference(sql, &columns);
-    if inferred[0].1 != DataType::Unknown {
+    if inferred[0].1 != DataType::unknown_dynamic() {
         check_conformance(&oracle, "duckdb", sql, &columns, &inferred).unwrap();
     }
 }

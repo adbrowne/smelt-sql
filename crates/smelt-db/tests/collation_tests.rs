@@ -130,7 +130,7 @@ fn non_binary_collation_diagnoses() {
         );
         assert_eq!(
             types[0].data_type,
-            DataType::Unknown,
+            DataType::unknown_dynamic(),
             "non-binary COLLATE should degrade type to Unknown for: {sql}"
         );
 

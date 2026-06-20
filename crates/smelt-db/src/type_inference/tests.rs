@@ -776,7 +776,7 @@ fn test_promote_types_null_handling() {
     assert!(result.nullable);
 
     // Unknown + Text → Text
-    let result = promote_types(&mk(DataType::Unknown), &mk(DataType::Text));
+    let result = promote_types(&mk(DataType::unknown_dynamic()), &mk(DataType::Text));
     assert_eq!(result.data_type, DataType::Text);
 }
 
@@ -927,7 +927,7 @@ fn test_array_literal_empty() {
     let types = infer_sql("SELECT ARRAY[]");
     assert_eq!(
         types[0].data_type,
-        DataType::Array(Box::new(DataType::Unknown))
+        DataType::Array(Box::new(DataType::unknown_dynamic()))
     );
 }
 
@@ -957,7 +957,7 @@ fn test_array_literal_mixed_types_rejected() {
     // ARRAY[1, 'hello'] — Integer + Text can't be promoted → should fail inference
     let types = infer_sql("SELECT ARRAY[1, 'hello']");
     // Mixed types return Unknown since the array literal inference returns None
-    assert_eq!(types[0].data_type, DataType::Unknown);
+    assert_eq!(types[0].data_type, DataType::unknown_dynamic());
 }
 
 #[test]
@@ -2508,7 +2508,10 @@ fn hof_map_on_list_param_infers_correctly() {
     let mut ctx = TypeContext::new();
     // Simulate a function body context where `xs: List<Expr<Integer>>` was declared.
     // add_function_param stores DataType::Unknown (the scalar projection).
-    ctx.add_function_param("xs", smelt_types::TypedColumn::nullable(DataType::Unknown));
+    ctx.add_function_param(
+        "xs",
+        smelt_types::TypedColumn::nullable(DataType::unknown_dynamic()),
+    );
     // add_function_param_smelt_type stores the full SmeltType.
     ctx.add_function_param_smelt_type(
         "xs",
@@ -2616,12 +2619,11 @@ fn column_ref_field_projection_synthesises_field_type() {
     // Seed a lambda param `c` as ColumnRef.
     let mut ctx = TypeContext::new();
     ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
-    // For the data-type projection the lambda param `c` maps to DataType::Unknown
-    // (ColumnRef is not a SQL DataType).
+    // For the data-type projection the lambda param `c` maps to DataType::unknown_dynamic()    // (ColumnRef is not a SQL DataType).
     ctx.add_lambda_param(
         "c",
         smelt_types::TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -2673,7 +2675,7 @@ fn column_ref_head_predicates() {
     ctx.add_lambda_param(
         "c",
         smelt_types::TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -2736,7 +2738,7 @@ fn column_ref_field_projection_rejects_unknown_field() {
     ctx.add_lambda_param(
         "c",
         smelt_types::TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -2794,7 +2796,7 @@ fn make_column_ref_ctx() -> TypeContext {
     ctx.add_lambda_param(
         "c",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -2959,7 +2961,7 @@ fn lift_in_column_reference_position_resolves_to_column() {
     ctx_without_name.add_lambda_param(
         "c",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3100,7 +3102,7 @@ fn lift_in_order_by_position_resolves_to_column() {
     ctx_no_name.add_lambda_param(
         "c",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3148,7 +3150,7 @@ fn lift_in_group_by_position_resolves_to_column() {
     ctx_no_name.add_lambda_param(
         "c",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3394,7 +3396,7 @@ fn model_ref_field_projection_synthesises_field_type() {
     ctx.add_lambda_param(
         "m",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3402,7 +3404,7 @@ fn model_ref_field_projection_synthesises_field_type() {
     ctx.add_lambda_param(
         "s",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3506,7 +3508,7 @@ fn model_ref_field_projection_rejects_unknown_field() {
     ctx.add_lambda_param(
         "m",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3514,7 +3516,7 @@ fn model_ref_field_projection_rejects_unknown_field() {
     ctx.add_lambda_param(
         "s",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3587,7 +3589,7 @@ fn model_ref_assignable_to_table_expr_in_columns_of_arg() {
     ctx.add_lambda_param(
         "m",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3618,7 +3620,7 @@ fn source_ref_assignable_to_table_expr_in_columns_of_arg() {
     ctx.add_lambda_param(
         "s",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -3719,7 +3721,7 @@ fn m_columns_equivalent_to_smelt_columns_of_m() {
     ctx.add_lambda_param(
         "m",
         TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::unknown_dynamic(),
             nullable: true,
         },
     );
@@ -5987,7 +5989,7 @@ fn test_cross_family_arithmetic_numeric_plus_string() {
     let types = infer_sql("SELECT 42 + '3'");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "42 + '3' must infer Unknown (cross-family), got: {:?}",
         types[0].data_type
     );
@@ -5999,7 +6001,7 @@ fn test_cross_family_arithmetic_boolean_plus_numeric() {
     let types = infer_sql("SELECT TRUE + 1");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "TRUE + 1 must infer Unknown (cross-family), got: {:?}",
         types[0].data_type
     );
@@ -6011,7 +6013,7 @@ fn test_cross_family_arithmetic_numeric_plus_string_literal() {
     let types = infer_sql("SELECT 42 + 'abc'");
     assert_eq!(
         types[0].data_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "42 + 'abc' must infer Unknown (cross-family), got: {:?}",
         types[0].data_type
     );

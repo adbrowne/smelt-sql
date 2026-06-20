@@ -274,7 +274,7 @@ fn check_cte_against_oracle(
         };
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 
@@ -573,7 +573,7 @@ fn smoke_cte_with_aggregation() {
     // Just verify it doesn't crash and types are reasonable
     let inferred = run_smelt_inference(sql);
     assert!(!inferred.is_empty());
-    assert_ne!(inferred[0], DataType::Unknown);
+    assert_ne!(inferred[0], DataType::unknown_dynamic());
 
     match check_cte_against_oracle(&duckdb, sql, &divergences) {
         Ok(()) => {}

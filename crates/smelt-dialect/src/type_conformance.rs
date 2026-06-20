@@ -73,8 +73,14 @@ mod tests {
     #[test]
     fn unknown_passes_through() {
         let sql = "SELECT x AS a, y AS b FROM t";
-        let result =
-            wrap_with_type_casts(sql, &["a", "b"], &[DataType::Unknown(smelt_types::UnknownReason::Dynamic), DataType::Integer]);
+        let result = wrap_with_type_casts(
+            sql,
+            &["a", "b"],
+            &[
+                DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+                DataType::Integer,
+            ],
+        );
         assert!(result.contains("a, CAST(b AS INTEGER) AS b"));
     }
 

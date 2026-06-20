@@ -1203,7 +1203,7 @@ fn smelt_type_lub(a: &SmeltType, b: &SmeltType) -> Option<SmeltType> {
                 &TypedColumn::not_null(da.clone()),
                 &TypedColumn::not_null(db.clone()),
             );
-            if promoted.data_type == DataType::Unknown {
+            if promoted.data_type.is_unknown() {
                 None
             } else {
                 Some(SmeltType::Expr(

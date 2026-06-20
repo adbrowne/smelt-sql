@@ -98,7 +98,7 @@ fn check_types_against_oracle(
         let smelt_type = &inferred.1;
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 
@@ -249,7 +249,7 @@ fn smoke_binary_add() {
 
     // smelt may infer Unknown if the parser doesn't fully resolve binary
     // expressions with CTE column references; that's acceptable for now.
-    if inferred[0].1 != DataType::Unknown {
+    if inferred[0].1 != DataType::unknown_dynamic() {
         let match_result = compare_types(&inferred[0].1, &actual[0].1);
         assert!(
             matches!(
@@ -455,7 +455,7 @@ fn run_smelt_multi_model_inference(
                 .data_type
                 .as_ref()
                 .map(|tc| tc.data_type.clone())
-                .unwrap_or(DataType::Unknown);
+                .unwrap_or(DataType::unknown_dynamic());
             (col.name.clone(), dt)
         })
         .collect()
@@ -492,7 +492,7 @@ proptest! {
             let smelt_type = &inferred.1;
             let actual_type = &actual.1;
 
-            if *smelt_type == DataType::Unknown {
+            if *smelt_type == DataType::unknown_dynamic() {
                 continue;
             }
 
@@ -601,7 +601,7 @@ proptest! {
             let smelt_type = &inferred.1;
             let actual_type = &actual.1;
 
-            if *smelt_type == DataType::Unknown {
+            if *smelt_type == DataType::unknown_dynamic() {
                 continue;
             }
 
@@ -675,7 +675,7 @@ proptest! {
             let smelt_type = &inferred.1;
             let actual_type = &actual.1;
 
-            if *smelt_type == DataType::Unknown {
+            if *smelt_type == DataType::unknown_dynamic() {
                 continue;
             }
 

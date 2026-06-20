@@ -366,8 +366,8 @@ mod tests {
 
     #[test]
     fn unknown_identity_is_reason_agnostic() {
-        use std::collections::HashSet;
         use std::collections::hash_map::DefaultHasher;
+        use std::collections::HashSet;
         use std::hash::{Hash, Hasher};
 
         let a = DataType::Unknown(UnknownReason::Unresolved);
@@ -384,7 +384,11 @@ mod tests {
         set.insert(a.clone());
         set.insert(b.clone());
         set.insert(c.clone());
-        assert_eq!(set.len(), 1, "differently-reasoned Unknown values must deduplicate");
+        assert_eq!(
+            set.len(),
+            1,
+            "differently-reasoned Unknown values must deduplicate"
+        );
 
         // Also verify hash values are equal
         let hash_of = |dt: &DataType| -> u64 {

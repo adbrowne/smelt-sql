@@ -180,7 +180,7 @@ fn check_setop_against_oracle(
         };
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 
@@ -380,7 +380,7 @@ fn exhaustive_all_types_union() {
                     // DuckDB rejects this combination — verify smelt also produces
                     // Unknown (incompatible types)
                     let inferred = run_smelt_inference(&sql);
-                    if !inferred.is_empty() && inferred[0] != DataType::Unknown {
+                    if !inferred.is_empty() && inferred[0] != DataType::unknown_dynamic() {
                         // smelt inferred a type but DuckDB rejected — could be fine
                         // (smelt may be more permissive) but note it
                     }

@@ -802,7 +802,10 @@ pub fn build_type_context(
     for source in &sources_config.sources {
         for table in &source.tables {
             for col in &table.columns {
-                let data_type = col.data_type.clone().unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                let data_type = col
+                    .data_type
+                    .clone()
+                    .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
                 ctx.add_source_column(
                     &source.name,
                     &table.name,
@@ -830,7 +833,9 @@ pub fn build_type_context(
                                 &cte_name,
                                 &col_name,
                                 TypedColumn {
-                                    data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+                                    data_type: DataType::Unknown(
+                                        smelt_types::UnknownReason::Dynamic,
+                                    ),
                                     nullable: true,
                                 },
                             );

@@ -279,7 +279,10 @@ fn agg_kind_context_binding_checks() {
             ),
         ],
     );
-    body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
+    body_ctx.add_function_param(
+        "metrics",
+        TypedColumn::nullable(DataType::unknown_dynamic()),
+    );
 
     // Negative: scalar arg → FragmentKindMismatch.
     {
@@ -339,7 +342,7 @@ fn scalar_splice_rejects_agg_fragment() {
             ),
         ],
     );
-    body_ctx.add_function_param("cols", TypedColumn::nullable(DataType::Unknown));
+    body_ctx.add_function_param("cols", TypedColumn::nullable(DataType::unknown_dynamic()));
 
     // Agg arg into Scalar-only splice point → FragmentKindMismatch.
     {
@@ -399,7 +402,10 @@ fn agg_splice_accepts_agg_and_window() {
             ),
         ],
     );
-    body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
+    body_ctx.add_function_param(
+        "metrics",
+        TypedColumn::nullable(DataType::unknown_dynamic()),
+    );
 
     // Agg arg → no FragmentKindMismatch.
     {
@@ -459,7 +465,7 @@ fn scalar_splice_accepts_scalar() {
             ),
         ],
     );
-    body_ctx.add_function_param("cols", TypedColumn::nullable(DataType::Unknown));
+    body_ctx.add_function_param("cols", TypedColumn::nullable(DataType::unknown_dynamic()));
 
     // Scalar arg → no FragmentKindMismatch.
     let (arg_expr, arg_range, _) = parse_arg_expr("revenue + 1");

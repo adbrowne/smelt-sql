@@ -817,7 +817,7 @@ fn sessionize_output_schema_inferred() {
         .data_type
         .as_ref()
         .map(|tc| tc.data_type.clone())
-        .unwrap_or(DataType::Unknown);
+        .unwrap_or(DataType::unknown_dynamic());
     assert!(
         matches!(dt, DataType::BigInt),
         "session_id should widen to BigInt; got {dt:?}"

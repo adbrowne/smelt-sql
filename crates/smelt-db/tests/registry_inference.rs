@@ -46,7 +46,7 @@ fn unrecognized_function_uses_existing_code() {
     let types = infer(sql, &ctx);
     assert_eq!(types.len(), 1);
     // Unknown function → Unknown result type, preserving legacy behaviour.
-    assert_eq!(types[0].data_type, DataType::Unknown);
+    assert_eq!(types[0].data_type, DataType::unknown_dynamic());
 }
 
 #[test]

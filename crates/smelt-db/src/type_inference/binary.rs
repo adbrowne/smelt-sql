@@ -144,7 +144,7 @@ fn promote_numeric_operands_for_op(
             if let (Some((p1, s1)), Some((p2, s2))) = (l_decimal, r_decimal) {
                 let (p_prime, s_prime) = decimal_arithmetic_result(p1, s1, p2, s2, op);
                 let data_type = if p_prime > 38 {
-                    DataType::Unknown
+                    DataType::unknown_dynamic()
                 } else {
                     DataType::Decimal {
                         precision: p_prime as u8,

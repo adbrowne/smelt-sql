@@ -29,7 +29,7 @@ pub fn infer_array_literal_type(
 
     if elements.is_empty() {
         return Some(TypedColumn {
-            data_type: DataType::Array(Box::new(DataType::Unknown)),
+            data_type: DataType::Array(Box::new(DataType::unknown_dynamic())),
             nullable: false,
         });
     }
@@ -54,7 +54,7 @@ pub fn infer_array_literal_type(
                     if typed.data_type != existing.data_type {
                         // Try promotion
                         let promoted = promote_types(existing, &typed);
-                        if promoted.data_type == DataType::Unknown {
+                        if promoted.data_type.is_unknown() {
                             // Mixed types that can't be promoted — reject
                             return None;
                         }

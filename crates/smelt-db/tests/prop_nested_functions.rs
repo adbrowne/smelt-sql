@@ -83,7 +83,7 @@ fn numeric_to_numeric_wrappers() -> Vec<WrapperFunc> {
         WrapperFunc {
             name: "ABS",
 
-            output: DataType::Unknown, // arg-dependent
+            output: DataType::unknown_dynamic(), // arg-dependent
         },
         WrapperFunc {
             name: "SQRT",
@@ -108,12 +108,12 @@ fn numeric_to_numeric_wrappers() -> Vec<WrapperFunc> {
         WrapperFunc {
             name: "CEIL",
 
-            output: DataType::Unknown, // arg-dependent
+            output: DataType::unknown_dynamic(), // arg-dependent
         },
         WrapperFunc {
             name: "FLOOR",
 
-            output: DataType::Unknown, // arg-dependent
+            output: DataType::unknown_dynamic(), // arg-dependent
         },
     ]
 }
@@ -135,7 +135,7 @@ fn compatible_wrappers(current_type: &DataType) -> Vec<WrapperFunc> {
     result.push(WrapperFunc {
         name: "COALESCE",
 
-        output: DataType::Unknown, // same as input
+        output: DataType::unknown_dynamic(), // same as input
     });
 
     result
@@ -156,7 +156,7 @@ fn wrapper_output_type(wrapper: &WrapperFunc, inner_type: &DataType) -> DataType
         "COALESCE" => inner_type.clone(),
         // All others use their declared output type
         _ => {
-            if wrapper.output == DataType::Unknown {
+            if wrapper.output == DataType::unknown_dynamic() {
                 inner_type.clone()
             } else {
                 wrapper.output.clone()
@@ -343,7 +343,7 @@ fn check_types_against_oracle(
         let smelt_type = &inferred.1;
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::Unknown {
+        if *smelt_type == DataType::unknown_dynamic() {
             continue;
         }
 

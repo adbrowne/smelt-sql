@@ -95,7 +95,7 @@ fn sql_type_name(dt: &DataType) -> &'static str {
         DataType::Array(_) => "JSON",
         DataType::Struct(_) => "JSON",
         DataType::Map(_, _) => "JSON",
-        DataType::Null | DataType::Unknown => "VARCHAR",
+        DataType::Null | DataType::Unknown(_) => "VARCHAR",
     }
 }
 

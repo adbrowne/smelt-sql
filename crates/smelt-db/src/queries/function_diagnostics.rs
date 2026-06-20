@@ -1432,7 +1432,9 @@ pub fn smelt_fn_call_diagnostics_for_file(
                                     .iter()
                                     .map(|c| {
                                         let tc = c.data_type.clone().unwrap_or(TypedColumn {
-                                            data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+                                            data_type: DataType::Unknown(
+                                                smelt_types::UnknownReason::Dynamic,
+                                            ),
                                             nullable: true,
                                         });
                                         (c.name.clone(), tc)
@@ -2357,7 +2359,7 @@ mod tests {
         let sig_lookup = |_: &str| -> Option<smelt_types::signatures::FunctionSig> { None };
         let builtin_lookup =
             |_: &str| -> Option<&'static smelt_types::signatures::Signature> { None };
-        let lub = |_a: &DataType, _b: &DataType| -> DataType { DataType::Unknown };
+        let lub = |_a: &DataType, _b: &DataType| -> DataType { DataType::unknown_dynamic() };
         let body_lookup = |_: &smelt_types::signatures::FunctionSig| -> Option<(String, crate::function_body_check::BodyShape)> { None };
         let decl_lookup =
             |_: &smelt_types::signatures::FunctionSig| -> Option<std::path::PathBuf> { None };

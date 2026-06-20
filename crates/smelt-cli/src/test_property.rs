@@ -54,7 +54,7 @@ pub fn yaml_value_to_datatype(v: &serde_yaml::Value) -> DataType {
         }
         serde_yaml::Value::Bool(_) => DataType::Boolean,
         serde_yaml::Value::Null => DataType::Null,
-        _ => DataType::Unknown,
+        _ => DataType::unknown_dynamic(),
     }
 }
 
@@ -191,7 +191,7 @@ pub fn infer_missing_column_type(
         for row in rows {
             if let Some(val) = row.get(col_name) {
                 let dt = yaml_value_to_datatype(val);
-                if dt != DataType::Null && dt != DataType::Unknown {
+                if dt != DataType::Null && dt != DataType::unknown_dynamic() {
                     return dt;
                 }
             }

@@ -1947,7 +1947,7 @@ fn per_cohort_union_orders_has_concrete_typed_schema() {
         });
         assert_ne!(
             typed.data_type,
-            smelt_db::DataType::Unknown,
+            smelt_db::DataType::unknown_dynamic(),
             "orders.sql column '{}' should have a concrete type, got Unknown",
             col.name
         );
@@ -2759,10 +2759,10 @@ fn per_cohort_union_all_cohorts_unioned_has_concrete_typed_schema() {
             .data_type
             .as_ref()
             .map(|tc| tc.data_type.clone())
-            .unwrap_or(smelt_db::DataType::Unknown);
+            .unwrap_or(smelt_db::DataType::unknown_dynamic());
         assert_ne!(
             dt,
-            smelt_db::DataType::Unknown,
+            smelt_db::DataType::unknown_dynamic(),
             "all_cohorts_unioned.sql column '{}' should be concrete (from emitted cohort), \
              got Unknown",
             col.name
@@ -3152,10 +3152,10 @@ fn per_cohort_union_emitted_cohorts_have_typed_schemas() {
                 .data_type
                 .as_ref()
                 .map(|tc| tc.data_type.clone())
-                .unwrap_or(smelt_db::DataType::Unknown);
+                .unwrap_or(smelt_db::DataType::unknown_dynamic());
             assert_ne!(
                 dt,
-                smelt_db::DataType::Unknown,
+                smelt_db::DataType::unknown_dynamic(),
                 "emission '{}' column '{}' should be concrete, got Unknown",
                 name,
                 col.name

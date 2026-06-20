@@ -185,7 +185,7 @@ pub(crate) fn check_unsupported_constructs(
 }
 
 pub(crate) fn types_compatible(expected: &DataType, actual: &DataType) -> bool {
-    if matches!(expected, DataType::Unknown) || matches!(actual, DataType::Unknown(_)) {
+    if expected.is_unknown() || actual.is_unknown() {
         return true;
     }
     if expected == actual {

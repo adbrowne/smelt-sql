@@ -212,7 +212,7 @@ SELECT id, user_id, region, revenue, created_at FROM smelt.cohorts.eu
             if let Some(typed_col) = &col_constraint.expected_type {
                 assert_ne!(
                     typed_col.data_type,
-                    DataType::Unknown,
+                    DataType::unknown_dynamic(),
                     "column '{}' in '{}' should be a concrete type, got Unknown",
                     col_name,
                     constraint.ref_name

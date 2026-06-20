@@ -177,7 +177,10 @@ smelt.define session_rollup(
         }),
     );
     body_ctx.add_function_param("gap", TypedColumn::nullable(DataType::Interval));
-    body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
+    body_ctx.add_function_param(
+        "metrics",
+        TypedColumn::nullable(DataType::unknown_dynamic()),
+    );
     body_ctx.add_function_param("filters", TypedColumn::nullable(DataType::Boolean));
 
     let (arg_expr, arg_range, _arg_text) = parse_arg_expr("SUM(session_id)");
@@ -240,7 +243,10 @@ smelt.define session_rollup(
         }),
     );
     body_ctx.add_function_param("gap", TypedColumn::nullable(DataType::Interval));
-    body_ctx.add_function_param("metrics", TypedColumn::nullable(DataType::Unknown));
+    body_ctx.add_function_param(
+        "metrics",
+        TypedColumn::nullable(DataType::unknown_dynamic()),
+    );
     body_ctx.add_function_param("filters", TypedColumn::nullable(DataType::Boolean));
 
     let (arg_expr, arg_range, _arg_text) = parse_arg_expr("SUM(xyz)");

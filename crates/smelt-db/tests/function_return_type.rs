@@ -267,7 +267,7 @@ fn test_untyped_function_produces_unknown() {
     // Untyped function: type is None or Unknown — both are acceptable.
     // The column may have no data_type at all, or an explicit Unknown.
     let actual_type = col.data_type.as_ref().map(|t| &t.data_type);
-    let is_unknown = matches!(actual_type, None | Some(DataType::Unknown));
+    let is_unknown = actual_type.is_none() || actual_type.is_some_and(|t| t.is_unknown());
     assert!(
         is_unknown,
         "expected untyped function call to produce Unknown or no type, got {:?}",

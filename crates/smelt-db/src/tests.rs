@@ -2837,7 +2837,10 @@ fn test_circular_ref_does_not_panic() {
         schema.columns.is_empty()
             || schema.columns.iter().all(|c| {
                 c.data_type.is_none()
-                    || matches!(c.data_type.as_ref().unwrap().data_type, DataType::Unknown)
+                    || matches!(
+                        c.data_type.as_ref().unwrap().data_type,
+                        DataType::Unknown(_)
+                    )
             })
     };
     assert!(
@@ -5759,7 +5762,7 @@ FROM smelt.functions.add_margin(x)"#;
         .map(|tc| &tc.data_type);
 
     assert!(
-        !matches!(margin_type, Some(DataType::Unknown) | None),
+        !(margin_type.is_none() || margin_type.is_some_and(|t| t.is_unknown())),
         "margin column must resolve to a non-Unknown type when CTE arg is seeded; got {:?}",
         margin_type
     );

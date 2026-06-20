@@ -729,7 +729,7 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
                     // walks CASE branches or UNION columns must emit the
                     // TypeMismatch diagnostic; promote_types is pure and cannot
                     // push diagnostics itself.
-                    DataType::Unknown
+                    DataType::unknown_unresolved()
                 }
             }
             (DataType::Timestamp { with_timezone }, _)

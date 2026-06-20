@@ -113,12 +113,12 @@ generates: models
 
     assert_ne!(
         id_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "id must be concrete, got Unknown"
     );
     assert_ne!(
         region_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "region must be concrete, got Unknown"
     );
 
@@ -192,7 +192,7 @@ generates: models
             .clone();
         assert_ne!(
             dt,
-            DataType::Unknown,
+            DataType::unknown_dynamic(),
             "column '{}' should be concrete (propagated from orders.sql), got Unknown",
             col.name
         );
@@ -248,7 +248,11 @@ generates: models
         .expect("x typed")
         .data_type
         .clone();
-    assert_ne!(x_type, DataType::Unknown, "alpha.x must be concrete");
+    assert_ne!(
+        x_type,
+        DataType::unknown_dynamic(),
+        "alpha.x must be concrete"
+    );
     assert!(
         matches!(
             x_type,
@@ -271,7 +275,7 @@ generates: models
         let dt = col.data_type.as_ref().expect("typed").data_type.clone();
         assert_ne!(
             dt,
-            DataType::Unknown,
+            DataType::unknown_dynamic(),
             "beta column '{}' must be concrete",
             col.name
         );
@@ -333,8 +337,12 @@ generates: models
             .data_type
             .as_ref()
             .map(|tc| tc.data_type.clone())
-            .unwrap_or(DataType::Unknown);
-        assert_ne!(dt, DataType::Unknown, "known_col should be concrete");
+            .unwrap_or(DataType::unknown_dynamic());
+        assert_ne!(
+            dt,
+            DataType::unknown_dynamic(),
+            "known_col should be concrete"
+        );
     }
     // No assertion on some_unbound_col — it may or may not resolve; we only
     // require the query doesn't panic and returns a schema.
@@ -441,12 +449,12 @@ generates: models
 
     assert_ne!(
         id_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "id must be concrete (from source YAML), got Unknown"
     );
     assert_ne!(
         amount_type,
-        DataType::Unknown,
+        DataType::unknown_dynamic(),
         "amount must be concrete (from source YAML), got Unknown"
     );
 

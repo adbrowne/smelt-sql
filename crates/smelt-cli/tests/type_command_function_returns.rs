@@ -120,7 +120,7 @@ fn margin_via_cte_resolves_to_non_unknown() {
         "margin_via_cte must have a `margin` output column in its schema"
     );
     assert!(
-        !matches!(dt, Some(DataType::Unknown)),
+        !dt.as_ref().is_some_and(|t| t.is_unknown()),
         "margin_via_cte.margin must not be Unknown; CTE argument `x` must be seeded into \
          add_margin's body context so `revenue - cost` resolves; got {:?}",
         dt
@@ -144,7 +144,7 @@ fn rollup_dashboard_session_id_not_unknown() {
         "rollup_dashboard must have a `session_id` output column in its schema"
     );
     assert!(
-        !matches!(dt, Some(DataType::Unknown)),
+        !dt.as_ref().is_some_and(|t| t.is_unknown()),
         "rollup_dashboard.session_id must not be Unknown; the nested smelt.functions.sessionize \
          call inside session_rollup's body CTE must be resolved so session_id propagates; \
          got {:?}",

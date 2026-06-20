@@ -199,7 +199,7 @@ fn caller_sees_fully_resolved_return_type() {
         .data_type
         .clone()
         .map(|tc| tc.data_type)
-        .unwrap_or(DataType::Unknown);
+        .unwrap_or(DataType::unknown_dynamic());
     let type_str = ev_type.to_string();
 
     // The type string must show concrete fields, not the row variable.
