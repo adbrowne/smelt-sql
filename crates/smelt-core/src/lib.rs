@@ -54,8 +54,8 @@ pub use seeds::{
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use sources::{
     check_aggregate_sources_yml, discover_source_errors, discover_source_infos, parse_source_yaml,
-    SourceColumn, SourceColumnDef, SourceDef, SourceError, SourceInfo, SourceTableDef,
-    SourcesConfig, SourcesError,
+    SourceColumn, SourceColumnDef, SourceDef, SourceError, SourceInfo, SourceNameOverride,
+    SourceTableDef, SourcesConfig, SourcesError,
 };
 pub use text::{extract_snippet, text_range_to_line_col};
 pub use workspace::{load_workspace, LoadedWorkspace, WorkspaceLoadErrors};

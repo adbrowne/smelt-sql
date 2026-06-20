@@ -478,3 +478,43 @@ name: raw_cdc.u
     assert_eq!(info.db_name_for_target("prod", "staging"), "raw_cdc.u");
     assert_eq!(info.db_name_for_target("", "main"), "raw_cdc.u");
 }
+
+#[test]
+fn name_map_key_names_undeclared_target_is_malformed() {
+    use smelt_core::SourceNameOverride;
+    use std::collections::BTreeMap;
+
+    let mut map = BTreeMap::new();
+    map.insert("dev".to_string(), "raw_dev.users".to_string());
+    map.insert("ghost".to_string(), "raw_ghost.users".to_string());
+    let override_val = SourceNameOverride::PerTarget(map);
+
+    // "ghost" is not in the declared targets → validation returns an error.
+    let err = override_val.validate_target_keys(&["dev", "prod"]);
+    assert!(
+        err.is_some(),
+        "expected an error for undeclared target key 'ghost', got None"
+    );
+    let msg = err.unwrap().to_string();
+    assert!(
+        msg.contains("ghost"),
+        "error message must mention the undeclared key 'ghost', got: {msg}"
+    );
+
+    // When all keys are declared → no error.
+    let mut map2 = BTreeMap::new();
+    map2.insert("dev".to_string(), "raw_dev.users".to_string());
+    map2.insert("prod".to_string(), "raw.users".to_string());
+    let override_ok = SourceNameOverride::PerTarget(map2);
+    assert!(
+        override_ok.validate_target_keys(&["dev", "prod"]).is_none(),
+        "no error expected when all keys are declared targets"
+    );
+
+    // Literal overrides always pass regardless of declared targets.
+    let literal = SourceNameOverride::Literal("raw.users".to_string());
+    assert!(
+        literal.validate_target_keys(&["dev"]).is_none(),
+        "Literal override must not produce a target-key error"
+    );
+}

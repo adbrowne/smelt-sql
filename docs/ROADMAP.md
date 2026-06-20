@@ -90,6 +90,15 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/sources — Target-Aware `name:` Override (D-35)~~ ✅ (June 21, 2026)
+
+Four-phase remediation plan ([plan](plans/20260620-w8-sources.md)) landing the D-35 decision from the 2026-06-13 spec review:
+
+- **`SourceNameOverride` enum (D-35 parse, P1)** — `name:` in per-entity source YAMLs now accepts both a bare `<schema>.<table>` literal (existing form, preserved) and a YAML mapping `{ <target>: <schema>.<table>, … }` (new per-target form). Invalid map values (not `<schema>.<table>`) produce `MalformedSource`.
+- **`db_name_for_target` resolution (D-35 resolution, P2)** — `SourceInfo::db_name_for_target(target_name, schema)` resolves the active target: Literal → verbatim; PerTarget → map lookup, fallback to default mapping on miss; None → default mapping. The old `db_name(schema)` shim delegates to it.
+- **Runtime wiring (D-35 runtime, P3)** — `SqlCompiler` stores the active target name (set via `set_target_name` in `CompilerRegistry::new`). The path-ref resolver calls `db_name_for_target` so per-target maps resolve correctly at compile time.
+- **MalformedSource for undeclared target keys (D-35 close-out, P4)** — `SourceNameOverride::validate_target_keys` checks all `PerTarget` map keys against `smelt.yml::targets`. `project_source_diagnostics` runs this semantic pass after the parse-error scan, emitting `MalformedSource` (Error) for any key naming a non-existent target.
+
 ### ~~Spec-Remediation W8/config — smelt.yml Format, Default-Materialization Validation, state: Key (D-32/33/34)~~ ✅ (June 21, 2026)
 
 Three-phase remediation plan ([plan](plans/20260620-w8-config.md)) landing the D-config cluster from the 2026-06-13 spec review:

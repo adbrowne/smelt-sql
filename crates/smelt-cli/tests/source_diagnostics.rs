@@ -228,6 +228,103 @@ fn seed_source_type_join_clean() {
     );
 }
 
+/// P4 (D-35): a per-target `name:` map that references a target name not
+/// declared in `smelt.yml::targets` must surface as a `MalformedSource`
+/// diagnostic through the Salsa/LSP path.
+///
+/// Workspace:
+///   smelt.yml  — targets: { dev, prod }
+///   models/sources/raw/users.yml — name: { dev: raw_dev.users, ghost: raw.users }
+///   models/use_source.sql        — SELECT id FROM smelt.sources.raw.users
+///
+/// `ghost` is not declared → expect exactly one MalformedSource error.
+#[test]
+fn name_map_undeclared_target_key_surfaces_malformed_source() {
+    use smelt_cli::discovery::ModelDiscovery;
+    use smelt_db::Workspace;
+    use tempfile::TempDir;
+
+    let source_yaml = r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: raw_dev.users
+  ghost: raw.users
+"#;
+
+    let smelt_yml = r#"
+name: test_proj
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    schema: main_dev
+  prod:
+    type: duckdb
+    schema: main_prod
+default_materialization: view
+"#;
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(project_dir.join("models/sources/raw")).unwrap();
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+    std::fs::write(
+        project_dir.join("models/sources/raw/users.yml"),
+        source_yaml,
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/use_source.sql"),
+        "SELECT id FROM smelt.sources.raw.users\n",
+    )
+    .unwrap();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().unwrap();
+    let db = smelt_cli::init_db(&project_dir, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut all_diags = Vec::new();
+    for project in ws.projects(&db).iter().copied() {
+        all_diags.extend(
+            smelt_db::project_source_diagnostics(&db, project)
+                .iter()
+                .cloned(),
+        );
+    }
+
+    let errors: Vec<&SourceDiagnostic> = all_diags
+        .iter()
+        .filter(|d| d.diagnostic.severity == DiagnosticSeverity::Error)
+        .collect();
+
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one MalformedSource error for undeclared target key 'ghost', got {}: {:?}",
+        errors.len(),
+        all_diags.iter().map(|d| &d.diagnostic.message).collect::<Vec<_>>()
+    );
+
+    assert_eq!(
+        errors[0].diagnostic.code,
+        Some(DiagnosticCode::MalformedSource),
+        "expected MalformedSource code, got {:?}: {}",
+        errors[0].diagnostic.code,
+        errors[0].diagnostic.message
+    );
+
+    assert!(
+        errors[0].diagnostic.message.contains("ghost"),
+        "error message must mention the undeclared key 'ghost', got: {}",
+        errors[0].diagnostic.message
+    );
+}
+
 #[cfg(feature = "duckdb")]
 fn copy_dir(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();

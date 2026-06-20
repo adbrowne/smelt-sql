@@ -35,6 +35,24 @@ pub enum SourceNameOverride {
     PerTarget(BTreeMap<String, String>),
 }
 
+impl SourceNameOverride {
+    /// Validate that every key in a `PerTarget` map names a declared target.
+    ///
+    /// Returns `Some(SourceError::InvalidTargetName(key))` for the first key
+    /// that is absent from `declared_targets`, or `None` if all keys are valid.
+    /// `Literal` variants always return `None` (no target-name keys to check).
+    pub fn validate_target_keys(&self, declared_targets: &[&str]) -> Option<SourceError> {
+        if let SourceNameOverride::PerTarget(map) = self {
+            for key in map.keys() {
+                if !declared_targets.contains(&key.as_str()) {
+                    return Some(SourceError::InvalidTargetName(key.clone()));
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Information about a single source discovered from a per-entity `.yml` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -135,6 +153,9 @@ pub enum SourceError {
 
     #[error("`name:` must be in `<schema>.<table>` format, got '{0}'")]
     InvalidNameOverride(String),
+
+    #[error("`name:` map key '{0}' names no declared target in smelt.yml")]
+    InvalidTargetName(String),
 }
 
 // ---------------------------------------------------------------------------

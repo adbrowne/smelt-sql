@@ -211,33 +211,64 @@ pub fn project_source_diagnostics(
     project: ProjectInput,
 ) -> Arc<Vec<SourceDiagnostic>> {
     let project_root = project.root(db).clone();
-    let paths = smelt_core::Config::load(&project_root)
-        .map(|c| c.paths)
-        .unwrap_or_else(|_| vec!["models".to_string()]);
+    let config = smelt_core::Config::load(&project_root).ok();
+    let paths = config
+        .as_ref()
+        .map(|c| c.paths.clone())
+        .unwrap_or_else(|| vec!["models".to_string()]);
 
-    let diags = smelt_core::discover_source_errors(&project_root, &paths)
-        .into_iter()
-        .map(|(path, err)| {
-            // The spec (`sources.md` §"Diagnostic codes") splits an unrecognised
-            // column type out as `SourceTypeError`; every other shape violation
-            // (missing `columns:`, `materialization:` present, bad YAML, bad
-            // `name:` override, unreadable file) is `MalformedSource`.
-            let code = match err {
-                smelt_core::SourceError::UnknownType { .. } => DiagnosticCode::SourceTypeError,
-                _ => DiagnosticCode::MalformedSource,
-            };
-            SourceDiagnostic {
-                path,
-                diagnostic: crate::Diagnostic {
-                    severity: crate::DiagnosticSeverity::Error,
-                    message: err.to_string(),
-                    range: TextRange::empty(rowan::TextSize::from(0)),
-                    code: Some(code),
-                    data: None,
-                },
+    let mut diags: Vec<SourceDiagnostic> =
+        smelt_core::discover_source_errors(&project_root, &paths)
+            .into_iter()
+            .map(|(path, err)| {
+                // The spec (`sources.md` §"Diagnostic codes") splits an unrecognised
+                // column type out as `SourceTypeError`; every other shape violation
+                // (missing `columns:`, `materialization:` present, bad YAML, bad
+                // `name:` override, unreadable file) is `MalformedSource`.
+                let code = match err {
+                    smelt_core::SourceError::UnknownType { .. } => DiagnosticCode::SourceTypeError,
+                    _ => DiagnosticCode::MalformedSource,
+                };
+                SourceDiagnostic {
+                    path,
+                    diagnostic: crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: err.to_string(),
+                        range: TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(code),
+                        data: None,
+                    },
+                }
+            })
+            .collect();
+
+    // Semantic check: validate per-target `name:` map keys against the targets
+    // declared in smelt.yml. This is a separate pass from the parse-error scan
+    // above because `discover_source_errors` only reports files that FAIL to
+    // parse; a source with a valid `name:` map but undeclared keys parses fine
+    // and appears only in `discover_source_infos`.
+    if let Some(cfg) = config {
+        let declared: Vec<&str> = cfg.targets.keys().map(String::as_str).collect();
+        for src in smelt_core::discover_source_infos(&project_root, &paths) {
+            if let Some(err) = src
+                .name_override
+                .as_ref()
+                .and_then(|o| o.validate_target_keys(&declared))
+            {
+                diags.push(SourceDiagnostic {
+                    path: src.path.clone(),
+                    diagnostic: crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: err.to_string(),
+                        range: TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::MalformedSource),
+                        data: None,
+                    },
+                });
             }
-        })
-        .collect();
+        }
+        diags.sort_by(|a, b| a.path.cmp(&b.path));
+    }
 
     Arc::new(diags)
 }
