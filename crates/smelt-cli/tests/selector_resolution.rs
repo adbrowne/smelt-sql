@@ -421,6 +421,117 @@ fn exclude_bare_model_only() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── D-41: `smelt test --select` uses full selector syntax ────────────────────
+
+/// `smelt test --select tag:core` runs only tests for models tagged `core`,
+/// not tests for untagged models. Confirms selector syntax (not substring)
+/// gates which tests execute (D-41).
+#[cfg(feature = "duckdb")]
+#[test]
+fn test_select_uses_selector_syntax() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("test_tag_select");
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+
+    // smelt.yml: tagged_model has tag "core"; untagged_model has none.
+    fs::write(
+        root.join("smelt.yml"),
+        "name: test_tag_select\nversion: 1\npaths:\n  - models\n  - tests\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         models:\n  tagged_model:\n    tags:\n      - core\n",
+    )
+    .unwrap();
+
+    fs::write(root.join("models/tagged_model.sql"), "SELECT 1 AS x\n").unwrap();
+    fs::write(root.join("models/untagged_model.sql"), "SELECT 2 AS y\n").unwrap();
+
+    // Test for tagged_model (should run when selecting tag:core).
+    fs::write(
+        root.join("tests/test_tagged.sql"),
+        "--- name: test_tagged ---\nmaterialization: test\ntest:\n  model: tagged_model\n  expect:\n    - {x: 1}\n---\n",
+    )
+    .unwrap();
+    // Test for untagged_model (must NOT run when selecting tag:core).
+    fs::write(
+        root.join("tests/test_untagged.sql"),
+        "--- name: test_untagged ---\nmaterialization: test\ntest:\n  model: untagged_model\n  expect:\n    - {y: 2}\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(smelt_bin())
+        .args(["test", "--project-dir", root.to_str().unwrap()])
+        .args(["--select", "tag:core", "--json"])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("smelt test should be runnable");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "smelt test --select tag:core should succeed\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    // test_tagged ran (the tagged model's test).
+    assert!(
+        stdout.contains("test_tagged"),
+        "smelt test --select tag:core should include test_tagged in JSON output\nstdout: {stdout}"
+    );
+    // test_untagged did NOT run (no-tag model excluded by selector).
+    assert!(
+        !stdout.contains("test_untagged"),
+        "smelt test --select tag:core must NOT include test_untagged in JSON output\nstdout: {stdout}"
+    );
+}
+
+/// `smelt test --select typo_name` where `typo_name` doesn't resolve → non-zero
+/// exit with a "not found" diagnostic (same fail-loud contract as other commands).
+#[cfg(feature = "duckdb")]
+#[test]
+fn test_select_unresolvable_is_hard_error() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("test_notfound");
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+    // Include both models/ and tests/ in paths so test models are discovered.
+    fs::write(
+        root.join("smelt.yml"),
+        "name: test_notfound\nversion: 1\npaths:\n  - models\n  - tests\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+    fs::write(root.join("models/base.sql"), "SELECT 1 AS x\n").unwrap();
+    fs::write(
+        root.join("tests/test_base.sql"),
+        "--- name: test_base ---\nmaterialization: test\ntest:\n  model: base\n  expect:\n    - {x: 1}\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(smelt_bin())
+        .args(["test", "--project-dir", root.to_str().unwrap()])
+        .args(["--select", "definitely_no_such_model"])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("smelt test should be runnable");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "smelt test --select <nonexistent> should exit non-zero\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("not found") || stderr.contains("definitely_no_such_model"),
+        "stderr should contain 'not found' or the unknown name; got:\n{stderr}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// `path:` is NOT a recognised selection method — a `path:models/silver`
 /// selector is treated as a model-name reference that fails to resolve,
 /// confirming no `path:` method was added (D-38).

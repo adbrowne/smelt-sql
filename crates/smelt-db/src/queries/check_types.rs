@@ -123,9 +123,7 @@ pub fn cannot_infer_type_for_schema(
         }
         match &col.data_type {
             Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown(_)) => {
-                if let Some(UnknownReason::Unresolved) =
-                    typed_col.data_type.unknown_reason()
-                {
+                if let Some(UnknownReason::Unresolved) = typed_col.data_type.unknown_reason() {
                     // Compiler-resolvable gap: emit ColumnTypeUnresolved (Error).
                     let range = col.range + range_offset;
                     out.push(Diagnostic {

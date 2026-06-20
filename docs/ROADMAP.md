@@ -111,6 +111,17 @@ Five-phase remediation plan ([plan](plans/20260613-w5-python-models.md)) landing
 - **Plain single-model frontmatter + name-mismatch blocking (D-22, D-27)** — Python output is always single-model: `--- name: X ---` section-delimiter format is normalized to plain `---\nname: X\n…` before processing; `FileMetadata::Multi` is never produced from Python output. A `name:` key that mismatches the function name emits `PythonModelNameMismatch` (Error, blocks the build) while retaining all other frontmatter keys (`materialization`, `tags`, `owner`). Frontmatter is now stripped before SQL parsing to eliminate spurious parse errors from YAML keys.
 - **Close-out** — retracted `directory`-implementation divergence note (implementation is now correct); updated note to user-guide gap only.
 
+### ~~Spec-Remediation W6 — CLI & Selection (D-36–D-41)~~ ✅ (June 21, 2026)
+
+Six-phase remediation plan ([plan](plans/20260613-w6-cli-selection.md)) landing the D-cli cluster from the 2026-06-13 spec review (D-36/37/38/39/40/41) in `smelt-cli` and `smelt-core`:
+
+- **`smelt.` prefix round-trip (D-36, P1)** — every CLI entity argument accepts and strips a leading `smelt.` prefix before resolution, so any printed canonical `smelt.<path>` copy-pastes straight back into a command.
+- **No cwd-scope fall-through (D-40, P2)** — when a `--scope` is active, a shorthand resolves only as `<scope>.<arg>`; if that exact path does not resolve, the command errors (no silent retry of the bare `<arg>`).
+- **`+` operators stripped before entity resolution (D-38, P3)** — leading/trailing `+` graph operators are stripped from a `ModelName` selector before entity lookup and re-attached to the resolved full path afterward.
+- **Hard error vs no-op asymmetry (D-37, P4)** — an entity-name selector that resolves to no entity is a non-zero "not found" error; a method selector (`tag:`/`generator_file:`) that legitimately matches no models is a quiet exit-0 no-op with a stderr message.
+- **`--exclude +model` inconsistent-set refusal (D-39, P5)** — if `--exclude +model` removes a transitive upstream that a retained model still needs, smelt refuses the inconsistent set with a diagnostic naming the retained model and the missing upstream.
+- **`smelt test --select` uses full selector syntax (D-41, P6)** — `smelt test --select` now uses the same methods (`ModelName`/`tag:`/`generator_file:`) and `+` graph operators as every other command, not a substring match on test names. Now-satisfied Known-Divergence notes retracted from `model_selection.md` and `cli.md`.
+
 ### ~~Spec-Remediation W5b — Combined SQL↔Python Fixed-Point Evaluation (D-24, ISOLATED)~~ ✅ (June 20, 2026)
 
 Five-phase remediation plan ([plan](plans/20260613-w5b-combined-eval.md)) implementing D-24 (B) from the 2026-06-13 spec review: a single fully-interleaved fixed-point loop where SQL `generates: models` generators and Python `@model` generators run together, each observing the other's emissions across rounds:
