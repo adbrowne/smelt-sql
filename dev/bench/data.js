@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781940484725,
+  "lastUpdate": 1781940486820,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -26171,6 +26171,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.892817914204205,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "b73fd8f77db27802d8484f473b1eb5b59d49ec6f",
+          "message": "feat(autonomy): graceful stop flag — finish current iteration, then halt\n\nAdds a between-iterations stop mechanism so the loop can be stopped without\nwasting the in-flight iteration's work (it commits + pushes as normal first).\n\n- autonomy-loop.sh: check .claude/autonomy.stop at the top of each iteration;\n  if present, consume it, break, and exit 3 (stopped_by_flag). The flag lives\n  under .claude/ (gitignored by `.claude/*`), so it is never committed and the\n  iteration-start auto-stash (--include-untracked skips ignored files) and\n  `git status --porcelain` both leave it untouched.\n- autonomy-loop-forever.sh: on inner-loop exit 3, do not restart.\n- stop-autonomy.sh: helper that drops the flag (or `touch .claude/autonomy.stop`).\n\nImmediate Ctrl-C/kill still works for a hard stop (discards in-progress work).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T16:49:41+10:00",
+          "tree_id": "50f87ef22bdb2205bafb116b91b274511740624f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b73fd8f77db27802d8484f473b1eb5b59d49ec6f"
+        },
+        "date": 1781940486328,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.586699706132233,
             "unit": "MB/s"
           }
         ]
