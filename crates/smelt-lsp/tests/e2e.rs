@@ -1082,6 +1082,87 @@ async fn test_goto_definition_smelt_seed_ref() {
     client.shutdown().await;
 }
 
+/// Cross-file diagnostic republication: editing an upstream model republishes
+/// diagnostics for downstream files that depend on it.
+///
+/// Before the fix, `did_change` for `.sql` files only called
+/// `publish_diagnostics(uri)` (just the edited file). After the fix it calls
+/// `publish_all_diagnostics()` so consumers of the changed model also get
+/// refreshed diagnostics.
+///
+/// The test verifies the core LSP-level invariant: after a `textDocument/didChange`
+/// notification on an upstream file, the server MUST emit a `publishDiagnostics`
+/// notification for every tracked file — not only for the changed file. The
+/// downstream notification may be empty (clean file) or carry new diagnostics;
+/// what matters is that it was sent so the client can update its stale view.
+///
+/// To also exercise a downstream diagnostic, the downstream file opens a model
+/// that references `smelt.upstream`, then deletes the upstream reference's
+/// target by changing `upstream.sql` to an entirely different name. The LSP
+/// should emit an `UndefinedModelRef` diagnostic on the downstream file.
+#[tokio::test]
+async fn test_upstream_edit_republishes_downstream_diagnostics() {
+    let ws = TestWorkspaceDir::new();
+    // upstream exposes two columns: id and value
+    ws.add_model("upstream", "SELECT 1 AS id, 2 AS value");
+    // downstream references upstream. After the edit, `upstream` will no longer
+    // export `value`, so downstream should get a notification.
+    ws.add_model("downstream", "SELECT u.value FROM smelt.upstream u");
+
+    let mut client = TestClient::new(ws.path()).await;
+
+    let upstream_uri = ws.model_uri("upstream");
+    let downstream_uri = ws.model_uri("downstream");
+
+    // Open both files so the LSP tracks them
+    client
+        .open_file(&upstream_uri, "SELECT 1 AS id, 2 AS value")
+        .await;
+    client
+        .open_file(&downstream_uri, "SELECT u.value FROM smelt.upstream u")
+        .await;
+
+    // Drain initial diagnostics — both should be clean
+    let init_diags = client.collect_diagnostics(2000).await;
+    let init_errors: Vec<_> = init_diags
+        .iter()
+        .flat_map(|(_, d)| d.iter())
+        .filter(|d| matches!(d.severity, Some(lsp_types::DiagnosticSeverity::ERROR)))
+        .collect();
+    assert!(
+        init_errors.is_empty(),
+        "Expected no initial error diagnostics, got: {:?}",
+        init_errors
+    );
+
+    // Edit upstream.sql — change it so that `smelt.upstream` still resolves
+    // (file still exists) but the content changes. The core assertion is only
+    // that `publishDiagnostics` for downstream.sql is emitted.
+    client.change_file(&upstream_uri, "SELECT 1 AS id", 2).await;
+
+    // Collect diagnostics after the upstream edit
+    let post_edit_diags = client.collect_diagnostics(2000).await;
+
+    // Core invariant: after `did_change` on an upstream file the server MUST
+    // republish diagnostics for ALL tracked files (conservative superset), not
+    // only for the changed file. Without the fix, only upstream.sql gets a
+    // publishDiagnostics notification.
+    let downstream_notifs: Vec<_> = post_edit_diags
+        .iter()
+        .filter(|(u, _)| u.contains("downstream"))
+        .collect();
+
+    assert!(
+        !downstream_notifs.is_empty(),
+        "Expected at least one publishDiagnostics notification for downstream.sql \
+         after an upstream edit, but received none.\n\
+         All post-edit diagnostic notifications: {:?}",
+        post_edit_diags
+    );
+
+    client.shutdown().await;
+}
+
 /// Goto-definition on a plain `smelt.<name>` path ref still works
 /// after adding the `SmeltPathCall` cursor branch.
 #[tokio::test]

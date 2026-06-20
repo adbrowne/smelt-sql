@@ -171,8 +171,8 @@ discriminant = "dynamic"
 
 ["crates/smelt-db/src/queries/schema.rs:808"]
 classification = "legitimate"
-reason = "source column type fallback — sources.yml column type is optional; Unknown when absent"
-discriminant = "dynamic"
+reason = "sources.yml column with no declared type — Unresolved because user can add a type: field to fix; ColumnTypeUnresolved fires to notify"
+discriminant = "unresolved"
 
 ["crates/smelt-db/src/queries/schema.rs:836"]
 classification = "legitimate"

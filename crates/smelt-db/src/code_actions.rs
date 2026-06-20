@@ -106,7 +106,9 @@ pub fn generate_code_actions(
 
     match code {
         DiagnosticCode::TypeMismatch => generate_type_mismatch_actions(diagnostic, file_text),
-        DiagnosticCode::CannotInferType => generate_cannot_infer_actions(diagnostic, file_text),
+        DiagnosticCode::CannotInferType | DiagnosticCode::ColumnTypeUnresolved => {
+            generate_cannot_infer_actions(diagnostic, file_text)
+        }
         _ => vec![],
     }
 }

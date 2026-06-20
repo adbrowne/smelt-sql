@@ -805,7 +805,10 @@ pub fn build_type_context(
                 let data_type = col
                     .data_type
                     .clone()
-                    .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                    // A sources.yml column with no `type:` field is Unresolved —
+                    // the user can fix it by declaring the type. Unresolved fires
+                    // ColumnTypeUnresolved so the user is notified.
+                    .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Unresolved));
                 ctx.add_source_column(
                     &source.name,
                     &table.name,

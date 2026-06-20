@@ -64,8 +64,7 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
         // Build Salsa DB for canonical address resolution and smelt.-strip (D-36).
         let all_models = discovery.discover_models().unwrap_or_default();
         let salsa_db = smelt_cli::init_db(&project_dir, &all_models);
-        let salsa_ws = smelt_db::Workspace::try_get(&salsa_db)
-            .expect("workspace not initialized");
+        let salsa_ws = smelt_db::Workspace::try_get(&salsa_db).expect("workspace not initialized");
         let salsa_proj = salsa_db
             .project_input(&project_dir)
             .expect("project not initialized");
@@ -85,8 +84,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
 
         let selectors: Vec<_> = resolved_select
             .iter()
-            .map(|s| smelt_core::parse_selector(s)
-                .with_context(|| format!("Invalid selector '{}'", s)))
+            .map(|s| {
+                smelt_core::parse_selector(s).with_context(|| format!("Invalid selector '{}'", s))
+            })
             .collect::<Result<_>>()?;
 
         // Hard error for unresolvable entity selectors; empty set for method

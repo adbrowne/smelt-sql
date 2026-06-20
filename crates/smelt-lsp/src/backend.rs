@@ -1592,7 +1592,7 @@ impl LanguageServer for Backend {
                 }
                 drop(tracked);
                 drop(db);
-                self.publish_diagnostics(uri).await;
+                self.publish_all_diagnostics().await;
             } else if path.extension().and_then(|s| s.to_str()) != Some("py") {
                 let mut db = self.db.lock().await;
                 let project_roots = self.project_roots.lock().await.clone();
