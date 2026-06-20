@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781906670523,
+  "lastUpdate": 1781925253585,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19739,6 +19739,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.38839,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "30bceeaf3f47a835cc539049b434a1380c4a8a03",
+          "message": "docs(plans): phased plan to cut cold initial-load path/diagnostic overhead\n\nFollow-up to d28a26ba. Flamegraph attribution + three research passes\n(sort-site inventory, path-identity options, CST-rewalk inventory) distilled\ninto a subagent-executable plan: sorted_workspace_files hoist, per-file\nfile_classification skip-gate, unified CST walk, and a re-profile-gated\ncheap-path-identity stretch. Behavior-preserving; equivalence gates are the\noracle.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T13:01:56+10:00",
+          "tree_id": "1594b95fbbb59a47ddd66d98ddbaf0c0c84e5282",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/30bceeaf3f47a835cc539049b434a1380c4a8a03"
+        },
+        "date": 1781925252571,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 44.400587,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 42.136957,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.006653,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.606621,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.314222,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1565.466518,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 4.511417,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.02875,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.9944390000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.659701,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1670.137107,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.41312,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.14172,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.658821,
             "unit": "ms"
           }
         ]
