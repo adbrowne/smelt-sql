@@ -641,13 +641,11 @@ pub async fn execute_project(
                             .targets
                             .get(model_target)
                             .expect("target config must exist");
-                        let table_format = plan
-                            .model_file
-                            .metadata
-                            .as_deref()
-                            .and_then(|m| m.format.as_ref())
-                            .cloned()
-                            .or_else(|| target_config.table_format());
+                        let table_format = config.get_format(
+                            &plan.name,
+                            plan.model_file.metadata.as_deref(),
+                            target_config,
+                        );
                         let ddl_backend =
                             ddl_backend_for_dialect(backend.dialect(), table_format, None);
                         match check_and_migrate(

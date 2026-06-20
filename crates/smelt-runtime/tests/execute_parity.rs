@@ -248,6 +248,7 @@ async fn test_cli_ui_manifest_parity() {
             incremental: None,
             tags: vec![],
             target: None,
+            format: None,
         },
     );
     models_config.insert(
@@ -258,6 +259,7 @@ async fn test_cli_ui_manifest_parity() {
             incremental: None,
             tags: vec![],
             target: None,
+            format: None,
         },
     );
     models_config.insert(
@@ -268,6 +270,7 @@ async fn test_cli_ui_manifest_parity() {
             incremental: None,
             tags: vec![],
             target: None,
+            format: None,
         },
     );
 

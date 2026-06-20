@@ -124,6 +124,7 @@ fn test_logical_graph_cross_engine_edges() {
             incremental: None,
             tags: vec![],
             target: Some("spark_local".to_string()),
+            format: None,
         },
     );
 

@@ -2016,6 +2016,7 @@ JOIN smelt.model_b b ON a.id = b.id
                 incremental: None,
                 tags: Vec::new(),
                 target: None,
+                format: None,
             },
         );
 

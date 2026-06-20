@@ -427,6 +427,7 @@ mod tests {
                 }),
                 tags: vec![],
                 target: None,
+                format: None,
             },
         )]);
         let graph = DependencyGraph::build(models, None).unwrap();
@@ -526,6 +527,7 @@ mod tests {
                 }),
                 tags: vec!["revenue".to_string(), "daily".to_string()],
                 target: None,
+                format: None,
             },
         )]);
         let graph = DependencyGraph::build(models, None).unwrap();

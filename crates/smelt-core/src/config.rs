@@ -220,6 +220,10 @@ pub struct ModelConfig {
     /// Target to execute this model on (overrides CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// Table format override for this model (Spark targets only).
+    /// Precedence: SQL frontmatter `format:` > this field > target default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<TableFormat>,
 }
 
 /// Day of the week for weekly partition start.
@@ -633,6 +637,32 @@ impl Config {
         }
         // Fall back to smelt.yml
         self.get_timeseries(model_name)
+    }
+
+    /// Get table format for a model using three-tier precedence.
+    ///
+    /// **Precedence**: SQL frontmatter `format:` > `smelt.yml` `models.<name>.format` > target default.
+    /// DuckDB targets always return `None` — format is not applicable.
+    pub fn get_format(
+        &self,
+        model_name: &str,
+        sql_metadata: Option<&ModelMetadata>,
+        target: &Target,
+    ) -> Option<TableFormat> {
+        if target.backend_type() == BackendType::DuckDB {
+            return None;
+        }
+        if let Some(meta) = sql_metadata {
+            if let Some(fmt) = meta.format {
+                return Some(fmt);
+            }
+        }
+        if let Some(model_config) = self.models.get(model_name) {
+            if let Some(fmt) = model_config.format {
+                return Some(fmt);
+            }
+        }
+        target.table_format()
     }
 
     /// Get incremental config with SQL metadata precedence
@@ -1658,6 +1688,130 @@ targets:
         assert!(
             target.settings.is_none(),
             "settings must be None when absent"
+        );
+    }
+
+    /// D-32: `format:` field on a model-config entry in `smelt.yml` parses correctly.
+    #[test]
+    fn model_config_format_parses_from_yaml() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  my_model:
+    format: parquet
+  other_model:
+    format: delta
+  no_format_model:
+    materialization: table
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.models["my_model"].format, Some(TableFormat::Parquet),);
+        assert_eq!(
+            config.models["other_model"].format,
+            Some(TableFormat::Delta),
+        );
+        assert_eq!(config.models["no_format_model"].format, None);
+    }
+
+    /// D-32: `get_format` tier 2 — model config overrides Spark target's delta default.
+    #[test]
+    fn get_format_model_config_overrides_target() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  my_model:
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_prod").unwrap();
+        assert_eq!(
+            config.get_format("my_model", None, target),
+            Some(TableFormat::Parquet),
+        );
+    }
+
+    /// D-32: `get_format` tier 1 — SQL frontmatter wins over model config.
+    #[test]
+    fn get_format_sql_metadata_beats_model_config() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  my_model:
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_prod").unwrap();
+        let metadata = ModelMetadata {
+            format: Some(TableFormat::Delta),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.get_format("my_model", Some(&metadata), target),
+            Some(TableFormat::Delta),
+        );
+    }
+
+    /// D-32: DuckDB target always returns `None` — format is not applicable.
+    #[test]
+    fn get_format_duckdb_always_none() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  my_model:
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("dev").unwrap();
+        assert_eq!(config.get_format("my_model", None, target), None);
+    }
+
+    /// D-32: no format at any tier → `None` for DuckDB, `Some(Delta)` for Spark.
+    #[test]
+    fn get_format_falls_through_to_target_default() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let duckdb = config.targets.get("dev").unwrap();
+        let spark = config.targets.get("spark_prod").unwrap();
+        assert_eq!(config.get_format("unknown", None, duckdb), None);
+        assert_eq!(
+            config.get_format("unknown", None, spark),
+            Some(TableFormat::Delta),
         );
     }
 }

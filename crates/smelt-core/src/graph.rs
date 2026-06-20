@@ -782,6 +782,7 @@ mod tests {
                     incremental: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,
+                    format: None,
                 },
             );
         }
