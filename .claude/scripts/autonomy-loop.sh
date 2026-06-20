@@ -80,8 +80,14 @@
 #   MAX_ITERATIONS=50 bash .claude/scripts/autonomy-loop.sh
 #   PERMISSION_MODE=acceptEdits bash .claude/scripts/autonomy-loop.sh   # override
 #
-# Stop the loop manually: Ctrl-C. The current Claude iteration will
-# finish naturally; the next iteration will not start.
+# Stop the loop:
+#   - Graceful (recommended): `bash .claude/scripts/stop-autonomy.sh` (or
+#     `touch .claude/autonomy.stop`). The in-flight iteration finishes — it
+#     commits + pushes as normal — and then the loop exits before the next
+#     iteration starts (exit code 3). No work is lost. Under the forever
+#     wrapper this also prevents a restart. The flag is consumed on stop.
+#   - Immediate: Ctrl-C / kill. The current Claude iteration is interrupted,
+#     so its in-progress (uncommitted) work is wasted.
 #
 # Logs: ${HOME}/.claude/logs/spec-impl/iter-<ts>-<n>.log
 #       ${HOME}/.claude/logs/spec-impl/iter-<ts>-<n>.memory.log
@@ -95,6 +101,15 @@ set -uo pipefail
 # Locate the repo root: this script lives at .claude/scripts/, repo is two up.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Graceful-stop flag. Checked at the top of every iteration: if present, the
+# loop finishes the current iteration (already committed + pushed by then) and
+# exits with code 3 without starting another. Lives under .claude/, which is
+# gitignored by `.claude/*` — so it is never committed, and the iteration-start
+# auto-stash (`git stash --include-untracked`, which skips ignored files) and
+# `git status --porcelain` both leave it untouched. Create it with
+# stop-autonomy.sh; it is removed automatically when the loop acts on it.
+STOP_FLAG="${STOP_FLAG:-${SCRIPT_DIR}/../autonomy.stop}"
 
 # Currently active: the spec-remediation implementation backlog
 # (docs/plans/20260613-spec-impl.md via .claude/active-plan).
@@ -223,6 +238,15 @@ advanced_count=0    # times the loop rolled up to a sibling sub-plan
 trap 'echo; echo "===== Interrupted by user ====="; [ -n "${sampler_pid}" ] && kill "${sampler_pid}" 2>/dev/null; exit 130' INT TERM
 
 while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
+  # Graceful stop: honoured between iterations so the just-finished iteration's
+  # committed work is preserved and nothing in flight is interrupted.
+  if [ -f "${STOP_FLAG}" ]; then
+    rm -f "${STOP_FLAG}"
+    echo "===== graceful stop requested (${STOP_FLAG}) — finishing now; no further iterations ====="
+    exit_reason="stopped_by_flag"
+    break
+  fi
+
   iteration=$((iteration + 1))
   ts="$(date +%Y%m%dT%H%M%S)"
   log="${LOG_DIR}/iter-${ts}-$(printf '%02d' "${iteration}").log"
@@ -397,9 +421,11 @@ echo "Sub-plan roll-ups this run:        ${advanced_count}"
 echo "Logs in: ${LOG_DIR}"
 
 # Exit codes: 0 = master backlog done; 2 = needs a human (master exhausted —
-# next cluster needs a sub-plan scaffolded); 1 = infra failure / max-iter.
+# next cluster needs a sub-plan scaffolded); 3 = graceful stop requested (do
+# not restart); 1 = infra failure / max-iter.
 case "${exit_reason}" in
   all_done) exit 0 ;;
   master_exhausted) exit 2 ;;
+  stopped_by_flag) exit 3 ;;
   *) exit 1 ;;
 esac
