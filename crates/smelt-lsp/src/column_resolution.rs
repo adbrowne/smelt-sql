@@ -644,6 +644,108 @@ fn trace_upstream_column_chain(
     false
 }
 
+/// Find the stem of the model that is the authoritative definition site for
+/// `column_name` reachable via `model_name`. Follows `ColumnSource::FromModel`
+/// chains (and wildcard `row_extensions` chains) upward until it reaches a model
+/// that actually defines the column in its SELECT list (has an explicit AS alias
+/// or a computed expression). The returned name is the file-stem of that model.
+///
+/// This is used to root the downstream BFS at the definition site rather than at
+/// the cursor's file, so sibling consumers of the definition model are included.
+pub(crate) fn find_definition_model_name(
+    db: &Database,
+    all_files: &[PathBuf],
+    project_root: &std::path::Path,
+    model_name: &str,
+    column_name: &str,
+) -> String {
+    find_definition_model_name_inner(db, all_files, project_root, model_name, column_name, 10)
+}
+
+fn find_definition_model_name_inner(
+    db: &Database,
+    all_files: &[PathBuf],
+    project_root: &std::path::Path,
+    model_name: &str,
+    column_name: &str,
+    depth_limit: usize,
+) -> String {
+    if depth_limit == 0 {
+        return model_name.to_string();
+    }
+    // Find the model's file
+    for file_path in all_files {
+        if !file_path.starts_with(project_root) {
+            continue;
+        }
+        let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if stem != model_name {
+            continue;
+        }
+        let fi = match lookup_file(db, file_path) {
+            Some(f) => f,
+            None => return model_name.to_string(),
+        };
+
+        let schema = smelt_db::model_schema(db, fi);
+
+        // Primary: follow ColumnSource::FromModel — the column is a passthrough
+        // from an upstream model and must be traced further to the definition site.
+        if let Some(col) = schema.columns.iter().find(|c| c.name == column_name) {
+            if let smelt_db::ColumnSource::FromModel {
+                model_name: ref upstream_name,
+                column_name: ref upstream_col,
+            } = col.source
+            {
+                if upstream_col == column_name {
+                    return find_definition_model_name_inner(
+                        db,
+                        all_files,
+                        project_root,
+                        upstream_name,
+                        column_name,
+                        depth_limit - 1,
+                    );
+                }
+            }
+            // For Computed / ExternalTable / Unknown / Wildcard sources, this
+            // model IS the definition site.
+            return model_name.to_string();
+        }
+
+        // Follow wildcard extensions (SELECT * passthrough): the column may come
+        // from a row-extension model rather than appearing in schema.columns.
+        for ext in &schema.row_extensions {
+            if let Some(upstream_path) = resolve_ref_leaf(db, project_root, &ext.ref_name) {
+                let up_stem = upstream_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(up_fi) = lookup_file(db, &upstream_path) {
+                    let up_schema = smelt_db::model_schema(db, up_fi);
+                    let up_exposes_col = up_schema.columns.iter().any(|c| c.name == column_name)
+                        || !up_schema.row_extensions.is_empty();
+                    if up_exposes_col {
+                        return find_definition_model_name_inner(
+                            db,
+                            all_files,
+                            project_root,
+                            &up_stem,
+                            column_name,
+                            depth_limit - 1,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Column not traceable upward from here; this model is the definition site.
+        return model_name.to_string();
+    }
+    model_name.to_string()
+}
+
 /// Build project context JSON from discovered files for Python model execution.
 /// Extracts model names, tags, and directories from the file paths registered in Salsa.
 pub(crate) fn build_python_context(

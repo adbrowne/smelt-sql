@@ -16,9 +16,9 @@ use smelt_core::{
 };
 use smelt_db::{
     functions_in_file, project_address_collisions, project_emitted_name_collisions,
-    project_source_diagnostics, yaml_edits::find_source_column_yaml_rename, Database,
-    Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
-    DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile, Workspace,
+    project_source_diagnostics, Database, Diagnostic as DbDiagnostic, DiagnosticCode as DbCode,
+    DiagnosticData as DbData, DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile,
+    Workspace,
 };
 use smelt_parser::ast::File as AstFile;
 use smelt_parser::is_valid_sql_identifier;
@@ -26,8 +26,8 @@ use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor}
 use smelt_types::{format_smelt_type_hover, TypedColumn};
 
 use crate::column_resolution::{
-    build_python_context, collect_from_model_names, format_type, resolve_column_definitions,
-    trace_upstream_column, ColumnDefLocation,
+    build_python_context, collect_from_model_names, find_definition_model_name, format_type,
+    resolve_column_definitions, trace_upstream_column, ColumnDefLocation,
 };
 use crate::completion::{
     determine_completion_context, extract_from_aliases, AliasTarget, CompletionContext,
@@ -2824,6 +2824,62 @@ impl LanguageServer for Backend {
                                 }
                             }
                         }
+
+                        // Refuse rename if the column comes from an externally-managed
+                        // source table (smelt.sources.*). Source columns are declared in
+                        // YAML and must be renamed at the data source, not via LSP.
+                        if best_range.is_some() {
+                            if let (Some(fi), Some(ws)) = (file_input, Workspace::try_get(&db)) {
+                                let path_refs = smelt_db::model_path_refs(&db, fi);
+                                let project_root = file_project_root(&db, &effective_path);
+                                let maybe_project =
+                                    crate::db_helpers::lookup_project(&db, &project_root);
+                                if let Some(project) = maybe_project {
+                                    for pr in path_refs.iter() {
+                                        if !pr.in_table_expr_position {
+                                            continue;
+                                        }
+                                        if let Some(resolved) =
+                                            smelt_db::resolve_ref_path(&db, ws, pr.path.clone())
+                                        {
+                                            if resolved.kind == smelt_db::RefKind::Source {
+                                                // Legacy sources.yml: path is ["sources", src, tbl]
+                                                let is_source_col = if pr.path.len() >= 3
+                                                    && pr.path[0] == "sources"
+                                                {
+                                                    let src = pr.path[pr.path.len() - 2].clone();
+                                                    let tbl = pr.path[pr.path.len() - 1].clone();
+                                                    smelt_db::resolve_source(&db, project, src, tbl)
+                                                        .map(|table_def| {
+                                                            table_def
+                                                                .columns
+                                                                .iter()
+                                                                .any(|c| c.name == name)
+                                                        })
+                                                        .unwrap_or(false)
+                                                } else {
+                                                    // Per-entity source — any column from it is a source column
+                                                    true
+                                                };
+                                                if is_source_col {
+                                                    return Err(tower_lsp::jsonrpc::Error {
+                                                        code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32001),
+                                                        message: std::borrow::Cow::Owned(format!(
+                                                            "Cannot rename '{}': it is declared by an \
+                                                             externally-managed source table. Rename the \
+                                                             column at the data source instead.",
+                                                            name
+                                                        )),
+                                                        data: None,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         best_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
                     }
                     Some(SymbolAtCursor::PathRef { segments }) => {
@@ -2946,10 +3002,6 @@ impl LanguageServer for Backend {
                 local_edits: Vec<(u32, u32, u32, u32)>,
                 /// Cross-file edits: (file_path, start_line, start_col, end_line, end_col)
                 cross_file_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
-                /// YAML column rename edit
-                yaml_edit: Option<(u32, String, String)>,
-                /// Path to sources.yml
-                sources_yml_path: PathBuf,
             },
             /// Lambda parameter — binder + every use in the lambda body.
             LambdaParam {
@@ -3105,16 +3157,59 @@ impl LanguageServer for Backend {
                                 }
                             }
 
-                            // Downstream tracing via BFS through model graph
+                            // Downstream tracing via BFS through model graph.
+                            //
+                            // Fix 1: Root the BFS at the definition site, not at the
+                            // cursor's file. The definition site is the model that
+                            // actually defines `column_name` in its SELECT list. Without
+                            // this, sibling consumers of the definition model are missed.
                             let current_model_name = effective_path
                                 .file_stem()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let mut models_exposing: Vec<String> = vec![current_model_name.clone()];
+
+                            // Find the initial upstream model to start the definition search
+                            let init_upstream_name = if upstream_traced {
+                                schema
+                                    .columns
+                                    .iter()
+                                    .find(|c| c.name == column_name)
+                                    .and_then(|col| {
+                                        if let smelt_db::ColumnSource::FromModel {
+                                            model_name: ref mn,
+                                            ..
+                                        } = col.source
+                                        {
+                                            Some(mn.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_else(|| current_model_name.clone())
+                            } else {
+                                current_model_name.clone()
+                            };
+
+                            let definition_model_name = find_definition_model_name(
+                                &db,
+                                &all_files,
+                                &trace_project_root,
+                                &init_upstream_name,
+                                &column_name,
+                            );
+
+                            let mut models_exposing: Vec<String> =
+                                vec![definition_model_name.clone()];
                             let mut visited = std::collections::HashSet::new();
+                            visited.insert(definition_model_name);
+                            // Also mark current model as visited to skip its local edits
+                            // which are already in local_edits.
                             visited.insert(current_model_name);
                             let mut depth = 0;
+
+                            // Workspace handle for Fix 2: path-ref resolution
+                            let bfs_ws = Workspace::try_get(&db);
 
                             while depth < 10 {
                                 let mut next_batch = Vec::new();
@@ -3135,25 +3230,63 @@ impl LanguageServer for Backend {
                                             Some(f) => f,
                                             None => continue,
                                         };
+
+                                        // Fix 2: check if this downstream model references
+                                        // the exposing model using resolve_ref_path (W1
+                                        // universal addressing: `smelt.X` not `smelt.models.X`).
                                         let down_model_path_refs =
                                             smelt_db::model_path_refs(&db, down_file_input);
-                                        if !down_model_path_refs.iter().any(|r| {
-                                            r.path.first().map(|s| s.as_str()) == Some("models")
-                                                && r.path.get(1).map(|s| s.as_str())
-                                                    == Some(exposing.as_str())
-                                        }) {
+                                        let references_exposing =
+                                            down_model_path_refs.iter().any(|r| {
+                                                // Legacy: smelt.models.X
+                                                let legacy_match =
+                                                    r.path.first().map(|s| s.as_str())
+                                                        == Some("models")
+                                                        && r.path.get(1).map(|s| s.as_str())
+                                                            == Some(exposing.as_str());
+                                                if legacy_match {
+                                                    return true;
+                                                }
+                                                // W1 universal addressing: resolve the path
+                                                // and compare file stems.
+                                                if let Some(ws) = bfs_ws {
+                                                    if let Some(resolved) =
+                                                        smelt_db::resolve_ref_path(
+                                                            &db,
+                                                            ws,
+                                                            r.path.clone(),
+                                                        )
+                                                    {
+                                                        if resolved.kind == smelt_db::RefKind::Model
+                                                        {
+                                                            if let Some(sf) = resolved.source_file {
+                                                                let sf_stem = sf
+                                                                    .path(&db)
+                                                                    .file_stem()
+                                                                    .and_then(|s| s.to_str())
+                                                                    .unwrap_or("");
+                                                                return sf_stem
+                                                                    == exposing.as_str();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                false
+                                            });
+                                        if !references_exposing {
                                             continue;
                                         }
+
                                         let down_text = down_file_input.text(&db).clone();
                                         let down_parse = smelt_db::parse_file(&db, down_file_input);
                                         let down_syntax = down_parse.syntax();
                                         if let Some(down_file) = AstFile::cast(down_syntax) {
                                             let col_refs =
-                                        smelt_db::references::find_column_references_in_file(
-                                            &down_file,
-                                            &column_name,
-                                            None,
-                                        );
+                                                smelt_db::references::find_column_references_in_file(
+                                                    &down_file,
+                                                    &column_name,
+                                                    None,
+                                                );
                                             for col_ref in &col_refs {
                                                 let r = crate::diagnostics_boundary::text_range_to_lsp_codepoint(
                                                     &down_text,
@@ -3167,14 +3300,21 @@ impl LanguageServer for Backend {
                                                     r.end.character,
                                                 ));
                                             }
-                                            // Check for SELECT * passthrough
+                                            // Fix 3: propagate BFS if the downstream model
+                                            // exposes the column — either via SELECT *
+                                            // (row_extensions) or explicit passthrough
+                                            // (column in output schema under same name).
                                             let down_schema =
                                                 smelt_db::model_schema(&db, down_file_input);
-                                            if down_schema
+                                            let propagates = down_schema
                                                 .row_extensions
                                                 .iter()
                                                 .any(|ext| ext.ref_name == *exposing)
-                                            {
+                                                || down_schema
+                                                    .columns
+                                                    .iter()
+                                                    .any(|c| c.name == column_name);
+                                            if propagates {
                                                 next_batch.push(down_name.clone());
                                             }
                                             visited.insert(down_name);
@@ -3188,21 +3328,14 @@ impl LanguageServer for Backend {
                                 depth += 1;
                             }
 
-                            // Source column YAML rename
-                            let project_root = file_project_root(&db, &effective_path);
-                            let sources_yml_content = project_sources_yaml(&db, &project_root);
-                            let sources_yml_path = project_root.join("sources.yml");
-                            let yaml_edit = find_source_column_yaml_rename(
-                                &sources_yml_content,
-                                &column_name,
-                                &new_name,
-                            );
+                            // Deduplicate cross-file edits in case both upstream trace
+                            // and downstream BFS added an edit for the same range.
+                            cross_file_edits.sort();
+                            cross_file_edits.dedup();
 
                             Some(RenameKind::Column {
                                 local_edits,
                                 cross_file_edits,
-                                yaml_edit,
-                                sources_yml_path,
                             })
                         }
                         Some(SymbolAtCursor::PathRef { segments })
@@ -3392,8 +3525,6 @@ impl LanguageServer for Backend {
             Some(RenameKind::Column {
                 local_edits,
                 cross_file_edits,
-                yaml_edit,
-                sources_yml_path,
             }) => {
                 if local_edits.is_empty() && cross_file_edits.is_empty() {
                     return Ok(None);
@@ -3443,26 +3574,6 @@ impl LanguageServer for Backend {
                             version: None,
                         },
                         edits: file_edits.into_iter().map(OneOf::Left).collect(),
-                    }));
-                }
-
-                // YAML column rename
-                if let Some((line_num, _old_line, new_line)) = yaml_edit {
-                    let yaml_uri =
-                        Url::from_file_path(&sources_yml_path).unwrap_or_else(|_| uri.clone());
-                    let old_line_len = _old_line.len() as u32;
-                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
-                        text_document: OptionalVersionedTextDocumentIdentifier {
-                            uri: yaml_uri,
-                            version: None,
-                        },
-                        edits: vec![OneOf::Left(TextEdit {
-                            range: Range {
-                                start: Position::new(line_num, 0),
-                                end: Position::new(line_num, old_line_len),
-                            },
-                            new_text: new_line,
-                        })],
                     }));
                 }
 
