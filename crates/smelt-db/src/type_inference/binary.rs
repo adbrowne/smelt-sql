@@ -401,7 +401,9 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
                             });
                         } else {
                             return Some(TypedColumn {
-                                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+                                data_type: DataType::Unknown(
+                                    smelt_types::UnknownReason::Unresolved,
+                                ),
                                 nullable: true,
                             });
                         }

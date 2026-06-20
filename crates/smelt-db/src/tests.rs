@@ -2745,8 +2745,12 @@ sources:
 
 #[test]
 fn test_type_diagnostic_for_unknown_column() {
-    // Model must have a smelt.ref() so type_diagnostics doesn't skip it
-    // (models with no refs/sources reference only physical tables and are skipped)
+    // Model must have a smelt.ref() so type_diagnostics doesn't skip it.
+    // A reference to a non-existent column in an upstream fires UndeclaredColumn
+    // (the column is absent, not merely unresolvable by inference). Previously
+    // this also produced CannotInferType for the Unknown(Dynamic) column, but
+    // Unknown(Dynamic) is now diagnostic-free by construction (spec:
+    // function_schema_inference.md) — UndeclaredColumn is the correct signal.
     let (mut db, paths) = setup_multi_model(&[
         ("upstream", "SELECT 1 AS id"),
         ("model", "SELECT unknown_col FROM smelt.models.upstream"),
@@ -2754,10 +2758,10 @@ fn test_type_diagnostic_for_unknown_column() {
 
     let diags = db.type_diagnostics(paths[1].clone());
     assert!(
-        diags.iter().any(
-            |d| d.message.contains("Could not infer type") && d.message.contains("unknown_col")
-        ),
-        "Should produce a diagnostic for column with unknown type, got: {:?}",
+        diags
+            .iter()
+            .any(|d| d.code == Some(crate::DiagnosticCode::UndeclaredColumn)),
+        "A reference to a missing upstream column must produce UndeclaredColumn; got: {:?}",
         diags
     );
 }

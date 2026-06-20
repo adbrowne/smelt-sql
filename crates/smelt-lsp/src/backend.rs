@@ -236,6 +236,7 @@ impl Backend {
                 DbCode::UndefinedModelRef => "undefined-model-ref",
                 DbCode::UndefinedSource => "undefined-source",
                 DbCode::CannotInferType => "cannot-infer-type",
+                DbCode::ColumnTypeUnresolved => "column-type-unresolved",
                 DbCode::UndeclaredColumn => "undeclared-column",
                 DbCode::TypeMismatch => "type-mismatch",
                 DbCode::CircularDependency => "circular-dependency",

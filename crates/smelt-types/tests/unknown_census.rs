@@ -37,14 +37,21 @@ fn allowlist_path() -> PathBuf {
 /// classification = "legitimate"  # or "error"
 /// reason = "one-line explanation"
 /// ```
-fn load_allowlist(path: &std::path::Path) -> HashMap<String, (String, String)> {
+struct CensusEntry {
+    classification: String,
+    note: String,
+    discriminant: String,
+}
+
+fn load_allowlist(path: &std::path::Path) -> HashMap<String, CensusEntry> {
     let text = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Cannot read allowlist at {path:?}: {e}"));
 
-    let mut entries: HashMap<String, (String, String)> = HashMap::new();
+    let mut entries: HashMap<String, CensusEntry> = HashMap::new();
     let mut current_key: Option<String> = None;
     let mut current_class = String::new();
     let mut current_reason = String::new();
+    let mut current_disc = String::new();
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -56,11 +63,19 @@ fn load_allowlist(path: &std::path::Path) -> HashMap<String, (String, String)> {
         // Section header: ["crates/..."]
         if line.starts_with("[\"") && line.ends_with("\"]") {
             if let Some(key) = current_key.take() {
-                entries.insert(key, (current_class.clone(), current_reason.clone()));
+                entries.insert(
+                    key,
+                    CensusEntry {
+                        classification: current_class.clone(),
+                        note: current_reason.clone(),
+                        discriminant: current_disc.clone(),
+                    },
+                );
             }
             current_key = Some(line[2..line.len() - 2].to_string());
             current_class.clear();
             current_reason.clear();
+            current_disc.clear();
             continue;
         }
 
@@ -70,13 +85,21 @@ fn load_allowlist(path: &std::path::Path) -> HashMap<String, (String, String)> {
             match k {
                 "classification" => current_class = v.to_string(),
                 "reason" => current_reason = v.to_string(),
+                "discriminant" => current_disc = v.to_string(),
                 _ => {}
             }
         }
     }
 
     if let Some(key) = current_key {
-        entries.insert(key, (current_class, current_reason));
+        entries.insert(
+            key,
+            CensusEntry {
+                classification: current_class,
+                note: current_reason,
+                discriminant: current_disc,
+            },
+        );
     }
 
     entries
@@ -149,24 +172,26 @@ fn every_unknown_site_is_classified() {
         .collect();
     stale.sort_unstable();
     for site in &stale {
-        let (class, reason) = allowlist.get(*site).unwrap();
+        let entry = allowlist.get(*site).unwrap();
         failures.push(format!(
-            "STALE ALLOWLIST: {site} (was: {class}, \"{reason}\")\n  \
-             Remove it or update the line number in .claude/unknown-census.toml."
+            "STALE ALLOWLIST: {site} (was: {}, \"{}\")\n  \
+             Remove it or update the line number in .claude/unknown-census.toml.",
+            entry.classification, entry.note
         ));
     }
 
     // Every entry must have a non-empty classification
     let mut bad_class: Vec<&str> = allowlist
         .iter()
-        .filter(|(_, (class, _))| class != "legitimate" && class != "error")
+        .filter(|(_, e)| e.classification != "legitimate" && e.classification != "error")
         .map(|(k, _)| k.as_str())
         .collect();
     bad_class.sort_unstable();
     for site in &bad_class {
-        let (class, _) = allowlist.get(*site).unwrap();
+        let entry = allowlist.get(*site).unwrap();
         failures.push(format!(
-            "INVALID CLASSIFICATION: {site} has \"{class}\" — must be \"legitimate\" or \"error\""
+            "INVALID CLASSIFICATION: {site} has \"{}\" — must be \"legitimate\" or \"error\"",
+            entry.classification
         ));
     }
 
@@ -176,5 +201,56 @@ fn every_unknown_site_is_classified() {
          Run `.claude/scripts/unknown-census.sh` to see the current production sites.\n\
          Edit `.claude/unknown-census.toml` to bring the allowlist in sync.",
         failures.join("\n")
+    );
+}
+
+/// Every census entry must declare a `discriminant` — one of the closed
+/// `UnknownReason` values: `unresolved`, `dynamic`, or `propagated`.
+///
+/// A missing or invalid discriminant is an error: add
+/// `discriminant = "unresolved" | "dynamic" | "propagated"` to the entry.
+#[test]
+fn every_site_declares_a_discriminant() {
+    let allowlist = load_allowlist(&allowlist_path());
+    let valid = ["unresolved", "dynamic", "propagated"];
+    let mut bad: Vec<String> = allowlist
+        .iter()
+        .filter(|(_, e)| !valid.contains(&e.discriminant.as_str()))
+        .map(|(site, e)| {
+            format!(
+                "MISSING/INVALID DISCRIMINANT: {site} has {:?} — must be one of: unresolved, dynamic, propagated",
+                e.discriminant
+            )
+        })
+        .collect();
+    bad.sort();
+    assert!(
+        bad.is_empty(),
+        "Sites without a valid discriminant (add `discriminant = \"...\"` to each):\n{}",
+        bad.join("\n")
+    );
+}
+
+/// Any `classification = "error"` site must also declare
+/// `discriminant = "unresolved"` — an error site is a compiler-resolvable gap
+/// whose `Unknown` is not yet converted to a `ColumnTypeUnresolved` diagnostic.
+#[test]
+fn error_classification_implies_unresolved_discriminant() {
+    let allowlist = load_allowlist(&allowlist_path());
+    let mut bad: Vec<String> = allowlist
+        .iter()
+        .filter(|(_, e)| e.classification == "error" && e.discriminant != "unresolved")
+        .map(|(site, e)| {
+            format!(
+                "ERROR SITE NOT UNRESOLVED: {site} (classification=error but discriminant={:?})",
+                e.discriminant
+            )
+        })
+        .collect();
+    bad.sort();
+    assert!(
+        bad.is_empty(),
+        "error-classified sites must have discriminant=unresolved:\n{}",
+        bad.join("\n")
     );
 }

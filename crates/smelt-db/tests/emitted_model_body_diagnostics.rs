@@ -178,13 +178,15 @@ generates: models
 // Test 3: CannotInferType at SELECT-list item
 // ---------------------------------------------------------------------------
 
-/// A body whose SELECT list includes a column that cannot be typed (references
-/// an unbound identifier) produces exactly one `CannotInferType` warning.
+/// A body whose SELECT list references a column not present in the input schema
+/// produces `UndeclaredColumn`. (Previously this also produced `CannotInferType`
+/// for the Unknown(Dynamic) output column, but Unknown(Dynamic) is now
+/// diagnostic-free by construction per function_schema_inference.md.)
 #[test]
 fn cannot_infer_type_for_unknown_column() {
     let tmp = TempDir::new().expect("tempdir");
 
-    // `some_column` is unresolvable → the inferred type for the column is Unknown.
+    // `some_unresolvable_column` is absent from `smelt.orders` → UndeclaredColumn.
     let gen_src = r#"---
 generates: models
 ---
@@ -207,15 +209,15 @@ generates: models
 
     let analysis = emitted_model_body_analysis(&db, ws, gen_file, "x".to_string());
 
-    let cannot_infer: Vec<_> = analysis
+    let undeclared: Vec<_> = analysis
         .diagnostics
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::CannotInferType))
+        .filter(|d| d.code == Some(DiagnosticCode::UndeclaredColumn))
         .collect();
 
     assert!(
-        !cannot_infer.is_empty(),
-        "expected at least one CannotInferType diagnostic, got {} diagnostics: {:?}",
+        !undeclared.is_empty(),
+        "expected at least one UndeclaredColumn diagnostic, got {} diagnostics: {:?}",
         analysis.diagnostics.len(),
         analysis
             .diagnostics

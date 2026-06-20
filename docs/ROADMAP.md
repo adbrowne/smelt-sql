@@ -90,6 +90,17 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W3 — Diagnostics Codes, Ownership & Severities (D-diag) + `Unknown` Discriminant~~ ✅ (June 21, 2026)
+
+Seven-phase remediation plan ([plan](plans/20260613-w3-diagnostics.md)) plus a follow-up discriminant sub-plan ([plan](plans/20260620-unknown-reason-discriminant.md)) landing the D-diag cluster from the 2026-06-13 spec review (D-07/08/09/14/19/30/31):
+
+- **`HofNamedArgument` (D-19)** — a HOF call (`map`/`filter`/`reduce`) passing any argument by name fires the new `HofNamedArgument` (Error) before the kind check; named-lambda no longer silently accepted.
+- **Frontmatter routing (D-14, D-31)** — malformed function frontmatter now routes to `FrontmatterParseError` instead of `BackendsWideningNotAllowed`; `FrontmatterParseError` is Error in all cases (no Warning path).
+- **Directory-scoped `DuplicateFunctionDefinition` (D-30)** — two `smelt.define`s collide only when they share a name in the same directory; same name in different directories is allowed.
+- **D-08/D-09 cleanup** — `smelt.source()` call-form retired; bare unresolved `smelt.<path>` routes `smelt.sources.*` → `UndefinedSource`, else → `UndefinedModelRef`.
+- **`Unknown` reason-discriminant (D-07 prerequisite)** — `DataType::Unknown` carries a closed three-way reason (`Unresolved`/`Dynamic`/`Propagated`) with reason-agnostic type identity (LUB/dedup unaffected). Census-as-reason-map: every construction site declares its reason in `.claude/unknown-census.toml`; guard enforces reason presence + `error`→`unresolved` constraint.
+- **`ColumnTypeUnresolved` wired (D-07)** — `DiagnosticCode::ColumnTypeUnresolved` (Error) is minted and fires at schema-layer projections producing `Unknown(Unresolved)` columns. `Unknown(Dynamic)` and `Unknown(Propagated)` are now diagnostic-free by construction (no more `CannotInferType` for those; `CannotInferType` retained for `None` data_type columns).
+
 ### ~~Spec-Remediation W5 — Python Model Reconciliation~~ ✅ (June 15, 2026)
 
 Five-phase remediation plan ([plan](plans/20260613-w5-python-models.md)) landing the D-python cluster from the 2026-06-13 spec review (D-22/23/25/26/27):

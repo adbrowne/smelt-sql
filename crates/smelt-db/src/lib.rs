@@ -904,10 +904,18 @@ pub fn project_sql_address_index(
     for file in workspace.files(db).iter().copied() {
         let file_path = file.path(db);
         // Mirror the resolver's file filter: SQL models, Python models (whose
-        // content is generated SQL), and virtual `*.sql::model` split paths.
+        // content is generated SQL), virtual `*.sql::model` split paths, and
+        // virtual `*.py::name` paths for Python-emitted models.
+        // Note: Path::extension() on "py_source.py::py_source" returns
+        // "py::py_source" (everything after the last dot), not "py", so the
+        // .py:: check is required to catch Python virtual paths.
         let path_str = file_path.to_str().unwrap_or("");
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "sql" && ext != "py" && !path_str.contains(".sql::") {
+        if ext != "sql"
+            && ext != "py"
+            && !path_str.contains(".sql::")
+            && !path_str.contains(".py::")
+        {
             continue;
         }
         let Some(tuple) = file_path_tuple(&project_root, file_path, file, db, &scan_roots) else {

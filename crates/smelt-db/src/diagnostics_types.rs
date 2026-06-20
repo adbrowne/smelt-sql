@@ -12,6 +12,15 @@ pub enum DiagnosticCode {
     UndefinedModelRef,
     UndefinedSource,
     CannotInferType,
+    /// Emitted (Error) when a schema-layer projection produces a column whose
+    /// type is `Unknown` for a **compiler-resolvable** reason (`UnknownReason::Unresolved`)
+    /// — i.e. the current inference rules cannot type it, but a better rule
+    /// could. Distinguished from genuinely-dynamic `Unknown` (`Dynamic`/`Propagated`)
+    /// which are diagnostic-free by construction. Anchored at the projection
+    /// (SELECT item) that produced the column. Owned by
+    /// `function_schema_inference.md` (schema-propagation rules) and `types.md`
+    /// (the `Unknown` reason-discriminant).
+    ColumnTypeUnresolved,
     UndeclaredColumn,
     TypeMismatch,
     CircularDependency,
