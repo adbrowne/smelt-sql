@@ -262,7 +262,7 @@ pub use queries::function_diagnostics::{
 };
 pub use queries::functions::{
     file_signature_inputs, function_body, function_signature, functions_in_file, resolve_function,
-    resolve_function_path, BodyRange, NameRange,
+    resolve_function_path, workspace_function_signatures, BodyRange, NameRange,
 };
 pub use queries::loader::{
     loader_call_diagnostics_for_file, loader_call_diagnostics_for_file_with_content,
@@ -279,10 +279,10 @@ pub use queries::project::{
     models_with_tag, project_active_backends, project_address_collisions,
     project_emitted_name_collisions, project_paths, project_seeds, project_source_diagnostics,
     project_sources, project_unstable_schema, resolve_seed_or_source_path, smelt_yml_vars_query,
-    sources_all, sources_config, sources_type_errors, sources_with_tag, sources_yaml_error,
-    AddressCollisionDiagnostic, EmissionBodyAnalysis, EmittedModelDef, EmittedModelsResult,
-    EmittedNameCollisionDiagnostic, EvaluatedGenerator, SourceDiagnostic, SourceTypeError,
-    YamlParseError,
+    sorted_workspace_files, sources_all, sources_config, sources_type_errors, sources_with_tag,
+    sources_yaml_error, AddressCollisionDiagnostic, EmissionBodyAnalysis, EmittedModelDef,
+    EmittedModelsResult, EmittedNameCollisionDiagnostic, EvaluatedGenerator, SourceDiagnostic,
+    SourceTypeError, YamlParseError,
 };
 pub use queries::schema::{
     add_source_info_to_type_context, apply_outer_join_nullability, available_columns,
@@ -738,40 +738,17 @@ pub fn resolve_ref_path(
             }
         }
 
-        // SQL files: walk every workspace file, compute its
-        // workspace-relative path tuple, and compare.
-        for file in workspace.files(db).iter().copied() {
-            let file_path = file.path(db);
-            // Accept .sql files, .py files (Python models whose content is
-            // generated SQL), virtual `*.sql::model_name` paths created by
-            // multi-model file splitting, and `*.py::model_name` virtual paths
-            // created for Python-emitted models in the combined discovery loop.
-            // Note: Path::extension() on `source.py::model_name` returns
-            // `py::model_name` (everything after the last dot), not `py`, so
-            // the bare `ext != "py"` check is insufficient for virtual paths.
-            let path_str = file_path.to_str().unwrap_or("");
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext != "sql"
-                && ext != "py"
-                && !path_str.contains(".sql::")
-                && !path_str.contains(".py::")
-            {
-                continue;
-            }
-            // Match if file_path lives under project_root.
-            let file_tuple = match file_path_tuple(&project_root, file_path, file, db, &scan_roots)
-            {
-                Some(t) => t,
-                None => continue,
-            };
-            if file_tuple == path {
-                let kind = sql_file_kind(db, file);
-                return Some(ResolvedRef {
-                    kind,
-                    source_file: Some(file),
-                    path,
-                });
-            }
+        // SQL files: O(1) lookup in the per-project address index instead of
+        // rescanning every workspace file and recomputing its path tuple.
+        // The index (`project_sql_address_index`) is a workspace-keyed tracked
+        // query, so the scan runs once per revision rather than once per ref —
+        // collapsing cold ref resolution from O(files × refs) to O(refs).
+        if let Some((kind, file)) = project_sql_address_index(db, workspace, project).get(&path) {
+            return Some(ResolvedRef {
+                kind: *kind,
+                source_file: Some(*file),
+                path,
+            });
         }
 
         // Generator-emitted models: check the W3 emission survivors for a path
@@ -901,6 +878,45 @@ fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
     }
     // 3. Default: Model.
     RefKind::Model
+}
+
+/// One-pass index from a project's SQL-file path tuples to their
+/// `(RefKind, SourceFile)`, keyed on the [`Workspace`] + [`ProjectInput`].
+///
+/// `resolve_ref_path` previously rescanned **every** workspace file (computing
+/// `file_path_tuple` for each) on every call, making a cold diagnostics pass
+/// O(files × refs × files) — the dominant `std::path` cost in the Initial Load
+/// benchmark. Hoisting that scan into one workspace-keyed query collapses the
+/// per-ref cost to an O(1) `HashMap` lookup; the scan runs once per revision and
+/// is shared by every resolver call. This mirrors `workspace_function_signatures`.
+///
+/// First-writer-wins on tuple collisions, preserving the original loop's
+/// "first matching file in `workspace.files` order wins" semantics.
+#[salsa::tracked]
+pub fn project_sql_address_index(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: ProjectInput,
+) -> Arc<HashMap<Vec<String>, (RefKind, SourceFile)>> {
+    let project_root = project.root(db).clone();
+    let scan_roots = project_paths(db, project);
+    let mut map: HashMap<Vec<String>, (RefKind, SourceFile)> = HashMap::new();
+    for file in workspace.files(db).iter().copied() {
+        let file_path = file.path(db);
+        // Mirror the resolver's file filter: SQL models, Python models (whose
+        // content is generated SQL), and virtual `*.sql::model` split paths.
+        let path_str = file_path.to_str().unwrap_or("");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "sql" && ext != "py" && !path_str.contains(".sql::") {
+            continue;
+        }
+        let Some(tuple) = file_path_tuple(&project_root, file_path, file, db, &scan_roots) else {
+            continue;
+        };
+        map.entry(tuple)
+            .or_insert_with(|| (sql_file_kind(db, file), file));
+    }
+    Arc::new(map)
 }
 
 /// Find every canonical `smelt.<path>` address in `workspace` whose leaf

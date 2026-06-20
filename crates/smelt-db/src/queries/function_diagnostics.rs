@@ -14,7 +14,7 @@ use smelt_types::{DataType, TypedColumn};
 
 use crate::queries::functions::file_signature_inputs;
 use crate::queries::parse::parse_file;
-use crate::queries::project::{project_paths, sources_config};
+use crate::queries::project::{project_paths, sorted_workspace_files, sources_config};
 use crate::queries::schema::{
     resolved_model_schema, type_context, RefSchemaProvider, SalsaRefSchemaProvider,
 };
@@ -39,8 +39,7 @@ pub fn workspace_function_diagnostics(
     db: &dyn salsa::Database,
     workspace: Workspace,
 ) -> Arc<Vec<(PathBuf, Diagnostic)>> {
-    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    let files = sorted_workspace_files(db, workspace);
 
     // D-30: `smelt.define` uniqueness is directory-scoped; `smelt.extern`
     // uniqueness is workspace-wide. Two defines in different directories may
@@ -49,7 +48,7 @@ pub fn workspace_function_diagnostics(
     let mut seen_externs: HashMap<String, PathBuf> = HashMap::new();
     let mut diagnostics: Vec<(PathBuf, Diagnostic)> = Vec::new();
 
-    for f in files {
+    for f in files.iter().copied() {
         let path = f.path(db).clone();
         let sigs = file_signature_inputs(db, f);
         for sig in sigs.iter() {
@@ -204,8 +203,7 @@ pub fn function_body_diagnostics_for_file(
     // body contains a `smelt.functions.*` call to a Tier 1 callee, we expand
     // it using the Tier 2 context's concrete parameter types so errors cascade
     // to the Tier 2 body check site with full frame stacks.
-    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    let files = sorted_workspace_files(db, workspace);
 
     // Project isolation rule: function resolution is scoped to the project
     // containing the file under analysis. See
@@ -247,7 +245,7 @@ pub fn function_body_diagnostics_for_file(
         if cycle_set.contains(&sig.name) {
             return None;
         }
-        for f in &files {
+        for f in files.iter() {
             let sigs = file_signature_inputs(db, *f);
             if sigs.iter().any(|s| s.name == sig.name) {
                 let f_text = f.text(db);
@@ -280,7 +278,7 @@ pub fn function_body_diagnostics_for_file(
     };
 
     let decl_lookup = |sig: &smelt_types::signatures::FunctionSig| -> Option<std::path::PathBuf> {
-        for f in &files {
+        for f in files.iter() {
             let sigs = file_signature_inputs(db, *f);
             if sigs.iter().any(|s| s.name == sig.name) {
                 return Some(f.path(db).clone());
@@ -346,7 +344,7 @@ pub fn function_body_diagnostics_for_file(
         }
     };
     let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
-        for f in &files {
+        for f in files.iter() {
             let sigs = file_signature_inputs(db, *f);
             if !sigs.iter().any(|s| s.name == name) {
                 continue;
@@ -1028,8 +1026,7 @@ pub fn missing_provenance_advisory_for_file(
 
             // Check if the function has declared provenance.
             // Sort by path to match resolve_function's deterministic "first wins" order.
-            let mut sorted_files: Vec<SourceFile> = workspace.files(db).to_vec();
-            sorted_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+            let sorted_files = sorted_workspace_files(db, workspace);
             let has_provenance = sorted_files
                 .iter()
                 .copied()
@@ -1286,9 +1283,8 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // can resolve nested function returns. Iterating all files is O(N) but
     // only runs when a call site is present — pure function files with no
     // calls skip this entirely.
-    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
-    for f in &files {
+    let files = sorted_workspace_files(db, workspace);
+    for f in files.iter() {
         let sigs = file_signature_inputs(db, *f);
         for sig in sigs.iter() {
             ctx.add_function_signature(&sig.name, sig.clone());
@@ -1345,7 +1341,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             return None;
         }
         // Find the file declaring this function.
-        for f in &files {
+        for f in files.iter() {
             let sigs = file_signature_inputs(db, *f);
             if sigs.iter().any(|s| s.name == sig.name) {
                 let f_text = f.text(db);
@@ -1387,7 +1383,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // and the LSP use these to build outer-to-inner frame trailers and
     // `DiagnosticRelatedInformation` entries linking back to each declaration.
     let decl_lookup = |sig: &smelt_types::signatures::FunctionSig| -> Option<std::path::PathBuf> {
-        for f in &files {
+        for f in files.iter() {
             let sigs = file_signature_inputs(db, *f);
             if sigs.iter().any(|s| s.name == sig.name) {
                 return Some(f.path(db).clone());
@@ -1606,7 +1602,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
         }
     };
     let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
-        for f in &files {
+        for f in files.iter() {
             let sigs = file_signature_inputs(db, *f);
             if !sigs.iter().any(|s| s.name == name) {
                 continue;

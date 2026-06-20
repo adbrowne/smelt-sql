@@ -15,11 +15,88 @@
 //!      legacy parser path.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use smelt_db::{
-    file_diagnostics, model_schema, resolve_ref_path, Database, DiagnosticCode, RefKind,
-    ResolvedRef, SourceFile, Workspace,
+    file_diagnostics, model_schema, project_sql_address_index, resolve_ref_path,
+    sorted_workspace_files, Database, DiagnosticCode, RefKind, ResolvedRef, SourceFile, Workspace,
 };
+
+#[test]
+fn project_sql_address_index_maps_tuples_to_files() {
+    // The workspace-keyed SQL address index maps each model's path tuple to
+    // its (kind, file), so `resolve_ref_path` can look a ref up in O(1)
+    // instead of rescanning every workspace file. This is the equivalence
+    // contract the resolver relies on.
+    let root = PathBuf::from("/fake/project");
+    let users = root.join("models").join("users.sql");
+    let orders = root.join("models").join("staging").join("orders.sql");
+
+    let (db, ws, _files) = build_db(
+        root.clone(),
+        &[
+            (users.clone(), "SELECT 1 AS id\n"),
+            (orders.clone(), "SELECT 1 AS oid\n"),
+        ],
+    );
+    let project = db.project_input(&root).expect("project registered");
+    let index = project_sql_address_index(&db, ws, project);
+
+    let u = index
+        .get(&vec!["models".to_string(), "users".to_string()])
+        .expect("users indexed under its path tuple");
+    assert_eq!(u.0, RefKind::Model);
+    assert_eq!(u.1.path(&db), &users);
+
+    let o = index
+        .get(&vec![
+            "models".to_string(),
+            "staging".to_string(),
+            "orders".to_string(),
+        ])
+        .expect("nested model indexed under its full path tuple");
+    assert_eq!(o.0, RefKind::Model);
+    assert_eq!(o.1.path(&db), &orders);
+
+    assert!(index
+        .get(&vec!["models".to_string(), "missing".to_string()])
+        .is_none());
+}
+
+#[test]
+fn sorted_workspace_files_is_sorted_and_memoized() {
+    // `sorted_workspace_files` returns the workspace's files ordered by
+    // absolute path (byte-lexicographic), regardless of registration order,
+    // and memoizes the result within a revision so all per-file/per-workspace
+    // diagnostic queries can share one sorted list instead of re-sorting.
+    let root = PathBuf::from("/fake/project");
+    let zeta = root.join("models").join("zeta.sql");
+    let alpha = root.join("models").join("alpha.sql");
+    let mid = root.join("models").join("staging").join("mid.sql");
+
+    // Register OUT of path order on purpose.
+    let (db, ws, _files) = build_db(
+        root,
+        &[
+            (zeta.clone(), "SELECT 1 AS z\n"),
+            (alpha.clone(), "SELECT 1 AS a\n"),
+            (mid.clone(), "SELECT 1 AS m\n"),
+        ],
+    );
+
+    let sorted = sorted_workspace_files(&db, ws);
+    let paths: Vec<&PathBuf> = sorted.iter().map(|f| f.path(&db)).collect();
+    let mut expected = vec![&zeta, &alpha, &mid];
+    expected.sort();
+    assert_eq!(paths, expected, "files must be ordered by absolute path");
+
+    // Two calls within one revision return the memoized Arc (pointer-eq).
+    let sorted2 = sorted_workspace_files(&db, ws);
+    assert!(
+        Arc::ptr_eq(&sorted, &sorted2),
+        "Salsa should memoize the sorted list within a revision (same Arc)"
+    );
+}
 
 fn build_db(
     project_root: PathBuf,

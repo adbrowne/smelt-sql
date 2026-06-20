@@ -697,6 +697,27 @@ impl EmittedModelsResult {
     }
 }
 
+/// Workspace-keyed list of all `SourceFile`s ordered by absolute path
+/// (byte-lexicographic).
+///
+/// The diagnostic and resolution queries iterate workspace files in
+/// path-sorted order for deterministic "first match wins" semantics. Each of
+/// those queries previously re-sorted `workspace.files()` itself; on a cold
+/// pass that re-ran the `PathBuf::cmp` sort once per file (and once per
+/// workspace-level query), making the sort a measurable fraction of initial
+/// load. Routing every path-sort through this one memoized query collapses
+/// them to a single sort per revision. Project-scoped callers filter the
+/// shared list after the sort, which preserves their ordering.
+#[salsa::tracked]
+pub fn sorted_workspace_files(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+) -> Arc<Vec<SourceFile>> {
+    let mut files = workspace.files(db).to_vec();
+    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    Arc::new(files)
+}
+
 /// W1: Discover generator files in the workspace.
 ///
 /// Returns the subset of `workspace.files()` whose file content routes to
@@ -705,8 +726,10 @@ impl EmittedModelsResult {
 /// deterministic W3 iteration order.
 #[salsa::tracked]
 pub fn generator_files(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Vec<SourceFile>> {
-    let mut gen_files: Vec<SourceFile> = workspace
-        .files(db)
+    // Iterate the shared path-sorted workspace list so generator files keep
+    // their deterministic W3 cross-file ordering; filtering after the sort
+    // preserves that order.
+    let gen_files: Vec<SourceFile> = sorted_workspace_files(db, workspace)
         .iter()
         .copied()
         .filter(|&file| {
@@ -717,8 +740,6 @@ pub fn generator_files(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Ve
             )
         })
         .collect();
-    // Sort by absolute path for deterministic W3 cross-file ordering.
-    gen_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
     Arc::new(gen_files)
 }
 
@@ -2363,8 +2384,7 @@ pub fn emitted_model_body_analysis(
     let provider = SalsaRefSchemaProvider::new_for_file(db, workspace, generator_file);
 
     // Gather all workspace function signatures (path-sorted for determinism).
-    let mut wsp_files: Vec<SourceFile> = workspace.files(db).to_vec();
-    wsp_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    let wsp_files = sorted_workspace_files(db, workspace);
     let all_function_sigs: Vec<Arc<Vec<FunctionSig>>> = wsp_files
         .iter()
         .map(|f| file_signature_inputs(db, *f))

@@ -9,6 +9,7 @@ use smelt_parser::{self, File as AstFile};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
 
 use crate::queries::parse::parse_file;
+use crate::queries::project::sorted_workspace_files;
 use crate::{SourceFile, Workspace};
 
 // ============================================================================
@@ -59,6 +60,37 @@ pub fn file_signature_inputs(db: &dyn salsa::Database, file: SourceFile) -> Arc<
 #[salsa::tracked]
 pub fn functions_in_file(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<FunctionSig>> {
     file_signature_inputs(db, file)
+}
+
+/// Every `smelt.define` function signature declared anywhere in the workspace,
+/// gathered once per [`Workspace`] in sorted-file order.
+///
+/// Keyed on the **workspace** (not a file), so the scan over all workspace
+/// files runs a single time per revision and is shared by every per-file
+/// consumer — `type_context` and
+/// `SalsaRefSchemaProvider::all_function_signatures`. Without this aggregation
+/// each of the N per-file `type_context` computations re-walked all N files
+/// calling `file_signature_inputs`, making a cold diagnostics pass O(N^2) in
+/// both wall-clock and Salsa dependency edges (each `type_context` recorded a
+/// dependency on every file's signatures). Routing through one workspace-keyed
+/// query collapses that to O(N): one scan, N dependents.
+///
+/// Aggregating `file_signature_inputs` (rather than re-parsing) preserves the
+/// §20H invalidation hinge — body-only edits backdate at the per-file boundary
+/// and do not re-run this query.
+#[salsa::tracked]
+pub fn workspace_function_signatures(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+) -> Arc<Vec<FunctionSig>> {
+    let files = sorted_workspace_files(db, workspace);
+    let mut sigs = Vec::new();
+    for f in files.iter() {
+        for sig in file_signature_inputs(db, *f).iter() {
+            sigs.push(sig.clone());
+        }
+    }
+    Arc::new(sigs)
 }
 
 /// Look up a single function's signature by name within one file.
@@ -141,14 +173,12 @@ pub fn resolve_function(
     name: String,
 ) -> Option<Arc<FunctionSig>> {
     let project_root = project.root(db);
-    let mut files: Vec<SourceFile> = workspace
-        .files(db)
+    let files = sorted_workspace_files(db, workspace);
+    for f in files
         .iter()
         .copied()
         .filter(|f| f.project_root(db) == project_root)
-        .collect();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
-    for f in files {
+    {
         let sigs = file_signature_inputs(db, f);
         if let Some(sig) = sigs.iter().find(|s| s.name == name) {
             return Some(Arc::new(sig.clone()));
@@ -182,14 +212,12 @@ pub fn resolve_function_path(
     name: String,
 ) -> Option<(SourceFile, NameRange)> {
     let project_root = project.root(db);
-    let mut files: Vec<SourceFile> = workspace
-        .files(db)
+    let files = sorted_workspace_files(db, workspace);
+    for f in files
         .iter()
         .copied()
         .filter(|f| f.project_root(db) == project_root)
-        .collect();
-    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
-    for f in files {
+    {
         let parse = parse_file(db, f);
         let Some(ast) = AstFile::cast(parse.syntax()) else {
             continue;
