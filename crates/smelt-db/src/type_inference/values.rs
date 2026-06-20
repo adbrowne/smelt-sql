@@ -78,7 +78,7 @@ pub fn infer_values_columns(
         .iter()
         .map(|expr| {
             infer_expression_type(expr, ctx).unwrap_or(TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             })
         })
@@ -365,7 +365,7 @@ pub fn check_mixed_temporal_values_diagnostics(
                 .iter()
                 .filter_map(|row| row.get(col_idx))
                 .filter_map(|expr| infer_expression_type(expr, ctx))
-                .filter(|tc| !matches!(tc.data_type, DataType::Unknown | DataType::Null))
+                .filter(|tc| !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null))
                 .map(|tc| tc.data_type)
                 .collect();
 

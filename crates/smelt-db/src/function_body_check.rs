@@ -526,32 +526,32 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `Ordered` (Phase 7) currently has no precise stand-in type —
         // treat it like `Any` in the body checker until Phase 8 adds the
         // generics plumbing that actually binds `T` from call-site args.
-        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
-        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
+        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `TableExpr` (Phase 15) params are bound as FROM-scope entries,
         // not as `function_params`. When reached here (e.g. by the
         // unified Tier-1 body seeder) we fall back to `Unknown`.
-        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
+        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `SelectItems<Kind>` (Phase 21) params are list-typed; fall back to Unknown.
-        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
+        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `Struct<{…}>` (Phase 35) params — runtime type unknown until Phase 36.
-        Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown,
+        Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // runtime DataType equivalent in Phase A.
-        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
+        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `Lambda<params, U>` (Phase B/F meta-language) — meta-only; not a valid parameter sort.
-        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
+        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
+        Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ModelRef` / `SourceRef` (Phase D meta-language) — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown,
+        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
         // Inference wiring lands in Phase 3/5.
-        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown,
+        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ModelDef` — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown,
-        Some(Err(_)) => DataType::Unknown,
-        None => DataType::Unknown,
+        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Err(_)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        None => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
     }
 }
 
@@ -1087,7 +1087,7 @@ pub fn check_smelt_path_call(
                 .map(|a| {
                     infer_expression_type(a, ctx)
                         .map(|t| t.data_type)
-                        .unwrap_or(DataType::Unknown)
+                        .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic))
                 })
                 .collect();
 
@@ -1371,7 +1371,7 @@ pub fn check_smelt_path_call(
                     if concrete_fields.is_empty() {
                         body_ctx.add_function_param(
                             &param.name,
-                            TypedColumn::nullable(DataType::Unknown),
+                            TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)),
                         );
                         frame_bindings.push((param.name.clone(), "Struct<unknown>".to_string()));
                     } else {
@@ -1380,7 +1380,7 @@ pub fn check_smelt_path_call(
                             Ok(extras_opt) => {
                                 body_ctx.add_function_param(
                                     &param.name,
-                                    TypedColumn::nullable(DataType::Unknown),
+                                    TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)),
                                 );
                                 if let (StructRowTail::Named(var_name), Some(extras)) =
                                     (tail, extras_opt)
@@ -1406,7 +1406,7 @@ pub fn check_smelt_path_call(
                     }
                 } else {
                     body_ctx
-                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)));
                     frame_bindings.push((param.name.clone(), "Struct<?>".to_string()));
                 }
             } else if !param.has_default {
@@ -1431,15 +1431,15 @@ pub fn check_smelt_path_call(
             Some((arg_expr, arg_range)) => {
                 let arg_typed = infer_expression_type(arg_expr, ctx);
                 let arg_nullable = arg_typed.as_ref().map(|t| t.nullable).unwrap_or(true);
-                let arg_type = arg_typed.map(|t| t.data_type).unwrap_or(DataType::Unknown);
+                let arg_type = arg_typed.map(|t| t.data_type).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
 
                 let constraint_violation = match &param.type_ref {
                     Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(expected)))) => {
-                        !matches!(arg_type, DataType::Unknown | DataType::Null)
+                        !matches!(arg_type, DataType::Unknown(_) | DataType::Null)
                             && !types_assignment_compatible(expected, &arg_type)
                     }
                     Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => {
-                        !matches!(arg_type, DataType::Unknown | DataType::Null)
+                        !matches!(arg_type, DataType::Unknown(_) | DataType::Null)
                             && !arg_type.is_numeric()
                     }
                     Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => false,
@@ -1471,7 +1471,7 @@ pub fn check_smelt_path_call(
                         data: None,
                     });
                     body_ctx
-                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)));
                     frame_bindings.push((param.name.clone(), arg_type.to_string()));
                     continue;
                 }
@@ -1480,7 +1480,7 @@ pub fn check_smelt_path_call(
                 // non-nullable argument. Skip Unknown/Null-typed args (can't tell).
                 if param.not_null
                     && arg_nullable
-                    && !matches!(arg_type, DataType::Unknown | DataType::Null)
+                    && !matches!(arg_type, DataType::Unknown(_) | DataType::Null)
                 {
                     diagnostics.push(Diagnostic {
                         severity: DiagnosticSeverity::Error,
@@ -1495,7 +1495,7 @@ pub fn check_smelt_path_call(
                         data: None,
                     });
                     body_ctx
-                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)));
                     frame_bindings.push((param.name.clone(), arg_type.to_string()));
                     continue;
                 }
@@ -1516,10 +1516,10 @@ pub fn check_smelt_path_call(
                         data: None,
                     });
                     body_ctx
-                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)));
                     frame_bindings.push((param.name.clone(), "<missing>".to_string()));
                 } else {
-                    let dt = default_type_lookup(&sig, &param.name).unwrap_or(DataType::Unknown);
+                    let dt = default_type_lookup(&sig, &param.name).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
                     body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt.clone()));
                     frame_bindings.push((param.name.clone(), format!("{} (default)", dt)));
                 }
@@ -2541,7 +2541,7 @@ pub fn infer_splice_contexts(
                         c.name.clone(),
                         c.data_type
                             .clone()
-                            .unwrap_or_else(|| TypedColumn::nullable(DataType::Unknown)),
+                            .unwrap_or_else(|| TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic))),
                     )
                 })
                 .collect()
@@ -2927,7 +2927,7 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr) -> Vec<Diagnostic
     let inferred_nullable = inferred_col.nullable;
 
     // Unknown / Null bodies can't be verified.
-    if matches!(inferred, DataType::Unknown | DataType::Null) {
+    if matches!(inferred, DataType::Unknown(_) | DataType::Null) {
         return Vec::new();
     }
 
@@ -3164,7 +3164,7 @@ pub fn check_hof_column_ref_field_diagnostics(select_stmt: &SelectStmt) -> Vec<D
         lambda_ctx.add_function_param(
             &param_name,
             TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             },
         );

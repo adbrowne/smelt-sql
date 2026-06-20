@@ -506,12 +506,12 @@ pub fn infer_select_output_schema(
 
         let typed_col = if let Some(expr) = item.expression() {
             infer_expression_type(&expr, &inner_ctx).unwrap_or(TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             })
         } else {
             TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             }
         };
@@ -635,13 +635,13 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
 /// - Unknown + T → T (Unknown is dominated by any known type)
 pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
     // If either is Unknown or Null, prefer the other (Null makes result nullable)
-    if matches!(t1.data_type, DataType::Unknown | DataType::Null) {
+    if matches!(t1.data_type, DataType::Unknown(_) | DataType::Null) {
         return TypedColumn {
             data_type: t2.data_type.clone(),
             nullable: t1.nullable || t2.nullable || matches!(t1.data_type, DataType::Null),
         };
     }
-    if matches!(t2.data_type, DataType::Unknown | DataType::Null) {
+    if matches!(t2.data_type, DataType::Unknown(_) | DataType::Null) {
         return TypedColumn {
             data_type: t1.data_type.clone(),
             nullable: t1.nullable || t2.nullable || matches!(t2.data_type, DataType::Null),
@@ -741,11 +741,11 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
                     with_timezone: false,
                 }
             }
-            _ => DataType::Unknown,
+            _ => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         },
 
         // For incompatible type families, return Unknown (could be an error in strict mode)
-        _ => DataType::Unknown,
+        _ => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
     };
 
     TypedColumn {
@@ -766,12 +766,12 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
         for item in select_list.items() {
             let typed_col = if let Some(expr) = item.expression() {
                 infer_expression_type(&expr, ctx).unwrap_or(TypedColumn {
-                    data_type: DataType::Unknown,
+                    data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                     nullable: true,
                 })
             } else {
                 TypedColumn {
-                    data_type: DataType::Unknown,
+                    data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                     nullable: true,
                 }
             };
@@ -863,11 +863,11 @@ pub fn check_mixed_tz_setop_diagnostics(
     // For each column position, check for a naive/tz-aware mismatch.
     for (i, (l, r)) in left_types.iter().zip(right_types.iter()).enumerate() {
         let l_dt = match l {
-            Some(tc) if !matches!(tc.data_type, DataType::Unknown) => &tc.data_type,
+            Some(tc) if !matches!(tc.data_type, DataType::Unknown(_)) => &tc.data_type,
             _ => continue,
         };
         let r_dt = match r {
-            Some(tc) if !matches!(tc.data_type, DataType::Unknown) => &tc.data_type,
+            Some(tc) if !matches!(tc.data_type, DataType::Unknown(_)) => &tc.data_type,
             _ => continue,
         };
 
@@ -931,7 +931,7 @@ pub fn check_mixed_tz_case_diagnostics(
         for when_clause in case_expr.when_clauses() {
             if let Some(result_expr) = when_clause.result() {
                 if let Some(tc) = infer_expression_type(&result_expr, ctx) {
-                    if !matches!(tc.data_type, DataType::Unknown | DataType::Null) {
+                    if !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null) {
                         branch_types.push(tc.data_type.clone());
                     }
                 }
@@ -939,7 +939,7 @@ pub fn check_mixed_tz_case_diagnostics(
         }
         if let Some(else_expr) = case_expr.else_expr() {
             if let Some(tc) = infer_expression_type(&else_expr, ctx) {
-                if !matches!(tc.data_type, DataType::Unknown | DataType::Null) {
+                if !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null) {
                     branch_types.push(tc.data_type.clone());
                 }
             }

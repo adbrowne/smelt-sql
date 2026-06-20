@@ -923,8 +923,8 @@ pub fn plan_schema_operations(
                 operations.push(SchemaOperation::RemoveColumn { name: name.clone() });
             }
             SchemaChange::ChangeType { name, from, to } => {
-                let from_dt = parse_type(from).unwrap_or(DataType::Unknown);
-                let to_dt = parse_type(to).unwrap_or(DataType::Unknown);
+                let from_dt = parse_type(from).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                let to_dt = parse_type(to).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
 
                 if is_safe_type_widening(&from_dt.normalize(), &to_dt.normalize()) {
                     operations.push(SchemaOperation::WidenColumnType {
@@ -968,8 +968,8 @@ pub fn plan_schema_operations(
             SchemaChange::ArrayElementTypeChange {
                 column, from, to, ..
             } => {
-                let from_dt = parse_type(from).unwrap_or(DataType::Unknown);
-                let to_dt = parse_type(to).unwrap_or(DataType::Unknown);
+                let from_dt = parse_type(from).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                let to_dt = parse_type(to).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
                 let from_arr = DataType::Array(Box::new(from_dt));
                 let to_arr = DataType::Array(Box::new(to_dt));
 
@@ -997,8 +997,8 @@ pub fn plan_schema_operations(
             SchemaChange::MapValueTypeChange {
                 column, from, to, ..
             } => {
-                let from_dt = parse_type(from).unwrap_or(DataType::Unknown);
-                let to_dt = parse_type(to).unwrap_or(DataType::Unknown);
+                let from_dt = parse_type(from).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                let to_dt = parse_type(to).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
 
                 if is_safe_type_widening(&from_dt.normalize(), &to_dt.normalize()) {
                     // Map value widening operates on the whole column
@@ -1052,8 +1052,8 @@ pub fn plan_schema_operations(
                         from,
                         to,
                     } => {
-                        let from_dt = parse_type(from).unwrap_or(DataType::Unknown);
-                        let to_dt = parse_type(to).unwrap_or(DataType::Unknown);
+                        let from_dt = parse_type(from).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                        let to_dt = parse_type(to).unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
                         if is_safe_type_widening(&from_dt.normalize(), &to_dt.normalize()) {
                             operations.push(SchemaOperation::WidenNestedType {
                                 column: column.clone(),
@@ -3589,7 +3589,7 @@ mod tests {
             matches!(
                 op,
                 SchemaOperation::AddColumn {
-                    data_type: DataType::Unknown,
+                    data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                     ..
                 }
             )
@@ -3623,7 +3623,7 @@ mod tests {
             matches!(
                 op,
                 SchemaOperation::AddStructField {
-                    field_type: DataType::Unknown,
+                    field_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                     ..
                 }
             )

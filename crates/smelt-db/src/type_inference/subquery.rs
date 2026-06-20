@@ -69,7 +69,7 @@ pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext
                             &cte_name,
                             &col_name,
                             TypedColumn {
-                                data_type: DataType::Unknown,
+                                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                                 nullable: true,
                             },
                         );

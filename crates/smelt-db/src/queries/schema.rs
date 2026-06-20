@@ -533,7 +533,7 @@ impl SalsaRefSchemaProvider<'_> {
                     Some(Ok(SmeltType::Expr(
                         smelt_types::signatures::TypeConstraint::Concrete(dt),
                     ))) => dt.clone(),
-                    _ => DataType::Unknown,
+                    _ => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 };
                 body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt));
             }
@@ -596,7 +596,7 @@ impl SalsaRefSchemaProvider<'_> {
                 (
                     c.name.clone(),
                     c.data_type.clone().unwrap_or(TypedColumn {
-                        data_type: DataType::Unknown,
+                        data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                         nullable: true,
                     }),
                 )
@@ -622,7 +622,7 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
                 .iter()
                 .map(|col| {
                     let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
-                        data_type: DataType::Unknown,
+                        data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                         nullable: true,
                     });
                     (col.name.clone(), typed_col)
@@ -721,7 +721,7 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
                     .iter()
                     .map(|col| {
                         let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
-                            data_type: DataType::Unknown,
+                            data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                             nullable: true,
                         });
                         (col.name.clone(), typed_col)
@@ -802,7 +802,7 @@ pub fn build_type_context(
     for source in &sources_config.sources {
         for table in &source.tables {
             for col in &table.columns {
-                let data_type = col.data_type.clone().unwrap_or(DataType::Unknown);
+                let data_type = col.data_type.clone().unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
                 ctx.add_source_column(
                     &source.name,
                     &table.name,
@@ -830,7 +830,7 @@ pub fn build_type_context(
                                 &cte_name,
                                 &col_name,
                                 TypedColumn {
-                                    data_type: DataType::Unknown,
+                                    data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                                     nullable: true,
                                 },
                             );
@@ -1055,7 +1055,7 @@ fn process_table_ref_pure(
                         };
 
                         let typed_col = column_types.get(i).cloned().unwrap_or(TypedColumn {
-                            data_type: DataType::Unknown,
+                            data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                             nullable: true,
                         });
 

@@ -878,7 +878,7 @@ pub fn check_columns_of_diagnostics(
             // (e.g. Integer, Text, Boolean) trigger the diagnostic.
             if let Some(tc) = infer_expression_type(&pos_arg, ctx) {
                 let is_clearly_non_table =
-                    !matches!(tc.data_type, DataType::Unknown | DataType::Null);
+                    !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null);
                 if is_clearly_non_table {
                     let arg_range = pos_arg.syntax().text_range();
                     let actual_str = tc.data_type.to_string();

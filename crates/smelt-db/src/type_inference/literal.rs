@@ -92,7 +92,7 @@ pub fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<T
                 if result_type.nullable {
                     all_branches_non_nullable = false;
                 }
-                if !matches!(result_type.data_type, DataType::Unknown | DataType::Null) {
+                if !matches!(result_type.data_type, DataType::Unknown(_) | DataType::Null) {
                     accumulated = merge(accumulated, result_type);
                 }
             } else {
@@ -109,7 +109,7 @@ pub fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<T
             if else_type.nullable {
                 all_branches_non_nullable = false;
             }
-            if !matches!(else_type.data_type, DataType::Unknown | DataType::Null) {
+            if !matches!(else_type.data_type, DataType::Unknown(_) | DataType::Null) {
                 accumulated = merge(accumulated, else_type);
             }
         } else {

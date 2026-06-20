@@ -64,7 +64,7 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
             .map(|s| s.eq_ignore_ascii_case("models") || s.eq_ignore_ascii_case("sources"))
             .unwrap_or(false)
         {
-            return Some(TypedColumn::nullable(DataType::Unknown));
+            return Some(TypedColumn::nullable(DataType::Unknown(smelt_types::UnknownReason::Dynamic)));
         }
     }
 
@@ -78,15 +78,15 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
         // (§16 #14) — Phase 8 adds the inference machinery. In the monomorphic
         // `smelt.define` path we stay conservative: no precise return type
         // known yet, surface `Unknown` like `Any`.
-        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
-        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
+        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `TableExpr` return (Phase 15) — scalar inference has no
         // DataType for a whole row set. Downstream Phase 17 plumbs the
         // inferred output schema; for now the call-site sees an opaque
         // Unknown.
-        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
+        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `SelectItems<Kind>` (Phase 21) is not a scalar type.
-        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
+        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // Phase 37: `Struct<{declared_fields, ..r}>` return type — resolve
         // the row variable `r` by examining the call-site argument that
         // corresponds to the first struct parameter.  When the extras can
@@ -98,20 +98,20 @@ pub fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Op
         })) => resolve_struct_return_type(call, ctx, sig, ret_fields, tail),
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // scalar DataType equivalent in Phase A.
-        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
+        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `Lambda<params, U>` (Phase B/F meta-language) — meta-only; not a valid return type.
-        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
+        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
+        Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ModelRef` / `SourceRef` (Phase D meta-language) — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown,
+        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `Record<{…}>` / `Map<K, V>` (Phase E1 meta-language) — meta-only; not a SQL DataType.
         // Inference wiring lands in Phase 3/5.
-        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown,
+        Some(Ok(SmeltType::Record { .. })) | Some(Ok(SmeltType::Map { .. })) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
         // `ModelDef` — meta-only; not a SQL DataType.
-        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown,
-        Some(Err(_)) => DataType::Unknown,
-        None => DataType::Unknown,
+        Some(Ok(SmeltType::ModelDef)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        Some(Err(_)) => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        None => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
     };
     Some(TypedColumn::nullable(dt))
 }
@@ -153,7 +153,7 @@ fn resolve_struct_return_type(
         .iter()
         .position(|p| matches!(&p.type_ref, Some(Ok(SmeltType::Struct { .. }))));
     let Some(idx) = struct_param_idx else {
-        return DataType::Unknown;
+        return DataType::Unknown(smelt_types::UnknownReason::Dynamic);
     };
 
     // Get the corresponding argument expression.
@@ -178,13 +178,13 @@ fn resolve_struct_return_type(
         })
     });
     let Some(arg) = arg_expr else {
-        return DataType::Unknown;
+        return DataType::Unknown(smelt_types::UnknownReason::Dynamic);
     };
 
     // Resolve the argument to a column set.
     let qualifier = arg.text().trim().to_string();
     if qualifier.is_empty() {
-        return DataType::Unknown;
+        return DataType::Unknown(smelt_types::UnknownReason::Dynamic);
     }
     let cols: Vec<(String, DataType)> = ctx
         .columns_for_qualifier(&qualifier)
@@ -192,13 +192,13 @@ fn resolve_struct_return_type(
         .map(|(col_name, tc)| (col_name.to_string(), tc.data_type.clone()))
         .collect();
     if cols.is_empty() {
-        return DataType::Unknown;
+        return DataType::Unknown(smelt_types::UnknownReason::Dynamic);
     }
 
     // Extract declared fields from the struct parameter to compute extras.
     let param = &sig.params[idx];
     let Some((declared_fields, param_tail)) = struct_param_fields(param) else {
-        return DataType::Unknown;
+        return DataType::Unknown(smelt_types::UnknownReason::Dynamic);
     };
 
     // Run struct row-var unification to get extras.
@@ -217,7 +217,7 @@ fn resolve_struct_return_type(
         _ => false,
     };
     if !param_var_matches {
-        return DataType::Unknown;
+        return DataType::Unknown(smelt_types::UnknownReason::Dynamic);
     }
 
     // Build the concrete return type: declared return fields + extras.
@@ -477,13 +477,13 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
                         has_non_nullable_arg = true;
                     }
                     if result_type.is_none()
-                        && !matches!(arg_type.data_type, DataType::Unknown | DataType::Null)
+                        && !matches!(arg_type.data_type, DataType::Unknown(_) | DataType::Null)
                     {
                         result_type = Some(arg_type.data_type.clone());
                     }
                 }
             }
-            let data_type = result_type.unwrap_or(DataType::Unknown);
+            let data_type = result_type.unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
             Some(TypedColumn {
                 data_type,
                 nullable: !has_non_nullable_arg,
@@ -500,10 +500,10 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             let second_type = args.get(1).and_then(|a| infer_expression_type(a, ctx));
             let data_type = first_type
                 .as_ref()
-                .filter(|t| !matches!(t.data_type, DataType::Unknown | DataType::Null))
+                .filter(|t| !matches!(t.data_type, DataType::Unknown(_) | DataType::Null))
                 .or(second_type.as_ref())
                 .map(|t| t.data_type.clone())
-                .unwrap_or(DataType::Unknown);
+                .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
             let has_non_nullable = first_type.as_ref().is_some_and(|t| !t.nullable)
                 || second_type.as_ref().is_some_and(|t| !t.nullable);
             Some(TypedColumn {
@@ -752,7 +752,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             // Try all arguments, return first concrete type
             for arg in func.arguments() {
                 if let Some(arg_type) = infer_expression_type(&arg, ctx) {
-                    if !matches!(arg_type.data_type, DataType::Unknown | DataType::Null) {
+                    if !matches!(arg_type.data_type, DataType::Unknown(_) | DataType::Null) {
                         return Some(TypedColumn {
                             data_type: arg_type.data_type,
                             nullable: true,

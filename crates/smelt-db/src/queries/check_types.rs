@@ -122,7 +122,7 @@ pub fn cannot_infer_type_for_schema(
             continue;
         }
         match &col.data_type {
-            Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown) => {
+            Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown(_)) => {
                 let range = col.range + range_offset;
                 out.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
@@ -185,7 +185,7 @@ pub(crate) fn check_unsupported_constructs(
 }
 
 pub(crate) fn types_compatible(expected: &DataType, actual: &DataType) -> bool {
-    if matches!(expected, DataType::Unknown) || matches!(actual, DataType::Unknown) {
+    if matches!(expected, DataType::Unknown) || matches!(actual, DataType::Unknown(_)) {
         return true;
     }
     if expected == actual {
@@ -360,7 +360,7 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 && upstream_resolved.columns.iter().all(|c| {
                     c.data_type
                         .as_ref()
-                        .map(|t| matches!(t.data_type, DataType::Unknown))
+                        .map(|t| matches!(t.data_type, DataType::Unknown(_)))
                         .unwrap_or(true)
                 });
             let has_any_column =
@@ -790,7 +790,7 @@ mod tests {
             expression: "some_col".to_string(),
             range: col_range,
             data_type: Some(TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             }),
         };

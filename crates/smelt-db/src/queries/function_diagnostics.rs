@@ -1432,7 +1432,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
                                     .iter()
                                     .map(|c| {
                                         let tc = c.data_type.clone().unwrap_or(TypedColumn {
-                                            data_type: DataType::Unknown,
+                                            data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                                             nullable: true,
                                         });
                                         (c.name.clone(), tc)
@@ -1486,7 +1486,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
                                                             data_type: c
                                                                 .data_type
                                                                 .clone()
-                                                                .unwrap_or(DataType::Unknown),
+                                                                .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic)),
                                                             nullable: true,
                                                         },
                                                     )

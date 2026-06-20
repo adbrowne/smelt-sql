@@ -667,7 +667,7 @@ pub fn infer_hof_call(
                         SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(dt)) => {
                             dt.clone()
                         }
-                        _ => DataType::Unknown,
+                        _ => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                     },
                     nullable: true,
                 },
@@ -1118,7 +1118,7 @@ pub fn infer_list_literal(
             (r.inferred, r.sentinels)
         } else {
             let typed = infer_expression_type(elem, ctx).unwrap_or(TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             });
             let dt = typed.data_type;
@@ -1553,7 +1553,7 @@ pub fn check_select_list_spreads(
         match operand_type {
             Some(typed) => {
                 match &typed.data_type {
-                    DataType::Unknown => {
+                    DataType::Unknown(_) => {
                         // Unknown type — propagate without error.
                         // Handles unresolvable identifiers gracefully (no avalanche).
                     }
@@ -1790,7 +1790,7 @@ pub fn expand_spread_into_position(
     match operand_ty {
         Some(typed) => {
             match &typed.data_type {
-                DataType::Unknown => {
+                DataType::Unknown(_) => {
                     // Unknown — treat as empty expansion to avoid false positives.
                     (0, vec![], vec![])
                 }

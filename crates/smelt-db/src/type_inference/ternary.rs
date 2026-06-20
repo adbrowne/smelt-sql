@@ -316,9 +316,9 @@ fn compute_ternary_lub(then_ty: &SmeltType, else_ty: &SmeltType) -> LubResult {
                 nullable: true,
             };
             let promoted = promote_types(&t_col, &u_col);
-            if matches!(promoted.data_type, DataType::Unknown)
-                && !matches!(t, DataType::Unknown)
-                && !matches!(u, DataType::Unknown)
+            if matches!(promoted.data_type, DataType::Unknown(_))
+                && !matches!(t, DataType::Unknown(_))
+                && !matches!(u, DataType::Unknown(_))
             {
                 // promote_types returned Unknown for genuinely incompatible types.
                 LubResult::Incompatible

@@ -360,7 +360,7 @@ impl TypeContext {
     fn opaque_column() -> &'static TypedColumn {
         static OPAQUE: std::sync::OnceLock<TypedColumn> = std::sync::OnceLock::new();
         OPAQUE.get_or_init(|| TypedColumn {
-            data_type: DataType::Unknown,
+            data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
             nullable: true,
         })
     }
@@ -684,7 +684,7 @@ impl TypeContext {
                     SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(dt)) => {
                         dt.clone()
                     }
-                    _ => DataType::Unknown,
+                    _ => DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 };
                 self.add_model_column(
                     name,

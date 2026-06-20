@@ -31,7 +31,7 @@ pub fn wrap_with_type_casts(sql: &str, column_names: &[&str], column_types: &[Da
     let mut select_items = Vec::with_capacity(column_names.len());
     for (name, dt) in column_names.iter().zip(column_types.iter()) {
         match dt {
-            DataType::Unknown | DataType::Null => {
+            DataType::Unknown(_) | DataType::Null => {
                 select_items.push(name.to_string());
             }
             _ => {
@@ -74,7 +74,7 @@ mod tests {
     fn unknown_passes_through() {
         let sql = "SELECT x AS a, y AS b FROM t";
         let result =
-            wrap_with_type_casts(sql, &["a", "b"], &[DataType::Unknown, DataType::Integer]);
+            wrap_with_type_casts(sql, &["a", "b"], &[DataType::Unknown(smelt_types::UnknownReason::Dynamic), DataType::Integer]);
         assert!(result.contains("a, CAST(b AS INTEGER) AS b"));
     }
 

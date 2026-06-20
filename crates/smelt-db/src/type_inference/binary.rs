@@ -74,7 +74,7 @@ fn promote_numeric_operands_for_op(
     if let (Some(ref l), Some(ref r)) = (&left, &right) {
         if !l.is_numeric() || !r.is_numeric() {
             return Some(TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             });
         }
@@ -101,7 +101,7 @@ fn promote_numeric_operands_for_op(
                 .is_some_and(|l| lift_integer_to_decimal(l).is_some());
         if left_decimal || integer_over_decimal {
             return Some(TypedColumn {
-                data_type: DataType::Unknown,
+                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 nullable: true,
             });
         }
@@ -401,7 +401,7 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
                             });
                         } else {
                             return Some(TypedColumn {
-                                data_type: DataType::Unknown,
+                                data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                                 nullable: true,
                             });
                         }
@@ -527,11 +527,11 @@ pub fn check_crossfamily_arithmetic_diagnostics(
         let right_tc = infer_binary_operand(&binary, 1, ctx);
 
         let lt = match left_tc.as_ref().map(|t| &t.data_type) {
-            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            Some(dt) if !matches!(dt, DataType::Unknown(_)) => dt,
             _ => continue, // unknown/unresolved — skip, no spurious diagnostic
         };
         let rt = match right_tc.as_ref().map(|t| &t.data_type) {
-            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            Some(dt) if !matches!(dt, DataType::Unknown(_)) => dt,
             _ => continue,
         };
 
@@ -619,11 +619,11 @@ pub fn check_decimal_precision_overflow_diagnostics(
         let right_tc = infer_binary_operand(&binary, 1, ctx);
 
         let lt = match left_tc.as_ref().map(|t| &t.data_type) {
-            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            Some(dt) if !matches!(dt, DataType::Unknown(_)) => dt,
             _ => continue,
         };
         let rt = match right_tc.as_ref().map(|t| &t.data_type) {
-            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            Some(dt) if !matches!(dt, DataType::Unknown(_)) => dt,
             _ => continue,
         };
 
@@ -784,11 +784,11 @@ pub fn check_mixed_tz_arithmetic_diagnostics(
         let right_tc = infer_binary_operand(&binary, 1, ctx);
 
         let lt = match left_tc.as_ref().map(|t| &t.data_type) {
-            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            Some(dt) if !matches!(dt, DataType::Unknown(_)) => dt,
             _ => continue,
         };
         let rt = match right_tc.as_ref().map(|t| &t.data_type) {
-            Some(dt) if !matches!(dt, DataType::Unknown) => dt,
+            Some(dt) if !matches!(dt, DataType::Unknown(_)) => dt,
             _ => continue,
         };
 

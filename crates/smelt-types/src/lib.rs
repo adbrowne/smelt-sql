@@ -29,6 +29,32 @@ pub use signatures::{
     COLUMN_REF_FIELDS,
 };
 
+/// Reason a type resolved to `Unknown`.
+///
+/// `PartialEq`/`Eq`/`Hash` treat all reasons as equal so that two `Unknown`s
+/// with different reasons compare and hash identically — the reason is
+/// diagnostic metadata, not part of the type lattice's bottom identity.
+#[derive(Debug, Clone, Copy)]
+pub enum UnknownReason {
+    /// Compiler-resolvable gap: a diagnostic fires at the origin.
+    Unresolved,
+    /// Legitimately unknowable (e.g. `Expr<Any>` return). No diagnostic.
+    Dynamic,
+    /// Unknown only because an upstream value was already Unknown.
+    /// Reporting is origin-only; no re-emission.
+    Propagated,
+}
+
+impl PartialEq for UnknownReason {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for UnknownReason {}
+impl std::hash::Hash for UnknownReason {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
 /// SQL data types supported by smelt
 ///
 /// This enum represents the logical SQL types. Backend-specific variations
@@ -84,8 +110,8 @@ pub enum DataType {
     // Special types
     /// NULL literal type
     Null,
-    /// Type could not be determined (error recovery)
-    Unknown,
+    /// Type could not be determined; reason encodes whether a diagnostic fires.
+    Unknown(UnknownReason),
 }
 
 impl DataType {
@@ -145,6 +171,35 @@ impl DataType {
             self,
             DataType::Date | DataType::Time | DataType::Timestamp { .. } | DataType::Interval
         )
+    }
+
+    /// Check if this type is any variant of `Unknown`.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, DataType::Unknown(_))
+    }
+
+    /// Return the `UnknownReason` if this type is `Unknown`, otherwise `None`.
+    pub fn unknown_reason(&self) -> Option<UnknownReason> {
+        if let DataType::Unknown(r) = self {
+            Some(*r)
+        } else {
+            None
+        }
+    }
+
+    /// Construct an `Unknown` with reason `Unresolved` (diagnostic must fire at origin).
+    pub fn unknown_unresolved() -> Self {
+        DataType::Unknown(UnknownReason::Unresolved)
+    }
+
+    /// Construct an `Unknown` with reason `Dynamic` (legitimately unknowable, no diagnostic).
+    pub fn unknown_dynamic() -> Self {
+        DataType::Unknown(UnknownReason::Dynamic)
+    }
+
+    /// Construct an `Unknown` with reason `Propagated` (upstream was Unknown; no re-emission).
+    pub fn unknown_propagated() -> Self {
+        DataType::Unknown(UnknownReason::Propagated)
     }
 
     /// Normalize this type to its canonical form for comparison.
@@ -226,7 +281,7 @@ impl DataType {
                 format!("MAP({}, {})", key.to_sql(), value.to_sql())
             }
             DataType::Null => "NULL".to_string(),
-            DataType::Unknown => "UNKNOWN".to_string(),
+            DataType::Unknown(_) => "UNKNOWN".to_string(),
         }
     }
 }
@@ -267,7 +322,7 @@ impl TypedColumn {
 
     /// Create an unknown type (for error recovery)
     pub fn unknown() -> Self {
-        Self::nullable(DataType::Unknown)
+        Self::nullable(DataType::Unknown(UnknownReason::Dynamic))
     }
 }
 
@@ -308,6 +363,71 @@ pub fn decimal_widening_is_safe(p1: u8, s1: u8, p2: u8, s2: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_identity_is_reason_agnostic() {
+        use std::collections::HashSet;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let a = DataType::Unknown(UnknownReason::Unresolved);
+        let b = DataType::Unknown(UnknownReason::Dynamic);
+        let c = DataType::Unknown(UnknownReason::Propagated);
+
+        // All Unknown variants are equal regardless of reason
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        assert_eq!(a, c);
+
+        // All Unknown variants hash identically (insert 3 differently-reasoned, get set of size 1)
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        set.insert(b.clone());
+        set.insert(c.clone());
+        assert_eq!(set.len(), 1, "differently-reasoned Unknown values must deduplicate");
+
+        // Also verify hash values are equal
+        let hash_of = |dt: &DataType| -> u64 {
+            let mut h = DefaultHasher::new();
+            dt.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash_of(&a), hash_of(&b));
+        assert_eq!(hash_of(&b), hash_of(&c));
+    }
+
+    #[test]
+    fn unknown_reason_is_readable() {
+        let u = DataType::Unknown(UnknownReason::Unresolved);
+        let d = DataType::Unknown(UnknownReason::Dynamic);
+        let p = DataType::Unknown(UnknownReason::Propagated);
+
+        assert_eq!(u.unknown_reason(), Some(UnknownReason::Unresolved));
+        assert_eq!(d.unknown_reason(), Some(UnknownReason::Dynamic));
+        assert_eq!(p.unknown_reason(), Some(UnknownReason::Propagated));
+        assert_eq!(DataType::Integer.unknown_reason(), None);
+    }
+
+    #[test]
+    fn lub_and_dedup_unaffected_by_reason() {
+        // Two differently-reasoned Unknowns normalize to one in a set
+        use std::collections::HashSet;
+        let types: HashSet<DataType> = [
+            DataType::Unknown(UnknownReason::Unresolved),
+            DataType::Unknown(UnknownReason::Dynamic),
+        ]
+        .into();
+        assert_eq!(types.len(), 1);
+    }
+
+    #[test]
+    fn is_unknown_matches_any_reason() {
+        assert!(DataType::Unknown(UnknownReason::Unresolved).is_unknown());
+        assert!(DataType::Unknown(UnknownReason::Dynamic).is_unknown());
+        assert!(DataType::Unknown(UnknownReason::Propagated).is_unknown());
+        assert!(!DataType::Integer.is_unknown());
+        assert!(!DataType::Null.is_unknown());
+    }
 
     #[test]
     fn test_data_type_display() {
