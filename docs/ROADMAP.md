@@ -90,6 +90,16 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W7 — LSP Watched-File Set, Downstream Republication, Rename Scope & Hover (D-lsp)~~ ✅ (June 21, 2026)
+
+Five-phase remediation plan ([plan](plans/20260620-w7-lsp.md)) landing the D-lsp cluster from the 2026-06-13 spec review (D-48/49/56):
+
+- **Discovery-derived watch set (D-48, P1)** — `workspace/didChangeWatchedFiles` watchers are now derived from the loaded project's discovery rules (every non-excluded `.sql` plus model `.py` files), replacing hardcoded `**/models/**/*.py` + `**/functions/**/*.sql` globs. An external edit to any discoverable file triggers re-analysis.
+- **Cross-file diagnostic republication (D-48, P2)** — on any watched-file change, the server republishes diagnostics for the changed file plus every file whose Salsa-derived diagnostics changed (conservative superset: all tracked files). Upstream edits now refresh downstream diagnostics in open buffers.
+- **Column-rename rooted at definition site (D-49, P3)** — column rename traversal is rooted at the resolved definition site and rewrites all transitive consumers; an `AS` re-alias terminates propagation; `SELECT *` chains propagate. A source-column rename is refused at `prepare_rename` with an explanatory message (external table cannot be safely renamed via the LSP).
+- **Drop mtime from hover (D-56, P4)** — `hover_text_for_loader_call` no longer accepts or emits a last-modified timestamp; hover is now a pure function of `(file bytes, schema, target)` with no mtime Salsa input.
+- **Close-out (P5)** — KD sections were already clean (no retractions needed); master registry W7 row flipped to done; ROADMAP updated.
+
 ### ~~Spec-Remediation W3 — Diagnostics Codes, Ownership & Severities (D-diag) + `Unknown` Discriminant~~ ✅ (June 21, 2026)
 
 Seven-phase remediation plan ([plan](plans/20260613-w3-diagnostics.md)) plus a follow-up discriminant sub-plan ([plan](plans/20260620-unknown-reason-discriminant.md)) landing the D-diag cluster from the 2026-06-13 spec review (D-07/08/09/14/19/30/31):
