@@ -5,7 +5,7 @@
 
 use salsa::Accumulator;
 use smelt_parser::{self, File as AstFile};
-use smelt_types::{parse_type, DataType};
+use smelt_types::{parse_type, DataType, UnknownReason};
 
 use crate::queries::parse::{model_path_refs, model_sources, parse_file, parse_model};
 use crate::queries::schema::{
@@ -123,19 +123,24 @@ pub fn cannot_infer_type_for_schema(
         }
         match &col.data_type {
             Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown(_)) => {
-                let range = col.range + range_offset;
-                out.push(Diagnostic {
-                    severity: DiagnosticSeverity::Warning,
-                    message: format!(
-                        "Could not infer type for column '{}'. Consider adding an explicit CAST.",
-                        col.name
-                    ),
-                    range,
-                    code: Some(DiagnosticCode::CannotInferType),
-                    data: Some(DiagnosticData::CannotInferType {
-                        column_name: col.name.clone(),
-                    }),
-                });
+                if let Some(UnknownReason::Unresolved) =
+                    typed_col.data_type.unknown_reason()
+                {
+                    // Compiler-resolvable gap: emit ColumnTypeUnresolved (Error).
+                    let range = col.range + range_offset;
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Type of column '{}' could not be resolved by the current inference rules; add an explicit CAST or update the function schema.",
+                            col.name
+                        ),
+                        range,
+                        code: Some(DiagnosticCode::ColumnTypeUnresolved),
+                        data: None,
+                    });
+                    // Dynamic/Propagated unknowns are diagnostic-free by construction
+                    // (spec: function_schema_inference.md).
+                }
             }
             None => {
                 let range = col.range + range_offset;
@@ -773,10 +778,11 @@ mod tests {
         );
     }
 
-    /// `cannot_infer_type_for_schema` must emit `CannotInferType` for a column
-    /// whose data_type is `Unknown`.
+    /// `cannot_infer_type_for_schema` must be silent for a column whose
+    /// data_type is `Unknown(Dynamic)` — legitimately dynamic unknowns are
+    /// diagnostic-free by construction (spec: function_schema_inference.md).
     #[test]
-    fn cannot_infer_type_for_schema_emits_for_unknown_data_type() {
+    fn cannot_infer_type_for_schema_silent_for_dynamic_unknown() {
         use crate::queries::check_types::cannot_infer_type_for_schema;
         use crate::{Column, ColumnSource, ModelSchema};
         use smelt_types::{DataType, TypedColumn};
@@ -802,15 +808,139 @@ mod tests {
         };
 
         let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
+        assert!(
+            diags.is_empty(),
+            "Unknown(Dynamic) column must produce 0 diagnostics; got: {:?}",
+            diags
+        );
+    }
+
+    /// `cannot_infer_type_for_schema` must be silent for a column whose
+    /// data_type is `Unknown(Propagated)` — propagated unknowns (input already
+    /// Unknown) are diagnostic-free by construction; no cascade.
+    #[test]
+    fn propagated_unknown_column_is_silent() {
+        use crate::queries::check_types::cannot_infer_type_for_schema;
+        use crate::{Column, ColumnSource, ModelSchema};
+        use smelt_types::{DataType, TypedColumn};
+
+        let col_range = rowan::TextRange::new(7.into(), 15.into());
+
+        let schema = ModelSchema {
+            columns: vec![Column {
+                name: "derived".to_string(),
+                alias: None,
+                source: ColumnSource::Computed,
+                expression: "derived".to_string(),
+                range: col_range,
+                data_type: Some(TypedColumn {
+                    data_type: DataType::Unknown(smelt_types::UnknownReason::Propagated),
+                    nullable: true,
+                }),
+            }],
+            row_extensions: vec![],
+            input_constraints: vec![],
+        };
+
+        let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
+        assert!(
+            diags.is_empty(),
+            "Unknown(Propagated) column must produce 0 diagnostics; got: {:?}",
+            diags
+        );
+    }
+
+    /// `cannot_infer_type_for_schema` must emit `ColumnTypeUnresolved` (Error)
+    /// for a column whose data_type is `Unknown(Unresolved)` — a
+    /// compiler-resolvable gap that the current rules cannot type.
+    #[test]
+    fn origin_unresolved_column_emits_column_type_unresolved() {
+        use crate::queries::check_types::cannot_infer_type_for_schema;
+        use crate::{Column, ColumnSource, ModelSchema};
+        use smelt_types::{DataType, TypedColumn};
+
+        let col_range = rowan::TextRange::new(7.into(), 15.into());
+
+        let schema = ModelSchema {
+            columns: vec![Column {
+                name: "unresolved_col".to_string(),
+                alias: None,
+                source: ColumnSource::Computed,
+                expression: "unresolved_col".to_string(),
+                range: col_range,
+                data_type: Some(TypedColumn {
+                    data_type: DataType::Unknown(smelt_types::UnknownReason::Unresolved),
+                    nullable: true,
+                }),
+            }],
+            row_extensions: vec![],
+            input_constraints: vec![],
+        };
+
+        let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
         let matches: Vec<_> = diags
             .iter()
-            .filter(|d| d.code == Some(DiagnosticCode::CannotInferType))
+            .filter(|d| d.code == Some(DiagnosticCode::ColumnTypeUnresolved))
             .collect();
         assert_eq!(
             matches.len(),
             1,
-            "schema with Unknown data_type column must produce 1 CannotInferType; \
+            "Unknown(Unresolved) column must produce exactly 1 ColumnTypeUnresolved; \
              got: {:?}",
+            diags
+        );
+        assert_eq!(
+            matches[0].severity,
+            crate::DiagnosticSeverity::Error,
+            "ColumnTypeUnresolved must be Error severity"
+        );
+        // Must not also fire CannotInferType (single diagnostic, no double-report).
+        let cannot_infer: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::CannotInferType))
+            .collect();
+        assert!(
+            cannot_infer.is_empty(),
+            "Unknown(Unresolved) must not also emit CannotInferType; got: {:?}",
+            diags
+        );
+    }
+
+    /// `cannot_infer_type_for_schema` must NOT emit `ColumnTypeUnresolved` for
+    /// a column that is `Unknown(Dynamic)` — no over-fire on legitimately dynamic
+    /// columns.
+    #[test]
+    fn dynamic_unknown_column_is_silent() {
+        use crate::queries::check_types::cannot_infer_type_for_schema;
+        use crate::{Column, ColumnSource, ModelSchema};
+        use smelt_types::{DataType, TypedColumn};
+
+        let col_range = rowan::TextRange::new(7.into(), 15.into());
+
+        let schema = ModelSchema {
+            columns: vec![Column {
+                name: "dynamic_col".to_string(),
+                alias: None,
+                source: ColumnSource::Computed,
+                expression: "dynamic_col".to_string(),
+                range: col_range,
+                data_type: Some(TypedColumn {
+                    data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+                    nullable: true,
+                }),
+            }],
+            row_extensions: vec![],
+            input_constraints: vec![],
+        };
+
+        let diags = cannot_infer_type_for_schema(&schema, rowan::TextSize::from(0));
+        let ctu: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::ColumnTypeUnresolved))
+            .collect();
+        assert!(
+            ctu.is_empty(),
+            "Unknown(Dynamic) must not emit ColumnTypeUnresolved; got: {:?}",
             diags
         );
     }
