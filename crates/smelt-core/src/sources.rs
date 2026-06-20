@@ -11,12 +11,29 @@ use crate::discovery::ModelDiscovery;
 use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// The `name:` override in a per-entity source YAML.
+///
+/// Per `docs/specs/sources.md` §"Target-aware `name:` override":
+/// - `Literal` — a single `<schema>.<table>` string applied to every target.
+/// - `PerTarget` — a map from target name to `<schema>.<table>`, so different
+///   targets can resolve to different external schemas/tables. Targets absent
+///   from the map fall back to the default mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum SourceNameOverride {
+    /// A single `<schema>.<table>` literal applied to all targets.
+    Literal(String),
+    /// Per-target map: `{ dev: raw_dev.users, prod: raw.users }`.
+    PerTarget(BTreeMap<String, String>),
+}
 
 /// Information about a single source discovered from a per-entity `.yml` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,10 +49,10 @@ pub struct SourceInfo {
     pub columns: Vec<SourceColumn>,
     /// Optional free-text description.
     pub description: Option<String>,
-    /// Optional `name: <schema>.<table>` override for the database table name.
+    /// Optional `name:` override for the database table name (literal or per-target map).
     /// When `None`, the default mapping `<target_schema>.<address_segments.join("_")>`
     /// is used.
-    pub name_override: Option<String>,
+    pub name_override: Option<SourceNameOverride>,
     /// Tags declared in the source YAML (`tags:` key). Used by wide-reflection
     /// accessors `smelt.sources.with_tag` and `smelt.sources.all`.
     pub tags: Vec<String>,
@@ -47,14 +64,18 @@ pub struct SourceInfo {
 impl SourceInfo {
     /// Returns the fully-qualified database name for this source.
     ///
-    /// If `name_override` is set, it is returned verbatim.
-    /// Otherwise the default mapping applies:
+    /// For `Literal` overrides, returns the literal verbatim (any target).
+    /// For `PerTarget` overrides or `None`, returns the default mapping
     /// `<target_schema>.<address_segments.join("_")>`.
+    ///
+    /// For per-target resolution with the active target name, use
+    /// `db_name_for_target` (introduced in P2).
     pub fn db_name(&self, target_schema: &str) -> String {
-        if let Some(ref ov) = self.name_override {
-            ov.clone()
-        } else {
-            format!("{}.{}", target_schema, self.address_segments.join("_"))
+        match &self.name_override {
+            Some(SourceNameOverride::Literal(s)) => s.clone(),
+            Some(SourceNameOverride::PerTarget(_)) | None => {
+                format!("{}.{}", target_schema, self.address_segments.join("_"))
+            }
         }
     }
 }
@@ -114,9 +135,9 @@ struct RawSourceYaml {
     #[serde(default)]
     columns: Option<Vec<RawColumn>>,
 
-    /// Optional `name: schema.table` override.
+    /// Optional `name:` override — literal `<schema>.<table>` or per-target map.
     #[serde(default)]
-    name: Option<String>,
+    name: Option<SourceNameOverride>,
 
     /// Presence of this key is a hard error on source YAMLs.
     #[serde(default)]
@@ -183,10 +204,21 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
     // `columns:` is required.
     let raw_cols = raw.columns.ok_or(SourceError::MissingColumns)?;
 
-    // Validate `name:` format.
-    if let Some(ref n) = raw.name {
-        if !n.contains('.') || n.starts_with('.') || n.ends_with('.') {
-            return Err(SourceError::InvalidNameOverride(n.clone()));
+    // Validate `name:` format — each value must be `<schema>.<table>`.
+    if let Some(ref name_override) = raw.name {
+        match name_override {
+            SourceNameOverride::Literal(s) => {
+                if !s.contains('.') || s.starts_with('.') || s.ends_with('.') {
+                    return Err(SourceError::InvalidNameOverride(s.clone()));
+                }
+            }
+            SourceNameOverride::PerTarget(map) => {
+                for value in map.values() {
+                    if !value.contains('.') || value.starts_with('.') || value.ends_with('.') {
+                        return Err(SourceError::InvalidNameOverride(value.clone()));
+                    }
+                }
+            }
         }
     }
 

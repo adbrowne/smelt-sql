@@ -4,7 +4,9 @@
 //! is complete. Each test corresponds to a spec invariant from sources.md.
 
 use smelt_core::resolver::WorkspaceLoadError;
-use smelt_core::sources::{discover_source_infos, parse_source_yaml, SourceError};
+use smelt_core::sources::{
+    discover_source_infos, parse_source_yaml, SourceError, SourceNameOverride,
+};
 use std::fs;
 use tempfile::TempDir;
 
@@ -96,17 +98,20 @@ name: legacy_db.orders_v2
     .unwrap();
 
     let info = parse_source_yaml(&dir.join("orders.yml")).unwrap();
-    assert_eq!(
-        info.name_override.as_deref(),
-        Some("legacy_db.orders_v2"),
-        "name_override should capture the YAML name key"
+    assert!(
+        matches!(
+            &info.name_override,
+            Some(SourceNameOverride::Literal(s)) if s == "legacy_db.orders_v2"
+        ),
+        "name_override should be Literal(\"legacy_db.orders_v2\"), got {:?}",
+        info.name_override
     );
 
     // db_name should use the override, not the default mapping
     let db_name = info.db_name("main");
     assert_eq!(
         db_name, "legacy_db.orders_v2",
-        "db_name() should return the override verbatim"
+        "db_name() should return the Literal override verbatim"
     );
 }
 
@@ -297,4 +302,89 @@ columns:
     // For a top-level parse (no scan root), segments = ["orders"].
     let db_name = info.db_name("main");
     assert_eq!(db_name, "main.orders");
+}
+
+// ---------------------------------------------------------------------------
+// D-35 P1: SourceNameOverride enum — per-target map form
+// ---------------------------------------------------------------------------
+
+/// D-35 P1: `name: { dev: raw_dev.users, prod: raw.users }` parses to PerTarget map.
+#[test]
+fn per_target_map_parses() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: raw_dev.users
+  prod: raw.users
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    match &info.name_override {
+        Some(SourceNameOverride::PerTarget(map)) => {
+            assert_eq!(map.get("dev").map(String::as_str), Some("raw_dev.users"));
+            assert_eq!(map.get("prod").map(String::as_str), Some("raw.users"));
+        }
+        other => panic!("expected PerTarget, got {other:?}"),
+    }
+}
+
+/// D-35 P1: a per-target map value without a dot is InvalidNameOverride.
+#[test]
+fn per_target_map_value_invalid_format_is_error() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: nodot
+"#,
+    )
+    .unwrap();
+
+    let err = parse_source_yaml(&dir.join("users.yml")).unwrap_err();
+    assert!(
+        matches!(err, SourceError::InvalidNameOverride(_)),
+        "expected InvalidNameOverride for map value without dot, got {err:?}"
+    );
+}
+
+/// D-35 P1: `name: raw_cdc.users` still parses as Literal (regression guard).
+#[test]
+fn literal_still_parses() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name: raw_cdc.users
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    match &info.name_override {
+        Some(SourceNameOverride::Literal(s)) => assert_eq!(s, "raw_cdc.users"),
+        other => panic!("expected Literal, got {other:?}"),
+    }
 }
