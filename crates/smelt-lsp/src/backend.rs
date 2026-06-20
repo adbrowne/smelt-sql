@@ -161,6 +161,33 @@ fn collect_function_call_sites(
     out
 }
 
+/// Derive file-system watcher patterns for a set of project roots.
+///
+/// Returns two `FileSystemWatcher` entries per project root:
+/// - `<root>/**/*.sql` — covers every discoverable `.sql` (any non-excluded
+///   `.sql` is a model or function per universal discovery D-01/D-05)
+/// - `<root>/**/*.py` — covers Python model files
+///
+/// LSP glob patterns have no exclusion syntax, so the hidden-dir and `target/`
+/// skip-list is enforced at the handler level: files in those paths are not
+/// registered in the Salsa DB and are ignored when `did_change_watched_files`
+/// fires for them.
+pub(crate) fn derive_watch_globs(project_roots: &[PathBuf]) -> Vec<FileSystemWatcher> {
+    let mut watchers = Vec::new();
+    for root in project_roots {
+        let root_str = root.to_string_lossy();
+        watchers.push(FileSystemWatcher {
+            glob_pattern: GlobPattern::String(format!("{root_str}/**/*.sql")),
+            kind: Some(WatchKind::all()),
+        });
+        watchers.push(FileSystemWatcher {
+            glob_pattern: GlobPattern::String(format!("{root_str}/**/*.py")),
+            kind: Some(WatchKind::all()),
+        });
+    }
+    watchers
+}
+
 impl Backend {
     pub fn new(client: Client) -> Self {
         Self {
@@ -1375,28 +1402,18 @@ impl LanguageServer for Backend {
         // Publish emitted-name collision diagnostics (DuplicateEmittedName).
         self.publish_emitted_name_collision_diagnostics().await;
 
-        // Register file watchers (dynamic registration). We watch:
-        //   - `**/models/**/*.py` for Python model changes
-        //   - `**/functions/**/*.sql` so that external edits to function
-        //     definitions (git checkout, sed, etc.) re-trigger diagnostics
-        //     on dependent models. In-editor edits go through `did_change`.
+        // Register file watchers (dynamic registration). Watch every
+        // discoverable `.sql` and `.py` under each project root, derived
+        // from the loaded project roots rather than hardcoded directory names.
+        // See `derive_watch_globs` for the rationale (D-48).
+        let project_roots_snapshot = self.project_roots.lock().await.clone();
+        let watchers = derive_watch_globs(&project_roots_snapshot);
         let registration = Registration {
             id: "smelt-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: Some(
-                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![
-                        FileSystemWatcher {
-                            glob_pattern: GlobPattern::String("**/models/**/*.py".to_string()),
-                            kind: Some(WatchKind::all()),
-                        },
-                        FileSystemWatcher {
-                            glob_pattern: GlobPattern::String("**/functions/**/*.sql".to_string()),
-                            kind: Some(WatchKind::all()),
-                        },
-                    ],
-                })
-                .unwrap(),
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
+                    .unwrap(),
             ),
         };
         // intentionally ignored: LSP capability registration failure is non-fatal;
@@ -5370,6 +5387,93 @@ impl LanguageServer for Backend {
             Ok(None)
         } else {
             Ok(Some(CompletionResponse::Array(items)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod watch_glob_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn glob_string(w: &FileSystemWatcher) -> &str {
+        match &w.glob_pattern {
+            GlobPattern::String(s) => s.as_str(),
+            GlobPattern::Relative(_) => panic!("expected string glob"),
+        }
+    }
+
+    /// Verify `derive_watch_globs` produces two root-scoped watchers per root:
+    /// one for `**/*.sql` (all discoverable SQL) and one for `**/*.py`.
+    /// The patterns must not restrict to `models/` or `functions/`.
+    #[test]
+    fn derive_watch_globs_covers_all_sql_and_py() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let watchers = derive_watch_globs(std::slice::from_ref(&root));
+        assert_eq!(
+            watchers.len(),
+            2,
+            "expected exactly one .sql and one .py watcher"
+        );
+
+        let root_str = root.to_string_lossy();
+        let sql_pat = watchers
+            .iter()
+            .find(|w| glob_string(w).ends_with("**/*.sql"))
+            .expect("must have a .sql watcher");
+        let py_pat = watchers
+            .iter()
+            .find(|w| glob_string(w).ends_with("**/*.py"))
+            .expect("must have a .py watcher");
+
+        // Patterns are project-root-scoped
+        assert!(
+            glob_string(sql_pat).starts_with(root_str.as_ref()),
+            ".sql pattern must be scoped to the project root"
+        );
+        assert!(
+            glob_string(py_pat).starts_with(root_str.as_ref()),
+            ".py pattern must be scoped to the project root"
+        );
+
+        // Patterns must NOT restrict to models/ or functions/ (universal coverage)
+        assert!(
+            !glob_string(sql_pat).contains("/models/"),
+            ".sql pattern must not restrict to models/"
+        );
+        assert!(
+            !glob_string(sql_pat).contains("/functions/"),
+            ".sql pattern must not restrict to functions/"
+        );
+        assert!(
+            !glob_string(py_pat).contains("/models/"),
+            ".py pattern must not restrict to models/"
+        );
+    }
+
+    /// Two project roots produce four watchers (2 per root), each root-scoped.
+    #[test]
+    fn derive_watch_globs_scales_with_multiple_roots() {
+        let dir1 = TempDir::new().unwrap();
+        let dir2 = TempDir::new().unwrap();
+        let roots = vec![dir1.path().to_path_buf(), dir2.path().to_path_buf()];
+
+        let watchers = derive_watch_globs(&roots);
+        assert_eq!(watchers.len(), 4, "expected 2 watchers per project root");
+
+        for (root, expected_count) in [(&dir1, 2usize), (&dir2, 2)] {
+            let root_str = root.path().to_string_lossy();
+            let root_watchers: Vec<_> = watchers
+                .iter()
+                .filter(|w| glob_string(w).starts_with(root_str.as_ref()))
+                .collect();
+            assert_eq!(
+                root_watchers.len(),
+                expected_count,
+                "each root should have 2 watchers"
+            );
         }
     }
 }
