@@ -51,7 +51,7 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 | P1 | `UnknownReason` enum + `DataType::Unknown(UnknownReason)` w/ reason-agnostic identity; behavior-preserving workspace migration | done | discriminant | feat(types): discriminate DataType::Unknown by reason (Unresolved/Dynamic/Propagated), reason-agnostic identity | 2026-06-20 |
 | P2 | Unknown-census guard records the reason per site | done | census map | feat(types): unknown-census records each Unknown site's reason | 2026-06-20 |
 | P3 | `DiagnosticCode::ColumnTypeUnresolved` minted + wired at schema-layer origin `Unknown(Unresolved)` columns | done | D-07 (W3 P5) | feat(db): mint and emit ColumnTypeUnresolved for origin Unresolved columns (D-07) | 2026-06-21 |
-| P4 | Close-out: KD retraction (types.md, function_schema_inference.md) + W3 P5/P6 → done + master registry + ROADMAP | pending | W3 P6 | docs(spec-impl): close out D-07 — Unknown discriminant + ColumnTypeUnresolved landed | |
+| P4 | Close-out: KD retraction (types.md, function_schema_inference.md) + W3 P5/P6 → done + master registry + ROADMAP | done | W3 P6 | docs(spec-impl): close out D-07 — Unknown discriminant + ColumnTypeUnresolved landed | 2026-06-21 |
 
 **Status values**: `pending`, `done`, `blocked`.
 

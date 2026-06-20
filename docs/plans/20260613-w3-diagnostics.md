@@ -51,8 +51,8 @@ Set the row `blocked` + one-line reason; append a dated §"Blocked phases" entry
 | P2 | Frontmatter diagnostics: `BackendsWideningNotAllowed` malformed-branch → `FrontmatterParseError`; `FrontmatterParseError` Error in all cases | done | D-14, D-31 | fix(db): route malformed function frontmatter to FrontmatterParseError; Error in all cases (D-14, D-31) | 2026-06-14 |
 | P3 | `DuplicateFunctionDefinition` directory-scoped | done | D-30 | fix(db): scope DuplicateFunctionDefinition to a directory, not the workspace (D-30) | 2026-06-14 |
 | P4 | D-08/D-09 cleanup: confirm bare-path → `UndefinedModelRef`; retire `smelt.source()` call-form | done | D-08, D-09 | refactor(runtime): drop legacy smelt.source() call-form; lock bare-path → UndefinedModelRef (D-08, D-09) | 2026-06-14 |
-| P5 | `ColumnTypeUnresolved` minted live (risk-flagged) | blocked | D-07 | feat(db): emit ColumnTypeUnresolved for compiler-resolvable Unknown columns (D-07) | |
-| P6 | Close-out: catalogue gate + registry + ROADMAP | blocked | — | docs(spec-impl): close out W3 — diagnostics fixes landed; registry + roadmap | |
+| P5 | `ColumnTypeUnresolved` minted live (risk-flagged) | done | D-07 | feat(db): mint and emit ColumnTypeUnresolved for origin Unresolved columns (D-07) | 2026-06-21 (delivered via docs/plans/20260620-unknown-reason-discriminant.md) |
+| P6 | Close-out: catalogue gate + registry + ROADMAP | done | — | docs(spec-impl): close out D-07 — Unknown discriminant + ColumnTypeUnresolved landed | 2026-06-21 (delivered via docs/plans/20260620-unknown-reason-discriminant.md) |
 
 **Status values**: `pending`, `done`, `blocked`.
 
