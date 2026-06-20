@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781925255533,
+  "lastUpdate": 1781930144343,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19833,6 +19833,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.658821,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "64fcb49d3ed2a023d76f03edd88bfa620c3387ba",
+          "message": "perf(smelt-db): share one sorted workspace-file list across diagnostic queries\n\nPhase 1 of docs/plans/20260620-initial-load-path-perf.md.\n\nSeveral Salsa queries each rebuilt-and-sorted the workspace file list by path\n(workspace.files().to_vec(); sort_by(|a,b| a.path(db).cmp(b.path(db)))). Three\nof them run per-file during cold diagnostics — function_body_diagnostics_for_file,\nsmelt_fn_call_diagnostics_for_file, missing_provenance_advisory_for_file — so the\nwhole list was re-sorted N times, making cold load O(N^2 log N) in path-component\ncomparisons (the std::path hotspot the flamegraph attributed ~40% of cold CPU to).\n\nAdd sorted_workspace_files(workspace): one workspace-keyed tracked query that\nsorts once per revision and is shared by every consumer. Project-scoped resolvers\n(resolve_function/resolve_function_path) filter the shared list after the sort,\npreserving \"first match wins\" and project isolation; per-file diagnostic queries\niterate the shared Arc instead of re-sorting. Output is byte-identical — example\ndiagnostics, cross-project isolation, and property tests all unchanged.\n\nLocally on the 2000-model bench: Initial Load 663 -> 297ms (-55% this phase;\n-65% cumulative from the pre-Phase-0 ~850ms). diag-work-beyond-type_context\n537 -> 167ms. Reviewed by an independent subagent pass for ordering/isolation.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T13:27:21+10:00",
+          "tree_id": "8c558cb44baeb1a0ad0efd0bff846ebe839b4327",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/64fcb49d3ed2a023d76f03edd88bfa620c3387ba"
+        },
+        "date": 1781930142739,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 48.351040999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 46.248139,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.832032,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.620207,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.345514,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 676.9308910000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.135458,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.703522,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.54689,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.674188,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 574.9092420000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 8.14128,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.46094,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.486862,
             "unit": "ms"
           }
         ]
