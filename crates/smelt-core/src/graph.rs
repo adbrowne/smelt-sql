@@ -364,6 +364,30 @@ impl DependencyGraph {
         Ok(selected.difference(&to_exclude).cloned().collect())
     }
 
+    /// Check that every model in `selected` has all its direct built-model
+    /// dependencies also present in `selected`.
+    ///
+    /// Returns `(retained_model, missing_dep)` pairs where a retained model's
+    /// direct model dependency was removed from the working set (e.g. by
+    /// `--exclude +model` upstream expansion). Sources and seeds are never
+    /// flagged — only model-to-model dependency edges.
+    pub fn check_working_set_consistency(
+        &self,
+        selected: &HashSet<String>,
+    ) -> Vec<(String, String)> {
+        let mut violations = Vec::new();
+        for model in selected {
+            if let Some(deps) = self.dependencies.get(model) {
+                for dep in deps {
+                    if self.models.contains_key(dep) && !selected.contains(dep) {
+                        violations.push((model.clone(), dep.clone()));
+                    }
+                }
+            }
+        }
+        violations
+    }
+
     /// Collect all upstream dependencies recursively.
     fn collect_upstream(&self, model_name: &str, result: &mut HashSet<String>) {
         if let Some(deps) = self.dependencies.get(model_name) {
@@ -1053,6 +1077,93 @@ mod tests {
             vec!["silver.events_parsed".to_string()],
             "dep key must be canonical path, got: {deps:?}"
         );
+    }
+
+    // ----- check_working_set_consistency tests (D-39) -------------------
+
+    /// Retained model has a direct dep that was excluded → violation reported.
+    #[test]
+    fn consistency_check_flags_missing_dep() {
+        // A → B → C.  Select {A, B, C}, then exclude B.
+        // C depends on B (excluded) → violation.
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec!["A"]),
+            make_model("C", vec!["B"]),
+        ];
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        // Selected = {A, C} (B was excluded).
+        let selected: HashSet<String> = ["A".to_string(), "C".to_string()].into();
+        let violations = graph.check_working_set_consistency(&selected);
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "expected exactly one violation: {:?}",
+            violations
+        );
+        let (retained, missing) = &violations[0];
+        assert_eq!(retained, "C");
+        assert_eq!(missing, "B");
+    }
+
+    /// All retained models have their deps present → no violations.
+    #[test]
+    fn consistency_check_clean_set_no_violations() {
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec!["A"]),
+            make_model("C", vec!["B"]),
+        ];
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        let selected: HashSet<String> = ["A".to_string(), "B".to_string(), "C".to_string()].into();
+        assert!(graph.check_working_set_consistency(&selected).is_empty());
+    }
+
+    /// Sources/seeds in the dep list are NOT flagged even when absent from
+    /// `selected` — the check is model-to-model only.
+    #[test]
+    fn consistency_check_ignores_source_deps() {
+        use crate::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
+
+        // model A refs smelt.sources.src.events (a source, not a model).
+        let mut model_a = make_model("A", vec![]);
+        model_a.refs = vec![RefInfo {
+            has_named_params: false,
+            range: TextRange::default(),
+            smelt_ref: crate::refs::SmeltRef::Path(vec![
+                "sources".to_string(),
+                "src".to_string(),
+                "events".to_string(),
+            ]),
+        }];
+
+        let source_config = SourcesConfig {
+            sources: vec![SourceDef {
+                name: "src".to_string(),
+                database: None,
+                schema: None,
+                description: None,
+                tables: vec![SourceTableDef {
+                    name: "events".to_string(),
+                    identifier: None,
+                    description: None,
+                    columns: vec![SourceColumnDef {
+                        name: "id".to_string(),
+                        data_type: None,
+                        description: None,
+                        data_latency: None,
+                    }],
+                }],
+            }],
+        };
+
+        let graph = DependencyGraph::build(vec![model_a], Some(&source_config)).unwrap();
+        let selected: HashSet<String> = ["A".to_string()].into();
+        // src.events is a source, not in self.models → no violation.
+        assert!(graph.check_working_set_consistency(&selected).is_empty());
     }
 
     /// `execution_order()` returns canonical dot-paths in DAG order.
