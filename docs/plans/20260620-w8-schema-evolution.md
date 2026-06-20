@@ -44,14 +44,38 @@ least one of `default:` or `backfill:` is declared. The current code checks **on
 2. `plan_schema_operations` in the same file — the `full_refresh_reasons` push for NOT NULL
    add without default (line ~902).
 
-When **backfill-only** is present (no `default:`):
+When **backfill-only** is present (no `default:`) — **ADD COLUMN** case:
 - The ADD COLUMN statement must omit the `DEFAULT` clause (there is no SQL default).
-- The UPDATE backfill statement must follow immediately.
+- The UPDATE backfill statement must follow immediately. For a *new* column this UPDATE
+  has **no `WHERE`** (every row is freshly added and must be populated) — this matches the
+  existing column-add codegen at `schema_tracking.rs` ~line 1379.
 - The column is still NOT NULL — the backfill expression is trusted to populate all rows.
+
+When **backfill-only** is present — **nullability-tighten** (`ChangeNullability` NULL → NOT
+NULL) case — the column already exists and already holds non-NULL values in most rows:
+- The backfill UPDATE **must be scoped `WHERE <col> IS NULL`** so it fills only the NULL
+  gaps and does **not** clobber rows that already hold good data. This is the single guard
+  that resolves the code-comment hazard (see §"Spec mismatch (human triage)").
+- Then emit `ALTER COLUMN <col> SET NOT NULL`.
 
 When **neither** `default:` nor `backfill:` is present, the change must remain Blocked
 (FullRefresh required). The spec says "smelt will not silently insert NULL into a NOT NULL
 column."
+
+**Fail-loud, not fail-quiet.** The `ChangeNullability { to_nullable: false }` codegen arm
+(`schema_tracking.rs` ~line 1413) currently emits the `UPDATE`/`SET NOT NULL` pair **only
+inside** `if let Some(default_val) = column_defaults.get(...)`. The moment classification
+admits backfill-only as Safe, that arm falls through and emits **nothing** — silently
+dropping the NOT NULL constraint. P1 must restructure this arm to fill from `default` if
+present, **else** from `backfill` (`WHERE <col> IS NULL`), and **always** emit the
+`SET NOT NULL` on the Safe path. A Safe classification that produces no `SET NOT NULL` is a
+bug, not a no-op.
+
+**Precedence when both `default:` and `backfill:` are present.** Per the spec
+(§"NOT NULL column-add reclassification" — "backfill takes precedence for pre-existing
+rows"), the backfill value wins the gap fill. For the tighten case that means: if backfill
+is present, fill gaps with the backfill expression (`WHERE <col> IS NULL`); `default:` only
+governs the ADD COLUMN default clause, which does not apply to an already-existing column.
 
 ---
 
@@ -120,40 +144,62 @@ When neither is present, FullRefresh is returned as before.
   - `plan_schema_operations`: the `!nullable && default_expr.is_none()` guard (~line 902)
     that pushes to `full_refresh_reasons`; it must also bail out when `backfill_exprs`
     lacks the key.
-  - The DDL emission block inside `plan_migration_for_backend` (~line 1360): the
-    `AddColumn` arm already handles the backfill UPDATE — verify the backfill-only branch
-    emits `ADD COLUMN … NOT NULL` (no DEFAULT clause) followed by the UPDATE.
+  - The DDL emission block inside `plan_migration_for_backend`: the `AddColumn` arm
+    (~line 1360) already handles the backfill UPDATE — verify the backfill-only branch
+    emits `ADD COLUMN … NOT NULL` (no DEFAULT clause) followed by the no-`WHERE` UPDATE.
+  - The `ChangeNullability { to_nullable: false }` arm (~line 1413): restructure so it
+    fills gaps from `default` if present, **else** from `backfill` with `WHERE <col> IS
+    NULL`, and always emits `SET NOT NULL` on the Safe path (see §Goal "Fail-loud, not
+    fail-quiet"). Delete or rewrite the stale comment at ~line 1414 that asserts backfill
+    does not apply to nullability changes — it does, scoped to the NULL gaps.
 
 **TDD tests to write first** (in `crates/smelt-state/src/schema_tracking.rs` `#[cfg(test)]`):
 - `not_null_add_backfill_only_is_safe` — `AddColumn { nullable: false }` + backfill-only
   (no default): asserts `MigrationAction::AlterTable` with exactly two statements: the
   `ADD COLUMN … NOT NULL` (no DEFAULT) and the `UPDATE … SET … = …`.
 - `not_null_tighten_backfill_only_is_safe` — `ChangeNullability { to_nullable: false }` +
-  backfill-only (no default): asserts `AlterTable` with two statements (UPDATE to fill NULLs,
-  then `ALTER COLUMN … SET NOT NULL`). _(Note: the spec says `backfill:` populates rows for
-  both add and tighten; if tightening with backfill-only is genuinely ambiguous — see §Design
-  "backfill expressions are for recomputing column values from other columns, which is a
-  different semantic (used for new column additions, not nullability changes)" at line ~1414
-  — the implementer must flag it as a spec question and raise `<<PHASE_BLOCKED>>` rather
-  than guessing._
+  backfill-only (no default): asserts `AlterTable` with exactly two statements — the
+  gap-scoped `UPDATE … SET <col> = <expr> WHERE <col> IS NULL`, then
+  `ALTER COLUMN … SET NOT NULL`. The `WHERE <col> IS NULL` is **load-bearing** (it is the
+  guard that resolves the code-comment hazard); assert it is present in the UPDATE string.
+- `not_null_tighten_backfill_only_does_not_clobber_existing` — same setup; assert the
+  emitted UPDATE is scoped (`WHERE … IS NULL`) and **not** an unscoped
+  `UPDATE … SET <col> = <expr>` (which would overwrite already-populated rows). This is the
+  regression guard against reusing the column-add (no-`WHERE`) codegen for tightening.
+- `not_null_tighten_both_default_and_backfill_uses_backfill_for_gap` — both present:
+  assert the gap fill uses the **backfill** expression (precedence), `WHERE <col> IS NULL`,
+  then `SET NOT NULL`.
 - `not_null_add_neither_default_nor_backfill_is_blocked` — `AddColumn { nullable: false }`,
   empty `defaults` and empty `backfills`: asserts `FullRefresh`.
+- `not_null_tighten_neither_default_nor_backfill_is_blocked` —
+  `ChangeNullability { to_nullable: false }`, empty `defaults` and empty `backfills`:
+  asserts `FullRefresh` (the Blocked path is unchanged).
 
 The existing tests `test_plan_migration_not_null_column_with_default` and
 `test_plan_migration_not_null_with_default_and_backfill` must still pass unchanged — they
 cover the `default:`-present and both-present cases respectively.
 
-**Spec-mismatch risk.** The spec at §"NOT NULL column-add reclassification" applies the
-`default:`/`backfill:` symmetry to both `AddColumn` and `ChangeNullability` (NULL → NOT NULL
-tighten). However, the comment in the code at line ~1413 says: "We use `column_defaults`
-(not `backfill_exprs`) here because the goal is to fill NULL gaps with a safe constant —
-backfill expressions are for recomputing column values from other columns, which is a
-different semantic." If the implementer judges that the spec intends `backfill:`-only to
-unlock `ChangeNullability` as well (which the classification table row "Change NULL → NOT
-NULL | **Blocked** — requires `--allow-full-refresh` unless `default:` and/or `backfill:`
-is set" implies), apply it. If the distinction in the code comment makes the correct
-behaviour genuinely unclear, flag as `<<PHASE_BLOCKED>>` and note it in §"Blocked phases"
-for human resolution.
+**Spec-mismatch risk — RESOLVED (human triage 2026-06-20, do not re-litigate).** The spec
+at §"NOT NULL column-add reclassification" applies the `default:`/`backfill:` symmetry to
+both `AddColumn` and `ChangeNullability` (NULL → NOT NULL tighten). The code comment at
+~line 1413 ("backfill expressions are for recomputing column values from other columns …
+a different semantic") was reviewed and found to flag a **real codegen hazard but the wrong
+conclusion**:
+
+- The hazard is concrete: the column-add backfill UPDATE at ~line 1379 has **no `WHERE`**
+  (overwrites every row). That is correct for a brand-new column, but reused verbatim on an
+  existing column it would clobber already-populated, non-NULL rows.
+- The resolution is **not** to exclude backfill from nullability tightening (the spec is
+  right that it should unlock the change, and a derived `backfill:` expression — e.g.
+  `coalesce(prior, 'unknown')` — is strictly more useful here than a constant `default:`).
+  The resolution is to scope the tightening UPDATE `WHERE <col> IS NULL` so it fills only
+  the gaps. With that guard, backfill satisfies the constraint without touching good data.
+
+Therefore P1 **applies the spec for both `AddColumn` and `ChangeNullability`** as detailed
+in §Goal. Do **not** raise `<<PHASE_BLOCKED>>` for this case — the question is answered.
+(Full triage write-up references: classification sites `schema_tracking.rs:1291` and
+`:1316`; codegen `:1379` add / `:1413` tighten; spec `schema_evolution.md:137,147`;
+decision `docs/research/20260613-spec-remediation-decisions.md:429`.)
 
 ---
 
@@ -173,16 +219,32 @@ None. D-58 is a narrow, self-contained fix.
 
 ---
 
-## Spec mismatch (human triage)
+## Spec mismatch (human triage) — RESOLVED 2026-06-20
 
-Possible ambiguity: the code comment at `schema_tracking.rs` ~line 1413 argues that
-`backfill:` should **not** be used for `ChangeNullability` (only for new-column backfill),
-while the spec classification table row "Change NULL → NOT NULL … unless `default:` and/or
-`backfill:` is set" implies it should. The implementer should apply the spec as written
-unless the argument in the code comment surfaces a genuine correctness concern (e.g.,
-`backfill:` expressions reference other columns that may not correctly fill pre-existing
-NULLs in a nullability-tightening context). If uncertain, raise `<<PHASE_BLOCKED>>` rather
-than guessing.
+**Question.** The code comment at `schema_tracking.rs` ~line 1413 argued that `backfill:`
+should **not** be used for `ChangeNullability` (only for new-column backfill), while the
+spec classification row "Change NULL → NOT NULL … unless `default:` and/or `backfill:` is
+set" says it should.
+
+**Resolution: apply the spec (option A) for both `AddColumn` and `ChangeNullability`.** The
+comment's underlying concern — that `backfill:` for a *new* column is an unscoped
+`UPDATE SET col = expr` (no `WHERE`) which would clobber existing non-NULL rows if reused
+for an *existing* column — is real, but it is a codegen-scoping issue, not a reason to
+exclude backfill. The fix is to scope the tightening UPDATE `WHERE <col> IS NULL` (fill only
+the NULL gaps). This:
+
+1. Satisfies the NOT NULL constraint (every former-NULL row gets a value).
+2. Leaves already-populated rows untouched (no data clobbering).
+3. Gives users the more expressive primitive exactly where it matters — tightening fills are
+   almost always *derived* (`coalesce(...)`, computed from a sibling column), which a constant
+   `default:` cannot express. Forcing `default:` here would push users to a meaningless
+   constant or a full table rewrite — the penalty the spec's own design rationale
+   (`schema_evolution.md:213,217`) exists to avoid.
+
+**Implication for P1, beyond the classifier change:** the `:1413` codegen arm must be
+restructured so it never silently no-ops on the Safe path (it currently emits `SET NOT NULL`
+only when a `default:` exists — see §Goal "Fail-loud, not fail-quiet"), and the stale
+comment at `:1414` must be deleted/rewritten. No `<<PHASE_BLOCKED>>` for this item.
 
 ---
 
@@ -195,10 +257,15 @@ _(none)_
 ## Verification
 
 After P1 passes:
-- `cargo test -p smelt-state --quiet 2>&1 | tail -40` — all three new tests green; all
-  existing `test_plan_migration_not_null_*` tests still green.
+- `cargo test -p smelt-state --quiet 2>&1 | tail -40` — all new `not_null_*` tests green
+  (add backfill-only, tighten backfill-only, tighten no-clobber, tighten both-precedence,
+  add neither-blocked, tighten neither-blocked); all existing `test_plan_migration_not_null_*`
+  tests still green.
 - `cargo test --quiet 2>&1 | tail -40` — workspace green.
 - `cargo test -p smelt-cli --test example_diagnostics` — no regressions.
 - `cargo test -p smelt-lsp --test example_workspaces` — no regressions.
-- Reviewer confirms: backfill-only produces no DEFAULT clause in the ADD COLUMN DDL;
-  neither-present still returns FullRefresh; both-present still produces DEFAULT + UPDATE.
+- Reviewer confirms: backfill-only ADD produces no DEFAULT clause and a no-`WHERE` UPDATE;
+  backfill-only **tighten** produces a `WHERE <col> IS NULL`-scoped UPDATE plus
+  `SET NOT NULL` (never a silent no-op, never an unscoped clobbering UPDATE); neither-present
+  still returns FullRefresh for both add and tighten; both-present still produces DEFAULT +
+  UPDATE for add and a backfill-precedence gap fill for tighten.
