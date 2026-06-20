@@ -504,6 +504,7 @@ impl Config {
                     "seed_paths",
                     "unstable_schema",
                     "vars",
+                    "state",
                 ];
                 for (key, _) in map {
                     if let Some(key_str) = key.as_str() {
@@ -1905,5 +1906,56 @@ default_materialization: {default_mat}
                 "`default_materialization: {mat}` must be accepted"
             );
         }
+    }
+
+    /// D-34: `state:` is a known top-level key — a smelt.yml with a `state:` block
+    /// must not produce an unknown-key warning.
+    #[test]
+    fn state_key_does_not_warn() {
+        let yaml = r#"
+name: test_project
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+state:
+  mode: stateless
+"#;
+        let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        let state_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("state")).collect();
+        assert!(
+            state_warnings.is_empty(),
+            "`state:` must not produce an unknown-key warning, got: {:?}",
+            state_warnings
+        );
+    }
+
+    /// D-34: `vars:` still produces no warning (regression guard).
+    #[test]
+    fn vars_key_still_does_not_warn() {
+        let yaml = r#"
+name: test_project
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+vars:
+  env: production
+"#;
+        let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        let vars_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("vars")).collect();
+        assert!(
+            vars_warnings.is_empty(),
+            "`vars:` must not produce an unknown-key warning, got: {:?}",
+            vars_warnings
+        );
     }
 }
