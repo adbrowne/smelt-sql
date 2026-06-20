@@ -87,7 +87,7 @@ pub fn infer_collate_expr_type(collate: &CollateExpr, ctx: &TypeContext) -> Opti
             .and_then(|op| infer_expression_type(&op, ctx))
     } else {
         Some(TypedColumn {
-            data_type: DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+            data_type: DataType::Unknown(smelt_types::UnknownReason::Unresolved),
             nullable: true,
         })
     }
