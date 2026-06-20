@@ -517,6 +517,24 @@ impl Config {
                 }
             }
         }
+        // D-33: reject `test` and `cumulative_aggregate` as project-wide defaults.
+        // Only table / view / materialized_view / ephemeral are legal defaults;
+        // `test` and `cumulative_aggregate` require per-model semantics that cannot
+        // serve as a project fallback (smelt_yml.md §Top-level keys, §Semantics §8).
+        let forbidden_default = match &config.default_materialization {
+            Materialization::Test => Some("test"),
+            Materialization::CumulativeAggregate => Some("cumulative_aggregate"),
+            _ => None,
+        };
+        if let Some(name) = forbidden_default {
+            use serde::de::Error as _;
+            return Err(serde_yaml::Error::custom(format!(
+                "`default_materialization: {name}` is not permitted as a project-wide default. \
+                 Permitted values: table, view, materialized_view, ephemeral \
+                 (smelt_yml.md §Top-level keys, §Semantics §8)."
+            )));
+        }
+
         Ok((config, warnings))
     }
 
@@ -1813,5 +1831,79 @@ targets:
             config.get_format("unknown", None, spark),
             Some(TableFormat::Delta),
         );
+    }
+
+    // ── D-33: default_materialization validation ─────────────────────────────
+
+    fn minimal_config_yaml(default_mat: &str) -> String {
+        format!(
+            r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+default_materialization: {default_mat}
+"#
+        )
+    }
+
+    /// D-33: `default_materialization: test` is rejected at parse time
+    /// with a hard error naming the forbidden value.
+    #[test]
+    fn default_materialization_test_is_rejected() {
+        let yaml = minimal_config_yaml("test");
+        let result = Config::parse_with_warnings(&yaml);
+        assert!(
+            result.is_err(),
+            "`default_materialization: test` must be rejected, but parse_with_warnings returned Ok"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("test"),
+            "error must name the forbidden value 'test'; got: {err}"
+        );
+        assert!(
+            err.contains("default_materialization"),
+            "error must mention 'default_materialization'; got: {err}"
+        );
+    }
+
+    /// D-33: `default_materialization: cumulative_aggregate` is rejected at parse time.
+    #[test]
+    fn default_materialization_cumulative_aggregate_is_rejected() {
+        let yaml = minimal_config_yaml("cumulative_aggregate");
+        let result = Config::parse_with_warnings(&yaml);
+        assert!(
+            result.is_err(),
+            "`default_materialization: cumulative_aggregate` must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cumulative_aggregate"),
+            "error must name the forbidden value; got: {err}"
+        );
+    }
+
+    /// D-33: `default_materialization: ephemeral` is permitted.
+    #[test]
+    fn default_materialization_ephemeral_is_allowed() {
+        let yaml = minimal_config_yaml("ephemeral");
+        let (config, _) = Config::parse_with_warnings(&yaml).expect("ephemeral is a legal default");
+        assert_eq!(config.default_materialization, Materialization::Ephemeral);
+    }
+
+    /// D-33: table, view, materialized_view remain legal defaults (regression guard).
+    #[test]
+    fn default_materialization_standard_values_are_allowed() {
+        for mat in ["table", "view", "materialized_view"] {
+            let yaml = minimal_config_yaml(mat);
+            assert!(
+                Config::parse_with_warnings(&yaml).is_ok(),
+                "`default_materialization: {mat}` must be accepted"
+            );
+        }
     }
 }
