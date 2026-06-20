@@ -169,17 +169,17 @@ classification = "legitimate"
 reason = "recursive CTE column bootstrap — types unknown until recursive reference resolves; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:808"]
+["crates/smelt-db/src/queries/schema.rs:811"]
 classification = "legitimate"
 reason = "sources.yml column with no declared type — Unresolved because user can add a type: field to fix; ColumnTypeUnresolved fires to notify"
 discriminant = "unresolved"
 
-["crates/smelt-db/src/queries/schema.rs:836"]
+["crates/smelt-db/src/queries/schema.rs:839"]
 classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1063"]
+["crates/smelt-db/src/queries/schema.rs:1066"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"

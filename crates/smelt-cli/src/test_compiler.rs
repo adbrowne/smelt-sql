@@ -144,6 +144,25 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Check if a string looks like a decimal number: contains `.`, no exponent, parseable as f64.
+/// These strings are cast to `DECIMAL` (not `VARCHAR`) in generated SQL (D-44).
+///
+/// Examples: "300.00" → true, "3.14e2" → false, "42" → false.
+pub fn is_decimal_string(s: &str) -> bool {
+    if !s.contains('.') || s.contains('e') || s.contains('E') {
+        return false;
+    }
+    s.parse::<f64>().is_ok()
+}
+
+/// Count the number of digits after the decimal point in a decimal string.
+///
+/// Used to determine the CAST scale so DuckDB preserves trailing zeros (e.g.
+/// `'100.50'` → scale 2 → `DECIMAL(18, 2)` → Arrow shows `"100.50"` not `"100.500"`).
+fn decimal_string_scale(s: &str) -> usize {
+    s.find('.').map(|pos| s.len() - pos - 1).unwrap_or(0)
+}
+
 /// Check if a string matches the YYYY-MM-DD date pattern.
 fn is_date_string(s: &str) -> bool {
     if s.len() != 10 {
@@ -209,6 +228,16 @@ fn yaml_value_to_sql(v: &serde_yaml::Value) -> String {
                 format!("'{}'::DATE", s)
             } else if is_timestamp_string(s) {
                 format!("'{}'::TIMESTAMP", s)
+            } else if is_decimal_string(s) {
+                // D-44: decimal-shaped strings cast to DECIMAL(18, scale), not VARCHAR,
+                // so that SUM/AVG etc. accept them and trailing zeros are preserved
+                // (e.g. '100.50' → DECIMAL(18,2) → Arrow "100.50", not "100.500").
+                let scale = decimal_string_scale(s);
+                format!(
+                    "CAST('{}' AS DECIMAL(18, {}))",
+                    s.replace('\'', "''"),
+                    scale
+                )
             } else {
                 format!("'{}'", s.replace('\'', "''"))
             }
@@ -719,6 +748,26 @@ pub fn validate_test_expect(expect: &[BTreeMap<String, serde_yaml::Value>]) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_decimal_string() {
+        // True: contains '.', no exponent, parseable
+        assert!(is_decimal_string("300.00"));
+        assert!(is_decimal_string("1.0000001"));
+        assert!(is_decimal_string("0.5"));
+        assert!(is_decimal_string("-9.99"));
+        // False: no decimal point
+        assert!(!is_decimal_string("42"));
+        assert!(!is_decimal_string("0"));
+        // False: scientific notation
+        assert!(!is_decimal_string("3.14e2"));
+        assert!(!is_decimal_string("1E10"));
+        // False: not a number
+        assert!(!is_decimal_string("hello"));
+        assert!(!is_decimal_string("2024-01-01"));
+        // False: date-shaped (handled by is_date_string, but also no '.' so not decimal)
+        assert!(!is_decimal_string("2024-01-01"));
+    }
 
     #[test]
     fn test_extract_ctes_basic() {
