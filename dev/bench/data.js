@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781930147028,
+  "lastUpdate": 1781940484725,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19927,6 +19927,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.486862,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "b73fd8f77db27802d8484f473b1eb5b59d49ec6f",
+          "message": "feat(autonomy): graceful stop flag — finish current iteration, then halt\n\nAdds a between-iterations stop mechanism so the loop can be stopped without\nwasting the in-flight iteration's work (it commits + pushes as normal first).\n\n- autonomy-loop.sh: check .claude/autonomy.stop at the top of each iteration;\n  if present, consume it, break, and exit 3 (stopped_by_flag). The flag lives\n  under .claude/ (gitignored by `.claude/*`), so it is never committed and the\n  iteration-start auto-stash (--include-untracked skips ignored files) and\n  `git status --porcelain` both leave it untouched.\n- autonomy-loop-forever.sh: on inner-loop exit 3, do not restart.\n- stop-autonomy.sh: helper that drops the flag (or `touch .claude/autonomy.stop`).\n\nImmediate Ctrl-C/kill still works for a hard stop (discards in-progress work).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-20T16:49:41+10:00",
+          "tree_id": "50f87ef22bdb2205bafb116b91b274511740624f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b73fd8f77db27802d8484f473b1eb5b59d49ec6f"
+        },
+        "date": 1781940483445,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 54.382167,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 52.206891,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.875398,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.625664,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.35142399999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 689.493818,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.287234,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.8000339999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.641322,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.684803,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 569.314451,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.666370000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.65343,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.654781,
             "unit": "ms"
           }
         ]
