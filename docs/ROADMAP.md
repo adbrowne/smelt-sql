@@ -90,6 +90,14 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/config — smelt.yml Format, Default-Materialization Validation, state: Key (D-32/33/34)~~ ✅ (June 21, 2026)
+
+Three-phase remediation plan ([plan](plans/20260620-w8-config.md)) landing the D-config cluster from the 2026-06-13 spec review:
+
+- **`format` in `ModelConfig` + three-tier precedence `get_format` (D-32, P1)** — `smelt.yml` `models.<name>` entries now accept `format: delta|parquet`; `Config::get_format` implements the precedence chain (SQL frontmatter > `smelt.yml` model config > target default), matching the `materialization:` pattern.
+- **Reject `default_materialization: test/cumulative_aggregate` (D-33, P2)** — a project-level `default_materialization` of `test` or `cumulative_aggregate` is now a hard validation error at load time; `table`, `view`, `materialized_view`, and `ephemeral` remain legal.
+- **Add `state:` to `KNOWN_KEYS` (D-34, P3)** — `smelt.yml` files containing a `state:` block no longer produce a spurious unknown-key warning; `state:` is an allowlisted out-of-band key alongside `vars:`.
+
 ### ~~Spec-Remediation W7 — LSP Watched-File Set, Downstream Republication, Rename Scope & Hover (D-lsp)~~ ✅ (June 21, 2026)
 
 Five-phase remediation plan ([plan](plans/20260620-w7-lsp.md)) landing the D-lsp cluster from the 2026-06-13 spec review (D-48/49/56):
