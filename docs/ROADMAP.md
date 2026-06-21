@@ -90,6 +90,14 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/timeseries — Partition & Pruning Column Invariants (D-52)~~ ✅ (June 22, 2026)
+
+Two-rule static diagnostic pass ([plan](plans/20260620-w8-timeseries.md)) landing the D-52 decisions from the 2026-06-13 spec review. The R2-incremental-cadence execution changes are explicitly out of scope (deferred to the R2 rewrite).
+
+- **NOT-NULL invariant (D-52 rule 7, P1)** — `partition_column` (and a distinct `event_time_column` when it drives pruning) must be NOT NULL on the model's output schema. A nullable pruning column silently escapes the `>= start AND < end` window and is never re-inserted — a correctness hole. Fires `MalformedTimeseries`. Checks only `Computed` columns to avoid false positives from CTE pass-throughs and cross-model inheritance. Also tightened nullability defaults for CAST (None → false) and `date_trunc` (propagates from input) to eliminate false positives on clean timeseries examples.
+- **Sub-day granularity type constraint (D-52 rule 8, P2)** — `granularity: hour` requires a timestamp-resolution `partition_column`; pairing it with a `DATE` column silently coarsens pruning to whole-day boundaries. Fires `MalformedTimeseries`.
+- KD retraction: rules 7 and 8 removed from the "Output-schema-dependent validation rules" Known-Divergence note in `timeseries.md`; rules 2, 3, 4 remain pending the R2 rewrite.
+
 ### ~~Spec-Remediation W8/catalog — Catalog JSON Shape Fixes (D-50)~~ ✅ (June 21, 2026)
 
 Three-phase remediation plan ([plan](plans/20260620-w8-catalog.md)) landing the D-50 decisions from the 2026-06-13 spec review:

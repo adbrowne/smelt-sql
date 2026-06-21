@@ -155,7 +155,7 @@ This section captures the load-bearing rationale.
 - **Custom granularity plugin surface.** Reserved for future work. No plugin shipping today; the closed enum is authoritative.
 - **`smelt verify` against the database.** A future pass could check that an external source's declared `partition_column` and `event_time_column` exist in the live database. Out of scope here; mentioned in `sources.md` Known Divergences as well.
 - **LSP enrichment.** Hover and goto-definition for `timeseries:` fields are specced (Semantics § "LSP surface") but not yet implemented in the LSP. Tracked alongside the migration plan.
-- **Output-schema-dependent validation rules.** Validation rules 2, 3, 4, 7, and 8 (event-time column projection, event-time type constraint, partition-column type constraint, partition/pruning-column NOT NULL, and sub-day-granularity partition-type resolution) require the model's output schema — column types and nullability — which is not available at frontmatter extraction. These rules land alongside type-aware analysis in a follow-on; tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`. Rules 1, 5, 6 are enforced at frontmatter parse time.
+- **Output-schema-dependent validation rules (rules 2, 3, 4).** Validation rules 2 (event-time column projection), 3 (event-time type constraint), and 4 (partition-column type constraint) require the model's output schema. These rules land alongside the R2 incremental-cadence rewrite; tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`. Rules 7 and 8 (NOT-NULL invariant and sub-day granularity type) are implemented in `smelt-db`. Rules 1, 5, 6 are enforced at frontmatter parse time.
 
 ## References
 
