@@ -21,6 +21,7 @@
 mod canonical;
 mod determinism;
 mod hash;
+pub mod reuse;
 
 use smelt_parser::ast::SelectStmt;
 
