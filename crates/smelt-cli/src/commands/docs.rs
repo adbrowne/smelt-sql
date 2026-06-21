@@ -197,7 +197,14 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .collect::<Vec<_>>(),
     );
 
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets)?;
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &test_targets,
+        &project_dir,
+    )?;
 
     let output_dir = args
         .output

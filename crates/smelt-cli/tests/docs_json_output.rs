@@ -112,6 +112,7 @@ fn emitted_model_carries_origin_in_real_docs_catalog_pipeline() {
         &db,
         &origins,
         &std::collections::HashMap::new(),
+        &project_dir,
     )
     .expect("build catalog");
     let json = serde_json::to_string_pretty(&catalog).expect("serialize catalog");
@@ -216,6 +217,7 @@ fn catalog_column_source_always_present_in_full_pipeline() {
         &db,
         &origins,
         &std::collections::HashMap::new(),
+        &project_dir,
     )
     .expect("build catalog");
 
@@ -241,5 +243,101 @@ fn catalog_column_source_always_present_in_full_pipeline() {
                 );
             }
         }
+    }
+}
+
+// ── D-50(iii): path is workspace-relative ────────────────────────────────────
+
+/// D-50(iii): `path` in a `CatalogModel` must be workspace-relative (no leading `/`).
+#[test]
+fn catalog_path_is_workspace_relative() {
+    let tmp = stage_workspace(&[("models/orders.sql", "SELECT 1 AS id")]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+        &project_dir,
+    )
+    .expect("build catalog");
+
+    let orders = catalog.models.get("orders").unwrap_or_else(|| {
+        panic!(
+            "expected 'orders' model; got: {:?}",
+            catalog.models.keys().collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        !orders.path.starts_with('/'),
+        "catalog path must be workspace-relative (no leading /); got: {}",
+        orders.path
+    );
+    assert_eq!(
+        orders.path, "models/orders.sql",
+        "catalog path must be relative to project root"
+    );
+}
+
+/// D-50(iii): `origin.generator_file` for emitted models must also be workspace-relative.
+#[test]
+fn catalog_origin_generator_file_is_workspace_relative() {
+    let generator = "---\ngenerates: models\n---\n\
+        [ModelDef { name: 'east', body: SELECT 1 AS id }]";
+    let tmp = stage_workspace(&[("models/cohorts.gen.sql", generator)]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+        &project_dir,
+    )
+    .expect("build catalog");
+
+    let (_, emitted) = catalog
+        .models
+        .iter()
+        .find(|(k, _)| k.contains("east"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected emitted model containing 'east'; got: {:?}",
+                catalog.models.keys().collect::<Vec<_>>()
+            )
+        });
+
+    if let Some(smelt_core::ModelOriginKind::Generated {
+        ref generator_file, ..
+    }) = emitted.origin
+    {
+        assert!(
+            !generator_file.starts_with('/'),
+            "origin.generator_file must be workspace-relative; got: {}",
+            generator_file
+        );
+        assert!(
+            generator_file.contains("cohorts.gen.sql"),
+            "origin.generator_file must reference cohorts.gen.sql; got: {}",
+            generator_file
+        );
+    } else {
+        panic!(
+            "emitted model must have Generated origin; got: {:?}",
+            emitted.origin
+        );
     }
 }

@@ -4,6 +4,7 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelOriginKind;
 use smelt_db::ColumnSource;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 
 use crate::Config;
 
@@ -96,17 +97,38 @@ pub struct CatalogIncremental {
     pub unique_key: Vec<String>,
 }
 
+/// Return a workspace-relative string for `path`, relative to `project_dir`.
+/// For virtual paths containing `::` (emitted models), strips the prefix from
+/// the real-file portion before the separator and re-appends the virtual suffix.
+/// Falls back to the original display string when `path` is not under `project_dir`.
+fn workspace_relative(path: &Path, project_dir: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(sep) = s.find("::") {
+        let file_part = Path::new(&s[..sep]);
+        let rel = file_part
+            .strip_prefix(project_dir)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| s[..sep].to_string());
+        return format!("{}{}", rel, &s[sep..]);
+    }
+    path.strip_prefix(project_dir)
+        .map(|p| p.display().to_string())
+        .unwrap_or(s)
+}
+
 /// Build a complete catalog from the dependency graph, config, and Salsa DB.
 ///
 /// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
 /// `test_targets` maps each model name to the list of test models targeting it.
-/// Pass empty maps when that information is not available.
+/// `project_dir` is the directory containing `smelt.yml`; all `path` fields in
+/// the output are made relative to it.
 pub fn build_catalog(
     graph: &DependencyGraph,
     config: &Config,
     db: &smelt_db::Database,
     origins: &HashMap<String, (String, String)>,
     test_targets: &HashMap<String, Vec<TestRef>>,
+    project_dir: &Path,
 ) -> Result<Catalog> {
     let execution_order = graph.execution_order()?;
 
@@ -256,7 +278,7 @@ pub fn build_catalog(
         let origin = origins
             .get(model_name)
             .map(|(gf, gn)| ModelOriginKind::Generated {
-                generator_file: gf.clone(),
+                generator_file: workspace_relative(Path::new(gf), project_dir),
                 generator_name: gn.clone(),
             });
 
@@ -270,7 +292,7 @@ pub fn build_catalog(
                 owner,
                 tags,
                 materialization,
-                path: model_file.path.display().to_string(),
+                path: workspace_relative(&model_file.path, project_dir),
                 columns,
                 upstream,
                 downstream,

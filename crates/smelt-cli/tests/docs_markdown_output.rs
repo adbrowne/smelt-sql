@@ -63,8 +63,9 @@ fn model_page_lists_targeting_test_models() {
     let (graph, db, origins) =
         smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
             .expect("build logical graph");
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets)
-        .expect("build catalog");
+    let catalog =
+        smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets, &project_dir)
+            .expect("build catalog");
 
     // "orders" should be in the catalog.
     let orders = catalog
@@ -199,6 +200,7 @@ fn emitted_model_has_source_line_in_real_docs_markdown_pipeline() {
         &db,
         &origins,
         &std::collections::HashMap::new(),
+        &project_dir,
     )
     .expect("build catalog");
 
