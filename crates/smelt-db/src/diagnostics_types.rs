@@ -747,6 +747,14 @@ pub enum DiagnosticCode {
     /// must compare byte-wise (the default binary collation) or declare an engine
     /// on the model to use the engine's native collation.
     NonPortableCollation,
+
+    // ── Virtual environments diagnostic codes (D-46/D-47) ───────────────────
+    /// Emitted when a model's frontmatter declares a `state.mode` that is
+    /// higher in the posture lattice than the project's `state.mode` (models
+    /// may narrow but not widen; D-47). Error severity. Anchored at offset 0.
+    /// Message: "model declares state.mode {model_mode} but project posture is
+    /// {project_mode}; models may narrow but not widen the project posture"
+    StateModeWidening,
 }
 
 /// Structured metadata attached to diagnostics for code actions

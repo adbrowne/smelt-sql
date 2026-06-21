@@ -435,6 +435,7 @@ impl Backend {
                 DbCode::EventTimeColumnNotVisibleAtOuterSelect => {
                     "event-time-column-not-visible-at-outer-select"
                 }
+                DbCode::StateModeWidening => "state-mode-widening",
             };
             NumberOrString::String(code_str.to_string())
         });

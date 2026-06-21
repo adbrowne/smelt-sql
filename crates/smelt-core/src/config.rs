@@ -127,6 +127,15 @@ pub enum StateMode {
 }
 
 impl StateMode {
+    /// Returns the lowercase string representation of this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StateMode::Stateless => "stateless",
+            StateMode::Intervals => "intervals",
+            StateMode::Environments => "environments",
+        }
+    }
+
     /// Returns `true` if a model (or child project) with posture `self` may
     /// declare posture `target` — i.e. `target` is ≤ `self` in the lattice.
     ///
@@ -147,7 +156,7 @@ impl StateMode {
 }
 
 /// `state:` block in `smelt.yml` (D-47).
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct StateConfig {
     #[serde(default)]
     pub mode: StateMode,

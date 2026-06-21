@@ -1412,6 +1412,33 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
+        // State posture widening check (D-47): a model may narrow the project's
+        // state.mode but not widen it.
+        if let Some(model_state) = metadata.state.as_ref() {
+            let project_mode = project
+                .and_then(|p| {
+                    smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
+                        .ok()
+                        .map(|(cfg, _)| cfg.state.mode)
+                })
+                .unwrap_or_default();
+            if !project_mode.can_narrow_to(&model_state.mode) {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "model declares state.mode {} but project posture is {}; \
+                         models may narrow but not widen the project posture",
+                        model_state.mode.as_str(),
+                        project_mode.as_str(),
+                    ),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::StateModeWidening),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+        }
+
         // Built-in planner-rule diagnostics (cumulative classifier, incremental
         // batch-safety) surfaced through the uniform rule → diagnostics
         // interface. The checks live in `smelt-planner` (analysis-pure); this
