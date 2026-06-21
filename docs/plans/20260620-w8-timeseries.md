@@ -43,7 +43,7 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
 | P1 | NOT-NULL invariant: nullable `partition_column` or pruning `event_time_column` → `MalformedTimeseries` | done | D-52 rule 7 | feat(db): reject nullable timeseries partition/pruning columns (D-52 rule 7) | 2026-06-22 |
-| P2 | Granularity-vs-partition-type: sub-day `granularity` with `DATE` partition → `MalformedTimeseries` | pending | D-52 rule 8 | feat(db): reject sub-day granularity with date-resolution partition column (D-52 rule 8) | |
+| P2 | Granularity-vs-partition-type: sub-day `granularity` with `DATE` partition → `MalformedTimeseries` | done | D-52 rule 8 | feat(db): reject sub-day granularity with date-resolution partition column (D-52 rule 8) | 2026-06-22 |
 | P3 | Close-out: retract KD note for rules 7+8, registry row, ROADMAP | pending | D-52 close-out | docs(spec-impl): close out W8 — timeseries partition invariants; retract KD (D-52) | |
 
 ---

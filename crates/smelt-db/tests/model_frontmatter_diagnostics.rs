@@ -381,6 +381,72 @@ SELECT DATE '2020-01-01' AS partition_date, ts FROM events
     );
 }
 
+// ── D-52 rule 8: sub-day granularity + DATE partition → MalformedTimeseries ─
+
+/// D-52 rule 8: `granularity: hour` with a DATE partition column must fire.
+/// `DATE_TRUNC('day', ts)` returns a Timestamp, but DATE literals are Date.
+/// Use `CAST(ts AS DATE)` to guarantee a Date type partition column.
+#[test]
+fn timeseries_hour_granularity_with_date_partition_emits_malformed_timeseries() {
+    let root = PathBuf::from("/fake/ts_hour_date_partition");
+    let path = root.join("models").join("hourly_events.sql");
+    let src = "\
+---
+materialization: table
+timeseries:
+  event_time_column: ts
+  partition_column: partition_date
+  granularity: hour
+---
+SELECT CAST(ts AS DATE) AS partition_date, ts FROM events
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedTimeseries);
+    assert!(
+        !diags.is_empty(),
+        "expected MalformedTimeseries for hour granularity with DATE partition; got {:#?}",
+        diags_for(&db, ws, file)
+    );
+    assert!(
+        diags.iter().any(|d| d.message.contains("partition_date") || d.message.contains("granularity")),
+        "MalformedTimeseries message must reference column or granularity; got {:#?}",
+        diags
+    );
+}
+
+/// Negative control: `granularity: hour` with a TIMESTAMP partition must NOT
+/// emit MalformedTimeseries for the granularity-vs-type rule.
+#[test]
+fn timeseries_hour_granularity_with_timestamp_partition_no_diagnostic() {
+    let root = PathBuf::from("/fake/ts_hour_timestamp_partition");
+    let path = root.join("models").join("hourly_events.sql");
+    let src = "\
+---
+materialization: table
+timeseries:
+  event_time_column: ts
+  partition_column: partition_ts
+  granularity: hour
+---
+SELECT CAST(ts AS TIMESTAMP) AS partition_ts, ts FROM events
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedTimeseries);
+    let granularity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("granularity") || d.message.contains("timestamp"))
+        .collect();
+    assert!(
+        granularity_diags.is_empty(),
+        "unexpected granularity MalformedTimeseries for TIMESTAMP partition with hour granularity; got {:#?}",
+        granularity_diags
+    );
+}
+
 /// A single-model file whose `---` frontmatter is never closed must emit an
 /// `UnclosedFrontmatter` diagnostic rather than silently treating the file as
 /// having no frontmatter.

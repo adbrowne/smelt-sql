@@ -3322,6 +3322,18 @@ fn timeseries_broken_nullable_partition_emits_malformed_timeseries() {
     );
 }
 
+/// D-52 rule 8 e2e: `examples/timeseries_broken_hour_date_partition/` emits
+/// `MalformedTimeseries` — `partition_date` is a DATE column but `granularity: hour`
+/// requires a TIMESTAMP/TIMESTAMPTZ partition column.
+#[test]
+fn timeseries_broken_hour_date_partition_emits_malformed_timeseries() {
+    check_workspace_emits_timeseries_diagnostic(
+        "examples/timeseries_broken_hour_date_partition",
+        "models/hourly_date_partition.sql",
+        smelt_db::DiagnosticCode::MalformedTimeseries,
+    );
+}
+
 /// U5 TDD: `examples/frontmatter_broken_unknown_key/` emits exactly one
 /// `FrontmatterParseError` Error — `mateializaton` is an unknown top-level key.
 /// BUG-016 end-to-end regression.

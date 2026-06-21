@@ -226,6 +226,55 @@ pub fn check_timeseries_nullability(
     out
 }
 
+/// D-52 rule 8: sub-day granularity (`hour`) requires a timestamp-resolution
+/// `partition_column` type (Timestamp or TimestampTz). Pairing `granularity: hour`
+/// with a plain `Date` partition silently coarsens pruning to whole-day boundaries.
+///
+/// Only checks Computed columns (same policy as `check_timeseries_nullability`).
+/// Unknown types and non-Computed sources are skipped to avoid false positives.
+pub fn check_timeseries_granularity_type(
+    ts: &smelt_core::config::TimeseriesConfig,
+    schema: &crate::ModelSchema,
+) -> Vec<Diagnostic> {
+    use crate::schema::ColumnSource;
+    use smelt_core::config::Granularity;
+
+    if ts.granularity != Granularity::Hour {
+        return vec![];
+    }
+
+    let col_name = &ts.partition_column;
+    let Some(col) = schema.columns.iter().find(|c| &c.name == col_name) else {
+        return vec![];
+    };
+    if !matches!(col.source, ColumnSource::Computed) {
+        return vec![];
+    }
+    let Some(typed) = &col.data_type else {
+        return vec![];
+    };
+    if matches!(typed.data_type, DataType::Unknown(_)) {
+        return vec![];
+    }
+    // Date is the only type that silently coarsens sub-day pruning.
+    // Timestamp and TimestampTz are fine; other types are unexpected but
+    // not this rule's concern (they'd be caught by a type-mismatch rule).
+    if matches!(typed.data_type, DataType::Date) {
+        vec![Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "timeseries partition_column '{col_name}' is DATE but granularity is 'hour' — \
+                 DATE cannot represent hour boundaries; use TIMESTAMP or TIMESTAMPTZ"
+            ),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::MalformedTimeseries),
+            data: None,
+        }]
+    } else {
+        vec![]
+    }
+}
+
 pub(crate) fn check_unsupported_constructs(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     db: &dyn salsa::Database,

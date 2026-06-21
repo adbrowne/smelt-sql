@@ -246,8 +246,8 @@ pub use type_inference::{
 };
 
 pub use queries::check_types::{
-    cannot_infer_type_for_schema, check_expression_types_for_select, check_timeseries_nullability,
-    check_type_diagnostics,
+    cannot_infer_type_for_schema, check_expression_types_for_select,
+    check_timeseries_granularity_type, check_timeseries_nullability, check_type_diagnostics,
 };
 pub use queries::function_diagnostics::{
     as_struct_backend_diagnostics_for_file, backends_widening_diagnostics_for_file,
@@ -1413,11 +1413,18 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
-        // Timeseries nullability check (D-52 rule 7): partition_column and
-        // event_time_column must be NOT NULL in the model's output schema.
+        // Timeseries schema invariants (D-52 rules 7 and 8).
         if let Some(ts) = metadata.timeseries.as_ref() {
             let typed_schema = typed_model_schema(db, workspace, file);
+            // Rule 7: partition_column and event_time_column must be NOT NULL.
             for diag in queries::check_types::check_timeseries_nullability(ts, &typed_schema) {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+            // Rule 8: sub-day granularity (hour) requires a timestamp-resolution
+            // partition_column type (not DATE).
+            for diag in
+                queries::check_types::check_timeseries_granularity_type(ts, &typed_schema)
+            {
                 DiagnosticAcc(diag).accumulate(db);
             }
         }
