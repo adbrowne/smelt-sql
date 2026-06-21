@@ -1,12 +1,13 @@
-//! Phase 5 (meta-language-E2): tests for the `origin` field in
-//! `smelt docs --json` (catalog) output for generator-emitted models.
+//! Tests for `smelt docs --json` (catalog JSON) output.
 //!
 //! Includes:
 //!  - Unit smoke test for `CatalogModel` serde shape (direct struct construction).
 //!  - Integration test that exercises the real `build_catalog()` pipeline with
 //!    a tempdir workspace fixture.
+//!  - D-50(i) invariant: every `CatalogColumn` always serializes a `source` key
+//!    (never omitted), with `{"type":"unknown"}` for undetermined lineage.
 
-use smelt_cli::docs::CatalogModel;
+use smelt_cli::docs::{CatalogColumn, CatalogColumnSource, CatalogModel};
 use smelt_core::ModelOriginKind;
 
 /// Unit smoke test — verifies `CatalogModel` serde shape directly.
@@ -165,4 +166,80 @@ fn emitted_model_carries_origin_in_real_docs_catalog_pipeline() {
         hand.origin.is_none(),
         "hand-authored model 'orders' must NOT have origin; full JSON:\n{json}"
     );
+}
+
+// ── D-50(i): source always present ───────────────────────────────────────────
+
+/// Unit test: `CatalogColumn` with `source: Unknown` always serializes a
+/// `"source"` key containing `{"type":"unknown"}` — the field is never omitted.
+#[test]
+fn source_always_present_in_catalog_column_json() {
+    let col = CatalogColumn {
+        name: "my_col".to_string(),
+        data_type: None,
+        nullable: None,
+        description: None,
+        tests: vec![],
+        expression: "my_col".to_string(),
+        source: CatalogColumnSource::Unknown,
+    };
+
+    let json = serde_json::to_string(&col).expect("serialize CatalogColumn");
+    assert!(
+        json.contains("\"source\""),
+        "CatalogColumn JSON must always include 'source' key; got: {json}"
+    );
+    assert!(
+        json.contains("\"type\":\"unknown\""),
+        "CatalogColumnSource::Unknown must serialize as {{\"type\":\"unknown\"}}; got: {json}"
+    );
+}
+
+/// Integration test: after running the full `build_catalog()` pipeline, every
+/// column object in the serialized JSON must contain a `"source"` key.
+/// D-50(i): `source` is never omitted regardless of how lineage was resolved.
+#[test]
+fn catalog_column_source_always_present_in_full_pipeline() {
+    let sql = "SELECT 1 AS id, 'hello' AS name";
+
+    let tmp = stage_workspace(&[("models/orders.sql", sql)]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+    )
+    .expect("build catalog");
+
+    let json = serde_json::to_string_pretty(&catalog).expect("serialize catalog");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("parse catalog JSON");
+
+    // Walk every column object; each must have a "source" key.
+    let models = value["models"]
+        .as_object()
+        .expect("catalog.models must be an object");
+    assert!(
+        !models.is_empty(),
+        "catalog must contain at least one model"
+    );
+    for (model_name, model_val) in models {
+        if let Some(cols) = model_val["columns"].as_array() {
+            for (i, col) in cols.iter().enumerate() {
+                assert!(
+                    col.get("source").is_some(),
+                    "model '{}' column[{}] is missing 'source' key; full JSON:\n{json}",
+                    model_name,
+                    i
+                );
+            }
+        }
+    }
 }
