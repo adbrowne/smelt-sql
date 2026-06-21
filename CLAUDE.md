@@ -255,7 +255,25 @@ journalctl --user -u smelt-autonomy -f
 
 Tunables (env vars): `MAX_ITERATIONS` (default 25), `PERMISSION_MODE`
 (default `bypassPermissions`), `MODEL` (default `sonnet`), `CARGO_BUILD_JOBS`
-(default 6 — caps link-time RSS spikes that previously tripped systemd-oomd).
+(default 6 — caps link-time RSS spikes that previously tripped systemd-oomd),
+`ITER_MEMORY_MAX` / `ITER_MEMORY_HIGH` (default `32G` / `28G`).
+
+**Per-iteration memory isolation (infra hardening).** Each iteration's `claude`
+(and the cargo/smelt builds it spawns) runs inside its own transient
+`systemd-run --user --scope` bounded by `ITER_MEMORY_HIGH` (soft, reclaim) and
+`ITER_MEMORY_MAX` (hard). A runaway iteration is therefore killed **alone** by
+the kernel cgroup OOM-killer before systemd-oomd reaps a whole tmux pane on
+memory *pressure* (which it chooses by cgroup and can land on an unrelated
+session — the original collateral-kill bug). The scope also sets
+`ManagedOOMPreference=avoid` so oomd spares these capped, well-behaved scopes
+when some *other* process drives systemwide pressure. The supervisor stays
+outside the scope and restarts after a kill. On a host without `systemd-run`,
+or an older systemd that rejects a property, the script degrades (caps-only,
+then inline-uncapped) rather than failing. This complements the framework-side
+fix that bounds DuckDB's own `memory_limit` by default (see
+`docs/specs/smelt_yml.md` §Semantics — a single `smelt build` could otherwise
+consume ~80% of host RAM and tip the box into pressure;
+`docs/handoffs/2026-06-21-autonomy-loop-ooms.md`).
 
 Before launching, check nothing is already running and that the active plan
 is the one you want:
