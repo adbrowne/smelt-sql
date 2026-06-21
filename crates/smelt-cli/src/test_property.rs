@@ -611,16 +611,16 @@ SELECT * FROM daily
     fn test_property_test_basic() {
         use smelt_core::metadata::TestConfig;
 
+        // D-45: target CTE directly reads from external smelt dep.
+        // inputs keyed by the external dep dot-key ("raw_data"), not internal CTE name.
         let model_sql = r#"
-WITH cleaned AS (
-    SELECT user_id, amount, created_at FROM raw_orders WHERE status = 'completed'
-),
-daily AS (
-    SELECT DATE(created_at) as day, SUM(amount) as revenue FROM cleaned GROUP BY 1
+WITH daily AS (
+    SELECT DATE(created_at) as day, SUM(amount) as revenue
+    FROM smelt.raw_data
+    GROUP BY 1
 )
 SELECT * FROM daily
 "#;
-        // Only provide the columns that matter for the assertion
         let mut inputs = BTreeMap::new();
         let mut row1 = BTreeMap::new();
         row1.insert(
@@ -640,7 +640,7 @@ SELECT * FROM daily
             "created_at".to_string(),
             serde_yaml::Value::String("2024-01-01".to_string()),
         );
-        inputs.insert("cleaned".to_string(), vec![row1, row2]);
+        inputs.insert("raw_data".to_string(), vec![row1, row2]);
 
         let mut expect1 = BTreeMap::new();
         expect1.insert(
@@ -718,25 +718,23 @@ SELECT * FROM formatted
     fn dispatch_cte_with_omitted_col_runs_n_iterations() {
         use smelt_core::metadata::TestConfig;
 
-        // Model: `result` CTE uses both `amount` (provided) and `flag` (omitted).
+        // D-45: `result` CTE reads directly from external smelt dep.
+        // `flag` is omitted from inputs → property dispatch triggered.
         // SUM(amount) is invariant to `flag`; expect only checks `total`.
         let model_sql = r#"
-WITH base AS (
-    SELECT amount, flag FROM orders
-),
-result AS (
-    SELECT SUM(amount) as total, MAX(flag) as max_flag FROM base
+WITH result AS (
+    SELECT SUM(amount) as total, MAX(flag) as max_flag FROM smelt.orders
 )
 SELECT * FROM result
 "#;
 
-        let mut base_row = BTreeMap::new();
-        base_row.insert(
+        let mut order_row = BTreeMap::new();
+        order_row.insert(
             "amount".to_string(),
             serde_yaml::Value::Number(serde_yaml::Number::from(100)),
         );
         let mut inputs = BTreeMap::new();
-        inputs.insert("base".to_string(), vec![base_row]);
+        inputs.insert("orders".to_string(), vec![order_row]);
 
         let mut expect_row = BTreeMap::new();
         expect_row.insert(
@@ -775,27 +773,26 @@ SELECT * FROM result
     fn dispatch_fully_specified_cte_returns_none() {
         use smelt_core::metadata::TestConfig;
 
+        // D-45: `result` CTE reads directly from external smelt dep.
+        // Both `amount` and `flag` provided → no missing columns → no dispatch.
         let model_sql = r#"
-WITH base AS (
-    SELECT amount, flag FROM orders
-),
-result AS (
-    SELECT SUM(amount) as total, MAX(flag) as max_flag FROM base
+WITH result AS (
+    SELECT SUM(amount) as total, MAX(flag) as max_flag FROM smelt.orders
 )
 SELECT * FROM result
 "#;
 
-        let mut base_row = BTreeMap::new();
-        base_row.insert(
+        let mut order_row = BTreeMap::new();
+        order_row.insert(
             "amount".to_string(),
             serde_yaml::Value::Number(serde_yaml::Number::from(100)),
         );
-        base_row.insert(
+        order_row.insert(
             "flag".to_string(),
             serde_yaml::Value::String("active".to_string()),
         );
         let mut inputs = BTreeMap::new();
-        inputs.insert("base".to_string(), vec![base_row]);
+        inputs.insert("orders".to_string(), vec![order_row]);
 
         let test_config = TestConfig {
             model: "test_model".to_string(),

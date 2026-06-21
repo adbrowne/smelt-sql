@@ -287,57 +287,148 @@ pub fn yaml_rows_to_sql(name: &str, rows: &[BTreeMap<String, serde_yaml::Value>]
     )
 }
 
+/// Find external `smelt.<path>` refs in a SQL body, replace them with
+/// underscore-joined CTE names, and return (replaced_sql, [(cte_name, dot_key)]).
+fn find_and_replace_smelt_path_refs(body_sql: &str) -> (String, Vec<(String, String)>) {
+    let parse = smelt_parser::parse(body_sql);
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return (body_sql.to_string(), vec![]),
+    };
+
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut refs: Vec<(String, String)> = Vec::new();
+
+    for path_ref in file
+        .syntax()
+        .descendants()
+        .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+    {
+        let segments = path_ref.segments();
+        if segments.is_empty() {
+            continue;
+        }
+        let cte_name = segments.join("_");
+        let dot_key = segments.join(".");
+        if !refs.iter().any(|(n, _)| n == &cte_name) {
+            refs.push((cte_name.clone(), dot_key));
+        }
+        let range = path_ref.text_range();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        replacements.push((start, end, cte_name));
+    }
+
+    replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
+    let mut result = body_sql.to_string();
+    for (start, end, name) in replacements {
+        result.replace_range(start..end, &name);
+    }
+
+    (result, refs)
+}
+
+/// Collect the transitive internal CTE chain reachable from `target` through
+/// internal CTE dependencies. Returns names in topological order (dependencies
+/// before their dependents, `target` last).
+fn collect_transitive_chain(ctes: &[CteInfo], target: &str) -> Vec<String> {
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    let mut bfs_order = Vec::new();
+
+    queue.push_back(target.to_string());
+    visited.insert(target.to_string());
+
+    while let Some(name) = queue.pop_front() {
+        bfs_order.push(name.clone());
+        if let Some(cte) = ctes.iter().find(|c| c.name == name) {
+            for dep in &cte.dependencies {
+                if !visited.contains(dep) {
+                    visited.insert(dep.clone());
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+    }
+
+    // BFS visits [target, direct_deps, transitive_deps...].
+    // Reverse for topological order: dependencies first, target last.
+    bfs_order.reverse();
+    bfs_order
+}
+
 /// Compile a test that targets a specific CTE within a model.
 ///
-/// Extracts the target CTE's body, mocks its dependencies using `inputs`,
-/// and returns a standalone SQL query.
+/// Spec §"CTE-level tests" (D-45): the mock boundary is the model's external
+/// `smelt.<path>` dependencies reachable from the target CTE's transitive
+/// internal chain — NOT the internal CTEs themselves. Internal CTEs run
+/// as-written; only the external `smelt.<path>` refs are substituted with mock
+/// data from `inputs` (dot-key lookup, D-42).
+///
+/// Returns a standalone SQL query:
+/// `WITH <mock_external_ctes>, <internal_chain_ctes> SELECT * FROM <target_cte>`
 pub fn compile_cte_test(
     model_sql: &str,
     target_cte: &str,
     inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
-    sql_body: Option<&str>,
+    _sql_body: Option<&str>,
 ) -> Result<String, String> {
     let ctes = extract_ctes(model_sql);
 
-    // Find target CTE
-    let target = ctes
-        .iter()
-        .find(|c| c.name == target_cte)
-        .ok_or_else(|| format!("CTE '{}' not found in model", target_cte))?;
-
-    // Build mock CTEs for dependencies
-    let mut mock_cte_parts: Vec<String> = Vec::new();
-
-    for dep in &target.dependencies {
-        if let Some(rows) = inputs.get(dep) {
-            mock_cte_parts.push(yaml_rows_to_sql(dep, rows));
-        } else if let Some(body) = sql_body {
-            // Check if sql_body defines this CTE
-            let body_ctes = extract_ctes(&format!("WITH {} SELECT 1", body));
-            if let Some(found) = body_ctes.iter().find(|c| c.name == *dep) {
-                mock_cte_parts.push(format!("{} AS ({})", dep, found.body));
-            } else {
-                return Err(format!(
-                    "Dependency '{}' of CTE '{}' is not mocked in inputs",
-                    dep, target_cte
-                ));
-            }
-        } else {
-            return Err(format!(
-                "Dependency '{}' of CTE '{}' is not mocked in inputs",
-                dep, target_cte
-            ));
-        }
+    if !ctes.iter().any(|c| c.name == target_cte) {
+        return Err(format!("CTE '{}' not found in model", target_cte));
     }
 
-    // Assemble: WITH <mock CTEs> <target body as main SELECT>
-    if mock_cte_parts.is_empty() {
-        Ok(target.body.clone())
+    // Collect the transitive internal chain in topological order (deps first).
+    let chain = collect_transitive_chain(&ctes, target_cte);
+
+    // For each CTE in the chain, replace external smelt.<path> refs with
+    // _-joined names and collect all discovered external refs.
+    let mut external_refs: Vec<(String, String)> = Vec::new(); // (cte_name, dot_key)
+    let mut chain_ctes: Vec<(String, String)> = Vec::new(); // (name, replaced_body)
+
+    for cte_name in &chain {
+        let cte = ctes.iter().find(|c| &c.name == cte_name).unwrap();
+        let (replaced_body, refs) = find_and_replace_smelt_path_refs(&cte.body);
+        for (cn, dk) in refs {
+            if !external_refs.iter().any(|(n, _)| n == &cn) {
+                external_refs.push((cn, dk));
+            }
+        }
+        chain_ctes.push((cte_name.clone(), replaced_body));
+    }
+
+    // Build mock CTEs for external refs using dot-key lookup (D-42).
+    // External refs not in `inputs` get an empty CTE (zero rows).
+    let mut mock_cte_parts: Vec<String> = Vec::new();
+    for (cte_name, dot_key) in &external_refs {
+        let rows = inputs.get(dot_key).map(|v| v.as_slice()).unwrap_or(&[]);
+        mock_cte_parts.push(yaml_rows_to_sql(cte_name, rows));
+    }
+
+    // Internal chain CTEs (all except the target) go in the WITH clause.
+    // The target CTE's replaced body is the final SELECT.
+    let chain_cte_parts: Vec<String> = chain_ctes
+        .iter()
+        .filter(|(name, _)| name.as_str() != target_cte)
+        .map(|(name, body)| format!("{} AS ({})", name, body))
+        .collect();
+
+    let target_body = chain_ctes
+        .iter()
+        .find(|(name, _)| name.as_str() == target_cte)
+        .map(|(_, body)| body.clone())
+        .expect("target CTE must be in chain");
+
+    let all_cte_parts: Vec<String> = mock_cte_parts.into_iter().chain(chain_cte_parts).collect();
+
+    if all_cte_parts.is_empty() {
+        Ok(target_body)
     } else {
         Ok(format!(
             "WITH {}\n{}",
-            mock_cte_parts.join(",\n"),
-            target.body
+            all_cte_parts.join(",\n"),
+            target_body
         ))
     }
 }
@@ -888,6 +979,10 @@ SELECT * FROM step1
 
     #[test]
     fn test_compile_cte_test_basic() {
+        // D-45: targeting 'daily' includes internal dep 'cleaned' in the chain.
+        // 'cleaned' has no smelt.<path> refs, so no external mock CTE is needed.
+        // The result must have 'cleaned AS (...)' in the WITH clause (runs as-written)
+        // and 'daily's body as the final SELECT (not wrapped in a CTE).
         let model_sql = r#"
 WITH cleaned AS (
     SELECT user_id, amount FROM raw_orders WHERE status = 'completed'
@@ -897,39 +992,32 @@ daily AS (
 )
 SELECT * FROM daily
 "#;
-        let mut inputs = BTreeMap::new();
-        let mut row = BTreeMap::new();
-        row.insert(
-            "user_id".to_string(),
-            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
-        );
-        row.insert(
-            "amount".to_string(),
-            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
-        );
-        row.insert(
-            "created_at".to_string(),
-            serde_yaml::Value::String("2024-01-01".to_string()),
-        );
-        inputs.insert("cleaned".to_string(), vec![row]);
+        let inputs = BTreeMap::new(); // no smelt.<path> refs in this model
 
         let result = compile_cte_test(model_sql, "daily", &inputs, None).unwrap();
+        // 'cleaned' runs as-written — it's in the WITH clause
         assert!(result.contains("cleaned AS"));
         assert!(result.contains("SUM(amount)"));
-        // The target CTE body should be the main SELECT, not wrapped in a CTE
+        // 'daily' is the target — its body is the final SELECT, not a CTE
         assert!(!result.contains("daily AS"));
     }
 
     #[test]
-    fn test_compile_cte_test_missing_dependency() {
+    fn test_compile_cte_test_internal_deps_run_as_written() {
+        // D-45: internal CTE 'a' is NOT in inputs and is NOT a smelt.<path> dep,
+        // so it runs as-written in the WITH clause. This is the new expected behavior:
+        // no error when an internal CTE dep is absent from inputs.
         let model_sql = r#"
 WITH a AS (SELECT 1 as x),
 b AS (SELECT x FROM a)
 SELECT * FROM b
 "#;
-        let inputs = BTreeMap::new(); // No mock for 'a'
-        let result = compile_cte_test(model_sql, "b", &inputs, None);
-        assert!(result.is_err());
+        let inputs = BTreeMap::new();
+        let result = compile_cte_test(model_sql, "b", &inputs, None).unwrap();
+        // 'a' runs as-written in the WITH clause
+        assert!(result.contains("a AS ("));
+        // 'b' is the target — its body is the final SELECT, not a CTE
+        assert!(!result.contains("b AS ("));
     }
 
     #[test]
