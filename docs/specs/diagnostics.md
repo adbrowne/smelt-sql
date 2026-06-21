@@ -394,6 +394,16 @@ Owned by `docs/specs/meta_language.md` (multi-model production section).
 
 ---
 
+### Virtual environments
+
+Owned by `docs/specs/virtual_environments.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `StateModeWidening` | Error | A model's `state.mode` frontmatter field declares a posture higher in the `environments ⊇ intervals ⊇ stateless` lattice than the project's configured posture. Narrowing is permitted; widening is rejected. |
+
+---
+
 ## Known divergences
 
 None currently open.

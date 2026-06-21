@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use smelt_planner::logical::{FunctionProperties, LogicalNode, Plan, Provenance, ProvenanceTag};
 use smelt_planner::logical_plan_rules::{
-    apply_rules_to_fixed_point, ElideEmptySelectItemsSplices, ExpandTransparentFunctionCalls,
-    PlannerRule, RuleContext, RuleResult,
+    apply_rules_to_fixed_point, splice_body, ElideEmptySelectItemsSplices,
+    ExpandTransparentFunctionCalls, PlannerRule, RuleContext, RuleResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -415,6 +415,54 @@ fn synthesised_self_referential_body_terminates() {
     assert!(
         find_inner_marker(outer_body).is_some(),
         "expected the inner recursive ExpandedCall for `loop` to fall back to body=None; got: {outer_body:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test (D-54 lock) — nested expansion leaves prior Tagged nodes intact
+// ---------------------------------------------------------------------------
+//
+// The D-54 invariant: "Tags are assigned once, relative to the original source;
+// nested expansion leaves prior tags intact."  `clone_with_tag` preserves any
+// existing `Tagged` node's tag and only recurses into its `inner` —  it never
+// overwrites a prior tag.  This test pins that behaviour as a regression guard.
+
+#[test]
+fn nested_expansion_leaves_prior_tagged_nodes_intact() {
+    // Simulate a partially expanded tree: a Caller-tagged node produced by an
+    // earlier splice, then wrapped in a Callee("a") tag from A's expansion.
+    let caller_tagged = Arc::new(LogicalNode::Tagged {
+        tag: ProvenanceTag::Caller,
+        inner: raw("SELECT 1 AS x"),
+    });
+    let after_a_splice = Arc::new(LogicalNode::Tagged {
+        tag: ProvenanceTag::Callee("a".to_string()),
+        inner: caller_tagged,
+    });
+
+    // Splice with Callee("b") — the new outer tag must not overwrite prior ones.
+    let result = splice_body(after_a_splice, &ProvenanceTag::Callee("b".to_string()));
+
+    // The outermost wrapper is Callee("b") — the new splice tag.
+    assert!(
+        contains_tag(
+            &result,
+            |t| matches!(t, ProvenanceTag::Callee(id) if id == "b")
+        ),
+        "expected Callee(\"b\") tag from the new splice; got: {result:?}"
+    );
+    // Callee("a") must be preserved — not overwritten by Callee("b").
+    assert!(
+        contains_tag(
+            &result,
+            |t| matches!(t, ProvenanceTag::Callee(id) if id == "a")
+        ),
+        "expected Callee(\"a\") tag to be preserved through nested splice; got: {result:?}"
+    );
+    // Caller tag must survive — deepest prior tag, also not overwritten (D-54).
+    assert!(
+        contains_tag(&result, |t| matches!(t, ProvenanceTag::Caller)),
+        "D-54: Caller tag must remain intact after nested splice; got: {result:?}"
     );
 }
 
