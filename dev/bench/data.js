@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782014037051,
+  "lastUpdate": 1782014039744,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -26540,6 +26540,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.924711966290918,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "89f5d5a8fc89630600f7baa226ae2e6446404f93",
+          "message": "chore(autonomy-loop): isolate each iteration in a memory-bounded systemd scope\n\nInfra hardening (Part 1) for the OOM collateral-kill problem documented in\ndocs/handoffs/2026-06-21-autonomy-loop-ooms.md. Previously a runaway process\nanywhere on the box drove systemwide memory pressure, and systemd-oomd reaped\na whole tmux pane chosen *by cgroup pressure* — which could be the autonomy\nloop rather than the offender.\n\nEach iteration's `claude` (and the cargo/smelt builds it spawns) now runs in\nits own transient `systemd-run --user --scope` bounded by ITER_MEMORY_HIGH\n(soft/reclaim, default 28G) and ITER_MEMORY_MAX (hard, default 32G), with\nManagedOOMPreference=avoid. A runaway iteration is killed alone by the kernel\ncgroup OOM-killer before oomd pressure-reaps a pane; oomd also spares these\ncapped scopes when an unrelated process drives pressure. The supervisor stays\noutside the scope and restarts after a kill. Property support is probed once,\ndegrading to caps-only (older systemd) then inline-uncapped (no systemd-run).\n\nComplements the framework fix that bounds DuckDB memory_limit by default.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-21T13:51:16+10:00",
+          "tree_id": "2d0423e63b131454f7a94b7ae74a108b6b045d26",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/89f5d5a8fc89630600f7baa226ae2e6446404f93"
+        },
+        "date": 1782014038830,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.361079133271343,
             "unit": "MB/s"
           }
         ]
