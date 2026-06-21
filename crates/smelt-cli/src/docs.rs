@@ -3,7 +3,7 @@ use serde::Serialize;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelOriginKind;
 use smelt_db::ColumnSource;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::Config;
@@ -129,8 +129,15 @@ pub fn build_catalog(
     origins: &HashMap<String, (String, String)>,
     test_targets: &HashMap<String, Vec<TestRef>>,
     project_dir: &Path,
+    selected_names: Option<&BTreeSet<String>>,
 ) -> Result<Catalog> {
-    let execution_order = graph.execution_order()?;
+    let execution_order = match selected_names {
+        Some(sel) => {
+            let hs: HashSet<String> = sel.iter().cloned().collect();
+            graph.filtered_execution_order(&hs)?
+        }
+        None => graph.execution_order()?,
+    };
 
     // Build dependents (downstream) map by inverting dependencies (deduplicated).
     let mut dependents_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -149,6 +156,11 @@ pub fn build_catalog(
     let ws = smelt_db::Workspace::try_get(db);
 
     for (model_name, model_file) in graph.iter_models() {
+        if let Some(sel) = selected_names {
+            if !sel.contains(model_name) {
+                continue;
+            }
+        }
         let metadata = model_file.metadata.as_deref();
         let frontmatter = smelt_planner::Frontmatter::parse(&model_file.content);
 

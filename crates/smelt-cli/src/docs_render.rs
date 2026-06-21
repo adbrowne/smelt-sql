@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -46,8 +47,9 @@ pub fn render_markdown(catalog: &Catalog, output_dir: &Path) -> Result<()> {
         .with_context(|| format!("Failed to write {}", index_path.display()))?;
 
     // Write per-model pages
+    let model_names: BTreeSet<String> = catalog.models.keys().cloned().collect();
     for model in catalog.models.values() {
-        let page = render_model_page(model);
+        let page = render_model_page(model, &model_names);
         let page_path = models_dir.join(format!("{}.md", model.name));
         fs::write(&page_path, page)
             .with_context(|| format!("Failed to write {}", page_path.display()))?;
@@ -96,7 +98,10 @@ fn render_index(catalog: &Catalog) -> String {
     out
 }
 
-pub fn render_model_page(model: &crate::docs::CatalogModel) -> String {
+pub fn render_model_page(
+    model: &crate::docs::CatalogModel,
+    catalog_model_names: &BTreeSet<String>,
+) -> String {
     let mut out = String::new();
 
     out.push_str(&format!("# {}\n\n", model.name));
@@ -166,7 +171,11 @@ pub fn render_model_page(model: &crate::docs::CatalogModel) -> String {
     if !model.upstream.is_empty() {
         out.push_str("## Upstream\n\n");
         for dep in &model.upstream {
-            out.push_str(&format!("- [{}]({}.md)\n", dep, dep));
+            if catalog_model_names.contains(dep) {
+                out.push_str(&format!("- [{}]({}.md)\n", dep, dep));
+            } else {
+                out.push_str(&format!("- {}\n", dep));
+            }
         }
         out.push('\n');
     }
@@ -174,7 +183,11 @@ pub fn render_model_page(model: &crate::docs::CatalogModel) -> String {
     if !model.downstream.is_empty() {
         out.push_str("## Downstream\n\n");
         for dep in &model.downstream {
-            out.push_str(&format!("- [{}]({}.md)\n", dep, dep));
+            if catalog_model_names.contains(dep) {
+                out.push_str(&format!("- [{}]({}.md)\n", dep, dep));
+            } else {
+                out.push_str(&format!("- {}\n", dep));
+            }
         }
         out.push('\n');
     }

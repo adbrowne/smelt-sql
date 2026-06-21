@@ -6,6 +6,10 @@
 //!    a tempdir workspace fixture.
 //!  - D-50(i) invariant: every `CatalogColumn` always serializes a `source` key
 //!    (never omitted), with `{"type":"unknown"}` for undetermined lineage.
+//!  - W8-catalog P3: `--select` filtering — selected models only in map/index,
+//!    but edge arrays retain names of ALL deps (including excluded ones).
+
+use std::collections::BTreeSet;
 
 use smelt_cli::docs::{CatalogColumn, CatalogColumnSource, CatalogModel};
 use smelt_core::ModelOriginKind;
@@ -113,6 +117,7 @@ fn emitted_model_carries_origin_in_real_docs_catalog_pipeline() {
         &origins,
         &std::collections::HashMap::new(),
         &project_dir,
+        None,
     )
     .expect("build catalog");
     let json = serde_json::to_string_pretty(&catalog).expect("serialize catalog");
@@ -218,6 +223,7 @@ fn catalog_column_source_always_present_in_full_pipeline() {
         &origins,
         &std::collections::HashMap::new(),
         &project_dir,
+        None,
     )
     .expect("build catalog");
 
@@ -266,6 +272,7 @@ fn catalog_path_is_workspace_relative() {
         &origins,
         &std::collections::HashMap::new(),
         &project_dir,
+        None,
     )
     .expect("build catalog");
 
@@ -306,6 +313,7 @@ fn catalog_origin_generator_file_is_workspace_relative() {
         &origins,
         &std::collections::HashMap::new(),
         &project_dir,
+        None,
     )
     .expect("build catalog");
 
@@ -340,4 +348,82 @@ fn catalog_origin_generator_file_is_workspace_relative() {
             emitted.origin
         );
     }
+}
+
+// ── W8-catalog P3: --select filtering ────────────────────────────────────────
+
+/// W8-catalog P3 TDD gate: when `build_catalog` is called with
+/// `selected_names = Some({"b"})` on a 3-model chain `a → b → c`:
+///
+/// - `catalog.models` contains ONLY `b` (not `a` or `c`)
+/// - `catalog.models["b"].upstream` still contains `"a"` (edge retained)
+/// - `catalog.models["b"].downstream` still contains `"c"` (edge retained)
+/// - `catalog.execution_order` == `["b"]`
+/// - `catalog.project.model_count` == 1
+#[test]
+fn select_filter_retains_edge_names() {
+    // Use path-form refs (FROM smelt.<name>) which the DependencyGraph uses
+    // to detect edges — NOT smelt.ref() which is a compilation-time function.
+    let tmp = stage_workspace(&[
+        ("models/a.sql", "SELECT 1 AS id"),
+        ("models/b.sql", "SELECT id FROM smelt.a"),
+        ("models/c.sql", "SELECT id FROM smelt.b"),
+    ]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    // Build the FULL (unfiltered) dependency graph — selection only affects
+    // what build_catalog puts in the output, not which edges are discovered.
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+
+    let selected = BTreeSet::from(["b".to_string()]);
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+        &project_dir,
+        Some(&selected),
+    )
+    .expect("build catalog");
+
+    // Only "b" should appear in the models map.
+    assert_eq!(
+        catalog.models.keys().cloned().collect::<Vec<_>>(),
+        vec!["b".to_string()],
+        "catalog.models must contain only the selected model 'b'; got: {:?}",
+        catalog.models.keys().collect::<Vec<_>>()
+    );
+
+    let b = catalog.models.get("b").expect("'b' must be in catalog");
+
+    // Edge arrays retain ALL dep names even when the neighbour is excluded.
+    assert!(
+        b.upstream.contains(&"a".to_string()),
+        "b.upstream must retain 'a' even though 'a' is excluded; got: {:?}",
+        b.upstream
+    );
+    assert!(
+        b.downstream.contains(&"c".to_string()),
+        "b.downstream must retain 'c' even though 'c' is excluded; got: {:?}",
+        b.downstream
+    );
+
+    // Execution order must contain only the selected model.
+    assert_eq!(
+        catalog.execution_order,
+        vec!["b".to_string()],
+        "execution_order must be [\"b\"]; got: {:?}",
+        catalog.execution_order
+    );
+
+    // model_count must reflect the selection, not the full graph.
+    assert_eq!(
+        catalog.project.model_count, 1,
+        "project.model_count must be 1 (selected only); got: {}",
+        catalog.project.model_count
+    );
 }
