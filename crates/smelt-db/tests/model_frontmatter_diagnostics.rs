@@ -312,6 +312,75 @@ test:
     );
 }
 
+// ── D-52 rule 7: timeseries partition/event_time nullability ─────────────────
+
+/// A model whose `partition_column` resolves to a nullable output column must
+/// emit `MalformedTimeseries`. Here a `CASE` without `ELSE` can return NULL
+/// (the implicit ELSE is NULL), so the type inferencer correctly marks
+/// `partition_date` as nullable: true. Rule 7 of timeseries.md §"Validation rules".
+#[test]
+fn timeseries_nullable_partition_column_emits_malformed_timeseries() {
+    let root = PathBuf::from("/fake/ts_nullable_partition");
+    let path = root.join("models").join("events_by_date.sql");
+    // A CASE expression without ELSE has an implicit ELSE NULL — the type
+    // inferencer marks the column nullable:true regardless of branch content.
+    let src = "\
+---
+materialization: table
+timeseries:
+  event_time_column: ts
+  partition_column: partition_date
+  granularity: day
+---
+SELECT CASE WHEN ts > '2020-01-01' THEN DATE '2020-01-01' END AS partition_date, ts FROM events
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedTimeseries);
+    assert!(
+        !diags.is_empty(),
+        "expected MalformedTimeseries for nullable partition_column 'partition_date'; got {:#?}",
+        diags_for(&db, ws, file)
+    );
+    assert!(
+        diags.iter().any(|d| d.message.contains("partition_date")),
+        "MalformedTimeseries message must name the offending column 'partition_date'; got {:#?}",
+        diags
+    );
+}
+
+/// Positive control: a NOT-NULL partition column must NOT emit MalformedTimeseries
+/// for the nullability rule. `DATE '2020-01-01'` is a non-null literal.
+#[test]
+fn timeseries_not_null_partition_column_no_nullability_diagnostic() {
+    let root = PathBuf::from("/fake/ts_notnull_partition");
+    let path = root.join("models").join("events_by_date.sql");
+    let src = "\
+---
+materialization: table
+timeseries:
+  event_time_column: ts
+  partition_column: partition_date
+  granularity: day
+---
+SELECT DATE '2020-01-01' AS partition_date, ts FROM events
+";
+    let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
+    let file = files[0];
+
+    let diags = diags_with_code(&db, ws, file, DiagnosticCode::MalformedTimeseries);
+    let nullability_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("NOT NULL") || d.message.contains("nullable"))
+        .collect();
+    assert!(
+        nullability_diags.is_empty(),
+        "unexpected nullability MalformedTimeseries for NOT-NULL partition_column; got {:#?}",
+        nullability_diags
+    );
+}
+
 /// A single-model file whose `---` frontmatter is never closed must emit an
 /// `UnclosedFrontmatter` diagnostic rather than silently treating the file as
 /// having no frontmatter.

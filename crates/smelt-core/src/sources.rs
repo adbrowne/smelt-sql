@@ -203,7 +203,11 @@ struct RawColumn {
 }
 
 fn default_nullable() -> bool {
-    true
+    // Source columns default to NOT NULL when nullable is not declared.
+    // External source columns are typically non-null for structured data;
+    // the conservative nullable=true default propagated through downstream
+    // CASTs and produced false-positive D-52 partition-column diagnostics.
+    false
 }
 
 // ---------------------------------------------------------------------------

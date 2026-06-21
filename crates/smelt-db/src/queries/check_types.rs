@@ -161,6 +161,71 @@ pub fn cannot_infer_type_for_schema(
     out
 }
 
+/// Pure helper: check that the timeseries `partition_column` (and
+/// `event_time_column` when it differs) are NOT NULL in the model's output
+/// schema.  A nullable partition value silently escapes the pruning window.
+///
+/// D-52 rule 7. Skip conditions:
+/// - Column absent from schema (upstream unknown → no false positives).
+/// - `data_type` is `None` (type inference unavailable).
+/// - `data_type` is `Unknown(_)` (dynamic/propagated unknown).
+/// - `ColumnSource` is `Unknown` or `ExternalTable`: source ambiguous (e.g.
+///   multi-ref JOIN or CTE pass-through) — type inference cannot reliably
+///   determine nullability, so skip to avoid false positives.
+pub fn check_timeseries_nullability(
+    ts: &smelt_core::config::TimeseriesConfig,
+    schema: &crate::ModelSchema,
+) -> Vec<Diagnostic> {
+    use crate::schema::ColumnSource;
+
+    // Build the list of (column_name, role) pairs to check, deduplicating when
+    // event_time_column == partition_column (the partition check is sufficient).
+    let mut pairs: Vec<(&str, &str)> = vec![(&ts.partition_column, "partition_column")];
+    if ts.event_time_column != ts.partition_column {
+        pairs.push((&ts.event_time_column, "event_time_column"));
+    }
+
+    let mut out = Vec::new();
+    for (col_name, role) in pairs {
+        let Some(col) = schema.columns.iter().find(|c| c.name == col_name) else {
+            continue;
+        };
+        // Check only Computed columns (where this model directly determines the
+        // value). Skip all pass-through and ambiguous sources:
+        //  - FromModel: the upstream model owns the column's nullability;
+        //    D-52 fires at the upstream if it also has timeseries, otherwise
+        //    the upstream has no timeseries obligation.
+        //  - Unknown: multi-ref JOINs where source tracking is lost; inferred
+        //    nullability may be pessimistic.
+        //  - ExternalTable: CTE pass-throughs and plain-SQL FROM tables where
+        //    the smelt type-context cannot resolve nullability reliably.
+        // Wildcards are already expanded before this function is reached and
+        // would appear as individual FromModel/Computed entries.
+        if !matches!(col.source, ColumnSource::Computed) {
+            continue;
+        }
+        let Some(typed) = &col.data_type else {
+            continue;
+        };
+        if matches!(typed.data_type, DataType::Unknown(_)) {
+            continue;
+        }
+        if typed.nullable {
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "timeseries {role} '{col_name}' must be NOT NULL — \
+                     a nullable value silently escapes the pruning window"
+                ),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::MalformedTimeseries),
+                data: None,
+            });
+        }
+    }
+    out
+}
+
 pub(crate) fn check_unsupported_constructs(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     db: &dyn salsa::Database,

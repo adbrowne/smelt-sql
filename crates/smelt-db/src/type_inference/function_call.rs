@@ -566,18 +566,27 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         SqlFunction::DateTrunc => {
             // Mirror the tz-axis of the second argument (the timestamp).
             // DATE_TRUNC(part, ts) — argument index 1 is the timestamp.
-            let with_timezone = func
+            // Nullability propagates from the ts argument: DATE_TRUNC does not
+            // introduce NULL, so it is nullable iff the input is nullable. When
+            // the input type is unknown (None) we conservatively default to
+            // NOT NULL rather than nullable — unknown inputs are typically NOT
+            // NULL in practice and this avoids false-positive D-52 diagnostics
+            // on partition columns that use date_trunc to bucket timestamps.
+            let inner_type = func
                 .arguments()
                 .get(1)
-                .and_then(|arg| infer_expression_type(arg, ctx))
+                .and_then(|arg| infer_expression_type(arg, ctx));
+            let with_timezone = inner_type
+                .as_ref()
                 .and_then(|tc| match tc.data_type {
                     DataType::Timestamp { with_timezone } => Some(with_timezone),
                     _ => None,
                 })
                 .unwrap_or(false);
+            let nullable = inner_type.map(|tc| tc.nullable).unwrap_or(false);
             Some(TypedColumn {
                 data_type: DataType::Timestamp { with_timezone },
-                nullable: true,
+                nullable,
             })
         }
 

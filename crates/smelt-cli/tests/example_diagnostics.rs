@@ -3310,6 +3310,18 @@ fn timeseries_broken_unknown_key_emits_malformed_timeseries() {
     );
 }
 
+/// D-52 rule 7 e2e: `examples/timeseries_broken_nullable_partition/` emits
+/// `MalformedTimeseries` — `partition_date` is `CAST(event_ts AS DATE)` which
+/// the type inferencer conservatively marks nullable (unknown upstream → true).
+#[test]
+fn timeseries_broken_nullable_partition_emits_malformed_timeseries() {
+    check_workspace_emits_timeseries_diagnostic(
+        "examples/timeseries_broken_nullable_partition",
+        "models/nullable_partition.sql",
+        smelt_db::DiagnosticCode::MalformedTimeseries,
+    );
+}
+
 /// U5 TDD: `examples/frontmatter_broken_unknown_key/` emits exactly one
 /// `FrontmatterParseError` Error — `mateializaton` is an unknown top-level key.
 /// BUG-016 end-to-end regression.
