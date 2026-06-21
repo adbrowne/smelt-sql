@@ -90,6 +90,13 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/misc-spec — Provenance-Tag Preservation + Record Overlay Shallow Replace (D-54, D-55)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-misc-spec.md)) closing out D-54 (nested expansion leaves prior `Tagged` nodes intact — verified by a new regression test in `smelt-planner`) and D-55 (record overlay is shallow replace, not deep recursive merge — `merge_values` in `loader.rs` simplified; nested-record discriminator test locks the new behaviour).
+
+- **Verify + lock (P1)** — confirmed `clone_with_tag` already preserves existing tags on re-entry; added a two-level nested-expansion test in `phase41_body_splice_tests.rs` to prevent silent regression.
+- **Fix (P2)** — simplified the `SmeltType::Record` branch of `merge_values`: overlay field now replaces the base field wholesale (including nested records) rather than recursively blending; renamed the existing flat-field test to `…shallow_replaces…`; added the canonical D-55 discriminator test (partial nested-record overlay → base nested-record sub-keys absent from overlay must not survive).
+
 ### ~~Spec-Remediation W8/datagen — Scale Factor, FK Bound, Zero-Row Guard (D-53)~~ ✅ (June 22, 2026)
 
 Two-phase remediation plan ([plan](plans/20260620-w8-datagen.md)) landing the D-53 decision from the 2026-06-13 spec review: `floor()` for effective row counts, FK bounds equal the effective (scaled) count at any scale factor, and zero-row is a hard configuration error.
