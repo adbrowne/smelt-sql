@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782013680006,
+  "lastUpdate": 1782014037051,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20209,6 +20209,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.469604,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "89f5d5a8fc89630600f7baa226ae2e6446404f93",
+          "message": "chore(autonomy-loop): isolate each iteration in a memory-bounded systemd scope\n\nInfra hardening (Part 1) for the OOM collateral-kill problem documented in\ndocs/handoffs/2026-06-21-autonomy-loop-ooms.md. Previously a runaway process\nanywhere on the box drove systemwide memory pressure, and systemd-oomd reaped\na whole tmux pane chosen *by cgroup pressure* — which could be the autonomy\nloop rather than the offender.\n\nEach iteration's `claude` (and the cargo/smelt builds it spawns) now runs in\nits own transient `systemd-run --user --scope` bounded by ITER_MEMORY_HIGH\n(soft/reclaim, default 28G) and ITER_MEMORY_MAX (hard, default 32G), with\nManagedOOMPreference=avoid. A runaway iteration is killed alone by the kernel\ncgroup OOM-killer before oomd pressure-reaps a pane; oomd also spares these\ncapped scopes when an unrelated process drives pressure. The supervisor stays\noutside the scope and restarts after a kill. Property support is probed once,\ndegrading to caps-only (older systemd) then inline-uncapped (no systemd-run).\n\nComplements the framework fix that bounds DuckDB memory_limit by default.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-21T13:51:16+10:00",
+          "tree_id": "2d0423e63b131454f7a94b7ae74a108b6b045d26",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/89f5d5a8fc89630600f7baa226ae2e6446404f93"
+        },
+        "date": 1782014035325,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 55.849884,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 53.188051,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.278423,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.656123,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.415401,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 716.088665,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.737195,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.9759640000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.644371,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.7328779999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 588.56899,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.37797,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.30563,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.781244999999998,
             "unit": "ms"
           }
         ]
