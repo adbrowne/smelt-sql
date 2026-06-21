@@ -90,6 +90,16 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/virtual_env — Virtual Environment Data Model & Reuse Evaluator (D-46, D-47)~~ ✅ (June 21, 2026)
+
+Five-phase remediation plan ([plan](plans/20260620-w8-virtual-env.md)) landing the D-46 and D-47 decisions from the 2026-06-13 spec review (data model and pure logic only; runtime wiring deferred):
+
+- **`StateMode` + `state.mode` config (D-47, P1)** — `StateMode` (`Stateless`/`Intervals`/`Environments`) added to `smelt-core`; parsed from the `state: {mode: …}` block in `smelt.yml`; `PartialOrd` encodes the posture lattice so per-model narrowing can be validated; unknown values fail loudly.
+- **`reuse.*`/`forward_only` frontmatter hatches (D-46, P2)** — `ModelMetadata` carries `reuse.accept_current`, `reuse.assert_deterministic`, and `forward_only`; a model may narrow the project posture via frontmatter `state: {mode: …}`; widening fires a new `MetadataError` variant wired into the diagnostic pipeline.
+- **`SnapshotStore` / `SnapshotEntry` types (D-47, P3)** — `smelt-state` gains the `(environment, model) → physical table` snapshot map with per-entry `source_sql`; `find_candidate` implements the candidate-precedence rule (target env E first, then base/production, then lexicographic).
+- **Reuse-condition evaluator (D-46/D-47, P4)** — `evaluate_reuse` in `smelt-fingerprint` checks all four conditions in order, returning a typed `ReuseDecision`; conditions 3a (rebuild-identity preserved) and 3b (output-preserving, `accept_current`) are distinct code paths with their own logged-trust notes; condition 4 is a stub always-pass pending `schema_evolution.md` work.
+- **Close-out (P5)** — orchestration-layer KD in `virtual_environments.md` updated to note what is now implemented vs still missing; master registry W8/virtual_env row flipped to done; ROADMAP updated.
+
 ### ~~Spec-Remediation W8/testing — Testing Framework (D-42/43/44/45)~~ ✅ (June 21, 2026)
 
 Four-phase remediation plan ([plan](plans/20260620-w8-testing.md)) landing the D-42…D-45 decisions from the 2026-06-13 spec review:
