@@ -74,11 +74,10 @@ pub struct FunctionProperties {
     pub provenance: Provenance,
     /// Declared joins parsed from the `joins:` frontmatter key.
     ///
-    /// Each entry describes a single side-joined dimension table. Phase 43
-    /// only parses these into a [`JoinSpec`] vector — they are not yet
-    /// consumed by the logical-plan-rules pipeline. The `cardinality` field
-    /// is kept as a raw string for v1; mapping into [`Cardinality`] is a
-    /// future phase.
+    /// Each entry describes a single side-joined dimension table. The raw
+    /// `cardinality` string is mapped to [`Cardinality`] via
+    /// [`cardinality_from_str`] at the `LogicalNode::LeftJoin` construction
+    /// site.
     pub joins: Vec<JoinSpec>,
 }
 
@@ -97,16 +96,16 @@ impl Default for FunctionProperties {
 
 /// A single join entry parsed from a `joins:` frontmatter list.
 ///
-/// V1 representation: `cardinality` is the raw string from frontmatter
-/// (e.g. `"1:1"`, `"1:N"`). Mapping to the structured [`Cardinality`] enum
-/// is deferred to a later phase.
+/// The `cardinality` field stores the raw string from frontmatter
+/// (e.g. `"1:1"`, `"1:N"`). Convert it to a [`Cardinality`] value via
+/// [`cardinality_from_str`] when constructing a `LogicalNode::LeftJoin`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinSpec {
     /// The dimension table or model name being joined to.
     pub table: String,
     /// The join condition expression (raw SQL fragment text).
     pub on: String,
-    /// Declared cardinality, kept as a raw string for v1.
+    /// Raw cardinality string from frontmatter; use [`cardinality_from_str`] to convert.
     pub cardinality: String,
 }
 

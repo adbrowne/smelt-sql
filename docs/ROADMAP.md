@@ -90,6 +90,13 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/planner — `joins:` Cardinality String→Enum Mapping (D-57)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-planner.md)) landing the D-57 decision from the 2026-06-13 spec review: the `cardinality:` frontmatter string→`Cardinality`-enum mapping is exact and fail-safe.
+
+- **`cardinality_from_str` (P1)** — `"1:1"` → `OneToOne` (the only value that enables `EliminateUnusedLeftJoin`); every other string → `OneToMany` (silent, conservative). Three TDD test layers: unit mapping tests in `smelt-logical`, a named fail-safe test in `join_elimination_tests.rs` confirming the gate already pattern-matches on `Cardinality`, and an end-to-end constructed-plan test in `show_plan.rs` bridging frontmatter string → rule gate.
+- **Close-out (P2)** — KD retraction in `planner_integration.md` (the "mapping is normative, wiring note" item removed; the mapping is now implemented); ROADMAP and master registry updated.
+
 ### ~~Spec-Remediation W8/timeseries — Partition & Pruning Column Invariants (D-52)~~ ✅ (June 22, 2026)
 
 Two-rule static diagnostic pass ([plan](plans/20260620-w8-timeseries.md)) landing the D-52 decisions from the 2026-06-13 spec review. The R2-incremental-cadence execution changes are explicitly out of scope (deferred to the R2 rewrite).
