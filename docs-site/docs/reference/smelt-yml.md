@@ -36,6 +36,7 @@ You can define multiple targets and select one at runtime with the `--target` CL
 | `type` | string | yes | Must be `duckdb` |
 | `database` | string | yes | Path to the DuckDB database file (relative to project root) |
 | `schema` | string | yes | Database schema to use |
+| `settings` | map | no | Connection-time DuckDB settings applied as `SET key = value` on open (e.g. `memory_limit`, `threads`, `temp_directory`). Unknown keys are rejected with an error. |
 
 ```yaml
 targets:
@@ -43,7 +44,33 @@ targets:
     type: duckdb
     database: target/dev.duckdb
     schema: main
+    settings:
+      memory_limit: "16GB"          # cap DuckDB's buffer pool
+      temp_directory: target/spill  # where to spill when over the limit
 ```
+
+#### Memory limits and spilling
+
+Left to itself, DuckDB sizes its buffer pool at **~80% of total host RAM** and
+only spills to disk once it reaches that ceiling. On a machine shared with other
+work (your editor, a language server, a second build, an agent), one heavy model
+scanning a large source can grow toward that ceiling and push the whole host into
+memory pressure.
+
+To keep smelt a good citizen by default, when a DuckDB target's `settings:` omits
+these keys smelt fills them in:
+
+- **`memory_limit`** — defaulted to roughly `min(50% of RAM, RAM − 20 GB)` (floored
+  at 40% of RAM on small hosts), leaving generous headroom for the OS and other
+  processes. It is set conservatively because DuckDB's limit caps its buffer pool,
+  not total process memory — actual RSS runs a few GB higher.
+- **`temp_directory`** — defaulted to `.smelt-duckdb-tmp` next to your `.duckdb`
+  file, so queries that exceed the limit **spill to disk** instead of failing or
+  growing unbounded.
+
+Any value you set yourself is used **exactly as written and never overridden** —
+set `memory_limit: "48GB"` on a dedicated box to opt back into a larger budget, or
+point `temp_directory` at a faster disk. `threads` is left at DuckDB's default.
 
 ### Spark Target
 

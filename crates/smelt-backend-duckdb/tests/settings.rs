@@ -89,6 +89,52 @@ async fn settings_threads_applied() {
     );
 }
 
+// ── default_settings_applied_when_absent ─────────────────────────────────────
+
+/// Opening a backend with **no** user settings still yields a bounded
+/// `memory_limit` and a `temp_directory` under the database directory — smelt's
+/// conservative defaults, so a single model can't grow toward DuckDB's native
+/// ~80%-of-host-RAM ceiling.
+#[tokio::test]
+async fn default_settings_applied_when_absent() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("sub").join("dev.duckdb");
+    // No settings at all.
+    let backend = DuckDbBackend::new_with_settings(&db_path, "main", None)
+        .await
+        .expect("backend creation without settings should succeed");
+
+    // temp_directory defaulted next to the db file and physically created.
+    let expected_tmp = db_path.parent().unwrap().join(".smelt-duckdb-tmp");
+    assert!(
+        expected_tmp.is_dir(),
+        "default temp_directory should be created: {:?}",
+        expected_tmp
+    );
+
+    let td = backend
+        .execute_sql("SELECT current_setting('temp_directory')")
+        .await
+        .expect("query must succeed");
+    let td_str = td[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("temp_directory is VARCHAR")
+        .value(0);
+    assert!(
+        td_str.ends_with(".smelt-duckdb-tmp"),
+        "temp_directory should default under the db dir, got {td_str}"
+    );
+
+    // memory_limit was set to a concrete bounded value (non-zero bytes).
+    let ml = backend
+        .execute_sql("SELECT current_setting('memory_limit')")
+        .await
+        .expect("query must succeed");
+    assert!(ml[0].num_rows() > 0, "memory_limit must be readable");
+}
+
 // ── unknown_setting_errors ───────────────────────────────────────────────────
 
 /// An unrecognised DuckDB setting key must cause `new_with_settings` to return
