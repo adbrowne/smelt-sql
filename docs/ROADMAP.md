@@ -90,6 +90,13 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/schema_evolution — NOT NULL Column Add: `backfill:`-only is Safe (D-58)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-schema-evolution.md)) landing the D-58 decision from the 2026-06-13 spec review: either `default:` or `backfill:` (or both) classifies a NOT NULL column addition or NULL→NOT NULL tighten as Safe.
+
+- **Backfill-only reclassification (P1)** — Both classifier call sites (in `plan_migration_for_backend` and `plan_schema_operations`) now admit backfill-only as Safe. DDL codegen restructured: ADD COLUMN with backfill-only emits `NOT NULL` (no DEFAULT clause) then the UPDATE backfill; ChangeNullability tighten with backfill-only emits a gap-scoped `UPDATE … WHERE col IS NULL` (no clobber) then `SET NOT NULL`. When both are present, backfill takes precedence for the gap fill. Fail-quiet bug fixed: SET NOT NULL is always emitted on the safe path. Six new TDD tests cover each case.
+- **Close-out (P2)** — No KD retraction needed (D-58 had no open KD entry); master registry and ROADMAP updated.
+
 ### ~~Spec-Remediation W8/planner — `joins:` Cardinality String→Enum Mapping (D-57)~~ ✅ (June 22, 2026)
 
 Two-phase remediation plan ([plan](plans/20260620-w8-planner.md)) landing the D-57 decision from the 2026-06-13 spec review: the `cardinality:` frontmatter string→`Cardinality`-enum mapping is exact and fail-safe.

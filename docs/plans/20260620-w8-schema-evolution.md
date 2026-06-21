@@ -124,7 +124,7 @@ Conditions:
 | Phase | Title | Status | Closes | Commit | Date |
 |-------|-------|--------|--------|--------|------|
 | P1 | `backfill:`-only reclassifies NOT NULL add/tighten as Safe | done (2026-06-22) | D-58 | feat(state): backfill-only reclassifies NOT NULL add as Safe (D-58) | 2026-06-22 |
-| P2 | Close-out: KD retraction, master registry, ROADMAP | pending | D-58 close-out | docs(spec-impl): close out W8 schema_evolution (D-58) | |
+| P2 | Close-out: KD retraction, master registry, ROADMAP | done (2026-06-22) | D-58 close-out | docs(spec-impl): close out W8 schema_evolution (D-58) | 2026-06-22 |
 
 ---
 
