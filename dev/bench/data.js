@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781975526690,
+  "lastUpdate": 1782013677500,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20115,6 +20115,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.297891,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6b9ebb09f91a1cbed45e5894b7a1ee8b3e73b3c1",
+          "message": "fix(smelt-backend-duckdb): bound DuckDB memory_limit + temp_directory by default\n\nA single `smelt build` of a real project (sherlock, raw.events ~1B rows)\nreached ~50 GB RSS and climbing on a 60 GB host, tipping the box into\nmemory pressure so systemd-oomd reaped an unrelated tmux scope (the\nautonomy loop). Root cause: smelt set no DuckDB memory_limit, so DuckDB\nused its native default of ~80% of total host RAM and only spilled once\nit reached that ceiling. A single legitimately-heavy model could thus\nconsume the whole host.\n\nWhen a DuckDB target's `settings:` omits a key, smelt now fills it in at\nconnection time:\n- memory_limit = min(50% RAM, RAM-20GiB), floored at 40% of RAM\n- temp_directory = <database-parent>/.smelt-duckdb-tmp (so it spills)\n\nThe memory_limit constants are deliberately conservative: DuckDB's\nmemory_limit bounds its buffer pool, but measured process RSS ran ~5 GB\nabove the limit on a 1B-row aggregation, so the limit is set well below\nthe host to keep RSS within a safe envelope.\n\nUser-set keys are applied verbatim and never overridden; threads is left\nat DuckDB's default. Policy is a pure, unit-tested function\n(resolve_duckdb_settings / default_memory_limit_bytes); platform RAM\ndetection (detect_total_ram_bytes) is a thin shim whose failure mode is\n\"apply no memory_limit default\".\n\nVerified end-to-end: the unmodified sherlock build now plateaus at the\ndefault limit and spills to disk instead of climbing past 50 GB.\n\nSpec: docs/specs/smelt_yml.md (Surface, Semantics 8, Design, Constraints 6).\nPlan: docs/plans/20260621-duckdb-default-memory-bound.md.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-21T13:45:46+10:00",
+          "tree_id": "42d2817f8d5734d19590a75052c3dda4cb7c6f83",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6b9ebb09f91a1cbed45e5894b7a1ee8b3e73b3c1"
+        },
+        "date": 1782013675906,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 54.022344,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 51.828073,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.859911,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.623478,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.365866,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 692.9023050000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.43258,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.275894,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.1744030000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.679203,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 574.822226,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.459670000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.1331,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.469604,
             "unit": "ms"
           }
         ]
