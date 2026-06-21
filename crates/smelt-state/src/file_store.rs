@@ -1,5 +1,6 @@
 use crate::intervals::IntervalStore;
 use crate::schema_tracking::DeployedSchema;
+use crate::snapshot_store::SnapshotStore;
 use crate::RunManifest;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,10 @@ impl FileStore {
 
     fn intervals_path(&self) -> PathBuf {
         self.state_dir.join("intervals.json")
+    }
+
+    fn snapshots_path(&self) -> PathBuf {
+        self.state_dir.join("snapshots.json")
     }
 
     fn schemas_dir(&self) -> PathBuf {
@@ -138,6 +143,32 @@ impl FileStore {
         Ok(())
     }
 
+    // --- Snapshot / Environment Store ---
+
+    /// Load the snapshot store from disk. Returns an empty store if the file doesn't exist.
+    pub fn load_snapshot_store(&self) -> Result<SnapshotStore> {
+        let path = self.snapshots_path();
+        if !path.exists() {
+            return Ok(SnapshotStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read snapshot store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse snapshot store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the snapshot store to disk.
+    pub fn save_snapshot_store(&self, store: &SnapshotStore) -> Result<()> {
+        self.init()?;
+        let path = self.snapshots_path();
+        let json = serde_json::to_string_pretty(store)
+            .with_context(|| "Failed to serialize snapshot store")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("Failed to write snapshot store: {:?}", path))?;
+        Ok(())
+    }
+
     // --- Schema Tracking ---
 
     /// Save a deployed schema for a model.
@@ -216,6 +247,7 @@ impl FileStore {
 mod tests {
     use super::*;
     use crate::schema_tracking::DeployedColumn;
+    use crate::snapshot_store::SnapshotEntry;
     use crate::{ModelRunRecord, TimeRangeRecord};
     use chrono::Utc;
     use std::collections::HashMap;
@@ -383,5 +415,48 @@ mod tests {
 
         // Deleting a non-existent schema should not error
         store.delete_schema("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_store_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let file_store = FileStore::new(dir.path());
+
+        let mut snap = SnapshotStore::default();
+        snap.upsert(SnapshotEntry {
+            model: "orders".to_string(),
+            environment: "prod".to_string(),
+            physical_table: "orders__prod".to_string(),
+            source_sql: "SELECT * FROM raw.orders".to_string(),
+            fingerprint_hex: Some("fp_abc123".to_string()),
+        });
+        snap.upsert(SnapshotEntry {
+            model: "customers".to_string(),
+            environment: "dev".to_string(),
+            physical_table: "customers__dev".to_string(),
+            source_sql: "SELECT * FROM raw.customers".to_string(),
+            fingerprint_hex: None,
+        });
+
+        file_store.save_snapshot_store(&snap).unwrap();
+
+        let loaded = file_store.load_snapshot_store().unwrap();
+        assert_eq!(loaded.len(), 2);
+
+        let e = loaded.get("prod", "orders").unwrap();
+        assert_eq!(e.physical_table, "orders__prod");
+        assert_eq!(e.fingerprint_hex.as_deref(), Some("fp_abc123"));
+
+        let e2 = loaded.get("dev", "customers").unwrap();
+        assert!(e2.fingerprint_hex.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_store_empty_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let file_store = FileStore::new(dir.path());
+
+        let loaded = file_store.load_snapshot_store().unwrap();
+        assert!(loaded.is_empty());
     }
 }

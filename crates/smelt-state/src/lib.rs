@@ -4,6 +4,7 @@ pub mod file_store;
 pub mod history;
 pub mod intervals;
 pub mod schema_tracking;
+pub mod snapshot_store;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

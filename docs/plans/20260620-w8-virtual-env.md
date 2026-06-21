@@ -54,7 +54,7 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 |-------|-------|--------|--------|--------|------|
 | P1 | `StateMode` enum + `state:` block in `Config` / `smelt.yml` | done | D-47 (lattice) | feat(core): add `StateMode` posture lattice to project config (D-47) | 2026-06-21 |
 | P2 | `reuse` frontmatter block: `accept_current`, `assert_deterministic`, `forward_only` | done | D-46 (hatches) | feat(core): add reuse frontmatter hatches to `ModelMetadata` (D-46) | 2026-06-21 |
-| P3 | Snapshot/environment store types in `smelt-state` | pending | D-47 (candidate index) | feat(state): add snapshot/environment store types and candidate-precedence lookup (D-47) | |
+| P3 | Snapshot/environment store types in `smelt-state` | done | D-47 (candidate index) | feat(state): add snapshot/environment store types and candidate-precedence lookup (D-47) | 2026-06-21 |
 | P4 | Reuse-condition evaluator: conditions 1, 2, 3a, 3b, 4-stub | pending | D-46 (3a/3b split), D-47 | feat(fingerprint): reuse-condition evaluator with 3a/3b split and logged-trust notes (D-46/47) | |
 | P5 | Close-out: KD retraction + master registry + ROADMAP | pending | D-46, D-47 close-out | docs(spec-impl): close out W8 virtual_env (D-46, D-47) | |
 
