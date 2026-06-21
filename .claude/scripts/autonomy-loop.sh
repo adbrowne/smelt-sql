@@ -131,6 +131,19 @@ SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-10}"
 # spikes. Exported so every cargo invocation in the iteration inherits it.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 
+# Per-iteration memory isolation (infra hardening; see
+# docs/handoffs/2026-06-21-autonomy-loop-ooms.md). Each iteration's `claude`
+# (and the cargo/smelt builds it spawns) runs inside its own transient,
+# memory-bounded systemd scope. Effect: a runaway iteration is killed *alone*
+# by the kernel cgroup OOM-killer once it crosses ITER_MEMORY_MAX, BEFORE
+# systemd-oomd reaps a whole tmux pane on memory *pressure* — which it picks by
+# cgroup and can land on an unrelated session (the original collateral-kill
+# bug). The supervisor (this script + forever-wrapper) stays OUTSIDE the scope,
+# so it survives the kill and restarts the next iteration. MemoryHigh throttles
+# (reclaim) before MemoryMax hard-kills, for a softer landing.
+ITER_MEMORY_MAX="${ITER_MEMORY_MAX:-32G}"
+ITER_MEMORY_HIGH="${ITER_MEMORY_HIGH:-28G}"
+
 SENTINEL_PHASE="<<PHASE_COMPLETE>>"
 SENTINEL_DONE="<<ALL_DONE>>"
 SENTINEL_BLOCKED="<<PHASE_BLOCKED>>"
@@ -227,6 +240,30 @@ echo "Sample interval: ${SAMPLE_INTERVAL}s"
 echo "Continue:        ${SENTINEL_PHASE} | ${SENTINEL_BLOCKED} | ${SENTINEL_ADVANCED}"
 echo "Halt:            ${SENTINEL_DONE} | ${SENTINEL_MASTER_EXHAUSTED} (+ infra failures)"
 echo "Cgroup watched:  ${SELF_CGROUP:-<unknown — sampler will skip cgroup stats>}"
+
+# Assemble the per-iteration scope command once. Probe property support so an
+# older systemd (no ManagedOOMPreference, etc.) degrades to caps-only, and a
+# host without systemd-run degrades to running claude inline (uncapped).
+ITER_SCOPE_BASE=()
+if command -v systemd-run >/dev/null 2>&1; then
+  if systemd-run --user --scope --quiet --collect --unit="autonomy-captest-$$" \
+       -p MemoryHigh="${ITER_MEMORY_HIGH}" -p MemoryMax="${ITER_MEMORY_MAX}" \
+       -p ManagedOOMPreference=avoid -- true >/dev/null 2>&1; then
+    ITER_SCOPE_BASE=(systemd-run --user --scope --quiet --collect \
+      -p MemoryHigh="${ITER_MEMORY_HIGH}" -p MemoryMax="${ITER_MEMORY_MAX}" \
+      -p ManagedOOMPreference=avoid)
+  elif systemd-run --user --scope --quiet --collect --unit="autonomy-captest2-$$" \
+         -p MemoryHigh="${ITER_MEMORY_HIGH}" -p MemoryMax="${ITER_MEMORY_MAX}" \
+         -- true >/dev/null 2>&1; then
+    ITER_SCOPE_BASE=(systemd-run --user --scope --quiet --collect \
+      -p MemoryHigh="${ITER_MEMORY_HIGH}" -p MemoryMax="${ITER_MEMORY_MAX}")
+  fi
+fi
+if [ "${#ITER_SCOPE_BASE[@]}" -gt 0 ]; then
+  echo "Iter mem scope:  MemoryMax=${ITER_MEMORY_MAX} MemoryHigh=${ITER_MEMORY_HIGH} (runaway dies alone)"
+else
+  echo "Iter mem scope:  <systemd-run unavailable — iterations run uncapped in this scope>"
+fi
 echo
 
 iteration=0
@@ -316,7 +353,15 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # --output-format json:            single-envelope result with .usage + .total_cost_usd,
   #                                  so we can record per-iteration spend below.
   #                                  Sentinel grepped from .result via jq below.
-  claude --print \
+  # Wrap claude in this iteration's memory-bounded scope (no-op prefix when
+  # systemd-run is unavailable). systemd-run --scope propagates claude's exit
+  # code, so PIPESTATUS[0] still reflects claude (or the OOM-kill that felled
+  # the scope, which is then handled as a non-zero iteration below).
+  iter_scope=()
+  if [ "${#ITER_SCOPE_BASE[@]}" -gt 0 ]; then
+    iter_scope=("${ITER_SCOPE_BASE[@]}" --unit="autonomy-iter-${ts}-$(printf '%02d' "${iteration}")" --)
+  fi
+  "${iter_scope[@]}" claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --no-session-persistence \
     --model "${MODEL}" \

@@ -35,6 +35,97 @@ fn arrow_type_to_duckdb_ddl(dt: &DataType) -> Result<String, String> {
     }
 }
 
+/// Conservative default DuckDB `memory_limit` (in bytes) for a host with
+/// `total_ram_bytes` of physical RAM.
+///
+/// `max(min(50% of RAM, RAM − 20 GiB), 40% of RAM)`. The smaller of the
+/// 50%/`RAM−20GiB` terms keeps absolute headroom generous on large hosts and
+/// proportional on small ones; the 40% floor stops the `RAM − 20 GiB` term from
+/// collapsing to zero on a ≤20 GiB laptop. Deliberately conservative: DuckDB's
+/// `memory_limit` bounds its buffer pool, but process RSS runs several GiB above
+/// it (untracked operator/scan/Arrow memory), so the limit is set well below the
+/// host to keep *RSS* within a safe envelope. See `docs/specs/smelt_yml.md`
+/// §Semantics 8 for rationale.
+fn default_memory_limit_bytes(total_ram_bytes: u64) -> u64 {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let pct50 = total_ram_bytes / 2;
+    let minus_20gib = total_ram_bytes.saturating_sub(20 * GIB);
+    let floor = total_ram_bytes * 4 / 10;
+    pct50.min(minus_20gib).max(floor)
+}
+
+/// Best-effort total physical RAM in bytes. Linux reads `/proc/meminfo`; macOS
+/// shells out to `sysctl hw.memsize`; every other platform (and any failure)
+/// returns `None`, in which case smelt applies no `memory_limit` default and
+/// DuckDB's own ~80%-of-RAM default stands. Never panics, never blocks.
+fn detect_total_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in meminfo.lines() {
+            // "MemTotal:       65536000 kB"
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kb * 1024);
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout)
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Resolve the DuckDB connection-time settings to apply, layering smelt's
+/// conservative resource defaults *under* the user's `settings:`.
+///
+/// A key the user set is preserved verbatim and never overridden. When absent:
+/// - `memory_limit` is defaulted from `total_ram_bytes` (skipped entirely if
+///   `None`, so DuckDB's native default applies);
+/// - `temp_directory` is defaulted to `<database-parent>/.smelt-duckdb-tmp` so a
+///   query exceeding `memory_limit` spills to disk instead of failing.
+///
+/// `threads` is intentionally left alone. Pure function — no I/O — so the policy
+/// is unit-testable without opening a connection.
+fn resolve_duckdb_settings(
+    user: Option<&BTreeMap<String, String>>,
+    total_ram_bytes: Option<u64>,
+    database_path: &Path,
+) -> BTreeMap<String, String> {
+    let mut settings = user.cloned().unwrap_or_default();
+
+    if !settings.contains_key("memory_limit") {
+        if let Some(ram) = total_ram_bytes {
+            let mib = default_memory_limit_bytes(ram) / (1024 * 1024);
+            settings.insert("memory_limit".to_string(), format!("{}MiB", mib));
+        }
+    }
+
+    if !settings.contains_key("temp_directory") {
+        let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp = parent.join(".smelt-duckdb-tmp");
+        settings.insert(
+            "temp_directory".to_string(),
+            tmp.to_string_lossy().into_owned(),
+        );
+    }
+
+    settings
+}
+
 /// DuckDB backend for smelt.
 ///
 /// Wraps a DuckDB connection and implements the Backend trait.
@@ -71,8 +162,12 @@ impl DuckDbBackend {
         let database_path = database_path.to_owned();
         let schema = schema.to_string();
         let schema_for_init = schema.clone();
-        // Clone settings into an owned map so it can cross the spawn_blocking boundary.
-        let settings_owned: BTreeMap<String, String> = settings.cloned().unwrap_or_default();
+        // Layer smelt's conservative resource defaults (memory_limit, temp_directory)
+        // under the user's settings, so no single model can consume the whole host.
+        // Computed here (before the move) so the pure policy stays I/O-free; the owned
+        // map then crosses the spawn_blocking boundary.
+        let settings_owned =
+            resolve_duckdb_settings(settings, detect_total_ram_bytes(), &database_path);
 
         // Run blocking DuckDB operations in spawn_blocking
         let connection = tokio::task::spawn_blocking(move || {
@@ -80,6 +175,14 @@ impl DuckDbBackend {
             if let Some(parent) = database_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+            }
+
+            // Ensure any temp_directory (smelt-defaulted or user-set) exists before
+            // we hand it to DuckDB, so spilling works on a fresh project.
+            if let Some(temp_dir) = settings_owned.get("temp_directory") {
+                std::fs::create_dir_all(temp_dir).with_context(|| {
+                    format!("Failed to create DuckDB temp_directory: {}", temp_dir)
+                })?;
             }
 
             // Open file-based connection (persistent)
@@ -584,6 +687,87 @@ mod tests {
     use super::*;
     use smelt_backend::Materialization;
     use tempfile::TempDir;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    // ── default_memory_limit_bytes: min(50% RAM, RAM-20GiB), floored at 40% ──────
+
+    #[test]
+    fn default_memory_limit_60gib_uses_50pct_cap() {
+        // 60 GiB: min(30, 40) = 30 GiB (the 50% cap), above the 24 GiB floor.
+        assert_eq!(default_memory_limit_bytes(60 * GIB), 30 * GIB);
+    }
+
+    #[test]
+    fn default_memory_limit_36gib_uses_minus20_term() {
+        // 36 GiB: min(18, 16) = 16 GiB (RAM − 20 GiB), above the 14.4 GiB floor.
+        assert_eq!(default_memory_limit_bytes(36 * GIB), 16 * GIB);
+    }
+
+    #[test]
+    fn default_memory_limit_24gib_hits_40pct_floor() {
+        // 24 GiB: min(12, 4) = 4 GiB → floored to 40% = 9.6 GiB so small hosts stay usable.
+        assert_eq!(default_memory_limit_bytes(24 * GIB), 24 * GIB * 4 / 10);
+    }
+
+    #[test]
+    fn default_memory_limit_128gib_uses_50pct_cap() {
+        // 128 GiB: min(64, 108) = 64 GiB (the 50% cap).
+        assert_eq!(default_memory_limit_bytes(128 * GIB), 64 * GIB);
+    }
+
+    // ── resolve_duckdb_settings: inject defaults, never override the user ─────────
+
+    fn db_path() -> std::path::PathBuf {
+        std::path::Path::new("/proj/target/dev.duckdb").to_path_buf()
+    }
+
+    #[test]
+    fn resolve_injects_defaults_when_absent() {
+        let s = resolve_duckdb_settings(None, Some(60 * GIB), &db_path());
+        assert_eq!(s.get("memory_limit").map(String::as_str), Some("30720MiB")); // 30 GiB
+        assert_eq!(
+            s.get("temp_directory").map(String::as_str),
+            Some("/proj/target/.smelt-duckdb-tmp")
+        );
+        assert!(!s.contains_key("threads"), "threads must be left untouched");
+    }
+
+    #[test]
+    fn resolve_respects_user_memory_limit() {
+        let mut user = BTreeMap::new();
+        user.insert("memory_limit".to_string(), "4GB".to_string());
+        let s = resolve_duckdb_settings(Some(&user), Some(60 * GIB), &db_path());
+        assert_eq!(
+            s.get("memory_limit").map(String::as_str),
+            Some("4GB"),
+            "explicit memory_limit must never be overridden"
+        );
+    }
+
+    #[test]
+    fn resolve_respects_user_temp_directory() {
+        let mut user = BTreeMap::new();
+        user.insert("temp_directory".to_string(), "/mnt/fast/tmp".to_string());
+        let s = resolve_duckdb_settings(Some(&user), Some(60 * GIB), &db_path());
+        assert_eq!(
+            s.get("temp_directory").map(String::as_str),
+            Some("/mnt/fast/tmp")
+        );
+    }
+
+    #[test]
+    fn resolve_no_ram_skips_memory_limit_but_sets_temp_dir() {
+        let s = resolve_duckdb_settings(None, None, &db_path());
+        assert!(
+            !s.contains_key("memory_limit"),
+            "no RAM info → no memory_limit default; DuckDB's own default stands"
+        );
+        assert_eq!(
+            s.get("temp_directory").map(String::as_str),
+            Some("/proj/target/.smelt-duckdb-tmp")
+        );
+    }
 
     #[tokio::test]
     async fn test_backend_creation() {
