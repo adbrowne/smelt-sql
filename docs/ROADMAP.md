@@ -90,6 +90,14 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/catalog — Catalog JSON Shape Fixes (D-50)~~ ✅ (June 21, 2026)
+
+Three-phase remediation plan ([plan](plans/20260620-w8-catalog.md)) landing the D-50 decisions from the 2026-06-13 spec review:
+
+- **`source` always present (D-50-i, P1)** — `CatalogColumn.source` is always serialized; `CatalogColumnSource::Unknown` serializes as `{"type":"unknown"}`, never omitted; snapshot test locks the invariant.
+- **Workspace-relative `path` (D-50-iii, P2)** — `CatalogModel.path` and `origin.generator_file` are now workspace-relative (relative to the `smelt.yml` directory), never absolute filesystem paths; catalog diffs identically across machines.
+- **`--select` preserves full lineage (D-50-ii, P3)** — full `DependencyGraph` kept for edge resolution; `build_catalog` filters `models`/`tag_index`/`execution_order`/`model_count` to the selected set while `upstream`/`downstream` retain all edge names including excluded deps; `render_model_page` renders excluded deps as plain text, not broken links.
+
 ### ~~Spec-Remediation W8/virtual_env — Virtual Environment Data Model & Reuse Evaluator (D-46, D-47)~~ ✅ (June 21, 2026)
 
 Five-phase remediation plan ([plan](plans/20260620-w8-virtual-env.md)) landing the D-46 and D-47 decisions from the 2026-06-13 spec review (data model and pure logic only; runtime wiring deferred):
