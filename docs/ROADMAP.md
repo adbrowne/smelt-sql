@@ -90,6 +90,15 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/testing — Testing Framework (D-42/43/44/45)~~ ✅ (June 21, 2026)
+
+Four-phase remediation plan ([plan](plans/20260620-w8-testing.md)) landing the D-42…D-45 decisions from the 2026-06-13 spec review:
+
+- **Dot-separated `inputs` keys (D-42, P1)** — `inputs` maps now use the bare address path with dot separators (`silver.orders`, not `silver_orders`). The CTE name in generated SQL continues to use `_`-joining; a translation layer maps the public dot-key to the internal identifier.
+- **DECIMAL exact compare + decimal-string coercion (D-44, P2)** — YAML strings that look like decimal numbers (`"300.00"`) coerce to `CAST(… AS DECIMAL(18, scale))` rather than `VARCHAR`. `Decimal128` Arrow columns compare by exact value; only `Float32`/`Float64` use the `1e-6` tolerance path.
+- **CTE-level tests mock external deps, not internal CTEs (D-45, P3)** — `compile_cte_test` now collects the transitive internal CTE chain reachable from the target, replaces each `smelt.<path>` ref in the chain with a mock from `inputs`, and emits all internal CTEs as-written. Internal CTEs are never mocked.
+- **`UnknownTestInput` diagnostic (D-43, P4)** — every key in `inputs` is validated against the model's actual `smelt.<path>` dependencies. An unmatched key (typo or internal CTE name) immediately fails the test with an `UnknownTestInput` message naming the bad key and the actual deps.
+
 ### ~~Spec-Remediation W8/sources — Target-Aware `name:` Override (D-35)~~ ✅ (June 21, 2026)
 
 Four-phase remediation plan ([plan](plans/20260620-w8-sources.md)) landing the D-35 decision from the 2026-06-13 spec review:

@@ -86,6 +86,99 @@ fn inputs_dot_key_resolves() {
     );
 }
 
+/// D-43: an `inputs` key that does not match any `smelt.<path>` dep of the
+/// model must cause the test to fail with an `UnknownTestInput` diagnostic.
+/// A typo ("order" instead of "orders") is the canonical example.
+#[test]
+fn unknown_inputs_key_fails_loudly() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("unknown_key_ws");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("smelt.yml"), smelt_yml("unknown_key_ws")).unwrap();
+
+    std::fs::write(
+        root.join("models/order_count.sql"),
+        "SELECT COUNT(*) AS cnt FROM smelt.orders\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("models/orders.sql"), "SELECT id FROM smelt.raw\n").unwrap();
+
+    // Typo: "order" instead of "orders" — must fail with UnknownTestInput.
+    let test_sql = "--- name: test_typo_key ---\n\
+        materialization: test\n\
+        test:\n  \
+          model: order_count\n  \
+          inputs:\n    \
+            order:\n      \
+              - {id: 1}\n  \
+          expect:\n    \
+            - {cnt: 1}\n\
+        ---\n";
+    std::fs::write(root.join("tests/test_typo_key.sql"), test_sql).unwrap();
+
+    let output = run_smelt_test(&root);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // Must fail: 'order' is not a dep of order_count (dep is 'orders').
+    assert!(
+        !output.status.success() || stdout.contains("FAIL") || stdout.contains("fail"),
+        "unknown inputs key must cause test failure;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // Error must be an UnknownTestInput diagnostic naming the bad key.
+    assert!(
+        combined.contains("UnknownTestInput") || combined.contains("not a dependency"),
+        "failure must name 'order' as UnknownTestInput;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// D-43 positive case: a correctly spelled `inputs` key ("orders") must
+/// pass without any `UnknownTestInput` diagnostic.
+#[test]
+fn matched_inputs_key_passes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("matched_key_ws");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("smelt.yml"), smelt_yml("matched_key_ws")).unwrap();
+
+    std::fs::write(
+        root.join("models/order_count.sql"),
+        "SELECT COUNT(*) AS cnt FROM smelt.orders\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("models/orders.sql"), "SELECT id FROM smelt.raw\n").unwrap();
+
+    let test_sql = "--- name: test_correct_key ---\n\
+        materialization: test\n\
+        test:\n  \
+          model: order_count\n  \
+          inputs:\n    \
+            orders:\n      \
+              - {id: 1}\n  \
+          expect:\n    \
+            - {cnt: 1}\n\
+        ---\n";
+    std::fs::write(root.join("tests/test_correct_key.sql"), test_sql).unwrap();
+
+    let output = run_smelt_test(&root);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "correctly spelled inputs key must not fail;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("PASS") || stdout.contains("pass") || stdout.contains("1 passed"),
+        "test must PASS;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 /// An `inputs` key using underscore-join ("silver_orders") must NOT resolve
 /// the mock data — it should fall back to an empty CTE, causing the test to
 /// fail.  This ensures we test the corrected direction (dot-key is canonical).

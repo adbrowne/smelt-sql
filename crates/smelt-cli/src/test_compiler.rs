@@ -398,6 +398,30 @@ pub fn compile_cte_test(
         chain_ctes.push((cte_name.clone(), replaced_body));
     }
 
+    // D-43: reject any inputs key that isn't a reachable external dep.
+    let valid_dot_keys: std::collections::HashSet<&str> =
+        external_refs.iter().map(|(_, dk)| dk.as_str()).collect();
+    let mut unknown_keys: Vec<&str> = inputs
+        .keys()
+        .filter(|k| !valid_dot_keys.contains(k.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    if !unknown_keys.is_empty() {
+        unknown_keys.sort();
+        let mut actual: Vec<&str> = valid_dot_keys.into_iter().collect();
+        actual.sort();
+        return Err(format!(
+            "UnknownTestInput: {} — not a reachable external dependency of CTE '{}'. Reachable deps: [{}]",
+            unknown_keys
+                .iter()
+                .map(|k| format!("'{}'", k))
+                .collect::<Vec<_>>()
+                .join(", "),
+            target_cte,
+            actual.join(", ")
+        ));
+    }
+
     // Build mock CTEs for external refs using dot-key lookup (D-42).
     // External refs not in `inputs` get an empty CTE (zero rows).
     let mut mock_cte_parts: Vec<String> = Vec::new();
@@ -613,6 +637,30 @@ fn compile_whole_model_test_inner(
     // `source => silver_events_parsed` already reference the CTE name.
     if let Some(bodies) = fn_bodies {
         result_sql = expand_fn_calls_in_sql(&result_sql, bodies);
+    }
+
+    // D-43: reject any inputs key that doesn't match an actual dep of this model.
+    // Every key in `inputs` must be a dot-separated path of a real smelt.<path> ref.
+    let valid_dot_keys: std::collections::HashSet<&str> =
+        cte_name_to_dot_key.values().map(|s| s.as_str()).collect();
+    let mut unknown_keys: Vec<&str> = inputs
+        .keys()
+        .filter(|k| !valid_dot_keys.contains(k.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    if !unknown_keys.is_empty() {
+        unknown_keys.sort();
+        let mut actual: Vec<&str> = valid_dot_keys.into_iter().collect();
+        actual.sort();
+        return Err(format!(
+            "UnknownTestInput: {} — not a dependency of this model. Actual deps: [{}]",
+            unknown_keys
+                .iter()
+                .map(|k| format!("'{}'", k))
+                .collect::<Vec<_>>()
+                .join(", "),
+            actual.join(", ")
+        ));
     }
 
     // Build mock CTEs — every smelt.<path> ref in the model gets a CTE.

@@ -97,9 +97,10 @@ fn cte_test_mocks_external_deps_not_internal_ctes() {
     );
 }
 
-/// An `inputs` key that is an internal CTE name (not a `smelt.<path>` dep) must
-/// be silently ignored. The test still runs against the actual external dep when
-/// provided via the correct dot-key and must produce the correct result.
+/// D-43: an `inputs` key that names an internal CTE (not a `smelt.<path>` dep)
+/// must fail the test with an `UnknownTestInput` diagnostic. Even if a valid
+/// external dep key is also provided, the spurious internal CTE key causes
+/// failure — the user must remove it.
 #[test]
 fn cte_test_inputs_keys_are_model_deps_not_cte_names() {
     let tmp = TempDir::new().unwrap();
@@ -131,9 +132,9 @@ fn cte_test_inputs_keys_are_model_deps_not_cte_names() {
     )
     .unwrap();
 
-    // inputs includes "cleaned" (an internal CTE name, must be ignored) AND "raw_orders"
-    // (the actual external dep). Test must pass with total=300 — "cleaned" key is ignored.
-    let test_sql = "--- name: test_internal_key_ignored ---\n\
+    // inputs includes "cleaned" (an internal CTE name — NOT a smelt.<path> dep).
+    // D-43: this must fail with UnknownTestInput, even though "raw_orders" is also valid.
+    let test_sql = "--- name: test_internal_key_fails ---\n\
         materialization: test\n\
         test:\n  \
           model: orders_agg\n  \
@@ -147,22 +148,22 @@ fn cte_test_inputs_keys_are_model_deps_not_cte_names() {
           expect:\n    \
             - {total: 300}\n\
         ---\n";
-    std::fs::write(root.join("tests/test_internal_key_ignored.sql"), test_sql).unwrap();
+    std::fs::write(root.join("tests/test_internal_key_fails.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // cleaned runs as-written (using raw_orders mock = 100+200 = 300), total=300.
-    // The "cleaned" input key is ignored (internal CTE, not a smelt dep).
+    // D-43: "cleaned" is not an external smelt dep → UnknownTestInput → test fails.
     assert!(
-        output.status.success(),
-        "CTE test with internal CTE name in inputs must pass (total=300);\
+        !output.status.success() || stdout.contains("FAIL") || stdout.contains("fail"),
+        "internal CTE name in inputs must cause test failure (D-43);\
         \nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("PASS") || stdout.contains("pass") || stdout.contains("1 passed"),
-        "test must report PASS;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stdout.contains("cleaned") || stderr.contains("cleaned"),
+        "failure must mention the unknown key 'cleaned';\
+        \nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 
