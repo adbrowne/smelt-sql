@@ -410,7 +410,9 @@ SELECT CAST(ts AS DATE) AS partition_date, ts FROM events
         diags_for(&db, ws, file)
     );
     assert!(
-        diags.iter().any(|d| d.message.contains("partition_date") || d.message.contains("granularity")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("partition_date") || d.message.contains("granularity")),
         "MalformedTimeseries message must reference column or granularity; got {:#?}",
         diags
     );

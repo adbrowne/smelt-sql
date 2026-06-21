@@ -90,6 +90,13 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/datagen — Scale Factor, FK Bound, Zero-Row Guard (D-53)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-datagen.md)) landing the D-53 decision from the 2026-06-13 spec review: `floor()` for effective row counts, FK bounds equal the effective (scaled) count at any scale factor, and zero-row is a hard configuration error.
+
+- **Core fixes (P1)** — `run_config()` now uses `floor()` not `round()` when scaling row counts; `fk_counts` is built from floor-scaled values; a zero effective row count (e.g. `num_rows: 1`, `scale_factor: 0.4`) is a hard error naming the offending dataset; a FK column whose referenced dataset has an effective row count of 0 is also an error; `unwrap_or(1)` in the FK generator arm hardened to a loud error. Five new TDD tests cover each contract.
+- **Help text close-out (P2)** — `--list-generators` `foreign_key` description updated from "Random id in [1, num_rows]" to "Random integer in [1, effective_row_count] where effective_row_count = floor(referenced_num_rows × scale_factor)"; `linked_pools` section gains the scale-invariance qualification note (pool contents are scale-invariant only when no shape field uses `foreign_key`). No KD retractions (the existing KDs are unrelated to scale-factor behavior).
+
 ### ~~Spec-Remediation W8/schema_evolution — NOT NULL Column Add: `backfill:`-only is Safe (D-58)~~ ✅ (June 22, 2026)
 
 Two-phase remediation plan ([plan](plans/20260620-w8-schema-evolution.md)) landing the D-58 decision from the 2026-06-13 spec review: either `default:` or `backfill:` (or both) classifies a NOT NULL column addition or NULL→NOT NULL tighten as Safe.

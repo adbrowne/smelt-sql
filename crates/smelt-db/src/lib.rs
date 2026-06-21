@@ -1422,9 +1422,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
             // Rule 8: sub-day granularity (hour) requires a timestamp-resolution
             // partition_column type (not DATE).
-            for diag in
-                queries::check_types::check_timeseries_granularity_type(ts, &typed_schema)
-            {
+            for diag in queries::check_types::check_timeseries_granularity_type(ts, &typed_schema) {
                 DiagnosticAcc(diag).accumulate(db);
             }
         }

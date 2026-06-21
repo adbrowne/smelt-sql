@@ -105,8 +105,12 @@ zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
   sequential_id           1-based row index.
 
   foreign_key
-    dataset: <name>       Random id in [1, num_rows] of the named dataset
-                          (must already be defined earlier in the YAML).
+    dataset: <name>       Random integer in [1, effective_row_count] of the
+                          named dataset, where effective_row_count =
+                          floor(referenced_num_rows × scale_factor). The
+                          dataset must appear earlier in the YAML. At any
+                          scale factor (<1, =1, >1) the bound is the scaled
+                          count, preserving referential integrity.
 
   date
     start: YYYY-MM-DD     Inclusive lower bound.
@@ -151,8 +155,14 @@ Dataset-level (not a generator, but documented here for discoverability):
         - weight: <float>  and sticky (fields drawn once and shared
           emit: <int>      across emitted entries). See the linked_choice
           sticky: [...]    generator above and the spec for full rules.
-          fields:
+          fields:          SCALE-INVARIANCE NOTE: pool contents are
             <field>: <generator>
+                          scale-invariant (byte-identical across
+                          --scale-factor settings) ONLY when no shape
+                          field uses foreign_key. A foreign_key field
+                          resolves against the referenced dataset's
+                          effective (scaled) row count, so FK-bearing
+                          pools vary with the scale factor.
 ";
 
 fn main() -> Result<()> {
