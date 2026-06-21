@@ -159,3 +159,39 @@ fn join_elimination_requires_declared_cardinality() {
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test 4 — D-57 fail-safe: unrecognised cardinality string never enables elision
+// ---------------------------------------------------------------------------
+//
+// `cardinality_from_str` maps any string other than "1:1" to `OneToMany`.
+// This test confirms that a join whose cardinality came from an unrecognised
+// string (e.g. "1:N") cannot be elided — even when no RHS column is consumed.
+
+#[test]
+fn join_elimination_blocked_for_unrecognised_cardinality_string() {
+    // Simulate the mapping that cardinality_from_str("1:N") produces.
+    let cardinality = smelt_planner::logical::cardinality_from_str("1:N");
+    assert_eq!(
+        cardinality,
+        Cardinality::OneToMany,
+        "cardinality_from_str(\"1:N\") must map to OneToMany (fail-safe)"
+    );
+
+    let join = make_left_join(
+        make_table_ref("orders"),
+        make_table_ref("dim_customer"),
+        vec!["customer_id"],
+        cardinality,
+        vec!["customer_name", "customer_tier"],
+    );
+    let plan = make_select(vec!["order_id", "total"], join);
+
+    let rule = EliminateUnusedLeftJoin;
+    match rule.apply(plan, &RuleContext::default()) {
+        RuleResult::Unchanged => {}
+        RuleResult::Changed(p) => panic!(
+            "Expected Unchanged: unrecognised cardinality string must not enable join elision, got Changed: {p:?}"
+        ),
+    }
+}

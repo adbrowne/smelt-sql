@@ -140,6 +140,71 @@ fn cli_show_plan_eliminates_unused_join() {
     );
 }
 
+// D-57 — cardinality fail-safe: an unrecognised string must NOT enable elision.
+// Constructed plan (logical_plan Salsa query does not yet build LeftJoin from SQL).
+// Uses cardinality_from_str to bridge frontmatter → Cardinality → rule gate.
+#[test]
+fn show_plan_unrecognised_cardinality_does_not_elide_join() {
+    use smelt_planner::logical::cardinality_from_str;
+
+    // "1:N" is not "1:1" → must map to OneToMany → join must not be elided.
+    let cardinality = cardinality_from_str("1:N");
+
+    let lhs = Arc::new(LogicalNode::TableRef {
+        name: "orders".to_string(),
+    });
+    let rhs = Arc::new(LogicalNode::TableRef {
+        name: "dim_customer".to_string(),
+    });
+    let join = Arc::new(LogicalNode::LeftJoin {
+        lhs,
+        rhs,
+        join_columns: vec!["customer_id".to_string()],
+        cardinality,
+        output_columns: vec!["customer_name".to_string(), "customer_tier".to_string()],
+    });
+    // No RHS column in projections — join could be elided if cardinality were OneToOne.
+    let plan = Arc::new(LogicalNode::Select {
+        projections: vec!["order_id".to_string(), "total".to_string()],
+        from: Some(join),
+        filter: None,
+    });
+
+    let optimised = apply_rules_to_fixed_point(plan, &show_plan_rules());
+    let printed = format_plan(&optimised);
+
+    assert!(
+        printed.contains("LeftJoin"),
+        "LeftJoin must NOT be elided for an unrecognised cardinality string (fail-safe); got:\n{printed}"
+    );
+
+    // Baseline: "1:1" DOES elide the same plan (confirmed by existing test 4).
+    let lhs2 = Arc::new(LogicalNode::TableRef {
+        name: "orders".to_string(),
+    });
+    let rhs2 = Arc::new(LogicalNode::TableRef {
+        name: "dim_customer".to_string(),
+    });
+    let join2 = Arc::new(LogicalNode::LeftJoin {
+        lhs: lhs2,
+        rhs: rhs2,
+        join_columns: vec!["customer_id".to_string()],
+        cardinality: cardinality_from_str("1:1"),
+        output_columns: vec!["customer_name".to_string(), "customer_tier".to_string()],
+    });
+    let plan2 = Arc::new(LogicalNode::Select {
+        projections: vec!["order_id".to_string(), "total".to_string()],
+        from: Some(join2),
+        filter: None,
+    });
+    let optimised2 = apply_rules_to_fixed_point(plan2, &show_plan_rules());
+    let printed2 = format_plan(&optimised2);
+    assert!(
+        !printed2.contains("LeftJoin"),
+        "LeftJoin must be elided for \"1:1\" (baseline); got:\n{printed2}"
+    );
+}
+
 // Phase 44 — research §3 spec body for `safe_divide` includes both an
 // `OR denominator IS NULL` guard and a second `CAST(denominator AS DOUBLE)`
 // in the divisor.  These tests assert the spec body survives end-to-end via

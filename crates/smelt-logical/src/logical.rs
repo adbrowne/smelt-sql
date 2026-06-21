@@ -142,6 +142,21 @@ pub enum Cardinality {
     OneToMany,
 }
 
+/// Maps the raw `cardinality:` frontmatter string to the [`Cardinality`] enum.
+///
+/// Normative, fail-safe (Semantics rule 8, D-57):
+/// - `"1:1"` → [`Cardinality::OneToOne`] (the only value that enables elision).
+/// - Any other string → [`Cardinality::OneToMany`] (conservative; join is kept).
+///
+/// No error is emitted for unrecognised strings — the fail-safe is silent.
+pub fn cardinality_from_str(s: &str) -> Cardinality {
+    if s == "1:1" {
+        Cardinality::OneToOne
+    } else {
+        Cardinality::OneToMany
+    }
+}
+
 /// A node in the logical query plan.
 ///
 /// Phase 30 introduces a minimal node set sufficient to represent
@@ -753,5 +768,33 @@ mod tests {
         assert!(props.deterministic);
         assert!(!props.idempotent);
         assert!(diags.is_empty());
+    }
+
+    /// D-57 — exact `"1:1"` string maps to `OneToOne`.
+    #[test]
+    fn cardinality_exact_match_1_1() {
+        assert_eq!(cardinality_from_str("1:1"), Cardinality::OneToOne);
+    }
+
+    /// D-57 — every string other than `"1:1"` maps to `OneToMany` (fail-safe).
+    #[test]
+    fn cardinality_unrecognised_never_one_to_one() {
+        let cases = [
+            "",
+            "1:N",
+            "N:1",
+            "N:M",
+            "one_to_one",
+            "1 :1",
+            "1:1 ",
+            "ONE_TO_ONE",
+        ];
+        for s in cases {
+            assert_ne!(
+                cardinality_from_str(s),
+                Cardinality::OneToOne,
+                "'{s}' should not map to OneToOne"
+            );
+        }
     }
 }
