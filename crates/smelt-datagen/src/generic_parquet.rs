@@ -194,7 +194,7 @@ fn write_partitioned(
     let entity_pool_arc: Option<Arc<_>> = config
         .entity
         .as_ref()
-        .map(|e| make_entity_pool(entity_seed, config.num_rows, e).map(Arc::new))
+        .map(|e| make_entity_pool(entity_seed, config.num_rows, e, fk_counts).map(Arc::new))
         .transpose()?;
 
     let entity_col_specs: Vec<_> = config
@@ -269,7 +269,7 @@ fn write_single(
     let entity_pool = config
         .entity
         .as_ref()
-        .map(|e| make_entity_pool(seed.wrapping_add(1), config.num_rows, e))
+        .map(|e| make_entity_pool(seed.wrapping_add(1), config.num_rows, e, fk_counts))
         .transpose()?;
 
     let entity_col_specs: Vec<_> = config
