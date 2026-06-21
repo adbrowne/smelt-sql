@@ -899,7 +899,7 @@ pub fn plan_schema_operations(
                 };
                 let default_expr = defaults.get(name.as_str()).cloned();
 
-                if !nullable && default_expr.is_none() {
+                if !nullable && default_expr.is_none() && !backfills.contains_key(name.as_str()) {
                     full_refresh_reasons
                         .push(format!("NOT NULL column '{}' added without default", name));
                     continue;
@@ -945,17 +945,24 @@ pub fn plan_schema_operations(
                 name, to_nullable, ..
             } => {
                 let default_expr = defaults.get(name.as_str()).cloned();
-                if !to_nullable && default_expr.is_none() {
+                let backfill_expr = backfills.get(name.as_str()).cloned();
+                if !to_nullable && default_expr.is_none() && backfill_expr.is_none() {
                     full_refresh_reasons.push(format!(
                         "column '{}' changed to NOT NULL without default",
                         name
                     ));
                     continue;
                 }
+                // For the tighten case: backfill takes precedence over default for the gap fill
+                let fill_expr = if !to_nullable {
+                    backfill_expr.or(default_expr)
+                } else {
+                    default_expr
+                };
                 operations.push(SchemaOperation::ChangeNullability {
                     name: name.clone(),
                     to_nullable: *to_nullable,
-                    default_expr,
+                    default_expr: fill_expr,
                 });
             }
             // Struct-level changes: collect for possible combination into RewriteColumn
@@ -1295,8 +1302,10 @@ pub fn plan_migration_for_backend(
                 nullable: false,
                 ..
             } => {
-                // NOT NULL column addition is safe if we have a default value
-                if column_defaults.contains_key(name.as_str()) {
+                // NOT NULL column addition is safe if we have a default or a backfill
+                if column_defaults.contains_key(name.as_str())
+                    || backfill_exprs.contains_key(name.as_str())
+                {
                     None
                 } else {
                     Some(format!(
@@ -1320,8 +1329,10 @@ pub fn plan_migration_for_backend(
                 to_nullable: false,
                 ..
             } => {
-                // nullable → NOT NULL is safe if we have a default to fill NULLs
-                if column_defaults.contains_key(name.as_str()) {
+                // nullable → NOT NULL is safe if we have a default or a backfill to fill NULLs
+                if column_defaults.contains_key(name.as_str())
+                    || backfill_exprs.contains_key(name.as_str())
+                {
                     None
                 } else {
                     Some(format!(
@@ -1378,12 +1389,13 @@ pub fn plan_migration_for_backend(
                         qualified_table, name, data_type, default_val
                     ));
                 } else {
-                    unreachable!(
-                        "NOT NULL column '{}' without default should have triggered FullRefresh",
-                        name
-                    );
+                    // NOT NULL with backfill only: no DEFAULT clause; backfill UPDATE follows
+                    statements.push(format!(
+                        "ALTER TABLE {} ADD COLUMN {} {} NOT NULL",
+                        qualified_table, name, data_type
+                    ));
                 }
-                // Backfill expression for the newly added column
+                // Backfill expression for the newly added column (no WHERE — new column, all rows need fill)
                 if let Some(backfill) = backfill_exprs.get(name.as_str()) {
                     statements.push(format!(
                         "UPDATE {} SET {} = {}",
@@ -1418,21 +1430,23 @@ pub fn plan_migration_for_backend(
                 to_nullable: false,
                 ..
             } => {
-                // nullable → NOT NULL: fill NULLs with the column's default value, then
-                // set NOT NULL. We use column_defaults (not backfill_exprs) here because
-                // the goal is to fill NULL gaps with a safe constant — backfill expressions
-                // are for recomputing column values from other columns, which is a different
-                // semantic (used for new column additions, not nullability changes).
-                if let Some(default_val) = column_defaults.get(name.as_str()) {
+                // nullable → NOT NULL: fill NULL gaps, then set NOT NULL.
+                // Backfill takes precedence over default for the gap fill (spec D-58);
+                // the UPDATE is scoped WHERE col IS NULL so it leaves non-NULL rows intact.
+                let fill_expr = backfill_exprs
+                    .get(name.as_str())
+                    .or_else(|| column_defaults.get(name.as_str()));
+                if let Some(fill_val) = fill_expr {
                     statements.push(format!(
                         "UPDATE {} SET {} = {} WHERE {} IS NULL",
-                        qualified_table, name, default_val, name
-                    ));
-                    statements.push(format!(
-                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        qualified_table, name
+                        qualified_table, name, fill_val, name
                     ));
                 }
+                // Always emit SET NOT NULL on the safe path (never a silent no-op).
+                statements.push(format!(
+                    "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+                    qualified_table, name
+                ));
             }
             // Complex type changes — delegate to backend-specific DDL module.
             SchemaChange::StructFieldAdded { .. }
@@ -3639,6 +3653,206 @@ mod tests {
         assert!(
             !has_unknown_field,
             "AddStructField with Unknown type must not be emitted for unparseable field type string"
+        );
+    }
+
+    // --- D-58: backfill-only reclassifies NOT NULL add/tighten as Safe ---
+
+    #[test]
+    fn not_null_add_backfill_only_is_safe() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "score".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            }],
+            warnings: vec![],
+        };
+        let mut backfills = HashMap::new();
+        backfills.insert("score".to_string(), "0".to_string());
+
+        let action = plan_migration("main", "events", &diff, false, &no_defaults(), &backfills);
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 2, "expected ADD COLUMN + UPDATE backfill");
+                assert!(
+                    statements[0].contains("ADD COLUMN score INTEGER NOT NULL"),
+                    "ADD COLUMN must include NOT NULL; got: {}",
+                    statements[0]
+                );
+                assert!(
+                    !statements[0].contains("DEFAULT"),
+                    "backfill-only ADD must not include DEFAULT clause; got: {}",
+                    statements[0]
+                );
+                assert!(
+                    statements[1].contains("UPDATE")
+                        && statements[1].contains("score")
+                        && statements[1].contains("= 0"),
+                    "second statement must be the backfill UPDATE; got: {}",
+                    statements[1]
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_null_tighten_backfill_only_is_safe() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "region".to_string(),
+                from_nullable: true,
+                to_nullable: false,
+            }],
+            warnings: vec![],
+        };
+        let mut backfills = HashMap::new();
+        backfills.insert("region".to_string(), "COALESCE(country, 'US')".to_string());
+
+        let action = plan_migration("main", "users", &diff, false, &no_defaults(), &backfills);
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 2, "expected UPDATE + SET NOT NULL");
+                assert!(
+                    statements[0].contains("UPDATE")
+                        && statements[0].contains("region")
+                        && statements[0].contains("COALESCE(country, 'US')")
+                        && statements[0].contains("WHERE region IS NULL"),
+                    "UPDATE must be scoped WHERE col IS NULL; got: {}",
+                    statements[0]
+                );
+                assert!(
+                    statements[1].contains("SET NOT NULL"),
+                    "second statement must be SET NOT NULL; got: {}",
+                    statements[1]
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_null_tighten_backfill_only_does_not_clobber_existing() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "label".to_string(),
+                from_nullable: true,
+                to_nullable: false,
+            }],
+            warnings: vec![],
+        };
+        let mut backfills = HashMap::new();
+        backfills.insert("label".to_string(), "'default'".to_string());
+
+        let action = plan_migration("main", "items", &diff, false, &no_defaults(), &backfills);
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                let update_stmt = statements
+                    .iter()
+                    .find(|s| s.contains("UPDATE"))
+                    .expect("must have an UPDATE statement");
+                assert!(
+                    update_stmt.contains("WHERE label IS NULL"),
+                    "tighten UPDATE must be scoped WHERE col IS NULL (not unscoped); got: {}",
+                    update_stmt
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_null_tighten_both_default_and_backfill_uses_backfill_for_gap() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "category".to_string(),
+                from_nullable: true,
+                to_nullable: false,
+            }],
+            warnings: vec![],
+        };
+        let mut defaults = HashMap::new();
+        defaults.insert("category".to_string(), "'other'".to_string());
+        let mut backfills = HashMap::new();
+        backfills.insert(
+            "category".to_string(),
+            "COALESCE(type_col, 'other')".to_string(),
+        );
+
+        let action = plan_migration("main", "products", &diff, false, &defaults, &backfills);
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                let update_stmt = statements
+                    .iter()
+                    .find(|s| s.contains("UPDATE"))
+                    .expect("must have an UPDATE statement");
+                assert!(
+                    update_stmt.contains("COALESCE(type_col, 'other')"),
+                    "when both are present, backfill takes precedence for the gap fill; got: {}",
+                    update_stmt
+                );
+                assert!(
+                    update_stmt.contains("WHERE category IS NULL"),
+                    "tighten UPDATE must be scoped WHERE col IS NULL; got: {}",
+                    update_stmt
+                );
+                assert!(
+                    statements.iter().any(|s| s.contains("SET NOT NULL")),
+                    "must emit SET NOT NULL"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_null_add_neither_default_nor_backfill_is_blocked() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "required_col".to_string(),
+                data_type: "VARCHAR".to_string(),
+                nullable: false,
+            }],
+            warnings: vec![],
+        };
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
+        assert!(
+            matches!(action, MigrationAction::FullRefresh { .. }),
+            "neither default nor backfill must remain FullRefresh; got: {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn not_null_tighten_neither_default_nor_backfill_is_blocked() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "col".to_string(),
+                from_nullable: true,
+                to_nullable: false,
+            }],
+            warnings: vec![],
+        };
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
+        assert!(
+            matches!(action, MigrationAction::FullRefresh { .. }),
+            "neither default nor backfill must remain FullRefresh; got: {:?}",
+            action
         );
     }
 }
