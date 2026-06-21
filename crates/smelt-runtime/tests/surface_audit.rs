@@ -62,6 +62,7 @@ fn test_no_compiler_internals_exposed() {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     };
 
     // Only the registry-level entry point is accessible from outside the crate.

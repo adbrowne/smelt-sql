@@ -1903,6 +1903,7 @@ mod tests {
             models: HashMap::new(),
             python: None,
             target: None,
+            state: Default::default(),
         }
     }
 

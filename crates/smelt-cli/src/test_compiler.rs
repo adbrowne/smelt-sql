@@ -388,7 +388,15 @@ pub fn compile_cte_test(
     let mut chain_ctes: Vec<(String, String)> = Vec::new(); // (name, replaced_body)
 
     for cte_name in &chain {
-        let cte = ctes.iter().find(|c| &c.name == cte_name).unwrap();
+        let cte = match ctes.iter().find(|c| &c.name == cte_name) {
+            Some(c) => c,
+            None => {
+                return Err(format!(
+                    "internal error: CTE '{}' not found in model",
+                    cte_name
+                ))
+            }
+        };
         let (replaced_body, refs) = find_and_replace_smelt_path_refs(&cte.body);
         for (cn, dk) in refs {
             if !external_refs.iter().any(|(n, _)| n == &cn) {
@@ -442,7 +450,12 @@ pub fn compile_cte_test(
         .iter()
         .find(|(name, _)| name.as_str() == target_cte)
         .map(|(_, body)| body.clone())
-        .expect("target CTE must be in chain");
+        .ok_or_else(|| {
+            format!(
+                "internal error: target CTE '{}' missing from chain",
+                target_cte
+            )
+        })?;
 
     let all_cte_parts: Vec<String> = mock_cte_parts.into_iter().chain(chain_cte_parts).collect();
 

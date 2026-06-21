@@ -48,6 +48,7 @@ fn make_config() -> Arc<Config> {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     })
 }
 

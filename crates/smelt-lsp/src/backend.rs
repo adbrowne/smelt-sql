@@ -954,6 +954,7 @@ impl Backend {
                     models: std::collections::HashMap::new(),
                     python: None,
                     target: None,
+                    state: Default::default(),
                 });
             build_python_context(&all_files, &config, &project_root)
         };

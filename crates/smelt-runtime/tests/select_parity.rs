@@ -42,6 +42,7 @@ fn config_with_targets(targets: &[&str]) -> Config {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     }
 }
 

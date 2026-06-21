@@ -811,6 +811,7 @@ mod tests {
             models,
             python: None,
             target: None,
+            state: Default::default(),
         }
     }
 

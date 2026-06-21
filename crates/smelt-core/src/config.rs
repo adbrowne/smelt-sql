@@ -102,6 +102,55 @@ pub struct Config {
     /// loader dispatch (no overlay files applied).
     #[serde(default)]
     pub target: Option<String>,
+    /// Project-level virtual-environment posture (D-47). Defaults to `stateless`
+    /// (today's behaviour). Set to `intervals` or `environments` to enable the
+    /// corresponding snapshot/reuse machinery.
+    #[serde(default)]
+    pub state: StateConfig,
+}
+
+/// Opt-in state posture for virtual environments (D-47).
+///
+/// The three modes form a capability lattice: `environments ⊇ intervals ⊇ stateless`.
+/// A model may narrow (declare a lower mode than the project) but not widen.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StateMode {
+    /// Default: no `.smelt/` state store required; no snapshot reuse.
+    #[default]
+    Stateless,
+    /// Persisted interval ledger for incremental models; no snapshot reuse.
+    Intervals,
+    /// Full virtual environments: fingerprint-keyed snapshot reuse + environment
+    /// addressing.
+    Environments,
+}
+
+impl StateMode {
+    /// Returns `true` if a model (or child project) with posture `self` may
+    /// declare posture `target` — i.e. `target` is ≤ `self` in the lattice.
+    ///
+    /// `environments ⊇ intervals ⊇ stateless`, so narrowing moves down and
+    /// widening (returning `false`) moves up.
+    pub fn can_narrow_to(&self, target: &StateMode) -> bool {
+        match (self, target) {
+            // Environments can narrow to anything.
+            (StateMode::Environments, _) => true,
+            // Intervals can narrow to itself or stateless.
+            (StateMode::Intervals, StateMode::Intervals | StateMode::Stateless) => true,
+            (StateMode::Intervals, StateMode::Environments) => false,
+            // Stateless can only stay stateless.
+            (StateMode::Stateless, StateMode::Stateless) => true,
+            (StateMode::Stateless, _) => false,
+        }
+    }
+}
+
+/// `state:` block in `smelt.yml` (D-47).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StateConfig {
+    #[serde(default)]
+    pub mode: StateMode,
 }
 
 fn default_config_version() -> u32 {
@@ -1216,6 +1265,7 @@ models:
             models: HashMap::new(),
             python: None,
             target: None,
+            state: StateConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -1248,6 +1298,7 @@ models:
             models: HashMap::new(),
             python: None,
             target: None,
+            state: StateConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -1365,6 +1416,7 @@ targets:
             models: HashMap::new(),
             python: None,
             target: None,
+            state: StateConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -1957,5 +2009,51 @@ vars:
             "`vars:` must not produce an unknown-key warning, got: {:?}",
             vars_warnings
         );
+    }
+
+    // ── D-47: StateMode posture lattice (P1 tests) ────────────────────────────
+
+    #[test]
+    fn state_mode_default_is_stateless() {
+        let yaml = "name: p\nversion: 1\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.mode, StateMode::Stateless);
+    }
+
+    #[test]
+    fn state_mode_environments_parses() {
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: environments\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.mode, StateMode::Environments);
+    }
+
+    #[test]
+    fn state_mode_intervals_parses() {
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: intervals\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.mode, StateMode::Intervals);
+    }
+
+    #[test]
+    fn state_mode_unknown_value_fails() {
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: bogus\n";
+        let result = Config::parse_with_warnings(yaml);
+        assert!(result.is_err(), "unknown mode must fail to parse");
+    }
+
+    #[test]
+    fn state_mode_lattice_narrowing() {
+        // environments can narrow to intervals or stateless
+        assert!(StateMode::Environments.can_narrow_to(&StateMode::Intervals));
+        assert!(StateMode::Environments.can_narrow_to(&StateMode::Stateless));
+        assert!(StateMode::Environments.can_narrow_to(&StateMode::Environments));
+        // intervals can narrow to stateless
+        assert!(StateMode::Intervals.can_narrow_to(&StateMode::Stateless));
+        assert!(StateMode::Intervals.can_narrow_to(&StateMode::Intervals));
+        // stateless cannot widen to intervals or environments
+        assert!(!StateMode::Stateless.can_narrow_to(&StateMode::Intervals));
+        assert!(!StateMode::Stateless.can_narrow_to(&StateMode::Environments));
+        // intervals cannot widen to environments
+        assert!(!StateMode::Intervals.can_narrow_to(&StateMode::Environments));
     }
 }
