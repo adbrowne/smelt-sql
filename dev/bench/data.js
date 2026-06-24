@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782288742667,
+  "lastUpdate": 1782288745419,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -26663,6 +26663,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.361079133271343,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a23f67ad62be3ce3385e6817274a4f20011aa1c3",
+          "message": "Merge pull request #142 from adbrowne/worktree-spec_review\n\nfeat(core): resolve per-target source name override against active target (D-35)",
+          "timestamp": "2026-06-24T18:07:55+10:00",
+          "tree_id": "ec88c210ac4786d06d8129437d99819eaf3d7dff",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a23f67ad62be3ce3385e6817274a4f20011aa1c3"
+        },
+        "date": 1782288744518,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.999141814725657,
             "unit": "MB/s"
           }
         ]
