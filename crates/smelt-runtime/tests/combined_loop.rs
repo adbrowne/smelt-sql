@@ -60,6 +60,7 @@ fn minimal_config(_project_dir: &Path, paths: Vec<String>) -> Config {
         default_materialization: Materialization::View,
         models: HashMap::new(),
         python: None,
+        state: Default::default(),
     }
 }
 

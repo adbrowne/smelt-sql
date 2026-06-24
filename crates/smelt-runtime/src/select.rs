@@ -93,6 +93,26 @@ pub fn select_executable_models(
             })
             .collect::<Result<_, _>>()?;
         selected_set = graph.exclude_models(&selected_set, &excludes, config)?;
+
+        // D-39: refuse an inconsistent working set — a retained model must not
+        // have a direct built-model dependency that was removed by --exclude.
+        let violations = graph.check_working_set_consistency(&selected_set);
+        if !violations.is_empty() {
+            let lines: Vec<String> = violations
+                .iter()
+                .map(|(retained, missing)| {
+                    format!(
+                        "  model '{}' requires upstream '{}' which was excluded",
+                        retained, missing
+                    )
+                })
+                .collect();
+            return Err(anyhow::anyhow!(
+                "Inconsistent working set after --exclude: the following retained models \
+                 have missing upstream dependencies:\n{}",
+                lines.join("\n")
+            ));
+        }
     }
 
     let ordered_models: Vec<String> = graph

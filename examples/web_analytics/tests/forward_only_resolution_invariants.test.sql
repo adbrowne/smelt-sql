@@ -3,7 +3,7 @@ materialization: test
 test:
   model: identity_forward_only
   inputs:
-    silver_sessions:
+    silver.sessions:
       # Session A: one signed-in event at the end (event id 2 carries user_id 100)
       - {session_id: 'sa', device_id: 1, session_seq: 0, session_start: '2026-04-01 10:00:00', session_end: '2026-04-01 10:10:00', session_start_date: '2026-04-01', event_count: 2, platform: 'web'}
       # Session B: two signed-in events; the LATER one (event id 5 at 11:08, user_id 201) wins
@@ -12,7 +12,7 @@ test:
       # the model boundary; the eventstream layer COALESCEs it to the device-prefix
       # amplitude_id downstream.
       - {session_id: 'sc', device_id: 3, session_seq: 0, session_start: '2026-04-01 12:00:00', session_end: '2026-04-01 12:10:00', session_start_date: '2026-04-01', event_count: 2, platform: 'web'}
-    silver_events_parsed:
+    silver.events_parsed:
       # Session A events
       - {event_id: 1, device_id: 1, user_id: null, amplitude_id: 'd:1',   event_ts: '2026-04-01 10:00:00', event_date: '2026-04-01', event_name: 'page_view', platform: 'web', url: 'https://example.com/'}
       - {event_id: 2, device_id: 1, user_id: 100,  amplitude_id: 'u:100', event_ts: '2026-04-01 10:08:00', event_date: '2026-04-01', event_name: 'login',     platform: 'web', url: 'https://example.com/login'}

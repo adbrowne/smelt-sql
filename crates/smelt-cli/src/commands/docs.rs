@@ -6,7 +6,7 @@ use smelt_cli::{
     parse_selector, Config, ModelDiscovery, ModelFile, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::DocsGenerateArgs;
 
@@ -165,8 +165,9 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
-    // Apply --select filters if provided
-    let (graph, origins) = if !args.select.is_empty() {
+    // Apply --select filters if provided: keep full graph for edge resolution;
+    // selection is forwarded to build_catalog which filters models/tag_index/execution_order.
+    let selected_names: Option<BTreeSet<String>> = if !args.select.is_empty() {
         let selectors: Vec<_> = args
             .select
             .iter()
@@ -174,18 +175,9 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .collect::<Result<_, _>>()
             .with_context(|| "Failed to parse selector")?;
         let selected = graph.select_models(&selectors, &config)?;
-        let filtered_models: Vec<_> = models
-            .into_iter()
-            .filter(|m| {
-                let cp = m.canonical_path();
-                selected.contains(&cp) || selected.contains(&m.name)
-            })
-            .collect();
-        let filtered_graph = DependencyGraph::build(filtered_models, sources.as_ref())
-            .with_context(|| "Failed to build filtered dependency graph")?;
-        (filtered_graph, origins)
+        Some(selected.into_iter().collect())
     } else {
-        (graph, origins)
+        None
     };
 
     // Initialize Salsa DB for type inference (uses the final post-filter model set).
@@ -197,7 +189,15 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .collect::<Vec<_>>(),
     );
 
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets)?;
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &test_targets,
+        &project_dir,
+        selected_names.as_ref(),
+    )?;
 
     let output_dir = args
         .output

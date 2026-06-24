@@ -3,7 +3,7 @@ materialization: test
 test:
   model: sessions
   inputs:
-    silver_events_parsed:
+    silver.events_parsed:
       # device_id 1 — gap boundary: two events 35 minutes apart on the same
       # platform. The 30-minute inactivity rule fires on the second event, so
       # two sessions are produced (one event each), keyed by their start ts.

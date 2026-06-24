@@ -246,7 +246,8 @@ pub use type_inference::{
 };
 
 pub use queries::check_types::{
-    cannot_infer_type_for_schema, check_expression_types_for_select, check_type_diagnostics,
+    cannot_infer_type_for_schema, check_expression_types_for_select,
+    check_timeseries_granularity_type, check_timeseries_nullability, check_type_diagnostics,
 };
 pub use queries::function_diagnostics::{
     as_struct_backend_diagnostics_for_file, backends_widening_diagnostics_for_file,
@@ -1406,6 +1407,47 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     message,
                     range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                     code: Some(code),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+        }
+
+        // Timeseries schema invariants (D-52 rules 7 and 8).
+        if let Some(ts) = metadata.timeseries.as_ref() {
+            let typed_schema = typed_model_schema(db, workspace, file);
+            // Rule 7: partition_column and event_time_column must be NOT NULL.
+            for diag in queries::check_types::check_timeseries_nullability(ts, &typed_schema) {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+            // Rule 8: sub-day granularity (hour) requires a timestamp-resolution
+            // partition_column type (not DATE).
+            for diag in queries::check_types::check_timeseries_granularity_type(ts, &typed_schema) {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+        }
+
+        // State posture widening check (D-47): a model may narrow the project's
+        // state.mode but not widen it.
+        if let Some(model_state) = metadata.state.as_ref() {
+            let project_mode = project
+                .and_then(|p| {
+                    smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
+                        .ok()
+                        .map(|(cfg, _)| cfg.state.mode)
+                })
+                .unwrap_or_default();
+            if !project_mode.can_narrow_to(&model_state.mode) {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "model declares state.mode {} but project posture is {}; \
+                         models may narrow but not widen the project posture",
+                        model_state.mode.as_str(),
+                        project_mode.as_str(),
+                    ),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::StateModeWidening),
                     data: None,
                 })
                 .accumulate(db);

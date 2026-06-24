@@ -467,6 +467,11 @@ pub struct SqlCompiler {
     config: Config,
     dialect: SqlDialect,
     capabilities: BackendCapabilities,
+    /// The name of the active target this compiler was instantiated for (e.g.
+    /// `"dev"`, `"prod"`). Used to resolve per-target `name:` overrides in
+    /// source YAMLs (`SourceNameOverride::PerTarget`).  Empty string when no
+    /// target name is set (falls back to the literal-or-default mapping).
+    target_name: String,
     /// Cross-engine refs: model_name -> parquet read expression.
     /// Set externally before compilation when cross-engine references exist.
     cross_engine_refs: HashMap<String, String>,
@@ -692,10 +697,18 @@ impl SqlCompiler {
             config,
             dialect,
             capabilities,
+            target_name: String::new(),
             cross_engine_refs: HashMap::new(),
             upstream_schemas: Arc::new(UpstreamSchemas::default()),
             fn_bodies: None,
         }
+    }
+
+    /// Set the active target name so per-target `name:` overrides in source
+    /// YAMLs resolve correctly.  Call this immediately after `new` when the
+    /// target name is known (e.g. from `CompilerRegistry::new`).
+    pub(crate) fn set_target_name(&mut self, name: &str) {
+        self.target_name = name.to_string();
     }
 
     /// Set cross-engine ref mappings (model_name -> parquet read expression).
@@ -932,6 +945,7 @@ impl SqlCompiler {
         ephemeral_names: &HashSet<String>,
     ) -> SmeltPathRefResolver<'static> {
         let schema = schema.to_string();
+        let target_name = self.target_name.clone();
         let cross_engine_refs = self.cross_engine_refs.clone();
         let per_entity_sources = self.upstream_schemas.per_entity_sources.clone();
         let ephemerals = ephemeral_names.clone();
@@ -939,7 +953,8 @@ impl SqlCompiler {
         Box::new(move |segs: &[String]| {
             match segs {
                 // smelt.sources.<path>: per-entity source with a `name:` override
-                // emits that override verbatim. Without an override, sources follow
+                // emits that override verbatim (literal) or the target-specific
+                // entry (per-target map). Without any override, sources follow
                 // the same unified default mapping as models and functions:
                 //   `<target_schema>.<segs.join("_")>`
                 // (architecture.md §"Default materialization name mapping").
@@ -947,13 +962,14 @@ impl SqlCompiler {
                 // `main.sources_raw_users`. Use `name: raw.users` in the source
                 // YAML when the external table lives at a different location.
                 segs if !segs.is_empty() && segs[0] == "sources" => {
-                    // Per-entity source with an explicit `name:` override wins.
+                    // Per-entity source with an explicit `name:` override wins;
+                    // resolve against the active target name for per-target maps.
                     if let Some(src_info) = per_entity_sources
                         .iter()
                         .find(|s| s.address_segments.as_slice() == segs)
                     {
                         if src_info.name_override.is_some() {
-                            return Some(src_info.db_name(&schema));
+                            return Some(src_info.db_name_for_target(&target_name, &schema));
                         }
                     }
                     // No override (or not found in per-entity registry) — unified
@@ -1785,7 +1801,9 @@ impl CompilerRegistry {
     pub fn new(config: &Config, targets: &HashMap<String, Target>) -> Self {
         let mut compilers = HashMap::new();
         for (name, target) in targets {
-            compilers.insert(name.clone(), SqlCompiler::new(config.clone(), target));
+            let mut compiler = SqlCompiler::new(config.clone(), target);
+            compiler.set_target_name(name);
+            compilers.insert(name.clone(), compiler);
         }
         Self { compilers }
     }
@@ -1885,6 +1903,7 @@ mod tests {
             models: HashMap::new(),
             python: None,
             target: None,
+            state: Default::default(),
         }
     }
 
@@ -2016,6 +2035,7 @@ JOIN smelt.model_b b ON a.id = b.id
                 incremental: None,
                 tags: Vec::new(),
                 target: None,
+                format: None,
             },
         );
 

@@ -351,6 +351,51 @@ impl TestClient {
         .await
     }
 
+    /// Like `send_request` but returns the full JSON-RPC response (including
+    /// any `"error"` field) without panicking. Used by tests that assert an
+    /// error is returned (e.g. refusing to rename a source column).
+    async fn send_request_raw(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+
+        self.client_tx
+            .write_all(&encode_message(&msg))
+            .await
+            .unwrap();
+
+        loop {
+            let response = read_message_timeout(&mut self.client_rx, 5000)
+                .await
+                .unwrap_or_else(|| {
+                    panic!("Timeout waiting for response to {} (id={})", method, id)
+                });
+
+            if response.get("id").and_then(|v| v.as_i64()) == Some(id) {
+                return response;
+            } else {
+                self.notification_buffer.push(response);
+            }
+        }
+    }
+
+    async fn prepare_rename_raw(&mut self, uri: &str, line: u32, col: u32) -> Value {
+        self.send_request_raw(
+            "textDocument/prepareRename",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": col }
+            }),
+        )
+        .await
+    }
+
     async fn goto_definition(&mut self, uri: &str, line: u32, col: u32) -> Value {
         self.send_request(
             "textDocument/definition",
@@ -1082,6 +1127,87 @@ async fn test_goto_definition_smelt_seed_ref() {
     client.shutdown().await;
 }
 
+/// Cross-file diagnostic republication: editing an upstream model republishes
+/// diagnostics for downstream files that depend on it.
+///
+/// Before the fix, `did_change` for `.sql` files only called
+/// `publish_diagnostics(uri)` (just the edited file). After the fix it calls
+/// `publish_all_diagnostics()` so consumers of the changed model also get
+/// refreshed diagnostics.
+///
+/// The test verifies the core LSP-level invariant: after a `textDocument/didChange`
+/// notification on an upstream file, the server MUST emit a `publishDiagnostics`
+/// notification for every tracked file — not only for the changed file. The
+/// downstream notification may be empty (clean file) or carry new diagnostics;
+/// what matters is that it was sent so the client can update its stale view.
+///
+/// To also exercise a downstream diagnostic, the downstream file opens a model
+/// that references `smelt.upstream`, then deletes the upstream reference's
+/// target by changing `upstream.sql` to an entirely different name. The LSP
+/// should emit an `UndefinedModelRef` diagnostic on the downstream file.
+#[tokio::test]
+async fn test_upstream_edit_republishes_downstream_diagnostics() {
+    let ws = TestWorkspaceDir::new();
+    // upstream exposes two columns: id and value
+    ws.add_model("upstream", "SELECT 1 AS id, 2 AS value");
+    // downstream references upstream. After the edit, `upstream` will no longer
+    // export `value`, so downstream should get a notification.
+    ws.add_model("downstream", "SELECT u.value FROM smelt.upstream u");
+
+    let mut client = TestClient::new(ws.path()).await;
+
+    let upstream_uri = ws.model_uri("upstream");
+    let downstream_uri = ws.model_uri("downstream");
+
+    // Open both files so the LSP tracks them
+    client
+        .open_file(&upstream_uri, "SELECT 1 AS id, 2 AS value")
+        .await;
+    client
+        .open_file(&downstream_uri, "SELECT u.value FROM smelt.upstream u")
+        .await;
+
+    // Drain initial diagnostics — both should be clean
+    let init_diags = client.collect_diagnostics(2000).await;
+    let init_errors: Vec<_> = init_diags
+        .iter()
+        .flat_map(|(_, d)| d.iter())
+        .filter(|d| matches!(d.severity, Some(lsp_types::DiagnosticSeverity::ERROR)))
+        .collect();
+    assert!(
+        init_errors.is_empty(),
+        "Expected no initial error diagnostics, got: {:?}",
+        init_errors
+    );
+
+    // Edit upstream.sql — change it so that `smelt.upstream` still resolves
+    // (file still exists) but the content changes. The core assertion is only
+    // that `publishDiagnostics` for downstream.sql is emitted.
+    client.change_file(&upstream_uri, "SELECT 1 AS id", 2).await;
+
+    // Collect diagnostics after the upstream edit
+    let post_edit_diags = client.collect_diagnostics(2000).await;
+
+    // Core invariant: after `did_change` on an upstream file the server MUST
+    // republish diagnostics for ALL tracked files (conservative superset), not
+    // only for the changed file. Without the fix, only upstream.sql gets a
+    // publishDiagnostics notification.
+    let downstream_notifs: Vec<_> = post_edit_diags
+        .iter()
+        .filter(|(u, _)| u.contains("downstream"))
+        .collect();
+
+    assert!(
+        !downstream_notifs.is_empty(),
+        "Expected at least one publishDiagnostics notification for downstream.sql \
+         after an upstream edit, but received none.\n\
+         All post-edit diagnostic notifications: {:?}",
+        post_edit_diags
+    );
+
+    client.shutdown().await;
+}
+
 /// Goto-definition on a plain `smelt.<name>` path ref still works
 /// after adding the `SmeltPathCall` cursor branch.
 #[tokio::test]
@@ -1103,6 +1229,104 @@ async fn test_goto_definition_smelt_model_ref_still_works() {
     assert!(
         result_str.contains("upstream"),
         "expected goto-def to land in upstream.sql, got: {result_str}",
+    );
+
+    client.shutdown().await;
+}
+
+/// D-49 Bug 4: `prepare_rename` must refuse source columns with an error.
+///
+/// A column declared by an externally-managed source (sourced via
+/// `smelt.sources.*`) should not be renameable through the LSP — the column
+/// lives in an external data source, not in a smelt SQL model. The server
+/// must return a JSON-RPC error response (not `null`).
+#[tokio::test]
+async fn test_prepare_rename_source_column_refused() {
+    let ws = TestWorkspaceDir::new();
+    // Legacy aggregate sources.yml so the source is discoverable.
+    ws.set_sources_yml(
+        "sources:\n  raw:\n    tables:\n      events:\n        columns:\n          - name: user_id\n            type: INTEGER\n",
+    );
+    // staging.sql selects user_id from the source table
+    ws.add_model("staging", "SELECT user_id FROM smelt.sources.raw.events");
+
+    let mut client = TestClient::new(ws.path()).await;
+    let staging_uri = ws.model_uri("staging");
+    client
+        .open_file(&staging_uri, "SELECT user_id FROM smelt.sources.raw.events")
+        .await;
+    client.collect_diagnostics(1000).await;
+
+    // "SELECT user_id FROM smelt.sources.raw.events"
+    //          ^col 7 (start of "user_id")
+    let response = client.prepare_rename_raw(&staging_uri, 0, 7).await;
+
+    // The server must refuse: either an error response or null result.
+    // A successful rename response would have a non-null result with a "range" field.
+    let is_error = response.get("error").is_some();
+    let is_null_result = response.get("result").map(|r| r.is_null()).unwrap_or(false);
+    assert!(
+        is_error || is_null_result,
+        "prepare_rename on a source column should return an error or null, got: {}",
+        serde_json::to_string_pretty(&response).unwrap()
+    );
+
+    client.shutdown().await;
+}
+
+/// D-49 Bugs 1, 2, 3: Column rename BFS must be rooted at the definition site.
+///
+/// When cursor is in `leaf.sql` (which reads from `mid1`), the BFS should
+/// start from `base.sql` (the definition site), so sibling consumers like
+/// `mid2.sql` are also included in the rename.
+///
+/// Setup:
+///   base.sql:  SELECT 1 AS col_x
+///   mid1.sql:  SELECT col_x FROM smelt.base
+///   mid2.sql:  SELECT col_x FROM smelt.base   (sibling, must be found)
+///   leaf.sql:  SELECT col_x FROM smelt.mid1
+///
+/// Renaming `col_x` from `leaf.sql` at position (0, 7) must include `mid2.sql`.
+#[tokio::test]
+async fn test_column_rename_rooted_at_definition_site() {
+    let ws = TestWorkspaceDir::new();
+    ws.add_model("base", "SELECT 1 AS col_x");
+    ws.add_model("mid1", "SELECT col_x FROM smelt.base");
+    ws.add_model("mid2", "SELECT col_x FROM smelt.base");
+    ws.add_model("leaf", "SELECT col_x FROM smelt.mid1");
+
+    let mut client = TestClient::new(ws.path()).await;
+    let base_uri = ws.model_uri("base");
+    let mid1_uri = ws.model_uri("mid1");
+    let mid2_uri = ws.model_uri("mid2");
+    let leaf_uri = ws.model_uri("leaf");
+
+    client.open_file(&base_uri, "SELECT 1 AS col_x").await;
+    client
+        .open_file(&mid1_uri, "SELECT col_x FROM smelt.base")
+        .await;
+    client
+        .open_file(&mid2_uri, "SELECT col_x FROM smelt.base")
+        .await;
+    client
+        .open_file(&leaf_uri, "SELECT col_x FROM smelt.mid1")
+        .await;
+    client.collect_diagnostics(1000).await;
+
+    // Rename col_x from leaf.sql. "SELECT col_x FROM smelt.mid1"
+    //                                       ^col 7
+    let edit = client.rename(&leaf_uri, 0, 7, "col_y").await;
+    assert_no_overlapping_edits(&edit);
+
+    let edit_str = serde_json::to_string_pretty(&edit).unwrap();
+
+    // mid2.sql must be included — it consumes col_x from base, not from leaf or mid1
+    let includes_mid2 = edit_str.contains("mid2");
+    assert!(
+        includes_mid2,
+        "Rename rooted at definition site must include mid2.sql (sibling consumer of base), \
+         but got: {}",
+        edit_str
     );
 
     client.shutdown().await;

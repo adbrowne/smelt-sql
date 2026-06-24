@@ -48,6 +48,7 @@ fn test_config() -> Config {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     }
 }
 

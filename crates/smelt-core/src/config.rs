@@ -102,6 +102,64 @@ pub struct Config {
     /// loader dispatch (no overlay files applied).
     #[serde(default)]
     pub target: Option<String>,
+    /// Project-level virtual-environment posture (D-47). Defaults to `stateless`
+    /// (today's behaviour). Set to `intervals` or `environments` to enable the
+    /// corresponding snapshot/reuse machinery.
+    #[serde(default)]
+    pub state: StateConfig,
+}
+
+/// Opt-in state posture for virtual environments (D-47).
+///
+/// The three modes form a capability lattice: `environments ⊇ intervals ⊇ stateless`.
+/// A model may narrow (declare a lower mode than the project) but not widen.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StateMode {
+    /// Default: no `.smelt/` state store required; no snapshot reuse.
+    #[default]
+    Stateless,
+    /// Persisted interval ledger for incremental models; no snapshot reuse.
+    Intervals,
+    /// Full virtual environments: fingerprint-keyed snapshot reuse + environment
+    /// addressing.
+    Environments,
+}
+
+impl StateMode {
+    /// Returns the lowercase string representation of this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StateMode::Stateless => "stateless",
+            StateMode::Intervals => "intervals",
+            StateMode::Environments => "environments",
+        }
+    }
+
+    /// Returns `true` if a model (or child project) with posture `self` may
+    /// declare posture `target` — i.e. `target` is ≤ `self` in the lattice.
+    ///
+    /// `environments ⊇ intervals ⊇ stateless`, so narrowing moves down and
+    /// widening (returning `false`) moves up.
+    pub fn can_narrow_to(&self, target: &StateMode) -> bool {
+        match (self, target) {
+            // Environments can narrow to anything.
+            (StateMode::Environments, _) => true,
+            // Intervals can narrow to itself or stateless.
+            (StateMode::Intervals, StateMode::Intervals | StateMode::Stateless) => true,
+            (StateMode::Intervals, StateMode::Environments) => false,
+            // Stateless can only stay stateless.
+            (StateMode::Stateless, StateMode::Stateless) => true,
+            (StateMode::Stateless, _) => false,
+        }
+    }
+}
+
+/// `state:` block in `smelt.yml` (D-47).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct StateConfig {
+    #[serde(default)]
+    pub mode: StateMode,
 }
 
 fn default_config_version() -> u32 {
@@ -220,6 +278,10 @@ pub struct ModelConfig {
     /// Target to execute this model on (overrides CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// Table format override for this model (Spark targets only).
+    /// Precedence: SQL frontmatter `format:` > this field > target default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<TableFormat>,
 }
 
 /// Day of the week for weekly partition start.
@@ -500,6 +562,7 @@ impl Config {
                     "seed_paths",
                     "unstable_schema",
                     "vars",
+                    "state",
                 ];
                 for (key, _) in map {
                     if let Some(key_str) = key.as_str() {
@@ -513,6 +576,24 @@ impl Config {
                 }
             }
         }
+        // D-33: reject `test` and `cumulative_aggregate` as project-wide defaults.
+        // Only table / view / materialized_view / ephemeral are legal defaults;
+        // `test` and `cumulative_aggregate` require per-model semantics that cannot
+        // serve as a project fallback (smelt_yml.md §Top-level keys, §Semantics §8).
+        let forbidden_default = match &config.default_materialization {
+            Materialization::Test => Some("test"),
+            Materialization::CumulativeAggregate => Some("cumulative_aggregate"),
+            _ => None,
+        };
+        if let Some(name) = forbidden_default {
+            use serde::de::Error as _;
+            return Err(serde_yaml::Error::custom(format!(
+                "`default_materialization: {name}` is not permitted as a project-wide default. \
+                 Permitted values: table, view, materialized_view, ephemeral \
+                 (smelt_yml.md §Top-level keys, §Semantics §8)."
+            )));
+        }
+
         Ok((config, warnings))
     }
 
@@ -633,6 +714,32 @@ impl Config {
         }
         // Fall back to smelt.yml
         self.get_timeseries(model_name)
+    }
+
+    /// Get table format for a model using three-tier precedence.
+    ///
+    /// **Precedence**: SQL frontmatter `format:` > `smelt.yml` `models.<name>.format` > target default.
+    /// DuckDB targets always return `None` — format is not applicable.
+    pub fn get_format(
+        &self,
+        model_name: &str,
+        sql_metadata: Option<&ModelMetadata>,
+        target: &Target,
+    ) -> Option<TableFormat> {
+        if target.backend_type() == BackendType::DuckDB {
+            return None;
+        }
+        if let Some(meta) = sql_metadata {
+            if let Some(fmt) = meta.format {
+                return Some(fmt);
+            }
+        }
+        if let Some(model_config) = self.models.get(model_name) {
+            if let Some(fmt) = model_config.format {
+                return Some(fmt);
+            }
+        }
+        target.table_format()
     }
 
     /// Get incremental config with SQL metadata precedence
@@ -1167,6 +1274,7 @@ models:
             models: HashMap::new(),
             python: None,
             target: None,
+            state: StateConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -1199,6 +1307,7 @@ models:
             models: HashMap::new(),
             python: None,
             target: None,
+            state: StateConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -1316,6 +1425,7 @@ targets:
             models: HashMap::new(),
             python: None,
             target: None,
+            state: StateConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -1659,5 +1769,300 @@ targets:
             target.settings.is_none(),
             "settings must be None when absent"
         );
+    }
+
+    /// D-32: `format:` field on a model-config entry in `smelt.yml` parses correctly.
+    #[test]
+    fn model_config_format_parses_from_yaml() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  my_model:
+    format: parquet
+  other_model:
+    format: delta
+  no_format_model:
+    materialization: table
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.models["my_model"].format, Some(TableFormat::Parquet),);
+        assert_eq!(
+            config.models["other_model"].format,
+            Some(TableFormat::Delta),
+        );
+        assert_eq!(config.models["no_format_model"].format, None);
+    }
+
+    /// D-32: `get_format` tier 2 — model config overrides Spark target's delta default.
+    #[test]
+    fn get_format_model_config_overrides_target() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  my_model:
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_prod").unwrap();
+        assert_eq!(
+            config.get_format("my_model", None, target),
+            Some(TableFormat::Parquet),
+        );
+    }
+
+    /// D-32: `get_format` tier 1 — SQL frontmatter wins over model config.
+    #[test]
+    fn get_format_sql_metadata_beats_model_config() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  my_model:
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_prod").unwrap();
+        let metadata = ModelMetadata {
+            format: Some(TableFormat::Delta),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.get_format("my_model", Some(&metadata), target),
+            Some(TableFormat::Delta),
+        );
+    }
+
+    /// D-32: DuckDB target always returns `None` — format is not applicable.
+    #[test]
+    fn get_format_duckdb_always_none() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  my_model:
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("dev").unwrap();
+        assert_eq!(config.get_format("my_model", None, target), None);
+    }
+
+    /// D-32: no format at any tier → `None` for DuckDB, `Some(Delta)` for Spark.
+    #[test]
+    fn get_format_falls_through_to_target_default() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let duckdb = config.targets.get("dev").unwrap();
+        let spark = config.targets.get("spark_prod").unwrap();
+        assert_eq!(config.get_format("unknown", None, duckdb), None);
+        assert_eq!(
+            config.get_format("unknown", None, spark),
+            Some(TableFormat::Delta),
+        );
+    }
+
+    // ── D-33: default_materialization validation ─────────────────────────────
+
+    fn minimal_config_yaml(default_mat: &str) -> String {
+        format!(
+            r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+default_materialization: {default_mat}
+"#
+        )
+    }
+
+    /// D-33: `default_materialization: test` is rejected at parse time
+    /// with a hard error naming the forbidden value.
+    #[test]
+    fn default_materialization_test_is_rejected() {
+        let yaml = minimal_config_yaml("test");
+        let result = Config::parse_with_warnings(&yaml);
+        assert!(
+            result.is_err(),
+            "`default_materialization: test` must be rejected, but parse_with_warnings returned Ok"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("test"),
+            "error must name the forbidden value 'test'; got: {err}"
+        );
+        assert!(
+            err.contains("default_materialization"),
+            "error must mention 'default_materialization'; got: {err}"
+        );
+    }
+
+    /// D-33: `default_materialization: cumulative_aggregate` is rejected at parse time.
+    #[test]
+    fn default_materialization_cumulative_aggregate_is_rejected() {
+        let yaml = minimal_config_yaml("cumulative_aggregate");
+        let result = Config::parse_with_warnings(&yaml);
+        assert!(
+            result.is_err(),
+            "`default_materialization: cumulative_aggregate` must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cumulative_aggregate"),
+            "error must name the forbidden value; got: {err}"
+        );
+    }
+
+    /// D-33: `default_materialization: ephemeral` is permitted.
+    #[test]
+    fn default_materialization_ephemeral_is_allowed() {
+        let yaml = minimal_config_yaml("ephemeral");
+        let (config, _) = Config::parse_with_warnings(&yaml).expect("ephemeral is a legal default");
+        assert_eq!(config.default_materialization, Materialization::Ephemeral);
+    }
+
+    /// D-33: table, view, materialized_view remain legal defaults (regression guard).
+    #[test]
+    fn default_materialization_standard_values_are_allowed() {
+        for mat in ["table", "view", "materialized_view"] {
+            let yaml = minimal_config_yaml(mat);
+            assert!(
+                Config::parse_with_warnings(&yaml).is_ok(),
+                "`default_materialization: {mat}` must be accepted"
+            );
+        }
+    }
+
+    /// D-34: `state:` is a known top-level key — a smelt.yml with a `state:` block
+    /// must not produce an unknown-key warning.
+    #[test]
+    fn state_key_does_not_warn() {
+        let yaml = r#"
+name: test_project
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+state:
+  mode: stateless
+"#;
+        let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        let state_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("state")).collect();
+        assert!(
+            state_warnings.is_empty(),
+            "`state:` must not produce an unknown-key warning, got: {:?}",
+            state_warnings
+        );
+    }
+
+    /// D-34: `vars:` still produces no warning (regression guard).
+    #[test]
+    fn vars_key_still_does_not_warn() {
+        let yaml = r#"
+name: test_project
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+vars:
+  env: production
+"#;
+        let (_config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+        let vars_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("vars")).collect();
+        assert!(
+            vars_warnings.is_empty(),
+            "`vars:` must not produce an unknown-key warning, got: {:?}",
+            vars_warnings
+        );
+    }
+
+    // ── D-47: StateMode posture lattice (P1 tests) ────────────────────────────
+
+    #[test]
+    fn state_mode_default_is_stateless() {
+        let yaml = "name: p\nversion: 1\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.mode, StateMode::Stateless);
+    }
+
+    #[test]
+    fn state_mode_environments_parses() {
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: environments\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.mode, StateMode::Environments);
+    }
+
+    #[test]
+    fn state_mode_intervals_parses() {
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: intervals\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.state.mode, StateMode::Intervals);
+    }
+
+    #[test]
+    fn state_mode_unknown_value_fails() {
+        let yaml = "name: p\nversion: 1\nstate:\n  mode: bogus\n";
+        let result = Config::parse_with_warnings(yaml);
+        assert!(result.is_err(), "unknown mode must fail to parse");
+    }
+
+    #[test]
+    fn state_mode_lattice_narrowing() {
+        // environments can narrow to intervals or stateless
+        assert!(StateMode::Environments.can_narrow_to(&StateMode::Intervals));
+        assert!(StateMode::Environments.can_narrow_to(&StateMode::Stateless));
+        assert!(StateMode::Environments.can_narrow_to(&StateMode::Environments));
+        // intervals can narrow to stateless
+        assert!(StateMode::Intervals.can_narrow_to(&StateMode::Stateless));
+        assert!(StateMode::Intervals.can_narrow_to(&StateMode::Intervals));
+        // stateless cannot widen to intervals or environments
+        assert!(!StateMode::Stateless.can_narrow_to(&StateMode::Intervals));
+        assert!(!StateMode::Stateless.can_narrow_to(&StateMode::Environments));
+        // intervals cannot widen to environments
+        assert!(!StateMode::Intervals.can_narrow_to(&StateMode::Environments));
     }
 }

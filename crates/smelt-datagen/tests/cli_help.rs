@@ -67,6 +67,40 @@ fn list_generators_mentions_json_object_fields() {
     );
 }
 
+/// `--list-generators` must describe `foreign_key` in terms of the effective
+/// (scaled) row count, not `num_rows`, so users understand that the FK bound
+/// moves with `--scale-factor` (D-53).
+#[test]
+fn list_generators_foreign_key_mentions_effective_row_count() {
+    let combined = run(&["--list-generators"]);
+    assert!(
+        combined.contains("foreign_key"),
+        "--list-generators output should describe the foreign_key generator; got:\n{combined}",
+    );
+    assert!(
+        combined.contains("effective_row_count") || combined.contains("scale_factor"),
+        "--list-generators foreign_key description should mention the effective \
+         (scaled) row count so users know the FK bound moves with --scale-factor \
+         (D-53); got:\n{combined}",
+    );
+}
+
+/// `--list-generators` must note that `linked_pools` pool contents are
+/// scale-invariant only when no shape field uses `foreign_key` (D-53).
+#[test]
+fn list_generators_linked_pools_mentions_scale_invariance_qualification() {
+    let combined = run(&["--list-generators"]);
+    assert!(
+        combined.contains("linked_pools"),
+        "--list-generators output should describe linked_pools; got:\n{combined}",
+    );
+    assert!(
+        combined.contains("scale-invariant") || combined.contains("scale_invariant"),
+        "--list-generators linked_pools description should mention scale-invariance \
+         and its qualification by foreign_key (D-53); got:\n{combined}",
+    );
+}
+
 /// `--list-generators` must surface the `linked_choice` generator and its
 /// `pool:` / `field:` parameters so users discover joint-distribution
 /// columns without reading the spec.

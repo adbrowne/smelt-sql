@@ -10,39 +10,60 @@ fn smelt_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_smelt"))
 }
 
-fn stage_test_workspace(tmp: &TempDir, name: &str) -> PathBuf {
-    let root = tmp.path().join(name);
+fn smelt_yml(name: &str) -> String {
+    format!(
+        "name: {name}\nversion: 1\npaths:\n  - models\n  - tests\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\n"
+    )
+}
+
+fn init_workspace(root: &std::path::Path, name: &str) {
     std::fs::create_dir_all(root.join("models")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::create_dir_all(root.join("target")).unwrap();
-
-    std::fs::write(
-        root.join("smelt.yml"),
-        format!(
-            "name: {name}\nversion: 1\npaths:\n  - models\n  - tests\n\
-             targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
-             default_materialization: view\n"
-        ),
-    )
-    .unwrap();
-
-    // Model under test: returns a single row with x=1
+    std::fs::write(root.join("smelt.yml"), smelt_yml(name)).unwrap();
     std::fs::write(root.join("models/simple.sql"), "SELECT 1 AS x\n").unwrap();
+}
 
-    // Passing test: expect {x: 1}
+/// Workspace with both a passing and a failing test (for no-select coverage).
+fn stage_test_workspace(tmp: &TempDir, name: &str) -> PathBuf {
+    let root = tmp.path().join(name);
+    init_workspace(&root, name);
     std::fs::write(
         root.join("tests/test_pass.sql"),
         "--- name: test_pass ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 1}\n---\n",
     )
     .unwrap();
-
-    // Failing test: expect {x: 2} but model returns x=1
     std::fs::write(
         root.join("tests/test_fail.sql"),
         "--- name: test_fail ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 2}\n---\n",
     )
     .unwrap();
+    root
+}
 
+/// Workspace with only the passing test — used to isolate exactly one result.
+fn stage_passing_workspace(tmp: &TempDir, name: &str) -> PathBuf {
+    let root = tmp.path().join(name);
+    init_workspace(&root, name);
+    std::fs::write(
+        root.join("tests/test_pass.sql"),
+        "--- name: test_pass ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 1}\n---\n",
+    )
+    .unwrap();
+    root
+}
+
+/// Workspace with only the failing test — used to isolate exactly one result.
+fn stage_failing_workspace(tmp: &TempDir, name: &str) -> PathBuf {
+    let root = tmp.path().join(name);
+    init_workspace(&root, name);
+    std::fs::write(
+        root.join("tests/test_fail.sql"),
+        "--- name: test_fail ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 2}\n---\n",
+    )
+    .unwrap();
     root
 }
 
@@ -82,9 +103,9 @@ fn test_json_flag_outputs_valid_json() {
 #[test]
 fn test_json_pass_status() {
     let tmp = TempDir::new().unwrap();
-    let workspace = stage_test_workspace(&tmp, "json_pass_ws");
+    let workspace = stage_passing_workspace(&tmp, "json_pass_ws");
 
-    let output = run_smelt_test(&workspace, &["--json", "--select", "test_pass"]);
+    let output = run_smelt_test(&workspace, &["--json"]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
@@ -113,9 +134,9 @@ fn test_json_pass_status() {
 #[test]
 fn test_json_fail_status() {
     let tmp = TempDir::new().unwrap();
-    let workspace = stage_test_workspace(&tmp, "json_fail_ws");
+    let workspace = stage_failing_workspace(&tmp, "json_fail_ws");
 
-    let output = run_smelt_test(&workspace, &["--json", "--select", "test_fail"]);
+    let output = run_smelt_test(&workspace, &["--json"]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
@@ -145,9 +166,9 @@ fn test_json_fail_status() {
 #[test]
 fn test_json_exits_zero_on_failure() {
     let tmp = TempDir::new().unwrap();
-    let workspace = stage_test_workspace(&tmp, "json_exit_ws");
+    let workspace = stage_failing_workspace(&tmp, "json_exit_ws");
 
-    let output = run_smelt_test(&workspace, &["--json", "--select", "test_fail"]);
+    let output = run_smelt_test(&workspace, &["--json"]);
 
     assert!(
         output.status.success(),

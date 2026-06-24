@@ -3,7 +3,7 @@ materialization: test
 test:
   model: daily_active_users_by_method
   inputs:
-    gold_eventstream_with_identity:
+    gold.eventstream_with_identity:
       # Day 1 (2026-04-01): 4 events on 2 devices. Exercises the four-way
       # monotonicity invariants on a per-day row:
       #   identified_events_raw ≤ identified_events_forward_only

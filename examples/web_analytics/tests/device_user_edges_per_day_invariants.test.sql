@@ -3,7 +3,7 @@ materialization: test
 test:
   model: device_user_edges
   inputs:
-    silver_events_parsed:
+    silver.events_parsed:
       # Day 1 (2026-04-01): device 1 user 100 has 3 events; device 1 user 101 has 1; device 2 user 200 has 2
       - {event_id: 1, device_id: 1, user_id: 100, event_ts: '2026-04-01T09:00:00', event_date: '2026-04-01', amplitude_id: 'u:100', event_name: 'view', platform: 'web', url: '/'}
       - {event_id: 2, device_id: 1, user_id: 100, event_ts: '2026-04-01T09:30:00', event_date: '2026-04-01', amplitude_id: 'u:100', event_name: 'view', platform: 'web', url: '/'}

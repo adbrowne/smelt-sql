@@ -48,6 +48,7 @@ fn make_config() -> Arc<Config> {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     })
 }
 
@@ -235,6 +236,7 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
             }),
             tags: vec![],
             target: None,
+            format: None,
         },
     );
     let config = Arc::new(config);

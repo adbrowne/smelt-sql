@@ -188,8 +188,6 @@ The two empty-output cases are distinct and have different exit codes:
 
 A typo'd entity name fails loudly rather than silently building nothing; a `tag:`/`generator_file:` selector that legitimately matches no models (per `model_selection.md` §"Tag matching" and `model_selection.md` §"Selection methods") is a quiet no-op.
 
-> **Implementation note.** The current implementation logs `"No models matched the selectors"` via `info!()`, which is only visible when `RUST_LOG=info` is set. This diverges from the above spec. Until fixed, users observing complete silence should treat it as a no-op (not an error).
-
 ### `smelt build` lifecycle
 
 A single `smelt build` performs these steps, in order:

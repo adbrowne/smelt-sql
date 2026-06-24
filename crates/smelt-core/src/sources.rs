@@ -11,12 +11,47 @@ use crate::discovery::ModelDiscovery;
 use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// The `name:` override in a per-entity source YAML.
+///
+/// Per `docs/specs/sources.md` §"Target-aware `name:` override":
+/// - `Literal` — a single `<schema>.<table>` string applied to every target.
+/// - `PerTarget` — a map from target name to `<schema>.<table>`, so different
+///   targets can resolve to different external schemas/tables. Targets absent
+///   from the map fall back to the default mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum SourceNameOverride {
+    /// A single `<schema>.<table>` literal applied to all targets.
+    Literal(String),
+    /// Per-target map: `{ dev: raw_dev.users, prod: raw.users }`.
+    PerTarget(BTreeMap<String, String>),
+}
+
+impl SourceNameOverride {
+    /// Validate that every key in a `PerTarget` map names a declared target.
+    ///
+    /// Returns `Some(SourceError::InvalidTargetName(key))` for the first key
+    /// that is absent from `declared_targets`, or `None` if all keys are valid.
+    /// `Literal` variants always return `None` (no target-name keys to check).
+    pub fn validate_target_keys(&self, declared_targets: &[&str]) -> Option<SourceError> {
+        if let SourceNameOverride::PerTarget(map) = self {
+            for key in map.keys() {
+                if !declared_targets.contains(&key.as_str()) {
+                    return Some(SourceError::InvalidTargetName(key.clone()));
+                }
+            }
+        }
+        None
+    }
+}
 
 /// Information about a single source discovered from a per-entity `.yml` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,10 +67,10 @@ pub struct SourceInfo {
     pub columns: Vec<SourceColumn>,
     /// Optional free-text description.
     pub description: Option<String>,
-    /// Optional `name: <schema>.<table>` override for the database table name.
+    /// Optional `name:` override for the database table name (literal or per-target map).
     /// When `None`, the default mapping `<target_schema>.<address_segments.join("_")>`
     /// is used.
-    pub name_override: Option<String>,
+    pub name_override: Option<SourceNameOverride>,
     /// Tags declared in the source YAML (`tags:` key). Used by wide-reflection
     /// accessors `smelt.sources.with_tag` and `smelt.sources.all`.
     pub tags: Vec<String>,
@@ -45,17 +80,38 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
+    /// Returns the fully-qualified database name for this source given the active
+    /// target name and schema.
+    ///
+    /// Resolution rules (spec: `docs/specs/sources.md` §"Target-aware `name:` override"):
+    /// - `Literal(s)` — returns `s` verbatim regardless of `target_name`.
+    /// - `PerTarget(map)` — looks up `target_name`; if found returns that value;
+    ///   if absent falls back to the default mapping
+    ///   `<target_schema>.<address_segments.join("_")>`.
+    /// - `None` — default mapping.
+    pub fn db_name_for_target(&self, target_name: &str, target_schema: &str) -> String {
+        match &self.name_override {
+            Some(SourceNameOverride::Literal(s)) => s.clone(),
+            Some(SourceNameOverride::PerTarget(map)) => {
+                if let Some(v) = map.get(target_name) {
+                    v.clone()
+                } else {
+                    format!("{}.{}", target_schema, self.address_segments.join("_"))
+                }
+            }
+            None => format!("{}.{}", target_schema, self.address_segments.join("_")),
+        }
+    }
+
     /// Returns the fully-qualified database name for this source.
     ///
-    /// If `name_override` is set, it is returned verbatim.
-    /// Otherwise the default mapping applies:
-    /// `<target_schema>.<address_segments.join("_")>`.
+    /// This is a shim for callers that do not yet pass the active target name.
+    /// For `Literal` overrides it returns the literal verbatim; for all other
+    /// cases it returns the default mapping `<target_schema>.<segs.join("_")>`.
+    ///
+    /// Prefer `db_name_for_target` when the active target name is available.
     pub fn db_name(&self, target_schema: &str) -> String {
-        if let Some(ref ov) = self.name_override {
-            ov.clone()
-        } else {
-            format!("{}.{}", target_schema, self.address_segments.join("_"))
-        }
+        self.db_name_for_target("", target_schema)
     }
 }
 
@@ -97,6 +153,9 @@ pub enum SourceError {
 
     #[error("`name:` must be in `<schema>.<table>` format, got '{0}'")]
     InvalidNameOverride(String),
+
+    #[error("`name:` map key '{0}' names no declared target in smelt.yml")]
+    InvalidTargetName(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -114,9 +173,9 @@ struct RawSourceYaml {
     #[serde(default)]
     columns: Option<Vec<RawColumn>>,
 
-    /// Optional `name: schema.table` override.
+    /// Optional `name:` override — literal `<schema>.<table>` or per-target map.
     #[serde(default)]
-    name: Option<String>,
+    name: Option<SourceNameOverride>,
 
     /// Presence of this key is a hard error on source YAMLs.
     #[serde(default)]
@@ -144,7 +203,11 @@ struct RawColumn {
 }
 
 fn default_nullable() -> bool {
-    true
+    // Source columns default to NOT NULL when nullable is not declared.
+    // External source columns are typically non-null for structured data;
+    // the conservative nullable=true default propagated through downstream
+    // CASTs and produced false-positive D-52 partition-column diagnostics.
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -183,10 +246,21 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
     // `columns:` is required.
     let raw_cols = raw.columns.ok_or(SourceError::MissingColumns)?;
 
-    // Validate `name:` format.
-    if let Some(ref n) = raw.name {
-        if !n.contains('.') || n.starts_with('.') || n.ends_with('.') {
-            return Err(SourceError::InvalidNameOverride(n.clone()));
+    // Validate `name:` format — each value must be `<schema>.<table>`.
+    if let Some(ref name_override) = raw.name {
+        match name_override {
+            SourceNameOverride::Literal(s) => {
+                if !s.contains('.') || s.starts_with('.') || s.ends_with('.') {
+                    return Err(SourceError::InvalidNameOverride(s.clone()));
+                }
+            }
+            SourceNameOverride::PerTarget(map) => {
+                for value in map.values() {
+                    if !value.contains('.') || value.starts_with('.') || value.ends_with('.') {
+                        return Err(SourceError::InvalidNameOverride(value.clone()));
+                    }
+                }
+            }
         }
     }
 

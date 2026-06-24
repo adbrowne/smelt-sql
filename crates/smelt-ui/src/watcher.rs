@@ -213,6 +213,7 @@ mod tests {
             models: HashMap::new(),
             python: None,
             target: None,
+            state: Default::default(),
         };
 
         let (change_tx, _) = broadcast::channel(16);

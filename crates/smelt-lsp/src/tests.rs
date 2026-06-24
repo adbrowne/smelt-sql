@@ -2190,15 +2190,10 @@ fn completion_at_map_get_arg_offers_statically_known_keys() {
 
 // ── Phase E1: Loader hover/completion tests ────────────────────────────
 
-/// Hover on a loader call site shows resolved path, schema summary, and timestamp.
+/// Hover on a loader call site shows resolved path and schema summary; never mtime (D-56).
 #[test]
 fn hover_on_loader_call_shows_resolved_path_and_summary() {
-    let text = hover_text_for_loader_call(
-        "load_yaml",
-        "cohorts.yaml",
-        "List<Cohort> (3 rows)",
-        Some("2026-05-13T10:00:00Z"),
-    );
+    let text = hover_text_for_loader_call("load_yaml", "cohorts.yaml", "List<Cohort> (3 rows)");
     assert!(
         text.contains("load_yaml"),
         "hover must contain loader function name, got: {text}"
@@ -2212,8 +2207,8 @@ fn hover_on_loader_call_shows_resolved_path_and_summary() {
         "hover must contain schema summary, got: {text}"
     );
     assert!(
-        text.contains("2026-05-13"),
-        "hover must contain last-modified timestamp, got: {text}"
+        !text.contains("Last modified") && !text.contains("2026-05-13"),
+        "hover must not expose mtime (D-56), got: {text}"
     );
 }
 

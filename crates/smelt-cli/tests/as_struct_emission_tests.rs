@@ -52,6 +52,7 @@ fn duckdb_config_and_target() -> (Config, Target) {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     };
     (config, target)
 }

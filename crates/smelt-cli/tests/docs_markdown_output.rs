@@ -4,12 +4,15 @@
 //!  - Generator-emitted models (Source line in metadata block).
 //!  - Test-model targeting section ("## Tests" on the targeted model's page).
 //!  - BUG-048 regression: per-model Markdown page must list test models that target it.
+//!  - W8-catalog P3: excluded deps render as plain text, not links.
 //!
 //! Includes:
 //!  - Unit smoke test for `render_model_page` with a direct `CatalogModel`
 //!    that has `origin` set.
 //!  - Integration test that exercises the real `build_catalog()` +
 //!    `render_model_page()` pipeline with a tempdir workspace fixture.
+
+use std::collections::BTreeSet;
 
 use smelt_cli::docs::CatalogModel;
 use smelt_cli::docs_render::render_model_page;
@@ -63,8 +66,16 @@ fn model_page_lists_targeting_test_models() {
     let (graph, db, origins) =
         smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
             .expect("build logical graph");
-    let catalog = smelt_cli::docs::build_catalog(&graph, &config, &db, &origins, &test_targets)
-        .expect("build catalog");
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &test_targets,
+        &project_dir,
+        None,
+    )
+    .expect("build catalog");
 
     // "orders" should be in the catalog.
     let orders = catalog
@@ -88,7 +99,7 @@ fn model_page_lists_targeting_test_models() {
     );
 
     // The rendered Markdown page must contain a "## Tests" section.
-    let markdown = smelt_cli::docs_render::render_model_page(orders);
+    let markdown = smelt_cli::docs_render::render_model_page(orders, &Default::default());
     assert!(
         markdown.contains("## Tests"),
         "Markdown page for 'orders' must contain '## Tests' section; got:\n{markdown}"
@@ -121,7 +132,7 @@ fn emitted_model_has_source_line_in_markdown() {
         tests_targeting: vec![],
     };
 
-    let markdown = render_model_page(&model);
+    let markdown = render_model_page(&model, &Default::default());
 
     // Must contain a "Source" line naming the generator file and ModelDef name.
     assert!(
@@ -199,6 +210,8 @@ fn emitted_model_has_source_line_in_real_docs_markdown_pipeline() {
         &db,
         &origins,
         &std::collections::HashMap::new(),
+        &project_dir,
+        None,
     )
     .expect("build catalog");
 
@@ -214,7 +227,7 @@ fn emitted_model_has_source_line_in_real_docs_markdown_pipeline() {
             )
         });
 
-    let markdown = render_model_page(emitted);
+    let markdown = render_model_page(emitted, &Default::default());
 
     // The Markdown must reference the generator file and ModelDef name.
     assert!(
@@ -228,5 +241,57 @@ fn emitted_model_has_source_line_in_real_docs_markdown_pipeline() {
     assert!(
         markdown.contains("Source") || markdown.contains("source"),
         "Markdown must include a 'Source' label; got:\n{markdown}"
+    );
+}
+
+// ── W8-catalog P3: excluded deps rendered as plain text ──────────────────────
+
+/// W8-catalog P3 TDD gate: when a model page is rendered with a
+/// `catalog_model_names` set that does NOT include its upstream/downstream
+/// neighbours, those neighbours must appear as plain text, NOT as Markdown
+/// links (`[name](name.md)`).
+///
+/// Setup: model `b` has `upstream: ["a"]` and `downstream: ["c"]`.
+/// Only `b` is in `catalog_model_names`, so `a` and `c` are excluded.
+/// The rendered page must list `a` and `c` but must NOT wrap them in links.
+#[test]
+fn excluded_dep_rendered_as_plain_text() {
+    let model = CatalogModel {
+        name: "b".to_string(),
+        description: None,
+        owner: None,
+        tags: vec![],
+        materialization: "view".to_string(),
+        path: "models/b.sql".to_string(),
+        columns: vec![],
+        upstream: vec!["a".to_string()],
+        downstream: vec!["c".to_string()],
+        incremental: None,
+        origin: None,
+        tests_targeting: vec![],
+    };
+
+    // Only "b" is in the catalog; "a" and "c" are excluded by the selection.
+    let catalog_model_names = BTreeSet::from(["b".to_string()]);
+    let markdown = render_model_page(&model, &catalog_model_names);
+
+    // Excluded upstream "a" must appear in the output but NOT as a link.
+    assert!(
+        markdown.contains("a"),
+        "markdown must mention excluded upstream 'a'; got:\n{markdown}"
+    );
+    assert!(
+        !markdown.contains("[a](a.md)"),
+        "excluded upstream 'a' must NOT be rendered as a link; got:\n{markdown}"
+    );
+
+    // Excluded downstream "c" must appear in the output but NOT as a link.
+    assert!(
+        markdown.contains("c"),
+        "markdown must mention excluded downstream 'c'; got:\n{markdown}"
+    );
+    assert!(
+        !markdown.contains("[c](c.md)"),
+        "excluded downstream 'c' must NOT be rendered as a link; got:\n{markdown}"
     );
 }

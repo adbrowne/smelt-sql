@@ -439,6 +439,7 @@ mod tests {
             models: std::collections::HashMap::new(),
             python: None,
             target: None,
+            state: Default::default(),
         }
     }
 

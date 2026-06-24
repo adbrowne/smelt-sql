@@ -248,6 +248,7 @@ async fn test_cli_ui_manifest_parity() {
             incremental: None,
             tags: vec![],
             target: None,
+            format: None,
         },
     );
     models_config.insert(
@@ -258,6 +259,7 @@ async fn test_cli_ui_manifest_parity() {
             incremental: None,
             tags: vec![],
             target: None,
+            format: None,
         },
     );
     models_config.insert(
@@ -268,6 +270,7 @@ async fn test_cli_ui_manifest_parity() {
             incremental: None,
             tags: vec![],
             target: None,
+            format: None,
         },
     );
 
@@ -280,6 +283,7 @@ async fn test_cli_ui_manifest_parity() {
         models: models_config,
         python: None,
         target: None,
+        state: Default::default(),
     });
 
     let (db, graph) = build_db_and_graph(project_dir, &config);
@@ -346,6 +350,7 @@ async fn test_cli_ui_manifest_parity() {
         models: config.models.clone(),
         python: None,
         target: None,
+        state: Default::default(),
     });
     let (db2, graph2) = build_db_and_graph(project_dir, &config2);
 

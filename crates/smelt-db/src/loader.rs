@@ -1137,9 +1137,9 @@ fn schema_display_name(schema: &SmeltType) -> String {
 /// Merge `overlay` on top of `base` according to the per-target overlay rules
 /// for schema `schema`:
 ///
-/// - **Record root**: per-field replace — overlay fields replace base fields;
-///   fields absent from the overlay are taken from the base. Nested records
-///   are merged recursively.
+/// - **Record root**: per-field shallow replace — overlay fields replace base
+///   fields wholesale (including nested record values); fields absent from the
+///   overlay are taken from the base.
 /// - **List root**: overlay replaces base entirely (no concatenation).
 /// - **Map root**: per-key replace — overlay keys replace base values;
 ///   keys absent from the overlay are taken from the base.
@@ -1147,12 +1147,12 @@ fn schema_display_name(schema: &SmeltType) -> String {
 /// This is a **pure function** — no I/O, no Salsa. The caller is responsible
 /// for parsing both files and validating against the schema before merging.
 ///
-/// `_schema` is used for dispatch (record / list / map); the concrete field
-/// types are consulted only for recursive nested-record merging.
+/// `schema` is used for dispatch (record / list / map) and to validate that
+/// overlay keys exist in the schema; field types are not consulted.
 pub fn merge_values(base: MetaValue, overlay: MetaValue, schema: &SmeltType) -> MetaValue {
     match schema {
         SmeltType::Record { fields, .. } => {
-            // Record root: per-field replace; recurse into nested record fields.
+            // Record root: per-field shallow replace — overlay field replaces base field wholesale.
             let base_fields = match base {
                 MetaValue::Record(m) => m,
                 other => return other, // shouldn't happen if validation passed
@@ -1163,17 +1163,11 @@ pub fn merge_values(base: MetaValue, overlay: MetaValue, schema: &SmeltType) -> 
             };
             let mut merged = base_fields;
             for (key, ov_val) in overlay_fields {
-                if let Some(field_schema) = fields.get(&key) {
-                    let base_val = merged.remove(&key);
-                    let merged_field = match base_val {
-                        Some(bv) => merge_values(bv, ov_val, field_schema),
-                        None => ov_val,
-                    };
-                    merged.insert(key, merged_field);
-                } else {
-                    // Overlay key not in schema — should have been caught by validation;
-                    // skip silently here.
+                if fields.contains_key(&key) {
+                    merged.insert(key, ov_val);
                 }
+                // Overlay key not in schema — should have been caught by validation;
+                // skip silently here.
             }
             MetaValue::Record(merged)
         }
@@ -1628,10 +1622,10 @@ mod tests {
 
     // ── Phase 6 overlay merge tests ────────────────────────────────────────
 
-    /// `merge_values` on a record root deep-merges overridden fields and
+    /// `merge_values` on a record root shallow-replaces overridden fields and
     /// preserves fields absent from the overlay.
     #[test]
-    fn overlay_record_root_deep_merges_overridden_field() {
+    fn overlay_record_root_shallow_replaces_overridden_field() {
         // Base: {name: 'us_west', region: 'us-west-2', threshold: 100}
         // Overlay (target=prod): {threshold: 50}
         // Expected: threshold=50, name and region from base.
@@ -1684,6 +1678,81 @@ mod tests {
                     Some(&MetaValue::Text("us-west-2".to_string())),
                     "region must come from base"
                 );
+            }
+            other => panic!("expected Record, got: {:?}", other),
+        }
+    }
+
+    /// D-55 discriminator: a nested record overlay field replaces the base nested
+    /// record wholesale — the overlay's partial nested record wins in full, so
+    /// keys absent from the overlay's nested record do NOT survive from the base.
+    #[test]
+    fn overlay_nested_record_is_shallow_replaced_not_deep_merged() {
+        // Schema: { meta: {env: Text, version: Integer}, threshold: Integer }
+        let mut meta_fields = BTreeMap::new();
+        meta_fields.insert(
+            "env".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        meta_fields.insert(
+            "version".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let meta_schema = SmeltType::Record {
+            fields: meta_fields,
+            name: Some("Meta".to_string()),
+        };
+        let mut root_fields = BTreeMap::new();
+        root_fields.insert("meta".to_string(), meta_schema);
+        root_fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let schema = SmeltType::Record {
+            fields: root_fields,
+            name: Some("Config".to_string()),
+        };
+
+        // Base: {meta: {env: "dev", version: 1}, threshold: 100}
+        let mut base_meta = BTreeMap::new();
+        base_meta.insert("env".to_string(), MetaValue::Text("dev".to_string()));
+        base_meta.insert("version".to_string(), MetaValue::Integer(1));
+        let mut base_fields = BTreeMap::new();
+        base_fields.insert("meta".to_string(), MetaValue::Record(base_meta));
+        base_fields.insert("threshold".to_string(), MetaValue::Integer(100));
+        let base = MetaValue::Record(base_fields);
+
+        // Overlay: {meta: {version: 2}}  — partial nested record, env absent
+        let mut overlay_meta = BTreeMap::new();
+        overlay_meta.insert("version".to_string(), MetaValue::Integer(2));
+        let mut overlay_fields = BTreeMap::new();
+        overlay_fields.insert("meta".to_string(), MetaValue::Record(overlay_meta));
+        let overlay = MetaValue::Record(overlay_fields);
+
+        let merged = merge_values(base, overlay, &schema);
+        match merged {
+            MetaValue::Record(fields) => {
+                // threshold untouched (absent from overlay)
+                assert_eq!(
+                    fields.get("threshold"),
+                    Some(&MetaValue::Integer(100)),
+                    "threshold must come from base"
+                );
+                // meta replaced wholesale: overlay had {version:2}, env absent
+                match fields.get("meta") {
+                    Some(MetaValue::Record(meta)) => {
+                        assert_eq!(
+                            meta.get("version"),
+                            Some(&MetaValue::Integer(2)),
+                            "meta.version must be overlay value"
+                        );
+                        assert!(
+                            !meta.contains_key("env"),
+                            "meta.env must be absent — overlay replaced meta wholesale (shallow replace, not deep merge)"
+                        );
+                    }
+                    other => panic!("expected meta to be a Record, got: {:?}", other),
+                }
             }
             other => panic!("expected Record, got: {:?}", other),
         }

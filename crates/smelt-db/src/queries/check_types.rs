@@ -123,9 +123,7 @@ pub fn cannot_infer_type_for_schema(
         }
         match &col.data_type {
             Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown(_)) => {
-                if let Some(UnknownReason::Unresolved) =
-                    typed_col.data_type.unknown_reason()
-                {
+                if let Some(UnknownReason::Unresolved) = typed_col.data_type.unknown_reason() {
                     // Compiler-resolvable gap: emit ColumnTypeUnresolved (Error).
                     let range = col.range + range_offset;
                     out.push(Diagnostic {
@@ -161,6 +159,120 @@ pub fn cannot_infer_type_for_schema(
         }
     }
     out
+}
+
+/// Pure helper: check that the timeseries `partition_column` (and
+/// `event_time_column` when it differs) are NOT NULL in the model's output
+/// schema.  A nullable partition value silently escapes the pruning window.
+///
+/// D-52 rule 7. Skip conditions:
+/// - Column absent from schema (upstream unknown → no false positives).
+/// - `data_type` is `None` (type inference unavailable).
+/// - `data_type` is `Unknown(_)` (dynamic/propagated unknown).
+/// - `ColumnSource` is `Unknown` or `ExternalTable`: source ambiguous (e.g.
+///   multi-ref JOIN or CTE pass-through) — type inference cannot reliably
+///   determine nullability, so skip to avoid false positives.
+pub fn check_timeseries_nullability(
+    ts: &smelt_core::config::TimeseriesConfig,
+    schema: &crate::ModelSchema,
+) -> Vec<Diagnostic> {
+    use crate::schema::ColumnSource;
+
+    // Build the list of (column_name, role) pairs to check, deduplicating when
+    // event_time_column == partition_column (the partition check is sufficient).
+    let mut pairs: Vec<(&str, &str)> = vec![(&ts.partition_column, "partition_column")];
+    if ts.event_time_column != ts.partition_column {
+        pairs.push((&ts.event_time_column, "event_time_column"));
+    }
+
+    let mut out = Vec::new();
+    for (col_name, role) in pairs {
+        let Some(col) = schema.columns.iter().find(|c| c.name == col_name) else {
+            continue;
+        };
+        // Check only Computed columns (where this model directly determines the
+        // value). Skip all pass-through and ambiguous sources:
+        //  - FromModel: the upstream model owns the column's nullability;
+        //    D-52 fires at the upstream if it also has timeseries, otherwise
+        //    the upstream has no timeseries obligation.
+        //  - Unknown: multi-ref JOINs where source tracking is lost; inferred
+        //    nullability may be pessimistic.
+        //  - ExternalTable: CTE pass-throughs and plain-SQL FROM tables where
+        //    the smelt type-context cannot resolve nullability reliably.
+        // Wildcards are already expanded before this function is reached and
+        // would appear as individual FromModel/Computed entries.
+        if !matches!(col.source, ColumnSource::Computed) {
+            continue;
+        }
+        let Some(typed) = &col.data_type else {
+            continue;
+        };
+        if matches!(typed.data_type, DataType::Unknown(_)) {
+            continue;
+        }
+        if typed.nullable {
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "timeseries {role} '{col_name}' must be NOT NULL — \
+                     a nullable value silently escapes the pruning window"
+                ),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::MalformedTimeseries),
+                data: None,
+            });
+        }
+    }
+    out
+}
+
+/// D-52 rule 8: sub-day granularity (`hour`) requires a timestamp-resolution
+/// `partition_column` type (Timestamp or TimestampTz). Pairing `granularity: hour`
+/// with a plain `Date` partition silently coarsens pruning to whole-day boundaries.
+///
+/// Only checks Computed columns (same policy as `check_timeseries_nullability`).
+/// Unknown types and non-Computed sources are skipped to avoid false positives.
+pub fn check_timeseries_granularity_type(
+    ts: &smelt_core::config::TimeseriesConfig,
+    schema: &crate::ModelSchema,
+) -> Vec<Diagnostic> {
+    use crate::schema::ColumnSource;
+    use smelt_core::config::Granularity;
+
+    if ts.granularity != Granularity::Hour {
+        return vec![];
+    }
+
+    let col_name = &ts.partition_column;
+    let Some(col) = schema.columns.iter().find(|c| &c.name == col_name) else {
+        return vec![];
+    };
+    if !matches!(col.source, ColumnSource::Computed) {
+        return vec![];
+    }
+    let Some(typed) = &col.data_type else {
+        return vec![];
+    };
+    if matches!(typed.data_type, DataType::Unknown(_)) {
+        return vec![];
+    }
+    // Date is the only type that silently coarsens sub-day pruning.
+    // Timestamp and TimestampTz are fine; other types are unexpected but
+    // not this rule's concern (they'd be caught by a type-mismatch rule).
+    if matches!(typed.data_type, DataType::Date) {
+        vec![Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "timeseries partition_column '{col_name}' is DATE but granularity is 'hour' — \
+                 DATE cannot represent hour boundaries; use TIMESTAMP or TIMESTAMPTZ"
+            ),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::MalformedTimeseries),
+            data: None,
+        }]
+    } else {
+        vec![]
+    }
 }
 
 pub(crate) fn check_unsupported_constructs(

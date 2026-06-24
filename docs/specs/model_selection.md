@@ -115,10 +115,8 @@ A `GeneratorFile` selector takes a workspace-relative path to a generator file (
 
 ## Known Divergences / Open Questions
 
-- **`--select` on `smelt test` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (the same methods and `+` operators as every other command — see `cli.md` §"`smelt test` isolation"). Any remaining substring-match-on-test-names behaviour in the implementation is an unlanded gap, not the intended contract.
 - **Seeds in downstream traversal.** Seeds are included in upstream traversal (when a model depends on a seed). It is unclear whether seeds should appear in `smelt explain --select +model` output or be silently filtered. Current behavior undocumented.
 - **Selector order and deduplication.** When a model is added by multiple selectors or traversals, it appears once in the working set (deduplicated). The execution order is purely topological; selector order does not affect execution order.
-- **`--exclude` with `+` traversal.** `--exclude +model_name` removes `model_name` and all its upstream dependencies. If a removed upstream is still required by a model that remains in the working set, smelt refuses the inconsistent set with a diagnostic rather than running a model against an absent input (see `cli.md` §"`--exclude` and inconsistent working sets"). The user narrows the exclusion (drop the `+`) or also excludes the dependent model.
 
 ## References
 

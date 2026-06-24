@@ -4,7 +4,9 @@
 //! is complete. Each test corresponds to a spec invariant from sources.md.
 
 use smelt_core::resolver::WorkspaceLoadError;
-use smelt_core::sources::{discover_source_infos, parse_source_yaml, SourceError};
+use smelt_core::sources::{
+    discover_source_infos, parse_source_yaml, SourceError, SourceNameOverride,
+};
 use std::fs;
 use tempfile::TempDir;
 
@@ -96,17 +98,20 @@ name: legacy_db.orders_v2
     .unwrap();
 
     let info = parse_source_yaml(&dir.join("orders.yml")).unwrap();
-    assert_eq!(
-        info.name_override.as_deref(),
-        Some("legacy_db.orders_v2"),
-        "name_override should capture the YAML name key"
+    assert!(
+        matches!(
+            &info.name_override,
+            Some(SourceNameOverride::Literal(s)) if s == "legacy_db.orders_v2"
+        ),
+        "name_override should be Literal(\"legacy_db.orders_v2\"), got {:?}",
+        info.name_override
     );
 
     // db_name should use the override, not the default mapping
     let db_name = info.db_name("main");
     assert_eq!(
         db_name, "legacy_db.orders_v2",
-        "db_name() should return the override verbatim"
+        "db_name() should return the Literal override verbatim"
     );
 }
 
@@ -297,4 +302,219 @@ columns:
     // For a top-level parse (no scan root), segments = ["orders"].
     let db_name = info.db_name("main");
     assert_eq!(db_name, "main.orders");
+}
+
+// ---------------------------------------------------------------------------
+// D-35 P1: SourceNameOverride enum — per-target map form
+// ---------------------------------------------------------------------------
+
+/// D-35 P1: `name: { dev: raw_dev.users, prod: raw.users }` parses to PerTarget map.
+#[test]
+fn per_target_map_parses() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: raw_dev.users
+  prod: raw.users
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    match &info.name_override {
+        Some(SourceNameOverride::PerTarget(map)) => {
+            assert_eq!(map.get("dev").map(String::as_str), Some("raw_dev.users"));
+            assert_eq!(map.get("prod").map(String::as_str), Some("raw.users"));
+        }
+        other => panic!("expected PerTarget, got {other:?}"),
+    }
+}
+
+/// D-35 P1: a per-target map value without a dot is InvalidNameOverride.
+#[test]
+fn per_target_map_value_invalid_format_is_error() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: nodot
+"#,
+    )
+    .unwrap();
+
+    let err = parse_source_yaml(&dir.join("users.yml")).unwrap_err();
+    assert!(
+        matches!(err, SourceError::InvalidNameOverride(_)),
+        "expected InvalidNameOverride for map value without dot, got {err:?}"
+    );
+}
+
+/// D-35 P1: `name: raw_cdc.users` still parses as Literal (regression guard).
+#[test]
+fn literal_still_parses() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name: raw_cdc.users
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    match &info.name_override {
+        Some(SourceNameOverride::Literal(s)) => assert_eq!(s, "raw_cdc.users"),
+        other => panic!("expected Literal, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D-35 P2: db_name_for_target resolution
+// ---------------------------------------------------------------------------
+
+/// D-35 P2: PerTarget map resolves to the matching target's value.
+#[test]
+fn per_target_map_resolves_matching_target() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: raw_dev.u
+  prod: raw.u
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    let result = info.db_name_for_target("dev", "main");
+    assert_eq!(
+        result, "raw_dev.u",
+        "PerTarget with matching key should return that value"
+    );
+}
+
+/// D-35 P2: PerTarget map falls back to default mapping when target is absent.
+#[test]
+fn per_target_map_falls_back_on_missing_target() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  prod: raw.u
+"#,
+    )
+    .unwrap();
+
+    let mut info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    // Simulate full address segments as set by discover_source_infos.
+    info.address_segments = vec![
+        "sources".to_string(),
+        "raw".to_string(),
+        "users".to_string(),
+    ];
+    let result = info.db_name_for_target("dev", "main");
+    assert_eq!(
+        result, "main.sources_raw_users",
+        "PerTarget with no matching key should fall back to default mapping"
+    );
+}
+
+/// D-35 P2: Literal ignores target_name and returns the literal verbatim.
+#[test]
+fn literal_ignores_target_name() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("models");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("users.yml"),
+        r#"
+columns:
+  - name: id
+    type: INTEGER
+name: raw_cdc.u
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("users.yml")).unwrap();
+    // Any target_name should return the same literal.
+    assert_eq!(info.db_name_for_target("dev", "main"), "raw_cdc.u");
+    assert_eq!(info.db_name_for_target("prod", "staging"), "raw_cdc.u");
+    assert_eq!(info.db_name_for_target("", "main"), "raw_cdc.u");
+}
+
+#[test]
+fn name_map_key_names_undeclared_target_is_malformed() {
+    use smelt_core::SourceNameOverride;
+    use std::collections::BTreeMap;
+
+    let mut map = BTreeMap::new();
+    map.insert("dev".to_string(), "raw_dev.users".to_string());
+    map.insert("ghost".to_string(), "raw_ghost.users".to_string());
+    let override_val = SourceNameOverride::PerTarget(map);
+
+    // "ghost" is not in the declared targets → validation returns an error.
+    let err = override_val.validate_target_keys(&["dev", "prod"]);
+    assert!(
+        err.is_some(),
+        "expected an error for undeclared target key 'ghost', got None"
+    );
+    let msg = err.unwrap().to_string();
+    assert!(
+        msg.contains("ghost"),
+        "error message must mention the undeclared key 'ghost', got: {msg}"
+    );
+
+    // When all keys are declared → no error.
+    let mut map2 = BTreeMap::new();
+    map2.insert("dev".to_string(), "raw_dev.users".to_string());
+    map2.insert("prod".to_string(), "raw.users".to_string());
+    let override_ok = SourceNameOverride::PerTarget(map2);
+    assert!(
+        override_ok.validate_target_keys(&["dev", "prod"]).is_none(),
+        "no error expected when all keys are declared targets"
+    );
+
+    // Literal overrides always pass regardless of declared targets.
+    let literal = SourceNameOverride::Literal("raw.users".to_string());
+    assert!(
+        literal.validate_target_keys(&["dev"]).is_none(),
+        "Literal override must not produce a target-key error"
+    );
 }

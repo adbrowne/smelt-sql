@@ -85,8 +85,12 @@ pub struct EntityPool {
 }
 
 impl EntityPool {
-    pub fn new(seed: u64, count: usize, col_specs: &[ColumnConfig]) -> Result<Self> {
-        let empty_fk = FkCounts::new();
+    pub fn new(
+        seed: u64,
+        count: usize,
+        col_specs: &[ColumnConfig],
+        fk_counts: &FkCounts,
+    ) -> Result<Self> {
         let empty_pools: HashMap<String, Arc<LinkedPool>> = HashMap::new();
         let empty_samples: PoolSamples<'_> = HashMap::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -94,7 +98,7 @@ impl EntityPool {
         for i in 0..count {
             let ctx = RowContext {
                 row_index: i,
-                fk_counts: &empty_fk,
+                fk_counts,
                 pools: &empty_pools,
                 pool_samples: &empty_samples,
             };
@@ -277,9 +281,10 @@ pub fn make_entity_pool(
     seed: u64,
     num_rows: usize,
     entity_cfg: &EntityConfig,
+    fk_counts: &FkCounts,
 ) -> Result<EntityPool> {
     let count = ((num_rows as f64) * entity_cfg.pool_ratio).max(1.0) as usize;
-    EntityPool::new(seed, count, &entity_cfg.columns)
+    EntityPool::new(seed, count, &entity_cfg.columns, fk_counts)
 }
 
 /// Map a [`GeneratorSpec`] to a concrete [`GenericValue`] using `rng`.
@@ -346,7 +351,18 @@ pub fn apply_spec(
         }
         GeneratorSpec::SequentialId => Ok(GenericValue::Int((ctx.row_index + 1) as i32)),
         GeneratorSpec::ForeignKey { dataset } => {
-            let count = ctx.fk_counts.get(dataset).copied().unwrap_or(1) as u64;
+            let count = match ctx.fk_counts.get(dataset).copied() {
+                Some(0) => anyhow::bail!(
+                    "FK target '{dataset}' has effective row count 0 — \
+                     cannot generate a valid foreign key"
+                ),
+                Some(n) => n as u64,
+                // Unreachable after a correct fk_counts build; defence-in-depth.
+                None => anyhow::bail!(
+                    "FK target '{dataset}' not found in fk_counts — \
+                     ensure it appears before this dataset in the config"
+                ),
+            };
             let id = (rng.next_u64() % count) + 1;
             Ok(GenericValue::Int(id as i32))
         }

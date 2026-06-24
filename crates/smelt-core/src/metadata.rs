@@ -23,7 +23,9 @@
 //!    SELECT ...
 //!    ```
 
-use crate::config::{DataLatency, IncrementalConfig, Materialization, TimeseriesConfig};
+use crate::config::{
+    DataLatency, IncrementalConfig, Materialization, StateConfig, TimeseriesConfig,
+};
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -113,6 +115,23 @@ pub struct ColumnMetadata {
     pub backfill: Option<String>,
 }
 
+/// Author override hatches for virtual-environment reuse (D-46).
+///
+/// Declared in SQL frontmatter under the `reuse:` key.
+/// `deny_unknown_fields` ensures unrecognised sub-keys produce a parse error.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReuseConfig {
+    /// Reuse the existing materialization across an output-preserving change
+    /// rather than re-rolling the dice (non-deterministic models only).
+    #[serde(default)]
+    pub accept_current: bool,
+    /// Assert this model is deterministic-in-practice; the prover trusts it
+    /// and logs the assertion.
+    #[serde(default)]
+    pub assert_deterministic: bool,
+}
+
 /// Metadata for a single model extracted from frontmatter
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ModelMetadata {
@@ -175,6 +194,23 @@ pub struct ModelMetadata {
     /// Override table format for this model (e.g., parquet for a specific model on a Delta target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<crate::config::TableFormat>,
+
+    /// Virtual-environment reuse override hatches (D-46).
+    /// `accept_current` and `assert_deterministic` are explicit, logged
+    /// user overrides of the reuse prover's default verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuse: Option<ReuseConfig>,
+
+    /// Stateful model: apply a breaking change in place, accept no clean revert.
+    /// Escape hatch for tables too large to rebuild (D-46).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forward_only: bool,
+
+    /// Per-model state posture (D-47). When set, the model narrows (not widens)
+    /// the project's `state.mode`. A model narrowed to `stateless` opts out of
+    /// snapshot reuse entirely even when the project is `environments`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<StateConfig>,
 }
 
 /// Complete file metadata (single or multi-model)
@@ -618,9 +654,26 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
     let metadata: ModelMetadata = if validated_map.is_empty() {
         ModelMetadata::default()
     } else {
+        // Pre-validate strict sub-fields before the resilient fallback path.
+        // `reuse` uses deny_unknown_fields and `state` uses strict enum variants;
+        // both must fail hard rather than be silently stripped (fail-loud discipline).
+        for (key, value) in validated_map.iter() {
+            let key_str = key.as_str().unwrap_or("");
+            if key_str == "reuse" {
+                serde_yaml::from_value::<ReuseConfig>(value.clone())
+                    .map_err(MetadataError::YamlParseError)?;
+            } else if key_str == "state" {
+                serde_yaml::from_value::<StateConfig>(value.clone())
+                    .map_err(MetadataError::YamlParseError)?;
+            }
+        }
+
         match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map.clone())) {
             Ok(m) => m,
             Err(_) => {
+                // Strip known keys whose invalid values are surfaced as diagnostics
+                // by smelt-db (MalformedTimeseries, etc.) so the model is still
+                // discoverable.
                 let mut fallback = validated_map;
                 fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
                 fallback.remove(serde_yaml::Value::String("incremental".to_string()));
@@ -695,6 +748,18 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
         } else {
             let (validated_map, _fm_diags) =
                 parse_frontmatter(&yaml_content, DeclarationKind::Model);
+            // Pre-validate strict sub-fields before the resilient fallback path.
+            for (key, value) in validated_map.iter() {
+                let key_str = key.as_str().unwrap_or("");
+                if key_str == "reuse" {
+                    serde_yaml::from_value::<ReuseConfig>(value.clone())
+                        .map_err(MetadataError::YamlParseError)?;
+                } else if key_str == "state" {
+                    serde_yaml::from_value::<StateConfig>(value.clone())
+                        .map_err(MetadataError::YamlParseError)?;
+                }
+            }
+
             match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map.clone())) {
                 Ok(m) => m,
                 Err(_) => {

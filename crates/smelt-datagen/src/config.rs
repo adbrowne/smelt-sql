@@ -1,5 +1,6 @@
 //! YAML-driven dataset configuration.
 
+use anyhow::Result;
 use arrow::datatypes::DataType;
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -8,6 +9,22 @@ use std::collections::HashMap;
 /// Maps dataset name to its scaled row count. Used by `ForeignKey` to resolve
 /// the target dimension size without storing any generated values.
 pub type FkCounts = HashMap<String, usize>;
+
+/// Compute the effective row count for a dataset at a given scale factor.
+///
+/// Uses `floor(num_rows × scale_factor)` per spec (D-53 §"Scale factor").
+/// Returns an error if the effective count is 0 — a zero-row dataset is a
+/// configuration error, not a silent no-op.
+pub fn effective_row_count(num_rows: usize, scale_factor: f64) -> Result<usize> {
+    let count = ((num_rows as f64) * scale_factor).floor() as usize;
+    if count == 0 {
+        anyhow::bail!(
+            "effective row count is 0 (num_rows={num_rows}, scale_factor={scale_factor}): \
+             reduce scale_factor or increase num_rows"
+        );
+    }
+    Ok(count)
+}
 
 // ── linked_pools: pre-computed joint-distribution pools ───────────────────────
 

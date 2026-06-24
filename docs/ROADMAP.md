@@ -90,6 +90,96 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Spec-Remediation W8/misc-spec — Provenance-Tag Preservation + Record Overlay Shallow Replace (D-54, D-55)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-misc-spec.md)) closing out D-54 (nested expansion leaves prior `Tagged` nodes intact — verified by a new regression test in `smelt-planner`) and D-55 (record overlay is shallow replace, not deep recursive merge — `merge_values` in `loader.rs` simplified; nested-record discriminator test locks the new behaviour).
+
+- **Verify + lock (P1)** — confirmed `clone_with_tag` already preserves existing tags on re-entry; added a two-level nested-expansion test in `phase41_body_splice_tests.rs` to prevent silent regression.
+- **Fix (P2)** — simplified the `SmeltType::Record` branch of `merge_values`: overlay field now replaces the base field wholesale (including nested records) rather than recursively blending; renamed the existing flat-field test to `…shallow_replaces…`; added the canonical D-55 discriminator test (partial nested-record overlay → base nested-record sub-keys absent from overlay must not survive).
+
+### ~~Spec-Remediation W8/datagen — Scale Factor, FK Bound, Zero-Row Guard (D-53)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-datagen.md)) landing the D-53 decision from the 2026-06-13 spec review: `floor()` for effective row counts, FK bounds equal the effective (scaled) count at any scale factor, and zero-row is a hard configuration error.
+
+- **Core fixes (P1)** — `run_config()` now uses `floor()` not `round()` when scaling row counts; `fk_counts` is built from floor-scaled values; a zero effective row count (e.g. `num_rows: 1`, `scale_factor: 0.4`) is a hard error naming the offending dataset; a FK column whose referenced dataset has an effective row count of 0 is also an error; `unwrap_or(1)` in the FK generator arm hardened to a loud error. Five new TDD tests cover each contract.
+- **Help text close-out (P2)** — `--list-generators` `foreign_key` description updated from "Random id in [1, num_rows]" to "Random integer in [1, effective_row_count] where effective_row_count = floor(referenced_num_rows × scale_factor)"; `linked_pools` section gains the scale-invariance qualification note (pool contents are scale-invariant only when no shape field uses `foreign_key`). No KD retractions (the existing KDs are unrelated to scale-factor behavior).
+
+### ~~Spec-Remediation W8/schema_evolution — NOT NULL Column Add: `backfill:`-only is Safe (D-58)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-schema-evolution.md)) landing the D-58 decision from the 2026-06-13 spec review: either `default:` or `backfill:` (or both) classifies a NOT NULL column addition or NULL→NOT NULL tighten as Safe.
+
+- **Backfill-only reclassification (P1)** — Both classifier call sites (in `plan_migration_for_backend` and `plan_schema_operations`) now admit backfill-only as Safe. DDL codegen restructured: ADD COLUMN with backfill-only emits `NOT NULL` (no DEFAULT clause) then the UPDATE backfill; ChangeNullability tighten with backfill-only emits a gap-scoped `UPDATE … WHERE col IS NULL` (no clobber) then `SET NOT NULL`. When both are present, backfill takes precedence for the gap fill. Fail-quiet bug fixed: SET NOT NULL is always emitted on the safe path. Six new TDD tests cover each case.
+- **Close-out (P2)** — No KD retraction needed (D-58 had no open KD entry); master registry and ROADMAP updated.
+
+### ~~Spec-Remediation W8/planner — `joins:` Cardinality String→Enum Mapping (D-57)~~ ✅ (June 22, 2026)
+
+Two-phase remediation plan ([plan](plans/20260620-w8-planner.md)) landing the D-57 decision from the 2026-06-13 spec review: the `cardinality:` frontmatter string→`Cardinality`-enum mapping is exact and fail-safe.
+
+- **`cardinality_from_str` (P1)** — `"1:1"` → `OneToOne` (the only value that enables `EliminateUnusedLeftJoin`); every other string → `OneToMany` (silent, conservative). Three TDD test layers: unit mapping tests in `smelt-logical`, a named fail-safe test in `join_elimination_tests.rs` confirming the gate already pattern-matches on `Cardinality`, and an end-to-end constructed-plan test in `show_plan.rs` bridging frontmatter string → rule gate.
+- **Close-out (P2)** — KD retraction in `planner_integration.md` (the "mapping is normative, wiring note" item removed; the mapping is now implemented); ROADMAP and master registry updated.
+
+### ~~Spec-Remediation W8/timeseries — Partition & Pruning Column Invariants (D-52)~~ ✅ (June 22, 2026)
+
+Two-rule static diagnostic pass ([plan](plans/20260620-w8-timeseries.md)) landing the D-52 decisions from the 2026-06-13 spec review. The R2-incremental-cadence execution changes are explicitly out of scope (deferred to the R2 rewrite).
+
+- **NOT-NULL invariant (D-52 rule 7, P1)** — `partition_column` (and a distinct `event_time_column` when it drives pruning) must be NOT NULL on the model's output schema. A nullable pruning column silently escapes the `>= start AND < end` window and is never re-inserted — a correctness hole. Fires `MalformedTimeseries`. Checks only `Computed` columns to avoid false positives from CTE pass-throughs and cross-model inheritance. Also tightened nullability defaults for CAST (None → false) and `date_trunc` (propagates from input) to eliminate false positives on clean timeseries examples.
+- **Sub-day granularity type constraint (D-52 rule 8, P2)** — `granularity: hour` requires a timestamp-resolution `partition_column`; pairing it with a `DATE` column silently coarsens pruning to whole-day boundaries. Fires `MalformedTimeseries`.
+- KD retraction: rules 7 and 8 removed from the "Output-schema-dependent validation rules" Known-Divergence note in `timeseries.md`; rules 2, 3, 4 remain pending the R2 rewrite.
+
+### ~~Spec-Remediation W8/catalog — Catalog JSON Shape Fixes (D-50)~~ ✅ (June 21, 2026)
+
+Three-phase remediation plan ([plan](plans/20260620-w8-catalog.md)) landing the D-50 decisions from the 2026-06-13 spec review:
+
+- **`source` always present (D-50-i, P1)** — `CatalogColumn.source` is always serialized; `CatalogColumnSource::Unknown` serializes as `{"type":"unknown"}`, never omitted; snapshot test locks the invariant.
+- **Workspace-relative `path` (D-50-iii, P2)** — `CatalogModel.path` and `origin.generator_file` are now workspace-relative (relative to the `smelt.yml` directory), never absolute filesystem paths; catalog diffs identically across machines.
+- **`--select` preserves full lineage (D-50-ii, P3)** — full `DependencyGraph` kept for edge resolution; `build_catalog` filters `models`/`tag_index`/`execution_order`/`model_count` to the selected set while `upstream`/`downstream` retain all edge names including excluded deps; `render_model_page` renders excluded deps as plain text, not broken links.
+
+### ~~Spec-Remediation W8/virtual_env — Virtual Environment Data Model & Reuse Evaluator (D-46, D-47)~~ ✅ (June 21, 2026)
+
+Five-phase remediation plan ([plan](plans/20260620-w8-virtual-env.md)) landing the D-46 and D-47 decisions from the 2026-06-13 spec review (data model and pure logic only; runtime wiring deferred):
+
+- **`StateMode` + `state.mode` config (D-47, P1)** — `StateMode` (`Stateless`/`Intervals`/`Environments`) added to `smelt-core`; parsed from the `state: {mode: …}` block in `smelt.yml`; `PartialOrd` encodes the posture lattice so per-model narrowing can be validated; unknown values fail loudly.
+- **`reuse.*`/`forward_only` frontmatter hatches (D-46, P2)** — `ModelMetadata` carries `reuse.accept_current`, `reuse.assert_deterministic`, and `forward_only`; a model may narrow the project posture via frontmatter `state: {mode: …}`; widening fires a new `MetadataError` variant wired into the diagnostic pipeline.
+- **`SnapshotStore` / `SnapshotEntry` types (D-47, P3)** — `smelt-state` gains the `(environment, model) → physical table` snapshot map with per-entry `source_sql`; `find_candidate` implements the candidate-precedence rule (target env E first, then base/production, then lexicographic).
+- **Reuse-condition evaluator (D-46/D-47, P4)** — `evaluate_reuse` in `smelt-fingerprint` checks all four conditions in order, returning a typed `ReuseDecision`; conditions 3a (rebuild-identity preserved) and 3b (output-preserving, `accept_current`) are distinct code paths with their own logged-trust notes; condition 4 is a stub always-pass pending `schema_evolution.md` work.
+- **Close-out (P5)** — orchestration-layer KD in `virtual_environments.md` updated to note what is now implemented vs still missing; master registry W8/virtual_env row flipped to done; ROADMAP updated.
+
+### ~~Spec-Remediation W8/testing — Testing Framework (D-42/43/44/45)~~ ✅ (June 21, 2026)
+
+Four-phase remediation plan ([plan](plans/20260620-w8-testing.md)) landing the D-42…D-45 decisions from the 2026-06-13 spec review:
+
+- **Dot-separated `inputs` keys (D-42, P1)** — `inputs` maps now use the bare address path with dot separators (`silver.orders`, not `silver_orders`). The CTE name in generated SQL continues to use `_`-joining; a translation layer maps the public dot-key to the internal identifier.
+- **DECIMAL exact compare + decimal-string coercion (D-44, P2)** — YAML strings that look like decimal numbers (`"300.00"`) coerce to `CAST(… AS DECIMAL(18, scale))` rather than `VARCHAR`. `Decimal128` Arrow columns compare by exact value; only `Float32`/`Float64` use the `1e-6` tolerance path.
+- **CTE-level tests mock external deps, not internal CTEs (D-45, P3)** — `compile_cte_test` now collects the transitive internal CTE chain reachable from the target, replaces each `smelt.<path>` ref in the chain with a mock from `inputs`, and emits all internal CTEs as-written. Internal CTEs are never mocked.
+- **`UnknownTestInput` diagnostic (D-43, P4)** — every key in `inputs` is validated against the model's actual `smelt.<path>` dependencies. An unmatched key (typo or internal CTE name) immediately fails the test with an `UnknownTestInput` message naming the bad key and the actual deps.
+
+### ~~Spec-Remediation W8/sources — Target-Aware `name:` Override (D-35)~~ ✅ (June 21, 2026)
+
+Four-phase remediation plan ([plan](plans/20260620-w8-sources.md)) landing the D-35 decision from the 2026-06-13 spec review:
+
+- **`SourceNameOverride` enum (D-35 parse, P1)** — `name:` in per-entity source YAMLs now accepts both a bare `<schema>.<table>` literal (existing form, preserved) and a YAML mapping `{ <target>: <schema>.<table>, … }` (new per-target form). Invalid map values (not `<schema>.<table>`) produce `MalformedSource`.
+- **`db_name_for_target` resolution (D-35 resolution, P2)** — `SourceInfo::db_name_for_target(target_name, schema)` resolves the active target: Literal → verbatim; PerTarget → map lookup, fallback to default mapping on miss; None → default mapping. The old `db_name(schema)` shim delegates to it.
+- **Runtime wiring (D-35 runtime, P3)** — `SqlCompiler` stores the active target name (set via `set_target_name` in `CompilerRegistry::new`). The path-ref resolver calls `db_name_for_target` so per-target maps resolve correctly at compile time.
+- **MalformedSource for undeclared target keys (D-35 close-out, P4)** — `SourceNameOverride::validate_target_keys` checks all `PerTarget` map keys against `smelt.yml::targets`. `project_source_diagnostics` runs this semantic pass after the parse-error scan, emitting `MalformedSource` (Error) for any key naming a non-existent target.
+
+### ~~Spec-Remediation W8/config — smelt.yml Format, Default-Materialization Validation, state: Key (D-32/33/34)~~ ✅ (June 21, 2026)
+
+Three-phase remediation plan ([plan](plans/20260620-w8-config.md)) landing the D-config cluster from the 2026-06-13 spec review:
+
+- **`format` in `ModelConfig` + three-tier precedence `get_format` (D-32, P1)** — `smelt.yml` `models.<name>` entries now accept `format: delta|parquet`; `Config::get_format` implements the precedence chain (SQL frontmatter > `smelt.yml` model config > target default), matching the `materialization:` pattern.
+- **Reject `default_materialization: test/cumulative_aggregate` (D-33, P2)** — a project-level `default_materialization` of `test` or `cumulative_aggregate` is now a hard validation error at load time; `table`, `view`, `materialized_view`, and `ephemeral` remain legal.
+- **Add `state:` to `KNOWN_KEYS` (D-34, P3)** — `smelt.yml` files containing a `state:` block no longer produce a spurious unknown-key warning; `state:` is an allowlisted out-of-band key alongside `vars:`.
+
+### ~~Spec-Remediation W7 — LSP Watched-File Set, Downstream Republication, Rename Scope & Hover (D-lsp)~~ ✅ (June 21, 2026)
+
+Five-phase remediation plan ([plan](plans/20260620-w7-lsp.md)) landing the D-lsp cluster from the 2026-06-13 spec review (D-48/49/56):
+
+- **Discovery-derived watch set (D-48, P1)** — `workspace/didChangeWatchedFiles` watchers are now derived from the loaded project's discovery rules (every non-excluded `.sql` plus model `.py` files), replacing hardcoded `**/models/**/*.py` + `**/functions/**/*.sql` globs. An external edit to any discoverable file triggers re-analysis.
+- **Cross-file diagnostic republication (D-48, P2)** — on any watched-file change, the server republishes diagnostics for the changed file plus every file whose Salsa-derived diagnostics changed (conservative superset: all tracked files). Upstream edits now refresh downstream diagnostics in open buffers.
+- **Column-rename rooted at definition site (D-49, P3)** — column rename traversal is rooted at the resolved definition site and rewrites all transitive consumers; an `AS` re-alias terminates propagation; `SELECT *` chains propagate. A source-column rename is refused at `prepare_rename` with an explanatory message (external table cannot be safely renamed via the LSP).
+- **Drop mtime from hover (D-56, P4)** — `hover_text_for_loader_call` no longer accepts or emits a last-modified timestamp; hover is now a pure function of `(file bytes, schema, target)` with no mtime Salsa input.
+- **Close-out (P5)** — KD sections were already clean (no retractions needed); master registry W7 row flipped to done; ROADMAP updated.
+
 ### ~~Spec-Remediation W3 — Diagnostics Codes, Ownership & Severities (D-diag) + `Unknown` Discriminant~~ ✅ (June 21, 2026)
 
 Seven-phase remediation plan ([plan](plans/20260613-w3-diagnostics.md)) plus a follow-up discriminant sub-plan ([plan](plans/20260620-unknown-reason-discriminant.md)) landing the D-diag cluster from the 2026-06-13 spec review (D-07/08/09/14/19/30/31):
@@ -110,6 +200,17 @@ Five-phase remediation plan ([plan](plans/20260613-w5-python-models.md)) landing
 - **Full workspace-relative `path` in `find_models` (D-25)** — `ModelInfo.path` exposes the full workspace-relative path (forward-slash normalised); `directory` is now derived from it (final path component). The Python SDK `core.py` and Rust `ProjectModelInfo` are updated; `find_models(directory=…)` unchanged in behavior.
 - **Plain single-model frontmatter + name-mismatch blocking (D-22, D-27)** — Python output is always single-model: `--- name: X ---` section-delimiter format is normalized to plain `---\nname: X\n…` before processing; `FileMetadata::Multi` is never produced from Python output. A `name:` key that mismatches the function name emits `PythonModelNameMismatch` (Error, blocks the build) while retaining all other frontmatter keys (`materialization`, `tags`, `owner`). Frontmatter is now stripped before SQL parsing to eliminate spurious parse errors from YAML keys.
 - **Close-out** — retracted `directory`-implementation divergence note (implementation is now correct); updated note to user-guide gap only.
+
+### ~~Spec-Remediation W6 — CLI & Selection (D-36–D-41)~~ ✅ (June 21, 2026)
+
+Six-phase remediation plan ([plan](plans/20260613-w6-cli-selection.md)) landing the D-cli cluster from the 2026-06-13 spec review (D-36/37/38/39/40/41) in `smelt-cli` and `smelt-core`:
+
+- **`smelt.` prefix round-trip (D-36, P1)** — every CLI entity argument accepts and strips a leading `smelt.` prefix before resolution, so any printed canonical `smelt.<path>` copy-pastes straight back into a command.
+- **No cwd-scope fall-through (D-40, P2)** — when a `--scope` is active, a shorthand resolves only as `<scope>.<arg>`; if that exact path does not resolve, the command errors (no silent retry of the bare `<arg>`).
+- **`+` operators stripped before entity resolution (D-38, P3)** — leading/trailing `+` graph operators are stripped from a `ModelName` selector before entity lookup and re-attached to the resolved full path afterward.
+- **Hard error vs no-op asymmetry (D-37, P4)** — an entity-name selector that resolves to no entity is a non-zero "not found" error; a method selector (`tag:`/`generator_file:`) that legitimately matches no models is a quiet exit-0 no-op with a stderr message.
+- **`--exclude +model` inconsistent-set refusal (D-39, P5)** — if `--exclude +model` removes a transitive upstream that a retained model still needs, smelt refuses the inconsistent set with a diagnostic naming the retained model and the missing upstream.
+- **`smelt test --select` uses full selector syntax (D-41, P6)** — `smelt test --select` now uses the same methods (`ModelName`/`tag:`/`generator_file:`) and `+` graph operators as every other command, not a substring match on test names. Now-satisfied Known-Divergence notes retracted from `model_selection.md` and `cli.md`.
 
 ### ~~Spec-Remediation W5b — Combined SQL↔Python Fixed-Point Evaluation (D-24, ISOLATED)~~ ✅ (June 20, 2026)
 

@@ -4228,6 +4228,7 @@ dependencies = [
  "proptest",
  "rowan",
  "sha2 0.10.9",
+ "smelt-core",
  "smelt-db",
  "smelt-parser",
  "smelt-runtime",

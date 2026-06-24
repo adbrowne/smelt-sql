@@ -69,6 +69,9 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
     ("test", &[DeclarationKind::Model]),
     ("schema_evolution", &[DeclarationKind::Model]),
     ("format", &[DeclarationKind::Model]),
+    ("reuse", &[DeclarationKind::Model]),
+    ("forward_only", &[DeclarationKind::Model]),
+    ("state", &[DeclarationKind::Model]),
     // Function/extern-only keys (match the fields of FunctionProperties).
     (
         "deterministic",

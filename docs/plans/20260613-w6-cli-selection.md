@@ -53,8 +53,8 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 | P2 | No cwd-scope fall-through: scoped shorthand resolves only `<scope>.<arg>` | done | D-40 | feat(cli): scoped shorthand resolves only `<scope>.<arg>`, no fall-through (D-40) | 2026-06-20 |
 | P3 | Strip leading/trailing `+` graph operators before entity resolution; re-attach to full path | done | D-38 | feat(core): strip `+` graph operators before selector entity resolution (D-38) | 2026-06-20 |
 | P4 | Unresolvable entity selector = hard "not found" error; empty method selector = exit 0 no-op | done | D-37 | feat(cli): unresolvable entity-name selector is a hard not-found error (D-37) | 2026-06-20 |
-| P5 | `--exclude +model` dropping a retained dependency → inconsistent-set error | pending | D-39 | feat(core): refuse `--exclude +model` that drops a retained model's upstream (D-39) | |
-| P6 | `smelt test --select` uses full selector syntax (not substring) + close-out (KD retraction, registry, ROADMAP) | pending | D-41, D-cli close-out | feat(cli): `smelt test --select` uses full selector syntax; close out W6 (D-41) | |
+| P5 | `--exclude +model` dropping a retained dependency → inconsistent-set error | done | D-39 | feat(core): refuse `--exclude +model` that drops a retained model's upstream (D-39) | 2026-06-21 |
+| P6 | `smelt test --select` uses full selector syntax (not substring) + close-out (KD retraction, registry, ROADMAP) | done | D-41, D-cli close-out | feat(cli): `smelt test --select` uses full selector syntax; close out W6 (D-41) | 2026-06-21 |
 
 **Status values**: `pending`, `done`, `blocked`. A phase is `done` only when its tests are red-green confirmed and all gates are green. A `blocked` phase has a dated §"Blocked phases" entry and returns to `pending` once a human resolves it.
 
@@ -202,7 +202,9 @@ Set the row to `blocked` with a one-line reason; append a dated entry to §"Bloc
 
 ## Blocked phases
 
-Append-only log. None yet.
+Append-only log.
+
+**Note (2026-06-21 — pre-existing, not a P5 block):** `smelt-lsp --test integration::code_actions::test_code_action_cast_for_unknown_type` is red in the pre-P5 baseline. Root cause: D-07 changed source-column-with-no-type from emitting `CannotInferType` to `ColumnTypeUnresolved`; the code-action router only handles `CannotInferType`, so no CAST suggestions are offered. P5 gates (scope_integration, selector_resolution, example_diagnostics, example_workspaces) all pass; this pre-existing failure is tracked as a separate follow-up for the W3 close-out reviewer.
 
 ## Verification
 

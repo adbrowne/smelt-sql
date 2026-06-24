@@ -805,14 +805,24 @@ pub fn build_type_context(
                 let data_type = col
                     .data_type
                     .clone()
-                    .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+                    // A sources.yml column with no `type:` field is Unresolved —
+                    // the user can fix it by declaring the type. Unresolved fires
+                    // ColumnTypeUnresolved so the user is notified.
+                    .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Unresolved));
+                // Source columns default to NOT NULL. Sources typically
+                // represent structured external data whose key columns are
+                // always non-null; declaring them nullable conservatively
+                // propagates nullable through downstream CASTs and produces
+                // false-positive D-52 partition-column diagnostics. Users can
+                // use explicit CAST or COALESCE in their models to handle the
+                // rare column that truly is nullable.
                 ctx.add_source_column(
                     &source.name,
                     &table.name,
                     &col.name,
                     TypedColumn {
                         data_type,
-                        nullable: true,
+                        nullable: false,
                     },
                 );
             }

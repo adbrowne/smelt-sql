@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
-use smelt_cli::{find_project_root, Config, ModelDiscovery};
+use smelt_cli::{
+    argument_resolution::resolve_selector_args, find_project_root, Config, ModelDiscovery,
+};
+use smelt_core::graph::DependencyGraph;
+use std::collections::HashMap;
 
 use tracing::{debug, warn};
 
@@ -46,13 +50,66 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 4. Apply selection filter
+    // 4. Apply selection filter using full selector syntax (D-41).
+    //
+    // Selection targets the REGULAR models (models under test), not test-model
+    // names: `--select tag:X` runs tests whose subject model carries tag X;
+    // `--select +model` runs tests for model and its transitive upstreams.
+    // Entity selectors that resolve to no model are a hard "not found" error
+    // (non-zero); method selectors (tag:, generator_file:) that match nothing
+    // are a valid empty selection (exit 0, "no tests to run" message).
     let selected_tests: Vec<_> = if args.select.is_empty() {
         test_models
     } else {
+        // Build Salsa DB for canonical address resolution and smelt.-strip (D-36).
+        let all_models = discovery.discover_models().unwrap_or_default();
+        let salsa_db = smelt_cli::init_db(&project_dir, &all_models);
+        let salsa_ws = smelt_db::Workspace::try_get(&salsa_db).expect("workspace not initialized");
+        let salsa_proj = salsa_db
+            .project_input(&project_dir)
+            .expect("project not initialized");
+        let resolved_select =
+            resolve_selector_args(&salsa_db, salsa_ws, salsa_proj, None, &args.select)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Build a dependency graph from regular (non-test) models only.
+        let regular_model_files: Vec<smelt_cli::ModelFile> =
+            all_models.into_iter().filter(|m| !m.is_test()).collect();
+        // Map leaf-name → canonical path so we can match test_config.model.
+        let leaf_to_canonical: HashMap<String, String> = regular_model_files
+            .iter()
+            .map(|m| (m.name.clone(), m.canonical_path()))
+            .collect();
+        let graph = DependencyGraph::build(regular_model_files, None)?;
+
+        let selectors: Vec<_> = resolved_select
+            .iter()
+            .map(|s| {
+                smelt_core::parse_selector(s).with_context(|| format!("Invalid selector '{}'", s))
+            })
+            .collect::<Result<_>>()?;
+
+        // Hard error for unresolvable entity selectors; empty set for method
+        // selectors that match nothing (handled as a no-op below).
+        let selected_models = graph
+            .select_models(&selectors, &config)
+            .context("smelt test --select: selector failed")?;
+
+        if selected_models.is_empty() {
+            eprintln!("No models matched the selector(s). No tests to run.");
+            return Ok(());
+        }
+
+        // Filter test models: include only those whose target model's canonical
+        // path is in the selected set.
         test_models
             .into_iter()
-            .filter(|m| args.select.iter().any(|s| m.name.contains(s)))
+            .filter(|t| {
+                t.test_config()
+                    .and_then(|tc| leaf_to_canonical.get(&tc.model))
+                    .map(|cp| selected_models.contains(cp))
+                    .unwrap_or(false)
+            })
             .collect()
     };
 

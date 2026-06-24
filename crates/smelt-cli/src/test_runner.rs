@@ -1,6 +1,7 @@
 //! Test runner: executes compiled test SQL and compares results.
 
 use arrow::array::RecordBatch;
+use arrow::datatypes::DataType as ArrowDataType;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -228,6 +229,20 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Vec<BTreeMap<String, String>>
     rows
 }
 
+/// Extract Arrow column types from RecordBatches, keyed by column name.
+///
+/// Used by `compare_rows` to apply type-aware value matching (D-44): DECIMAL
+/// columns are compared exactly; FLOAT/DOUBLE columns use the 1e-6 tolerance.
+pub fn batches_to_column_types(batches: &[RecordBatch]) -> BTreeMap<String, ArrowDataType> {
+    let mut types = BTreeMap::new();
+    if let Some(batch) = batches.first() {
+        for field in batch.schema().fields() {
+            types.insert(field.name().clone(), field.data_type().clone());
+        }
+    }
+    types
+}
+
 /// Convert YAML expected rows to string maps for comparison.
 ///
 /// Values are normalized to match Arrow's string representation:
@@ -282,10 +297,14 @@ fn format_float(f: f64) -> String {
 /// If false (default), treats both sides as sets (sorts before comparing).
 ///
 /// Only compares columns that appear in `expected` -- extra columns in actual are ignored.
+///
+/// `column_types` maps column names to Arrow DataTypes so DECIMAL columns can be
+/// compared exactly (D-44), while FLOAT/DOUBLE columns still use the 1e-6 tolerance.
 pub fn compare_rows(
     actual: &[BTreeMap<String, String>],
     expected: &[BTreeMap<String, String>],
     check_order: bool,
+    column_types: &BTreeMap<String, ArrowDataType>,
 ) -> Option<TestError> {
     if expected.is_empty() && actual.is_empty() {
         return None;
@@ -323,7 +342,7 @@ pub fn compare_rows(
         for (i, (actual_row, expected_row)) in
             filtered_actual.iter().zip(expected.iter()).enumerate()
         {
-            if !rows_match(actual_row, expected_row) {
+            if !rows_match(actual_row, expected_row, column_types) {
                 return Some(TestError::Mismatch {
                     missing: vec![expected_row.clone()],
                     unexpected: vec![filtered_actual[i].clone()],
@@ -339,7 +358,7 @@ pub fn compare_rows(
         for actual_row in &filtered_actual {
             let mut found = false;
             for (ei, expected_row) in expected.iter().enumerate() {
-                if !matched_expected[ei] && rows_match(actual_row, expected_row) {
+                if !matched_expected[ei] && rows_match(actual_row, expected_row, column_types) {
                     matched_expected[ei] = true;
                     found = true;
                     break;
@@ -368,33 +387,58 @@ pub fn compare_rows(
     }
 }
 
-/// Check if two rows match (with numeric tolerance for floats).
-fn rows_match(actual: &BTreeMap<String, String>, expected: &BTreeMap<String, String>) -> bool {
+/// Check if two rows match, using type-aware comparison for each column.
+fn rows_match(
+    actual: &BTreeMap<String, String>,
+    expected: &BTreeMap<String, String>,
+    column_types: &BTreeMap<String, ArrowDataType>,
+) -> bool {
     for (key, expected_val) in expected {
         let actual_val = match actual.get(key) {
             Some(v) => v,
             None => return false,
         };
-        if !values_match(actual_val, expected_val) {
+        if !values_match(actual_val, expected_val, column_types.get(key)) {
             return false;
         }
     }
     true
 }
 
-/// Compare two string values with numeric tolerance.
-/// Uses relative epsilon for large values, absolute epsilon for values near zero.
-fn values_match(actual: &str, expected: &str) -> bool {
+/// Compare two string values.
+///
+/// For DECIMAL columns with non-zero scale (`Decimal128(_, s)` where `s > 0`):
+/// exact string equality only — no float tolerance (D-44). Scale-0 decimals
+/// (e.g., DuckDB HUGEINT = Decimal128(38, 0)) are integers and still use tolerance
+/// so that "300" and "300.0" compare equal. For FLOAT/DOUBLE and unknown types:
+/// 1e-6 relative epsilon tolerance.
+fn values_match(actual: &str, expected: &str, col_type: Option<&ArrowDataType>) -> bool {
     if actual == expected {
         return true;
     }
-    // Try numeric comparison with relative epsilon
+    // Scaled DECIMAL columns (scale > 0): exact comparison only. D-44.
+    if is_scaled_decimal(col_type) {
+        return false;
+    }
+    // FLOAT/DOUBLE, integer-equivalent, and unknown: relative epsilon tolerance.
     if let (Ok(a), Ok(e)) = (actual.parse::<f64>(), expected.parse::<f64>()) {
         let diff = (a - e).abs();
         let scale = e.abs().max(a.abs()).max(1.0);
         diff / scale < 1e-6
     } else {
         false
+    }
+}
+
+/// Returns true when the Arrow DataType is a Decimal with non-zero scale.
+///
+/// DuckDB HUGEINT → Decimal128(38, 0) has scale 0 and behaves as an integer —
+/// it is NOT a scaled decimal, so it does not get exact-only comparison.
+fn is_scaled_decimal(col_type: Option<&ArrowDataType>) -> bool {
+    match col_type {
+        Some(ArrowDataType::Decimal128(_, s)) => *s > 0,
+        Some(ArrowDataType::Decimal256(_, s)) => *s > 0,
+        _ => false,
     }
 }
 
@@ -426,12 +470,15 @@ pub fn run_test(
         }
     };
 
+    // Extract column types for type-aware comparison (D-44: DECIMAL exact, float tolerant).
+    let column_types = batches_to_column_types(&batches);
+
     // Convert to comparable rows
     let actual_rows = batches_to_rows(&batches);
     let expected_rows = normalize_expected_rows(expected);
 
     // Compare
-    let error = compare_rows(&actual_rows, &expected_rows, check_order);
+    let error = compare_rows(&actual_rows, &expected_rows, check_order, &column_types);
 
     TestResult {
         name: test_name.to_string(),
@@ -477,7 +524,7 @@ mod tests {
         let mut expected = BTreeMap::new();
         expected.insert("x".to_string(), "1".to_string());
         expected.insert("y".to_string(), "hello".to_string());
-        assert!(compare_rows(&[actual], &[expected], false).is_none());
+        assert!(compare_rows(&[actual], &[expected], false, &BTreeMap::new()).is_none());
     }
 
     #[test]
@@ -486,7 +533,7 @@ mod tests {
         actual.insert("x".to_string(), "1".to_string());
         let mut expected = BTreeMap::new();
         expected.insert("x".to_string(), "2".to_string());
-        assert!(compare_rows(&[actual], &[expected], false).is_some());
+        assert!(compare_rows(&[actual], &[expected], false, &BTreeMap::new()).is_some());
     }
 
     #[test]
@@ -496,7 +543,13 @@ mod tests {
         let mut r2 = BTreeMap::new();
         r2.insert("x".to_string(), "2".to_string());
         // Actual in reverse order of expected
-        assert!(compare_rows(&[r2.clone(), r1.clone()], &[r1, r2], false).is_none());
+        assert!(compare_rows(
+            &[r2.clone(), r1.clone()],
+            &[r1, r2],
+            false,
+            &BTreeMap::new()
+        )
+        .is_none());
     }
 
     #[test]
@@ -506,7 +559,9 @@ mod tests {
         let mut r2 = BTreeMap::new();
         r2.insert("x".to_string(), "2".to_string());
         // Ordered comparison should fail when order differs
-        assert!(compare_rows(&[r2.clone(), r1.clone()], &[r1, r2], true).is_some());
+        assert!(
+            compare_rows(&[r2.clone(), r1.clone()], &[r1, r2], true, &BTreeMap::new()).is_some()
+        );
     }
 
     #[test]
@@ -516,14 +571,46 @@ mod tests {
         actual.insert("extra".to_string(), "ignored".to_string());
         let mut expected = BTreeMap::new();
         expected.insert("x".to_string(), "1".to_string());
-        assert!(compare_rows(&[actual], &[expected], false).is_none());
+        assert!(compare_rows(&[actual], &[expected], false, &BTreeMap::new()).is_none());
     }
 
     #[test]
     fn test_values_match_numeric() {
-        assert!(values_match("1.23", "1.23"));
-        assert!(values_match("1.23000001", "1.23"));
-        assert!(!values_match("3.5", "1.23"));
+        assert!(values_match("1.23", "1.23", None));
+        assert!(values_match("1.23000001", "1.23", None));
+        assert!(!values_match("3.5", "1.23", None));
+    }
+
+    #[test]
+    fn test_values_match_decimal_exact() {
+        // D-44: scaled DECIMAL columns use exact comparison (no tolerance).
+        let decimal_type = ArrowDataType::Decimal128(10, 7);
+        // Exact match still passes.
+        assert!(values_match("1.0000001", "1.0000001", Some(&decimal_type)));
+        // Tiny diff that float tolerance would accept must FAIL for scaled DECIMAL.
+        assert!(!values_match("1.0000001", "1.0000000", Some(&decimal_type)));
+        // Decimal256 same behaviour.
+        let dec256 = ArrowDataType::Decimal256(30, 10);
+        assert!(!values_match(
+            "1.00000000001",
+            "1.00000000000",
+            Some(&dec256)
+        ));
+        // Scale-0 decimal (HUGEINT = Decimal128(38,0)) still uses float tolerance.
+        let hugeint = ArrowDataType::Decimal128(38, 0);
+        assert!(values_match("300", "300.0", Some(&hugeint)));
+        assert!(!values_match("301", "300.0", Some(&hugeint)));
+    }
+
+    #[test]
+    fn test_values_match_float_tolerance_preserved() {
+        // Float/Double columns retain the 1e-6 relative tolerance.
+        let float64 = ArrowDataType::Float64;
+        assert!(values_match("1.0000001", "1.0", Some(&float64)));
+        let float32 = ArrowDataType::Float32;
+        assert!(values_match("1.0000001", "1.0", Some(&float32)));
+        // Large diff still fails.
+        assert!(!values_match("2.0", "1.0", Some(&float64)));
     }
 
     #[cfg(feature = "duckdb")]

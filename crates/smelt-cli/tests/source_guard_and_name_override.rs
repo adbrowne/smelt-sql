@@ -69,6 +69,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
         models: HashMap::new(),
         python: None,
         target: None,
+        state: Default::default(),
     }
 }
 
@@ -272,6 +273,152 @@ columns:
     assert!(
         !compiled.sql.contains("smelt.sources.raw.users"),
         "smelt.sources.raw.users should be resolved, got:\n{}",
+        compiled.sql
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: per-target map resolves to the correct entry for the active target
+// ---------------------------------------------------------------------------
+
+/// A source YAML with `name: { dev: raw_dev.users, prod: raw.users }` must
+/// resolve to `raw_dev.users` when compiled with the `dev` target and
+/// `raw.users` when compiled with the `prod` target.
+///
+/// This is the end-to-end verification that the target name flows through
+/// `CompilerRegistry` → `SqlCompiler` → the path-ref resolver at compile time.
+#[test]
+fn per_target_name_override_resolves_for_active_target() {
+    let source_yaml = r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  dev: raw_dev.users
+  prod: raw.users
+"#;
+
+    let model_sql = "SELECT id FROM smelt.sources.raw.users\n";
+
+    let tmp = stage_workspace(&[
+        ("models/sources/raw/users.yml", source_yaml),
+        ("models/use_source.sql", model_sql),
+    ]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().unwrap();
+
+    let use_source = models
+        .iter()
+        .find(|m| m.name == "use_source")
+        .expect("use_source model not found");
+
+    let db = init_db(&project_dir, &models);
+
+    let mut targets = HashMap::new();
+    targets.insert("dev".to_string(), duckdb_target("main_dev"));
+    targets.insert("prod".to_string(), duckdb_target("main_prod"));
+    let config = config_with_targets(targets.clone());
+    let mut compilers = CompilerRegistry::new(&config, &targets);
+
+    let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
+        .expect("from_database should succeed");
+    compilers.set_upstream_schemas_all(std::sync::Arc::new(upstream_schemas));
+
+    // dev target → raw_dev.users
+    let compiled_dev = compilers
+        .get("dev")
+        .compile(use_source, "main_dev")
+        .expect("compile should succeed for dev");
+    assert!(
+        compiled_dev.sql.contains("raw_dev.users"),
+        "dev target: compiled SQL must contain `raw_dev.users`, got:\n{}",
+        compiled_dev.sql
+    );
+    assert!(
+        !compiled_dev.sql.contains("raw.users"),
+        "dev target: `raw.users` (prod entry) must NOT appear, got:\n{}",
+        compiled_dev.sql
+    );
+
+    // prod target → raw.users
+    let compiled_prod = compilers
+        .get("prod")
+        .compile(use_source, "main_prod")
+        .expect("compile should succeed for prod");
+    assert!(
+        compiled_prod.sql.contains("raw.users"),
+        "prod target: compiled SQL must contain `raw.users`, got:\n{}",
+        compiled_prod.sql
+    );
+    assert!(
+        !compiled_prod.sql.contains("raw_dev.users"),
+        "prod target: `raw_dev.users` (dev entry) must NOT appear, got:\n{}",
+        compiled_prod.sql
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: per-target map falls back to default mapping for unlisted targets
+// ---------------------------------------------------------------------------
+
+/// A source YAML with `name: { prod: raw.users }` compiled with a `staging`
+/// target (not listed in the map) must fall back to the unified default
+/// mapping `<target_schema>.<address_segments.join("_")>`.
+///
+/// For `smelt.sources.raw.users` with `--target staging` (schema `main_staging`)
+/// the default mapping is `main_staging.sources_raw_users`.
+#[test]
+fn per_target_name_override_falls_back_for_unlisted_target() {
+    let source_yaml = r#"
+columns:
+  - name: id
+    type: INTEGER
+name:
+  prod: raw.users
+"#;
+
+    let model_sql = "SELECT id FROM smelt.sources.raw.users\n";
+
+    let tmp = stage_workspace(&[
+        ("models/sources/raw/users.yml", source_yaml),
+        ("models/use_source.sql", model_sql),
+    ]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().unwrap();
+
+    let use_source = models
+        .iter()
+        .find(|m| m.name == "use_source")
+        .expect("use_source model not found");
+
+    let db = init_db(&project_dir, &models);
+
+    let mut targets = HashMap::new();
+    targets.insert("staging".to_string(), duckdb_target("main_staging"));
+    let config = config_with_targets(targets.clone());
+    let mut compilers = CompilerRegistry::new(&config, &targets);
+
+    let upstream_schemas = UpstreamSchemas::from_database(&db, &project_dir, &models)
+        .expect("from_database should succeed");
+    compilers.set_upstream_schemas_all(std::sync::Arc::new(upstream_schemas));
+
+    // staging target is not in the map → fall back to default
+    let compiled = compilers
+        .get("staging")
+        .compile(use_source, "main_staging")
+        .expect("compile should succeed for staging");
+    assert!(
+        compiled.sql.contains("main_staging.sources_raw_users"),
+        "staging target: compiled SQL must use default mapping `main_staging.sources_raw_users`, got:\n{}",
+        compiled.sql
+    );
+    assert!(
+        !compiled.sql.contains("raw.users"),
+        "staging target: `raw.users` (prod-only override) must NOT appear, got:\n{}",
         compiled.sql
     );
 }

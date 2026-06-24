@@ -1113,7 +1113,7 @@ fn test_sessions_invariants_inline_pass() {
             "--project-dir",
             tmp_path.to_str().expect("tmp_path is valid UTF-8"),
             "--select",
-            "session_boundary",
+            "silver.sessions",
         ])
         .env("RUST_LOG", "warn")
         .output()
@@ -1125,7 +1125,7 @@ fn test_sessions_invariants_inline_pass() {
 
     assert!(
         test_out.status.success(),
-        "`smelt test --select session_boundary` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "`smelt test --select silver.sessions` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         test_out.status,
     );
 
@@ -1500,7 +1500,7 @@ fn test_forward_only_invariants_inline_pass() {
             "--project-dir",
             tmp_path.to_str().expect("tmp_path is valid UTF-8"),
             "--select",
-            "forward_only_resolution",
+            "gold.identity_forward_only",
         ])
         .env("RUST_LOG", "warn")
         .output()
@@ -1512,7 +1512,7 @@ fn test_forward_only_invariants_inline_pass() {
 
     assert!(
         test_out.status.success(),
-        "`smelt test --select forward_only_resolution` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "`smelt test --select gold.identity_forward_only` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         test_out.status,
     );
 
@@ -2060,7 +2060,7 @@ fn test_backward_fill_invariants_inline_pass() {
             "--project-dir",
             tmp_path.to_str().expect("tmp_path is valid UTF-8"),
             "--select",
-            "backward_fill_resolution",
+            "gold.identity_backward_fill",
         ])
         .env("RUST_LOG", "warn")
         .output()
@@ -2072,7 +2072,7 @@ fn test_backward_fill_invariants_inline_pass() {
 
     assert!(
         test_out.status.success(),
-        "`smelt test --select backward_fill_resolution` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "`smelt test --select gold.identity_backward_fill` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         test_out.status,
     );
 
@@ -2328,7 +2328,7 @@ fn test_connected_components_invariants_inline_pass() {
             "--project-dir",
             tmp_path.to_str().expect("tmp_path is valid UTF-8"),
             "--select",
-            "connected_components_resolution",
+            "gold.identity_connected_components",
         ])
         .env("RUST_LOG", "warn")
         .output()
@@ -2340,7 +2340,7 @@ fn test_connected_components_invariants_inline_pass() {
 
     assert!(
         test_out.status.success(),
-        "`smelt test --select connected_components_resolution` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "`smelt test --select gold.identity_connected_components` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         test_out.status,
     );
 

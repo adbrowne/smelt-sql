@@ -1977,25 +1977,20 @@ pub fn map_get_key_completions(known_keys: Option<&[String]>) -> Vec<String> {
 
 /// Render hover text for a `smelt.config.load_yaml` / `load_json` call site.
 ///
-/// Shows the resolved path, row count (for `List`/`Map` schemas) or field set
-/// (for record schemas), and optionally the last-modified timestamp.
+/// Shows the resolved path and schema summary. No mtime — hover is a pure
+/// function of `(file bytes, schema, target)` per spec §"No clock".
 ///
 /// Pure — callers supply the resolved summary.
 pub fn hover_text_for_loader_call(
     loader_fn: &str,
     resolved_path: &str,
     schema_summary: &str,
-    last_modified: Option<&str>,
 ) -> String {
-    let mut text = format!(
+    format!(
         "`smelt.config.{loader_fn}('{resolved_path}', …)`\n\n\
          **Path:** `{resolved_path}`\n\n\
          **Schema:** {schema_summary}"
-    );
-    if let Some(ts) = last_modified {
-        text.push_str(&format!("\n\n*Last modified: {ts}*"));
-    }
-    text
+    )
 }
 
 /// Return filesystem path completion candidates for a loader's `path` argument.

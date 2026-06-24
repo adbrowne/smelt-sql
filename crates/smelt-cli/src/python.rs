@@ -83,6 +83,7 @@ def cli_model(project):
             models: std::collections::HashMap::new(),
             python: None,
             target: None,
+            state: Default::default(),
         };
 
         // Call via CLI's re-export (now delegates to smelt-runtime)
@@ -115,6 +116,7 @@ def cli_model(project):
             models: std::collections::HashMap::new(),
             python: None,
             target: None,
+            state: Default::default(),
         };
         let result = discover_python_models(&[], &[], &config, project_dir, None).unwrap();
         assert!(result.is_empty());

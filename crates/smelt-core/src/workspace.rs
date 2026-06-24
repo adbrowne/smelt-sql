@@ -18,7 +18,7 @@
 //! - Per-entity sources (already shared via the Salsa `project_sources`
 //!   query).
 
-use crate::config::{Config, Materialization};
+use crate::config::{Config, Materialization, StateConfig};
 use crate::discovery::{ModelDiscovery, ModelFile};
 use std::path::{Path, PathBuf};
 
@@ -89,6 +89,7 @@ pub fn load_workspace(project_root: &Path) -> LoadedWorkspace {
         models: std::collections::HashMap::new(),
         python: None,
         target: None,
+        state: StateConfig::default(),
     });
 
     // Sources: read sources.yml / sources.yaml if present.

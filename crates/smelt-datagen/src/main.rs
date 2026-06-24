@@ -1,6 +1,6 @@
 //! CLI for deterministic data generation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
 use std::path::PathBuf;
@@ -105,8 +105,12 @@ zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
   sequential_id           1-based row index.
 
   foreign_key
-    dataset: <name>       Random id in [1, num_rows] of the named dataset
-                          (must already be defined earlier in the YAML).
+    dataset: <name>       Random integer in [1, effective_row_count] of the
+                          named dataset, where effective_row_count =
+                          floor(referenced_num_rows × scale_factor). The
+                          dataset must appear earlier in the YAML. At any
+                          scale factor (<1, =1, >1) the bound is the scaled
+                          count, preserving referential integrity.
 
   date
     start: YYYY-MM-DD     Inclusive lower bound.
@@ -151,8 +155,14 @@ Dataset-level (not a generator, but documented here for discoverability):
         - weight: <float>  and sticky (fields drawn once and shared
           emit: <int>      across emitted entries). See the linked_choice
           sticky: [...]    generator above and the spec for full rules.
-          fields:
+          fields:          SCALE-INVARIANCE NOTE: pool contents are
             <field>: <generator>
+                          scale-invariant (byte-identical across
+                          --scale-factor settings) ONLY when no shape
+                          field uses foreign_key. A foreign_key field
+                          resolves against the referenced dataset's
+                          effective (scaled) row count, so FK-bearing
+                          pools vary with the scale factor.
 ";
 
 fn main() -> Result<()> {
@@ -181,7 +191,7 @@ fn run_config(
     cli_scale_factor: Option<f64>,
     quiet: bool,
 ) -> Result<()> {
-    use smelt_datagen::config::{FkCounts, GeneratorSpec};
+    use smelt_datagen::config::{effective_row_count, FkCounts, GeneratorSpec};
 
     let global_seed = config.seed.unwrap_or(42);
     let scale_factor = cli_scale_factor.or(config.scale_factor).unwrap_or(1.0);
@@ -190,8 +200,8 @@ fn run_config(
         println!("Scale factor: {}", scale_factor);
     }
 
-    // Build FK resolution map: dataset name -> scaled row count
-    // Also validate that FK references only refer to previously-listed datasets
+    // Build FK resolution map: dataset name -> effective (floor-scaled) row count.
+    // Also validate that FK references only refer to previously-listed datasets.
     let mut fk_counts = FkCounts::new();
     for dataset in &config.datasets {
         // Validate FK references
@@ -212,14 +222,28 @@ fn run_config(
                         dataset.name,
                     );
                 }
+                // Validate that the FK target itself has a non-zero effective count.
+                if fk_counts.get(target).copied() == Some(0) {
+                    anyhow::bail!(
+                        "Dataset '{}' column '{}' references dataset '{}' via foreign_key, \
+                         but '{}' has an effective row count of 0 at scale_factor={scale_factor}. \
+                         Increase the target's num_rows or the scale factor.",
+                        dataset.name,
+                        col.name,
+                        target,
+                        target,
+                    );
+                }
             }
         }
-        let scaled_rows = ((dataset.num_rows as f64) * scale_factor).round() as usize;
+        let scaled_rows = effective_row_count(dataset.num_rows, scale_factor)
+            .with_context(|| format!("dataset '{}'", dataset.name))?;
         fk_counts.insert(dataset.name.clone(), scaled_rows);
     }
 
     for dataset in &config.datasets {
-        let scaled_rows = ((dataset.num_rows as f64) * scale_factor).round() as usize;
+        let scaled_rows = effective_row_count(dataset.num_rows, scale_factor)
+            .with_context(|| format!("dataset '{}'", dataset.name))?;
         // Create a scaled copy of the dataset config
         let mut scaled_dataset = dataset.clone();
         scaled_dataset.num_rows = scaled_rows;

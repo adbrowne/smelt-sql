@@ -271,6 +271,267 @@ fn unresolvable_entity_select_did_you_mean_hint() {
     );
 }
 
+// ── D-39: `--exclude +model` inconsistent-set refusal ────────────────────────
+
+fn run_dry_exclude(project_dir: &Path, exclude: &str) -> std::process::Output {
+    Command::new(smelt_bin())
+        .args(["run", "--project-dir", project_dir.to_str().unwrap()])
+        .args(["--exclude", exclude, "--dry-run"])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("smelt binary should be runnable")
+}
+
+/// Workspace: `shared_upstream` (leaf), `needs_upstream` (→ shared_upstream),
+/// `also_needs` (→ shared_upstream).
+/// `--exclude +needs_upstream` expands to {needs_upstream, shared_upstream}.
+/// `also_needs` is retained but requires `shared_upstream` (excluded) → error.
+#[test]
+fn exclude_upstream_needed_by_retained_is_error() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("excl_inconsistent");
+    fs::create_dir_all(root.join("models")).unwrap();
+    write_smelt_yml(&root, "excl_inconsistent");
+    fs::write(
+        root.join("models").join("shared_upstream.sql"),
+        "SELECT 1 AS id\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models").join("needs_upstream.sql"),
+        "SELECT id FROM smelt.shared_upstream\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models").join("also_needs.sql"),
+        "SELECT id FROM smelt.shared_upstream\n",
+    )
+    .unwrap();
+
+    // +needs_upstream expands to {needs_upstream, shared_upstream}; also_needs
+    // is retained but needs shared_upstream which is now excluded → error.
+    let output = run_dry_exclude(&root, "+needs_upstream");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "--exclude +needs_upstream with a retained model that needs the excluded upstream \
+         should exit non-zero\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    // The error must name the retained model and the missing upstream.
+    assert!(
+        stderr.contains("also_needs") || stderr.contains("Inconsistent"),
+        "stderr should mention the retained model 'also_needs' or 'Inconsistent'; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("shared_upstream"),
+        "stderr should mention the missing upstream 'shared_upstream'; got:\n{stderr}"
+    );
+}
+
+/// Workspace: `shared_upstream` (leaf), `needs_upstream` (→ shared_upstream),
+/// `independent` (no deps).
+/// `--exclude +needs_upstream` expands to {needs_upstream, shared_upstream};
+/// `independent` is retained and has no upstream deps → consistent → OK.
+#[test]
+fn exclude_upstream_not_needed_ok() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("excl_consistent");
+    fs::create_dir_all(root.join("models")).unwrap();
+    write_smelt_yml(&root, "excl_consistent");
+    fs::write(
+        root.join("models").join("shared_upstream.sql"),
+        "SELECT 1 AS id\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models").join("needs_upstream.sql"),
+        "SELECT id FROM smelt.shared_upstream\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models").join("independent.sql"),
+        "SELECT 42 AS x\n",
+    )
+    .unwrap();
+
+    // +needs_upstream expands to {needs_upstream, shared_upstream}; independent
+    // remains and has no deps that were excluded → consistent → exit 0.
+    let output = run_dry_exclude(&root, "+needs_upstream");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "--exclude +needs_upstream with only independent models retained should succeed\n\
+         stderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Would run: independent"),
+        "independent model should still be in the dry-run output\nstdout: {stdout}"
+    );
+}
+
+/// Workspace: `leaf` (no deps), `downstream` (→ leaf), `unrelated` (no deps).
+/// `--exclude downstream` (bare, no `+`) removes only `downstream`, not `leaf`.
+/// `leaf` and `unrelated` are retained and have no unmet deps → consistent.
+#[test]
+fn exclude_bare_model_only() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("excl_bare");
+    fs::create_dir_all(root.join("models")).unwrap();
+    write_smelt_yml(&root, "excl_bare");
+    fs::write(root.join("models").join("leaf.sql"), "SELECT 1 AS id\n").unwrap();
+    fs::write(
+        root.join("models").join("downstream.sql"),
+        "SELECT id FROM smelt.leaf\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models").join("unrelated.sql"),
+        "SELECT 99 AS z\n",
+    )
+    .unwrap();
+
+    // Bare --exclude downstream: only downstream is removed, leaf survives.
+    // No retained model has a missing upstream → consistent → exit 0.
+    let output = run_dry_exclude(&root, "downstream");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "--exclude downstream (bare, no +) should succeed: leaf and unrelated survive \
+         with no unmet deps\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Would run: leaf"),
+        "leaf should still be in the dry-run output\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Would run: unrelated"),
+        "unrelated should still be in the dry-run output\nstdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Would run: downstream"),
+        "downstream was excluded and must not appear\nstdout: {stdout}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── D-41: `smelt test --select` uses full selector syntax ────────────────────
+
+/// `smelt test --select tag:core` runs only tests for models tagged `core`,
+/// not tests for untagged models. Confirms selector syntax (not substring)
+/// gates which tests execute (D-41).
+#[cfg(feature = "duckdb")]
+#[test]
+fn test_select_uses_selector_syntax() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("test_tag_select");
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+
+    // smelt.yml: tagged_model has tag "core"; untagged_model has none.
+    fs::write(
+        root.join("smelt.yml"),
+        "name: test_tag_select\nversion: 1\npaths:\n  - models\n  - tests\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         models:\n  tagged_model:\n    tags:\n      - core\n",
+    )
+    .unwrap();
+
+    fs::write(root.join("models/tagged_model.sql"), "SELECT 1 AS x\n").unwrap();
+    fs::write(root.join("models/untagged_model.sql"), "SELECT 2 AS y\n").unwrap();
+
+    // Test for tagged_model (should run when selecting tag:core).
+    fs::write(
+        root.join("tests/test_tagged.sql"),
+        "--- name: test_tagged ---\nmaterialization: test\ntest:\n  model: tagged_model\n  expect:\n    - {x: 1}\n---\n",
+    )
+    .unwrap();
+    // Test for untagged_model (must NOT run when selecting tag:core).
+    fs::write(
+        root.join("tests/test_untagged.sql"),
+        "--- name: test_untagged ---\nmaterialization: test\ntest:\n  model: untagged_model\n  expect:\n    - {y: 2}\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(smelt_bin())
+        .args(["test", "--project-dir", root.to_str().unwrap()])
+        .args(["--select", "tag:core", "--json"])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("smelt test should be runnable");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "smelt test --select tag:core should succeed\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    // test_tagged ran (the tagged model's test).
+    assert!(
+        stdout.contains("test_tagged"),
+        "smelt test --select tag:core should include test_tagged in JSON output\nstdout: {stdout}"
+    );
+    // test_untagged did NOT run (no-tag model excluded by selector).
+    assert!(
+        !stdout.contains("test_untagged"),
+        "smelt test --select tag:core must NOT include test_untagged in JSON output\nstdout: {stdout}"
+    );
+}
+
+/// `smelt test --select typo_name` where `typo_name` doesn't resolve → non-zero
+/// exit with a "not found" diagnostic (same fail-loud contract as other commands).
+#[cfg(feature = "duckdb")]
+#[test]
+fn test_select_unresolvable_is_hard_error() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("test_notfound");
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+    // Include both models/ and tests/ in paths so test models are discovered.
+    fs::write(
+        root.join("smelt.yml"),
+        "name: test_notfound\nversion: 1\npaths:\n  - models\n  - tests\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+    fs::write(root.join("models/base.sql"), "SELECT 1 AS x\n").unwrap();
+    fs::write(
+        root.join("tests/test_base.sql"),
+        "--- name: test_base ---\nmaterialization: test\ntest:\n  model: base\n  expect:\n    - {x: 1}\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(smelt_bin())
+        .args(["test", "--project-dir", root.to_str().unwrap()])
+        .args(["--select", "definitely_no_such_model"])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("smelt test should be runnable");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "smelt test --select <nonexistent> should exit non-zero\nstderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("not found") || stderr.contains("definitely_no_such_model"),
+        "stderr should contain 'not found' or the unknown name; got:\n{stderr}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// `path:` is NOT a recognised selection method — a `path:models/silver`
 /// selector is treated as a model-name reference that fails to resolve,
 /// confirming no `path:` method was added (D-38).

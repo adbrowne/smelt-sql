@@ -11,6 +11,7 @@ repository = "https://github.com/adbrowne/smelt-sql"
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
 smelt-db = { path = "../smelt-db" }
+smelt-core = { path = "../smelt-core" }
 rowan.workspace = true
 sha2 = "0.10"
 
