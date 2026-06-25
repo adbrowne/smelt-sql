@@ -70,7 +70,7 @@ Prints a message indicating that docs are embedded in the binary and advises usi
 - Metadata: Materialization, Owner (if set), Tags (if any)
 - Columns table: `Column | Type | Nullable | Description | Tests`
   - The per-column **Tests** cell lists the column-level test constraints declared under `columns.<col>.tests` in the model's frontmatter (`models.md` §"`columns:` — column metadata"). Cell content is the comma-separated test names; an empty cell means no column-level tests are declared.
-- **Tests** section: a bulleted list of every test model that targets this model — i.e. every `materialization: test` model with `test.model: <this model>` in its frontmatter (`testing.md` §"`test:` frontmatter key"). Each bullet is the test name, linking to the test model's source location. The section is omitted when no test models target this one.
+- **Tests** section: a bulleted list of every test that targets this model — i.e. every `smelt.test` declaration whose assertion query references this model (`testing.md`). Each bullet is the test name, linking to the test's source location. The section is omitted when no tests target this one.
 - Upstream dependencies (links to upstream model pages)
 - Downstream dependencies (links to downstream model pages)
 - Incremental config section (only if the model is incremental): granularity, partition column, event time column, unique key
@@ -92,7 +92,8 @@ Prints a message indicating that docs are embedded in the binary and advises usi
       "description": "<string>",        // omitted if absent
       "owner": "<string>",              // omitted if absent
       "tags": ["<string>"],             // omitted if empty
-      "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "cumulative_aggregate" | "test",
+      "materialization": "table" | "view" | "ephemeral" | "materialized_view",
+      "refresh": "full" | "cumulative",  // omitted when "full" (default)
       "path": "<workspace-relative path>",
       "columns": [
         {
@@ -169,7 +170,7 @@ Topic paths correspond to relative paths under `docs-site/docs/`, without the `.
 
 ### `--select` and test models
 
-When `--select` is specified, only selected models get their own catalog entry. Test models (`materialization: test`) are excluded from catalog output regardless of selector.
+When `--select` is specified, only selected models get their own catalog entry. Tests (`smelt.test` declarations) are excluded from catalog output regardless of selector.
 
 ### `--select` and lineage
 
@@ -204,7 +205,7 @@ Hand-authored models omit the `origin` field (the standard `skip_serializing_if`
 ## Constraints & Invariants
 
 1. **Catalog is regenerated in full on each `smelt docs generate` run.** There is no incremental update; all output files are overwritten.
-2. **Test models are excluded from catalog output.** `materialization: test` models do not appear in the generated catalog.
+2. **Tests are excluded from catalog output.** `smelt.test` declarations do not appear in the generated catalog.
 3. **JSON `models` keys are alphabetically ordered.** The `BTreeMap` serialization ensures a stable, deterministic *key ordering*. The output is not byte-for-byte identical across runs: `generated_at` (the catalogue's wall-clock build timestamp) is the one intentionally non-deterministic field.
 4. **Embedded docs match the binary version.** `smelt docs show` returns documentation embedded at build time. It does not read from the filesystem.
 5. **Column `source` is derived from type inference, not user-declared.** If the type inference system cannot determine lineage, `source.type` is `"unknown"`.

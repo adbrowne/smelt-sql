@@ -21,7 +21,8 @@ A `.sql` file is a sequence of top-level **items**. Each item is one of:
 
 - A `smelt.define` declaration.
 - A `smelt.extern` declaration.
-- A bare model `SELECT` (a SELECT carrying `materialization: test` is a test model — declaration shape and assertion semantics owned by `testing.md`).
+- A `smelt.test` declaration (a unit test — declaration shape and assertion semantics owned by `testing.md`).
+- A bare model `SELECT`.
 
 Each item may be preceded by an optional YAML **frontmatter** block (`---` … `---`). Frontmatter attaches to the immediately following declaration; there is no file-level frontmatter scope. (Research §16 #22.)
 
@@ -30,7 +31,7 @@ Rules:
 - Items are separated by whitespace only — no separator token.
 - A file may contain **any number** of bare model `SELECT`s (test or otherwise). The naming rule (lone-anonymous OR all-named via frontmatter `name:`, never mixed) is specified in `architecture.md` §"Project layout — Bare-model naming".
 - A file may contain **zero or more** `smelt.define` and `smelt.extern` items, interleaved freely with each other and with bare model `SELECT`s.
-- All declared names within a file (bare-SELECT names, `smelt.define`s, `smelt.extern`s) must be unique.
+- All declared names within a file (bare-SELECT names, `smelt.test`s, `smelt.define`s, `smelt.extern`s) must be unique.
 - File **kind** is a property of each declaration, not of the file (architecture spec, "Resolution"). The directory containing the file contributes to the entity's `smelt.<path>` namespace — e.g. `functions/patterns/session_rollup.sql` declaring `session_rollup` produces the call path `smelt.functions.patterns.session_rollup`. Externs are flat and ambient: their declaring path affects navigation only, never the call surface (see `architecture.md` §"Externs are flat").
 - A trailing `;` after a `smelt.define` or `smelt.extern` declaration is allowed but optional.
 
@@ -152,7 +153,7 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 | `provenance` | structured map (shape TBD) | absent | Declared column-provenance map. Gated behind `smelt.yml: unstable_schema: true`. |
 | `backends.<name>.emit` | string | declared name | (`smelt.extern` only) Backend-specific emitted name. |
 
-Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all three declaration kinds (model `SELECT` — including `materialization: test` test models — `smelt.define`, and `smelt.extern`).
+Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
 
 ### Diagnostic codes
 
