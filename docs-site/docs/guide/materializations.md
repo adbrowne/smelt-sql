@@ -85,8 +85,6 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-The `materialization: cumulative_aggregate` shorthand is also accepted and behaves identically.
-
 The output has one row per `(device_id, user_id)`. There is no `event_date` column — partitions collapse into a per-key row. The driving partition shape is read from the source's `timeseries:` declaration; running with `--event-time-start D --event-time-end D+N` merges the N partitions in temporal order. Without a run window, the model falls back to a single-shot full refresh.
 
 Each non-key projection must be a direct call to one of the **allowlisted aggregators**, which are paired with a fixed cross-partition combiner:
@@ -112,7 +110,7 @@ Best for:
 - Tables consumed downstream as a lookup (no `partition_column` on the output)
 
 !!! warning "Forbidden combinations"
-    Cumulative models (both `materialization: table` + `refresh: cumulative` and the `cumulative_aggregate` shorthand) cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare an `incremental:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` error. Using `refresh: cumulative` on an `ephemeral` model is also a hard error.
+    Cumulative models cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare an `incremental:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` error. Using `refresh: cumulative` on an `ephemeral` model is also a hard error.
 
 !!! note "Reprocessing"
     v1 does not support per-partition reprocessing for already-merged source partitions. If a past partition's data changes, run with `--full-refresh` to truncate and rebuild from scratch.

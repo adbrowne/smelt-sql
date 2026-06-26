@@ -323,9 +323,7 @@ fn build_physical_section(
                 "incremental (partition: {}, granularity: {})",
                 ts.partition_column, gran
             )
-        } else if metadata.is_some_and(|m| m.is_cumulative())
-            || materialization == Materialization::CumulativeAggregate
-        {
+        } else if metadata.is_some_and(|m| m.is_cumulative()) {
             "cumulative_aggregate".to_string()
         } else {
             "full_refresh".to_string()
@@ -364,14 +362,9 @@ mod tests {
         ModelFile,
     };
 
-    /// Regression test: a model declared with `materialization: table` +
-    /// `refresh: cumulative` must report `"cumulative_aggregate"` as its
-    /// physical strategy in `smelt explain` output, NOT `"full_refresh"`.
-    ///
-    /// Before the fix, `build_physical_section` only checked for the legacy
-    /// `Materialization::CumulativeAggregate` variant; the new-surface
-    /// `Table` + `refresh: cumulative` combination fell through to
-    /// `"full_refresh"`.
+    /// A model declared with `materialization: table` + `refresh: cumulative`
+    /// must report `"cumulative_aggregate"` as its physical strategy in
+    /// `smelt explain` output (the human-readable strategy label), NOT `"full_refresh"`.
     #[test]
     fn refresh_cumulative_table_strategy_is_cumulative_aggregate() {
         // Minimal smelt.yml in a temp dir.

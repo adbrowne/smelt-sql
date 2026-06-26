@@ -1,4 +1,4 @@
-//! Tests for the `refresh:` frontmatter axis (Phase 1 — add alongside legacy surface).
+//! Tests for the `refresh:` frontmatter axis.
 //!
 //! Spec oracle: `docs/specs/models.md` §"YAML frontmatter keys" and
 //! `docs/specs/cumulative_aggregate.md` §Surface.
@@ -79,19 +79,28 @@ SELECT 1 AS n"#;
     }
 }
 
-// ── is_cumulative covers legacy materialization: cumulative_aggregate ─────────
+// ── cumulative_aggregate is now an unknown value ──────────────────────────────
 
-/// `materialization: cumulative_aggregate` (legacy) must also return `true` from
-/// `is_cumulative()` — transitional equivalence until Phase 2 removes the variant.
+/// `materialization: cumulative_aggregate` must fail to deserialize with a clear
+/// unknown-value error now that the variant has been removed.
+/// The opt-in is `materialization: table` + `refresh: cumulative`.
 #[test]
-fn legacy_cumulative_aggregate_is_cumulative() {
-    let metadata = ModelMetadata {
-        materialization: Some(Materialization::CumulativeAggregate),
-        ..Default::default()
-    };
+fn cumulative_aggregate_materialization_rejected() {
+    let source = r#"---
+materialization: cumulative_aggregate
+---
+SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, user_id"#;
+
+    let result = smelt_core::metadata::extract_file_metadata(source);
     assert!(
-        metadata.is_cumulative(),
-        "legacy materialization: cumulative_aggregate must return true from is_cumulative()"
+        result.is_err(),
+        "`materialization: cumulative_aggregate` must fail to deserialize — \
+         the variant has been removed. Use `materialization: table` + `refresh: cumulative` instead."
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("cumulative_aggregate") || err.contains("Invalid materialization"),
+        "error must mention the invalid value; got: {err}"
     );
 }
 

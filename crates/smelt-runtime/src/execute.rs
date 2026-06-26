@@ -8,9 +8,8 @@
 //!
 //! This file owns the model-plan construction (batch dispatch per
 //! `BatchSafety` shape), the per-model compile+execute loop (full refresh,
-//! incremental batches, and `cumulative_aggregate` dispatch via
-//! `crate::cumulative`), cancellation handling, manifest writes, and
-//! interval-store updates.
+//! incremental batches, and cumulative dispatch via `crate::cumulative`),
+//! cancellation handling, manifest writes, and interval-store updates.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -204,13 +203,8 @@ pub async fn execute_project(
                         .cloned()
                         .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
-                    // Route cumulative detection through is_cumulative() so
-                    // both `refresh: cumulative` (new) and
-                    // `materialization: cumulative_aggregate` (legacy) are caught.
-                    if metadata.is_some_and(|m| m.is_cumulative())
-                        || materialization
-                            == smelt_core::config::Materialization::CumulativeAggregate
-                    {
+                    // Route cumulative detection through is_cumulative().
+                    if metadata.is_some_and(|m| m.is_cumulative()) {
                         ModelStrategy::Cumulative
                     } else {
                         match materialization {
@@ -707,14 +701,11 @@ pub async fn execute_project(
         // incremental / full-refresh branches because it has its own per-
         // partition merge loop (see `smelt_runtime::cumulative` and
         // `docs/specs/cumulative_aggregate.md`).
-        // Route through is_cumulative() so both `refresh: cumulative` (new) and
-        // `materialization: cumulative_aggregate` (legacy) dispatch here.
         let plan_is_cumulative = plan
             .model_file
             .metadata
             .as_deref()
-            .is_some_and(|m| m.is_cumulative())
-            || plan.materialization == smelt_core::config::Materialization::CumulativeAggregate;
+            .is_some_and(|m| m.is_cumulative());
         if plan_is_cumulative {
             let db_table_name = plan.model_file.db_name_owned();
             let compiler = compilers.get(model_target);
@@ -1003,9 +994,6 @@ pub async fn execute_project(
                     }
                     smelt_core::config::Materialization::Test => {
                         unreachable!("Test models should not be executed directly")
-                    }
-                    smelt_core::config::Materialization::CumulativeAggregate => {
-                        unreachable!("cumulative_aggregate dispatched above the match")
                     }
                 };
 

@@ -70,10 +70,6 @@ pub enum Materialization {
     MaterializedView,
     /// Test model — not materialized, used for unit testing.
     Test,
-    /// Cumulative aggregate — stateful merge into one row per GROUP BY key.
-    /// Unique key, per-column aggregator, and cross-partition combiner are
-    /// derived from the SELECT (see `docs/specs/cumulative_aggregate.md`).
-    CumulativeAggregate,
 }
 
 impl<'de> Deserialize<'de> for Materialization {
@@ -88,9 +84,9 @@ impl<'de> Deserialize<'de> for Materialization {
             "ephemeral" => Ok(Materialization::Ephemeral),
             "materialized_view" => Ok(Materialization::MaterializedView),
             "test" => Ok(Materialization::Test),
-            "cumulative_aggregate" => Ok(Materialization::CumulativeAggregate),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', 'materialized_view', 'test', or 'cumulative_aggregate'",
+                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', 'materialized_view', or 'test'. \
+                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: cumulative` instead.",
                 s
             ))),
         }
@@ -108,9 +104,6 @@ impl Serialize for Materialization {
             Materialization::Ephemeral => serializer.serialize_str("ephemeral"),
             Materialization::MaterializedView => serializer.serialize_str("materialized_view"),
             Materialization::Test => serializer.serialize_str("test"),
-            Materialization::CumulativeAggregate => {
-                serializer.serialize_str("cumulative_aggregate")
-            }
         }
     }
 }
@@ -620,13 +613,14 @@ impl Config {
                 }
             }
         }
-        // D-33: reject `test` and `cumulative_aggregate` as project-wide defaults.
+        // D-33: reject `test` as a project-wide default.
         // Only table / view / materialized_view / ephemeral are legal defaults;
-        // `test` and `cumulative_aggregate` require per-model semantics that cannot
-        // serve as a project fallback (smelt_yml.md §Top-level keys, §Semantics §8).
+        // `test` requires per-model semantics that cannot serve as a project fallback.
+        // `cumulative_aggregate` is no longer a valid materialization value and will
+        // have already failed to deserialize before reaching this check.
+        // (smelt_yml.md §Top-level keys, §Semantics §8).
         let forbidden_default = match &config.default_materialization {
             Materialization::Test => Some("test"),
-            Materialization::CumulativeAggregate => Some("cumulative_aggregate"),
             _ => None,
         };
         if let Some(name) = forbidden_default {
@@ -905,21 +899,6 @@ impl Config {
                         ));
                     }
                 }
-                Materialization::CumulativeAggregate => {
-                    // `cumulative_aggregate` forbids `incremental:` — the two are
-                    // different rules with different equivalence contracts.
-                    // The `timeseries:` forbid is enforced in `validate_timeseries`
-                    // (where the block is reachable).
-                    if incremental.is_some() {
-                        errors.push((
-                            name.to_string(),
-                            "CumulativeForbidsIncremental: cumulative_aggregate models cannot \
-                             carry an `incremental:` block — they are sibling materializations \
-                             with different equivalence contracts (see docs/specs/cumulative_aggregate.md)"
-                                .to_string(),
-                        ));
-                    }
-                }
                 Materialization::Table => {} // All config is valid for tables
             }
         }
@@ -997,7 +976,9 @@ models:
     }
 
     #[test]
-    fn test_materialization_cumulative_aggregate_parses() {
+    fn test_materialization_cumulative_aggregate_is_rejected() {
+        // `materialization: cumulative_aggregate` is no longer valid —
+        // use `materialization: table` + `refresh: cumulative` instead.
         let yaml = r#"
 name: test_project
 version: 1
@@ -1010,47 +991,43 @@ models:
   device_user_edges:
     materialization: cumulative_aggregate
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config
-                .models
-                .get("device_user_edges")
-                .unwrap()
-                .materialization,
-            Some(Materialization::CumulativeAggregate)
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "`materialization: cumulative_aggregate` must be rejected as an unknown value"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cumulative_aggregate") || err.contains("Invalid materialization"),
+            "error must mention the invalid value; got: {err}"
         );
     }
 
-    /// Cumulative aggregate models cannot carry an incremental: block. The
-    /// validator emits a CumulativeForbidsIncremental-flavored error in
-    /// the errors vector.
+    /// `refresh: cumulative` models cannot carry an `incremental:` block.
+    /// The forbid is enforced in `validate_timeseries` via `is_cumulative()`.
+    /// Since `materialization: cumulative_aggregate` is no longer accepted,
+    /// this test uses the new surface (`materialization: table` + `refresh: cumulative`).
     #[test]
-    fn test_validate_cumulative_aggregate_forbids_incremental() {
-        use crate::metadata::ModelMetadata;
+    fn test_validate_refresh_cumulative_forbids_incremental_via_metadata() {
+        use crate::config::{IncrementalConfig, IncrementalSafetyOverrides, RefreshStrategy};
+        use crate::metadata::{validate_timeseries, MetadataError, ModelMetadata};
 
-        let yaml = r#"
-name: test_project
-version: 1
-targets:
-  dev:
-    type: duckdb
-    database: test.duckdb
-    schema: main
-models:
-  bad_model:
-    materialization: cumulative_aggregate
-    incremental:
-      enabled: true
-"#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let errors = config.validate_model_configs(&HashMap::<String, ModelMetadata>::new());
+        let metadata = ModelMetadata {
+            materialization: Some(Materialization::Table),
+            refresh: Some(RefreshStrategy::Cumulative),
+            incremental: Some(IncrementalConfig {
+                enabled: true,
+                unique_key: vec![],
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT * FROM foo")
+            .expect_err("refresh: cumulative + incremental must error");
         assert!(
-            errors
-                .iter()
-                .any(|(name, msg)| name == "bad_model"
-                    && msg.contains("CumulativeForbidsIncremental")),
-            "Expected CumulativeForbidsIncremental error, got: {:?}",
-            errors
+            matches!(err, MetadataError::CumulativeForbidsIncremental),
+            "Expected CumulativeForbidsIncremental, got: {}",
+            err
         );
     }
 
@@ -1153,16 +1130,16 @@ targets:
         assert_eq!(strategy, IncrementalStrategy::Append);
     }
 
-    /// `merge` is no longer an incremental strategy — UPSERT is the physical
-    /// primitive used by the `cumulative_aggregate` materialization, not a
-    /// knob on `incremental:`. Deserialising it must fail.
+    /// `merge` is not an incremental strategy — UPSERT is the physical
+    /// primitive used by the cumulative-aggregate merge loop (`refresh: cumulative`),
+    /// not a knob on `incremental:`. Deserialising it must fail.
     #[test]
     fn test_incremental_strategy_no_merge_variant() {
         let result: Result<IncrementalStrategy, _> = serde_json::from_str(r#""merge""#);
         assert!(
             result.is_err(),
             "`merge` must not deserialise as an IncrementalStrategy — it is the \
-             physical primitive of `materialization: cumulative_aggregate`"
+             physical primitive of the cumulative-aggregate merge loop (`refresh: cumulative`)"
         );
     }
 
@@ -1977,19 +1954,21 @@ default_materialization: {default_mat}
         );
     }
 
-    /// D-33: `default_materialization: cumulative_aggregate` is rejected at parse time.
+    /// `default_materialization: cumulative_aggregate` is rejected at parse time
+    /// because `cumulative_aggregate` is no longer a valid materialization value —
+    /// the Deserialize impl returns an unknown-value error before reaching the D-33 check.
     #[test]
     fn default_materialization_cumulative_aggregate_is_rejected() {
         let yaml = minimal_config_yaml("cumulative_aggregate");
         let result = Config::parse_with_warnings(&yaml);
         assert!(
             result.is_err(),
-            "`default_materialization: cumulative_aggregate` must be rejected"
+            "`default_materialization: cumulative_aggregate` must be rejected (unknown value)"
         );
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("cumulative_aggregate"),
-            "error must name the forbidden value; got: {err}"
+            err.contains("cumulative_aggregate") || err.contains("Invalid materialization"),
+            "error must name the invalid value; got: {err}"
         );
     }
 

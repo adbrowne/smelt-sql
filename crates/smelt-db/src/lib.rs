@@ -1460,9 +1460,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // query only gathers inputs and aggregates, so the editor and the build
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
-        // Route cumulative detection through is_cumulative() so both
-        // `refresh: cumulative` (new surface) and
-        // `materialization: cumulative_aggregate` (legacy) reach the classifier.
+        // Route cumulative detection through is_cumulative() (a `refresh:
+        // cumulative` model) so it reaches the classifier. The string below is
+        // the classifier's internal key for the cumulative rule, not a user
+        // surface value.
         let materialization = if metadata.is_cumulative() {
             "cumulative_aggregate"
         } else if metadata.incremental.is_some() {
