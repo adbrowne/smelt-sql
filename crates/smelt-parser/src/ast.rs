@@ -33,6 +33,11 @@ impl File {
     pub fn externs(&self) -> impl Iterator<Item = SmeltExtern> + '_ {
         self.0.children().filter_map(SmeltExtern::cast)
     }
+
+    /// Iterate over top-level `smelt.test` declarations in this file.
+    pub fn tests(&self) -> impl Iterator<Item = SmeltTest> + '_ {
+        self.0.children().filter_map(SmeltTest::cast)
+    }
 }
 
 // ===== smelt.define (Step 1, Phase 1) =====
@@ -230,6 +235,106 @@ impl SmeltExtern {
         let off = self.source_offset();
         let attached = crate::attach_frontmatter_to_decls(raw_text, &[off]);
         attached.into_iter().next().flatten().map(|b| b.inner_text)
+    }
+}
+
+// ===== smelt.test (Phase 3: parser-only declaration) =====
+
+/// Top-level `smelt.test <name> AS (<select>) [PASSING <dep> AS (<rows>)]... EXPECT (<rows>)`
+/// declaration.
+///
+/// A test is a peer of `smelt.define`/`smelt.extern` on the kind axis. The
+/// body `<select>` is an assertion query; the `PASSING` clauses supply inline
+/// table data; the `EXPECT` clause lists expected result rows. Semantic wiring
+/// (Phase 5) classifies the kind and wires the runner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltTest(SyntaxNode);
+
+impl SmeltTest {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `SMELT_TEST` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_TEST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The test name — text of the IDENT token inside the `TEST_NAME` child.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == TEST_NAME)?
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the `TEST_NAME` child — the name identifier span.
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == TEST_NAME)?;
+        let ident = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)?;
+        Some(ident.text_range())
+    }
+
+    /// The `SELECT` (or `WITH ... SELECT`) statement body of the test assertion.
+    pub fn body_select(&self) -> Option<SelectStmt> {
+        self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// Iterate over `PASSING` clauses in source order.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
+
+    /// The required `EXPECT` clause (the expected result rows).
+    pub fn expect_clause(&self) -> Option<ExpectClause> {
+        self.0.children().find_map(ExpectClause::cast)
+    }
+
+    /// Byte offset at which this declaration starts in the source text.
+    /// See `SmeltDefine::source_offset` for the offset-stability rationale.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+}
+
+/// The `EXPECT ( <rows> )` clause inside a `smelt.test` declaration.
+///
+/// `<rows>` is a comma-separated list of record literals `{key: value, ...}`.
+/// Omitted keys are allowed (partial match shape for property tests).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExpectClause(SyntaxNode);
+
+impl ExpectClause {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `EXPECT_CLAUSE` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == EXPECT_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over the expected result rows (record literals) in source order.
+    ///
+    /// Each row is a `RECORD_LITERAL` node produced by parsing a `{k: v, ...}`
+    /// expression. Because `parse_expression()` wraps each row in an `EXPRESSION`
+    /// node, we use `descendants()` to surface the inner `RECORD_LITERAL` nodes.
+    pub fn rows(&self) -> impl Iterator<Item = RecordLiteral> + '_ {
+        self.0.descendants().filter_map(RecordLiteral::cast)
     }
 }
 
@@ -846,6 +951,16 @@ impl PassingClause {
             .children()
             .find(|n| n.kind() == PASSING_NAME)
             .map(|n| n.text_range())
+    }
+
+    /// Iterate over the body rows (record literals) in source order.
+    ///
+    /// For `smelt.test` PASSING clauses the body is a comma-separated list of
+    /// record literals `{k: v, ...}`.  For function-call PASSING clauses the
+    /// body is typically a single expression (SELECT / aggregate), so this
+    /// iterator returns exactly one result in that case.
+    pub fn rows(&self) -> impl Iterator<Item = RecordLiteral> + '_ {
+        self.0.descendants().filter_map(RecordLiteral::cast)
     }
 }
 

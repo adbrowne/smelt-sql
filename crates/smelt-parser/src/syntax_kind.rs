@@ -333,6 +333,16 @@ pub enum SyntaxKind {
     // of the `NOT NULL` suffix (e.g. `Expr<Integer NOT NULL>`).
     NOT_NULL_QUALIFIER,
 
+    // Phase 3 (testing): smelt.test top-level declaration.
+    //
+    // SMELT_TEST: wraps the entire `smelt.test <name> AS (<select>)
+    //   [PASSING <dep> AS (<rows>)]... EXPECT (<rows>)` declaration.
+    // TEST_NAME: wraps the test name identifier (mirrors DEFINE_NAME).
+    // EXPECT_CLAUSE: the required `EXPECT ( <rows> )` trailer.
+    SMELT_TEST,
+    TEST_NAME,
+    EXPECT_CLAUSE,
+
     // Special
     EOF, // End of file
 }

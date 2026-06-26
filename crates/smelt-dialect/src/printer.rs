@@ -278,7 +278,10 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         // compiler inlines via the function-expander closure above; they must
         // not be emitted verbatim.  `SMELT_RECORD_DECL` carries type
         // declarations used by the analyzer but invisible to the engine.
-        SyntaxKind::SMELT_DEFINE | SyntaxKind::SMELT_EXTERN | SyntaxKind::SMELT_RECORD_DECL => {
+        SyntaxKind::SMELT_DEFINE
+        | SyntaxKind::SMELT_EXTERN
+        | SyntaxKind::SMELT_RECORD_DECL
+        | SyntaxKind::SMELT_TEST => {
             // Emit nothing — drop the declaration from the compiled SQL.
         }
         _ => {

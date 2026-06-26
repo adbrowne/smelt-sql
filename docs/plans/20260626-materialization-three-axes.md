@@ -65,8 +65,8 @@ The user surface conflated three independent questions under `materialization` (
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 7f202f67 | 2026-06-26 |
-| 2     | done     |        | 2026-06-26 |
-| 3     | pending  |        |      |
+| 2     | done     | 3f9ea474 | 2026-06-26 |
+| 3     | done     |        | 2026-06-26 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |

@@ -6458,3 +6458,348 @@ fn test_interval_numeric_round_trip() {
         );
     }
 }
+
+// ===== Phase 3: smelt.test declaration grammar =====
+
+use crate::ast::{RecordLiteral, SmeltTest};
+use crate::syntax_kind::SyntaxKind::{EXPECT_CLAUSE, SMELT_TEST};
+
+#[test]
+fn parse_smelt_test_basic() {
+    // A smelt.test declaration with a SELECT body, one PASSING clause,
+    // and an EXPECT clause must parse into a SmeltTest node with the
+    // expected children. Lossless round-trip is also verified.
+    let input = r#"smelt.test check_revenue AS (
+    SELECT a, b FROM smelt.orders WHERE revenue > 0
+)
+PASSING orders AS ({amount: 100})
+EXPECT ({a: 1, b: 'x'})"#;
+
+    let (parse_result, file) = parse_file_text(input);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse_smelt_test_basic: unexpected errors: {:?}",
+        parse_result.errors
+    );
+
+    // There must be exactly one SMELT_TEST node.
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1, "expected exactly one smelt.test");
+    let test = &tests[0];
+
+    // Name
+    assert_eq!(
+        test.name().as_deref(),
+        Some("check_revenue"),
+        "test name should be 'check_revenue'"
+    );
+
+    // Body SELECT exists
+    assert!(
+        test.body_select().is_some(),
+        "smelt.test body should contain a SELECT statement"
+    );
+
+    // One PASSING clause
+    let passing: Vec<_> = test.passing_clauses().collect();
+    assert_eq!(passing.len(), 1, "expected one PASSING clause");
+    assert_eq!(
+        passing[0].name().as_deref(),
+        Some("orders"),
+        "PASSING name should be 'orders'"
+    );
+
+    // EXPECT clause exists
+    let expect = test
+        .expect_clause()
+        .expect("EXPECT clause should be present");
+    let rows: Vec<RecordLiteral> = expect.rows().collect();
+    assert_eq!(rows.len(), 1, "expected one row in EXPECT clause");
+
+    // Lossless round-trip: the CST text (Rowan's lossless representation)
+    // must reproduce the exact source bytes.
+    let cst_text = parse_result.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce the exact source"
+    );
+    // Re-parsing the CST text must produce no errors.
+    let parse2 = parse(&cst_text);
+    assert_eq!(
+        parse2.errors.len(),
+        0,
+        "round-trip re-parse failed: errors={:?}",
+        parse2.errors
+    );
+}
+
+#[test]
+fn parse_smelt_test_multiple_passing_clauses() {
+    // Zero PASSING clauses: body + EXPECT only.
+    let input_zero = r#"smelt.test zero_passing AS (
+    SELECT 1 AS result
+)
+EXPECT ({result: 1})"#;
+
+    let (parse_zero, file_zero) = parse_file_text(input_zero);
+    assert!(
+        parse_zero.errors.is_empty(),
+        "parse_smelt_test_multiple_passing (zero): unexpected errors: {:?}",
+        parse_zero.errors
+    );
+    let tests_zero: Vec<SmeltTest> = file_zero.tests().collect();
+    assert_eq!(
+        tests_zero.len(),
+        1,
+        "expected one smelt.test (zero PASSING)"
+    );
+    let passing_zero: Vec<_> = tests_zero[0].passing_clauses().collect();
+    assert_eq!(
+        passing_zero.len(),
+        0,
+        "expected zero PASSING clauses, got {}",
+        passing_zero.len()
+    );
+
+    // Two PASSING clauses.
+    let input_two = r#"smelt.test two_passing AS (
+    SELECT a.x + b.y AS total FROM smelt.a JOIN smelt.b ON TRUE
+)
+PASSING a AS ({x: 1})
+PASSING b AS ({y: 2})
+EXPECT ({total: 3})"#;
+
+    let (parse_two, file_two) = parse_file_text(input_two);
+    assert!(
+        parse_two.errors.is_empty(),
+        "parse_smelt_test_multiple_passing (two): unexpected errors: {:?}",
+        parse_two.errors
+    );
+    let tests_two: Vec<SmeltTest> = file_two.tests().collect();
+    assert_eq!(tests_two.len(), 1, "expected one smelt.test (two PASSING)");
+    let passing_two: Vec<_> = tests_two[0].passing_clauses().collect();
+    assert_eq!(
+        passing_two.len(),
+        2,
+        "expected two PASSING clauses, got {}",
+        passing_two.len()
+    );
+    assert_eq!(passing_two[0].name().as_deref(), Some("a"));
+    assert_eq!(passing_two[1].name().as_deref(), Some("b"));
+}
+
+#[test]
+fn expect_rows_are_record_literals() {
+    // EXPECT with multiple record literals; omitted keys are allowed.
+    let input = r#"smelt.test multi_row_expect AS (
+    SELECT a, b FROM t
+)
+EXPECT ({a: 1, b: 'x'}, {a: 2})"#;
+
+    let (parse, file) = parse_file_text(input);
+    assert!(
+        parse.errors.is_empty(),
+        "expect_rows_are_record_literals: unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1);
+    let expect = tests[0]
+        .expect_clause()
+        .expect("EXPECT clause must be present");
+
+    // Two record literals: {a: 1, b: 'x'} and {a: 2}.
+    let rows: Vec<RecordLiteral> = expect.rows().collect();
+    assert_eq!(rows.len(), 2, "expected two rows in EXPECT clause");
+
+    // First row has two fields; second has one (omitted key is fine).
+    let fields_0: Vec<_> = rows[0].fields().collect();
+    let fields_1: Vec<_> = rows[1].fields().collect();
+    assert_eq!(
+        fields_0.len(),
+        2,
+        "first EXPECT row should have 2 fields, got {}",
+        fields_0.len()
+    );
+    assert_eq!(
+        fields_1.len(),
+        1,
+        "second EXPECT row should have 1 field (omitted key), got {}",
+        fields_1.len()
+    );
+
+    // Verify the EXPECT_CLAUSE node kind appears in the tree.
+    let has_expect = file
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == EXPECT_CLAUSE);
+    assert!(has_expect, "tree must contain an EXPECT_CLAUSE node");
+}
+
+#[test]
+fn passing_expect_contextual() {
+    // `PASSING` and `EXPECT` must remain ordinary identifiers outside a
+    // smelt.test declaration — no regression to ordinary SQL identifiers.
+
+    // `passing` and `expect` as column aliases.
+    let sql_alias = "SELECT x AS passing, y AS expect FROM t";
+    let (parse_alias, _) = parse_file_text(sql_alias);
+    assert!(
+        parse_alias.errors.is_empty(),
+        "column alias 'passing'/'expect' should parse cleanly: {:?}",
+        parse_alias.errors
+    );
+
+    // `passing` and `expect` as CTE names.
+    let sql_cte =
+        "WITH passing AS (SELECT 1 AS n), expect AS (SELECT 2 AS n) SELECT * FROM passing";
+    let (parse_cte, _) = parse_file_text(sql_cte);
+    assert!(
+        parse_cte.errors.is_empty(),
+        "CTE named 'passing'/'expect' should parse cleanly: {:?}",
+        parse_cte.errors
+    );
+
+    // `passing` and `expect` as table names in FROM clause.
+    let sql_from = "SELECT x FROM passing JOIN expect ON passing.id = expect.id";
+    let (parse_from, _) = parse_file_text(sql_from);
+    assert!(
+        parse_from.errors.is_empty(),
+        "table names 'passing'/'expect' in FROM should parse cleanly: {:?}",
+        parse_from.errors
+    );
+
+    // None of these should produce SMELT_TEST or EXPECT_CLAUSE nodes.
+    for (sql, label) in &[(sql_alias, "alias"), (sql_cte, "cte"), (sql_from, "from")] {
+        let p = parse(sql);
+        let has_test = p.syntax().descendants().any(|n| n.kind() == SMELT_TEST);
+        let has_expect = p.syntax().descendants().any(|n| n.kind() == EXPECT_CLAUSE);
+        assert!(
+            !has_test,
+            "plain SQL ({label}) must not produce SMELT_TEST nodes"
+        );
+        assert!(
+            !has_expect,
+            "plain SQL ({label}) must not produce EXPECT_CLAUSE nodes"
+        );
+    }
+
+    // Regression: PASSING as a column name in SELECT list.
+    let p_passing = parse("SELECT passing FROM t");
+    let passing_test_nodes = p_passing
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == SMELT_TEST);
+    assert!(
+        !passing_test_nodes,
+        "'SELECT passing FROM t' must not produce SMELT_TEST"
+    );
+
+    // Regression: smelt.test only triggers at top-level, not in expression position.
+    // A query that happens to have 'smelt' and 'test' in identifiers must not be
+    // mistaken for a top-level smelt.test declaration.
+    let sql_expr = "SELECT smelt_test FROM t";
+    let (parse_expr, _) = parse_file_text(sql_expr);
+    // This is not a smelt.test trigger (smelt_test is one IDENT, not smelt DOT test).
+    assert!(
+        parse_expr.errors.is_empty(),
+        "identifier 'smelt_test' must parse as plain SQL: {:?}",
+        parse_expr.errors
+    );
+}
+
+// ===== Phase 3: multi-row PASSING body (FIX 1) =====
+
+#[test]
+fn parse_smelt_test_multirow_passing() {
+    // A PASSING clause with two record-literal rows — the spec's canonical example.
+    // Before the fix this produced 3 parse errors and dropped the second row.
+    let input = r#"smelt.test check_revenue AS (
+    SELECT order_id, amount FROM smelt.orders
+)
+PASSING orders AS (
+    {order_id: 1, amount: 100.0},
+    {order_id: 2, amount: 200.0}
+)
+EXPECT ({order_id: 1})"#;
+
+    let (parse_result, file) = parse_file_text(input);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse_smelt_test_multirow_passing: unexpected errors: {:?}",
+        parse_result.errors
+    );
+
+    // Lossless round-trip.
+    let cst_text = parse_result.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce source"
+    );
+    let parse2 = parse(&cst_text);
+    assert_eq!(
+        parse2.errors.len(),
+        0,
+        "round-trip re-parse failed: {:?}",
+        parse2.errors
+    );
+
+    // One test, one PASSING clause, two rows inside it.
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1, "expected one smelt.test");
+    let passing: Vec<_> = tests[0].passing_clauses().collect();
+    assert_eq!(passing.len(), 1, "expected one PASSING clause");
+    assert_eq!(
+        passing[0].name().as_deref(),
+        Some("orders"),
+        "PASSING name should be 'orders'"
+    );
+
+    // The new rows() accessor must return both record literals.
+    let rows: Vec<RecordLiteral> = passing[0].rows().collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "PASSING clause should expose 2 rows, got {}",
+        rows.len()
+    );
+}
+
+// ===== Phase 3: error-recovery tests (FIX 2) =====
+
+#[test]
+fn smelt_test_missing_as_recovers() {
+    // `smelt.test foo (SELECT 1) EXPECT ({a:1})` — missing `AS`.
+    // The parser must return without panicking and produce ≥ 1 parse error.
+    let input = "smelt.test foo (SELECT 1) EXPECT ({a: 1})";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "missing AS should produce at least one parse error"
+    );
+}
+
+#[test]
+fn smelt_test_missing_expect_recovers() {
+    // `smelt.test foo AS (SELECT 1) PASSING x AS ({a:1})` — no EXPECT clause.
+    // The parser must return without panicking and produce ≥ 1 parse error.
+    let input = "smelt.test foo AS (SELECT 1) PASSING x AS ({a: 1})";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "missing EXPECT should produce at least one parse error"
+    );
+}
+
+#[test]
+fn smelt_test_unclosed_body_recovers() {
+    // `smelt.test foo AS (SELECT 1 EXPECT ({a:1})` — missing `)` closing the body.
+    // The parser must return without panicking and produce ≥ 1 parse error.
+    let input = "smelt.test foo AS (SELECT 1 EXPECT ({a: 1})";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "unclosed body should produce at least one parse error"
+    );
+}
