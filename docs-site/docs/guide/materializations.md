@@ -36,6 +36,7 @@ Best for:
 - Heavy aggregations you don't want to recompute on every read
 - Models with many downstream dependents
 - Incremental models (incremental requires `table` materialization)
+- Cumulative aggregates (`refresh: cumulative` requires `table` materialization)
 
 ### ephemeral
 
@@ -48,7 +49,7 @@ Best for:
 - Simple column renames or type casts
 
 !!! warning
-    Ephemeral models cannot have incremental configuration or target overrides. smelt will raise an error if you try to combine these.
+    Ephemeral models cannot have incremental configuration, `refresh: cumulative`, or target overrides. smelt will raise an error if you try to combine these.
 
 ### materialized_view
 
@@ -64,11 +65,14 @@ Best for:
 
 ### cumulative_aggregate
 
-Stateful merge into one row per `GROUP BY` key. Each daily run only aggregates the new partition's events and merges them into the running cumulative state. The model's frontmatter collapses to one line — the unique key, the per-column aggregator, and the cross-partition combiner are all derived from the SQL.
+Stateful merge into one row per `GROUP BY` key. Each daily run only aggregates the new partition's events and merges them into the running cumulative state. The unique key, the per-column aggregator, and the cross-partition combiner are all derived from the SQL.
+
+Use `materialization: table` together with `refresh: cumulative` to enable this mode:
 
 ```sql
 ---
-materialization: cumulative_aggregate
+materialization: table
+refresh: cumulative
 ---
 SELECT
     device_id,
@@ -80,6 +84,8 @@ FROM smelt.silver.events_parsed
 WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
+
+The `materialization: cumulative_aggregate` shorthand is also accepted and behaves identically.
 
 The output has one row per `(device_id, user_id)`. There is no `event_date` column — partitions collapse into a per-key row. The driving partition shape is read from the source's `timeseries:` declaration; running with `--event-time-start D --event-time-end D+N` merges the N partitions in temporal order. Without a run window, the model falls back to a single-shot full refresh.
 
@@ -106,7 +112,7 @@ Best for:
 - Tables consumed downstream as a lookup (no `partition_column` on the output)
 
 !!! warning "Forbidden combinations"
-    `materialization: cumulative_aggregate` cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare an `incremental:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` error.
+    Cumulative models (both `materialization: table` + `refresh: cumulative` and the `cumulative_aggregate` shorthand) cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare an `incremental:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` error. Using `refresh: cumulative` on an `ephemeral` model is also a hard error.
 
 !!! note "Reprocessing"
     v1 does not support per-partition reprocessing for already-merged source partitions. If a past partition's data changes, run with `--full-refresh` to truncate and rebuild from scratch.
@@ -181,6 +187,45 @@ When `materialization` is omitted in the SQL frontmatter, in `models.<name>` of 
 !!! tip
     A common pattern is to set `default_materialization: view` in `smelt.yml`, then override specific models to `table` where performance matters. This keeps development fast while ensuring production-critical models are materialized.
 
+## Refresh axis
+
+The `refresh:` frontmatter key controls how a stored model's output is recomputed on each run. It applies only to `materialization: table` and `materialization: materialized_view`; setting it on other materialization types has no effect for `view` (a warning is emitted) and is a hard error for `ephemeral`.
+
+| Value | Meaning |
+|---|---|
+| `full` (default) | Rebuild the table from scratch on every run. |
+| `cumulative` | Cumulative-aggregate merge: one row per `GROUP BY` key, grown across partitions. |
+
+When `refresh:` is omitted, `full` is assumed — the model always rebuilds completely.
+
+### refresh: full (default)
+
+No frontmatter key needed. The model always rebuilds from scratch:
+
+```sql
+---
+materialization: table
+---
+SELECT date, SUM(amount) AS revenue
+FROM transactions
+GROUP BY 1
+```
+
+### refresh: cumulative
+
+Enables the cumulative-aggregate merge loop. The model accumulates one row per `GROUP BY` key across all processed partitions — see [cumulative_aggregate](#cumulative_aggregate) above for the full semantics, allowed aggregators, and constraint rules.
+
+```sql
+---
+materialization: table
+refresh: cumulative
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.silver.events_parsed
+WHERE user_id IS NOT NULL
+GROUP BY device_id, user_id
+```
+
 ## Decision guide
 
 | Scenario | Recommended |
@@ -190,23 +235,24 @@ When `materialization` is omitted in the SQL frontmatter, in `models.<name>` of 
 | Intermediate step used by one downstream | `ephemeral` |
 | Model with many downstream dependents | `table` |
 | Incremental processing (per-partition output) | `incremental` (per-partition `timeseries:` output) |
-| Cumulative state (one row per key across history) | `cumulative_aggregate` |
+| Cumulative state (one row per key across history) | `table` + `refresh: cumulative` |
 | Database-managed refresh | `materialized_view` |
 | Development / iteration | `view` |
 
-## Incremental vs cumulative_aggregate
+## Incremental vs cumulative (refresh: cumulative)
 
 Both shapes are time-aware, but they uphold different contracts:
 
-| Property | `incremental` | `cumulative_aggregate` |
+| Property | `incremental` | `refresh: cumulative` |
 |---|---|---|
+| Frontmatter | `materialization: table` + `timeseries:` + `incremental:` | `materialization: table` + `refresh: cumulative` |
 | Output shape | One row per `(partition_column, …)` — partitioned | One row per `GROUP BY` key — collapsed |
 | Declares `timeseries:`? | Yes (the model's output is a timeseries) | No (forbidden; reads partition shape from source) |
 | Equivalence contract | Per-partition equivalence with full refresh | Cross-partition equivalence under any partition ordering |
 | Re-running a past partition | Idempotent (DELETE+INSERT) | Refused in v1; use `--full-refresh` |
 | Backend primitive | `DELETE` + `INSERT` per partition | `MERGE INTO` with per-column combiners |
 
-If the question is "what's the day's contribution?", use `incremental`. If the question is "what's the running total per key?", use `cumulative_aggregate`.
+If the question is "what's the day's contribution?", use `incremental`. If the question is "what's the running total per key?", use `refresh: cumulative`.
 
 ## Changing materialization type
 

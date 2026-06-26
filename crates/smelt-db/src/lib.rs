@@ -1460,9 +1460,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // query only gathers inputs and aggregates, so the editor and the build
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
-        let materialization = if metadata.materialization
-            == Some(smelt_core::config::Materialization::CumulativeAggregate)
-        {
+        // Route cumulative detection through is_cumulative() so both
+        // `refresh: cumulative` (new surface) and
+        // `materialization: cumulative_aggregate` (legacy) reach the classifier.
+        let materialization = if metadata.is_cumulative() {
             "cumulative_aggregate"
         } else if metadata.incremental.is_some() {
             "incremental"

@@ -24,7 +24,7 @@
 //!    ```
 
 use crate::config::{
-    DataLatency, IncrementalConfig, Materialization, StateConfig, TimeseriesConfig,
+    DataLatency, IncrementalConfig, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::{Deserialize, Serialize};
@@ -211,6 +211,33 @@ pub struct ModelMetadata {
     /// snapshot reuse entirely even when the project is `environments`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<StateConfig>,
+
+    /// Refresh axis: how stored output is recomputed across runs.
+    ///
+    /// `None` / `Some(Full)` — default full rebuild from scratch.
+    /// `Some(Cumulative)` — cumulative-aggregate merge loop
+    /// (`materialization: table` + `refresh: cumulative` is the new opt-in
+    /// surface for what was previously `materialization: cumulative_aggregate`).
+    ///
+    /// See `docs/specs/models.md` §"Refresh axis" and
+    /// `docs/specs/cumulative_aggregate.md` §Surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<RefreshStrategy>,
+}
+
+impl ModelMetadata {
+    /// Returns `true` when this model uses the cumulative-aggregate merge loop.
+    ///
+    /// True for either:
+    /// - `refresh: cumulative` (new surface, `materialization: table` + `refresh: cumulative`)
+    /// - `materialization: cumulative_aggregate` (legacy surface; removed in Phase 2)
+    ///
+    /// Route every cumulative detection site through this predicate so Phase 2
+    /// only needs to drop the `CumulativeAggregate` arm.
+    pub fn is_cumulative(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::Cumulative)
+            || self.materialization == Some(Materialization::CumulativeAggregate)
+    }
 }
 
 /// Complete file metadata (single or multi-model)
@@ -356,24 +383,44 @@ fn frontmatter_has_generates(source: &str) -> bool {
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
-    // Rule: cumulative_aggregate forbids incremental: — enforced here so the
-    // diagnostic fires alongside the other materialization-block constraints.
-    if matches!(
-        metadata.materialization,
-        Some(Materialization::CumulativeAggregate)
-    ) && metadata.incremental.is_some()
-    {
+    // Rule: cumulative forbids incremental: — enforced here so the diagnostic
+    // fires alongside the other materialization-block constraints.
+    // Triggered by either `refresh: cumulative` (new) or
+    // `materialization: cumulative_aggregate` (legacy transitional).
+    if metadata.is_cumulative() && metadata.incremental.is_some() {
         return Err(MetadataError::CumulativeForbidsIncremental);
     }
 
-    // Rule: cumulative_aggregate forbids timeseries: — the cumulative output
+    // Rule: cumulative forbids timeseries: — the cumulative output
     // has no partition column.
-    if matches!(
-        metadata.materialization,
-        Some(Materialization::CumulativeAggregate)
-    ) && metadata.timeseries.is_some()
-    {
+    if metadata.is_cumulative() && metadata.timeseries.is_some() {
         return Err(MetadataError::CumulativeForbidsTimeseries);
+    }
+
+    // `refresh: cumulative` on a non-stored materialization:
+    // - ephemeral: hard error — there is no persisted output to accumulate into.
+    //   Mirrors the existing `ephemeral` + `incremental:` hard-error treatment.
+    // - view: advisory warning only — config is ignored; mirrors `view + incremental`.
+    if metadata.refresh == Some(RefreshStrategy::Cumulative) {
+        if let Some(mat) = &metadata.materialization {
+            match mat {
+                Materialization::Ephemeral => {
+                    return Err(MetadataError::MalformedTimeseries {
+                        message: "ephemeral models cannot use refresh: cumulative \
+                                  (ephemeral models have no persisted output to accumulate into)"
+                            .to_string(),
+                    });
+                }
+                Materialization::View => {
+                    tracing::warn!(
+                        "model has `refresh: cumulative` but `materialization: view` — \
+                         the refresh config is ignored for non-table materializations"
+                    );
+                    // Not an error — fall through.
+                }
+                _ => {}
+            }
+        }
     }
 
     // Rule: incremental: without timeseries: → TimeseriesRequiredForIncremental

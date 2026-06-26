@@ -64,7 +64,7 @@ The user surface conflated three independent questions under `materialization` (
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-06-26 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -125,7 +125,8 @@ The user surface conflated three independent questions under `materialization` (
 - `cargo test -p smelt-cli --test example_diagnostics` green after example migration.
 
 **Implementation shape.**
-- Remove `Test`? No — only `CumulativeAggregate` here. Drop the variant from `config.rs` enum + de/serialize; delete the transitional OR in `is_cumulative()`; delete now-dead `Materialization::CumulativeAggregate` match arms (`config.rs:850–877` cumulative portion, `execute.rs:987/990` unreachable arm, `smelt-db/src/lib.rs:1464`, `explain.rs:326`).
+- Remove `Test`? No — only `CumulativeAggregate` here. Drop the variant from `config.rs` enum + de/serialize; delete the transitional OR in `is_cumulative()`; delete now-dead `Materialization::CumulativeAggregate` match arms (`config.rs:850–877` cumulative portion, `execute.rs:987/990` unreachable arm, `smelt-db/src/lib.rs:1464`).
+- **Also drop the transitional `|| materialization == Materialization::CumulativeAggregate` fallback clauses** that Phase 1 added alongside `is_cumulative()` at the detection sites — `execute.rs` (2 sites, ~210 and ~712) and `explain.rs` (~326). These exist in Phase 1 so smelt.yml-configured legacy models (where frontmatter `metadata` is `None`) still resolve; once the variant is gone they are dead and must be removed too. (Surfaced by the Phase 1 reviewer — dropping the `is_cumulative()` arm alone is not sufficient.)
 - `explain.rs` / catalog (`docs.rs`) — serialize storage `materialization` + a `refresh` field (`"cumulative"`, omitted when full), per `cli.md` / `data_catalog.md` JSON schema.
 - Migrate the 5 example files (`examples/cumulative_classifier_gate/models/edges_valid.sql`, `edges_bad_aggregator.sql`, `examples/timeseries_broken_cumulative_with_incremental/...`, `examples/timeseries_broken_cumulative_with_timeseries/...`, `examples/web_analytics/models/silver/device_user_edges.sql` + its README) and the cumulative crate fixtures (`backbuild_cumulative_e2e.rs`, `cumulative_equivalence.rs`, `cumulative_diagnostics.rs`) from `materialization: cumulative_aggregate` → `materialization: table` + `refresh: cumulative`.
 

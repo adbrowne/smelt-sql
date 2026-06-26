@@ -16,6 +16,50 @@ pub enum ConfigError {
     },
 }
 
+/// The refresh axis — how a stored model's output is recomputed across runs.
+///
+/// Stored outputs (`materialization: table` or `materialized_view`) may
+/// opt into a non-default refresh strategy.  `Full` is the default (no key
+/// needed).  `Cumulative` enables the cumulative-aggregate merge loop (see
+/// `docs/specs/cumulative_aggregate.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshStrategy {
+    /// Rebuild from scratch on every run (default; no key required).
+    Full,
+    /// Cumulative-aggregate merge: one row per GROUP BY key, grown across
+    /// partitions using commutative-associative per-column combiners.
+    Cumulative,
+}
+
+impl<'de> Deserialize<'de> for RefreshStrategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "full" => Ok(RefreshStrategy::Full),
+            "cumulative" => Ok(RefreshStrategy::Cumulative),
+            _ => Err(serde::de::Error::custom(format!(
+                "Invalid refresh strategy: {}. Must be 'full' or 'cumulative'",
+                s
+            ))),
+        }
+    }
+}
+
+impl Serialize for RefreshStrategy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            RefreshStrategy::Full => serializer.serialize_str("full"),
+            RefreshStrategy::Cumulative => serializer.serialize_str("cumulative"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Materialization {
     Table,

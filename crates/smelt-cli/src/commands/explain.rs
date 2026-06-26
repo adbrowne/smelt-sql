@@ -323,7 +323,9 @@ fn build_physical_section(
                 "incremental (partition: {}, granularity: {})",
                 ts.partition_column, gran
             )
-        } else if materialization == Materialization::CumulativeAggregate {
+        } else if metadata.is_some_and(|m| m.is_cumulative())
+            || materialization == Materialization::CumulativeAggregate
+        {
             "cumulative_aggregate".to_string()
         } else {
             "full_refresh".to_string()
@@ -347,5 +349,122 @@ fn build_physical_section(
         nodes,
         ephemerals,
         transformations: planner_transformations,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::{
+        config::{Materialization, RefreshStrategy},
+        discovery::ModelKind,
+        graph::DependencyGraph,
+        metadata::ModelMetadata,
+        model_id::ModelId,
+        ModelFile,
+    };
+
+    /// Regression test: a model declared with `materialization: table` +
+    /// `refresh: cumulative` must report `"cumulative_aggregate"` as its
+    /// physical strategy in `smelt explain` output, NOT `"full_refresh"`.
+    ///
+    /// Before the fix, `build_physical_section` only checked for the legacy
+    /// `Materialization::CumulativeAggregate` variant; the new-surface
+    /// `Table` + `refresh: cumulative` combination fell through to
+    /// `"full_refresh"`.
+    #[test]
+    fn refresh_cumulative_table_strategy_is_cumulative_aggregate() {
+        // Minimal smelt.yml in a temp dir.
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let yml = "name: test_proj\n\
+                   version: 1\n\
+                   paths:\n  - models\n\
+                   targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+                   default_materialization: view\n";
+        std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
+        let config = smelt_cli::Config::load(tmp.path()).expect("Config::load from temp smelt.yml");
+
+        // Build a ModelFile with `materialization: table` + `refresh: cumulative`.
+        let model_name = "my_cumulative_model";
+        let path: std::path::PathBuf = format!("models/{}.sql", model_name).into();
+        let metadata = ModelMetadata {
+            materialization: Some(Materialization::Table),
+            refresh: Some(RefreshStrategy::Cumulative),
+            ..ModelMetadata::default()
+        };
+        let model_file = ModelFile {
+            name: model_name.to_string(),
+            model_id: ModelId::from_path(path.clone()),
+            path,
+            content: String::new(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: Some(Box::new(metadata)),
+            kind: ModelKind::Sql,
+            address_segments: vec![model_name.to_string()],
+        };
+
+        let graph = DependencyGraph::build(vec![model_file], None).expect("DependencyGraph::build");
+
+        let execution_order = vec![model_name.to_string()];
+        let physical = build_physical_section(&execution_order, &graph, &config, &[]);
+
+        let node = physical.nodes.get(model_name).unwrap_or_else(|| {
+            panic!(
+                "expected node '{}' in physical section; got: {:?}",
+                model_name,
+                physical.nodes.keys().collect::<Vec<_>>()
+            )
+        });
+
+        assert_eq!(
+            node.strategy, "cumulative_aggregate",
+            "model with materialization: table + refresh: cumulative must report \
+             strategy 'cumulative_aggregate', not '{}'",
+            node.strategy
+        );
+    }
+
+    /// Sanity check: a plain `materialization: table` model (no refresh: cumulative)
+    /// still reports `"full_refresh"`.
+    #[test]
+    fn plain_table_strategy_is_full_refresh() {
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let yml = "name: test_proj\n\
+                   version: 1\n\
+                   paths:\n  - models\n\
+                   targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+                   default_materialization: view\n";
+        std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
+        let config = smelt_cli::Config::load(tmp.path()).expect("Config::load from temp smelt.yml");
+
+        let model_name = "plain_table";
+        let path: std::path::PathBuf = format!("models/{}.sql", model_name).into();
+        let metadata = ModelMetadata {
+            materialization: Some(Materialization::Table),
+            refresh: None,
+            ..ModelMetadata::default()
+        };
+        let model_file = ModelFile {
+            name: model_name.to_string(),
+            model_id: ModelId::from_path(path.clone()),
+            path,
+            content: String::new(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: Some(Box::new(metadata)),
+            kind: ModelKind::Sql,
+            address_segments: vec![model_name.to_string()],
+        };
+
+        let graph = DependencyGraph::build(vec![model_file], None).expect("DependencyGraph::build");
+        let execution_order = vec![model_name.to_string()];
+        let physical = build_physical_section(&execution_order, &graph, &config, &[]);
+
+        let node = physical.nodes.get(model_name).expect("node exists");
+        assert_eq!(
+            node.strategy, "full_refresh",
+            "plain table model must report strategy 'full_refresh'"
+        );
     }
 }
