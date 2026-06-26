@@ -343,6 +343,16 @@ pub enum SyntaxKind {
     TEST_NAME,
     EXPECT_CLAUSE,
 
+    // Phase 4 (testing): `#` CTE-reference operator.
+    //
+    // HASH: a bare `#` token (when NOT followed by `>`; `#>` / `#>>` remain
+    //   HASH_ARROW / HASH_ARROW_TEXT). Used to separate the model path from the
+    //   named CTE in `smelt.<path>#<cte>` references inside smelt.test bodies.
+    // CTE_SEGMENT: the `#<cte>` trailing segment inside a SMELT_PATH_REF node.
+    //   Contains the HASH token and the following IDENT (CTE name).
+    HASH,
+    CTE_SEGMENT,
+
     // Special
     EOF, // End of file
 }

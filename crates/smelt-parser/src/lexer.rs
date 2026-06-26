@@ -205,7 +205,7 @@ impl<'a> Lexer<'a> {
                 COLON
             }
 
-            // Hash operators (#>, #>>)
+            // Hash operators (#>, #>>) and bare `#` (CTE-reference operator).
             '#' if self.peek_char() == Some('>') => {
                 self.advance(); // #
                 self.advance(); // >
@@ -215,6 +215,13 @@ impl<'a> Lexer<'a> {
                 } else {
                     HASH_ARROW // #>
                 }
+            }
+            // Bare `#` — used in `smelt.<path>#<cte>` CTE references inside
+            // smelt.test bodies.  This arm fires only when the next char is NOT
+            // `>` (the #> / #>> arm above catches that case first).
+            '#' => {
+                self.advance();
+                HASH
             }
             // Containment operator (@>)
             '@' if self.peek_char() == Some('>') => {

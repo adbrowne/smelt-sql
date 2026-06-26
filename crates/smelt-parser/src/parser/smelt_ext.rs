@@ -1317,6 +1317,55 @@ impl<'a> Parser<'a> {
         } else {
             // Value form. Wrap the path in SMELT_PATH_REF.
             self.start_node_at(outer_checkpoint, SMELT_PATH_REF);
+
+            // Optional trailing `#<cte>` CTE-reference suffix
+            // (Phase 4 — test-local CTE operator).  Peek past any trivia for a
+            // bare HASH token.  Only consume when HASH is followed by an IDENT
+            // (the CTE name); a dangling `#` alone is NOT consumed so error
+            // recovery in the surrounding expression is unaffected.
+            {
+                let mut hash_la = 0;
+                while let Some(t) = self.tokens.get(self.pos + hash_la) {
+                    if t.kind.is_trivia() {
+                        hash_la += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let next_is_hash = self
+                    .tokens
+                    .get(self.pos + hash_la)
+                    .map(|t| t.kind == HASH)
+                    .unwrap_or(false);
+
+                if next_is_hash {
+                    // Also check that an IDENT follows the HASH (past any trivia).
+                    let mut ident_la = hash_la + 1;
+                    while let Some(t) = self.tokens.get(self.pos + ident_la) {
+                        if t.kind.is_trivia() {
+                            ident_la += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let has_ident_after_hash = self
+                        .tokens
+                        .get(self.pos + ident_la)
+                        .map(|t| t.kind == IDENT)
+                        .unwrap_or(false);
+
+                    if has_ident_after_hash {
+                        let cte_checkpoint = self.builder.checkpoint();
+                        self.skip_trivia(); // trivia before HASH (now inside SMELT_PATH_REF)
+                        self.advance(); // HASH token
+                        self.skip_trivia(); // trivia between HASH and IDENT
+                        self.advance(); // IDENT — CTE name
+                        self.start_node_at(cte_checkpoint, CTE_SEGMENT);
+                        self.finish_node(); // CTE_SEGMENT
+                    }
+                }
+            }
+
             self.finish_node(); // SMELT_PATH_REF
         }
     }

@@ -6803,3 +6803,176 @@ fn smelt_test_unclosed_body_recovers() {
         "unclosed body should produce at least one parse error"
     );
 }
+
+// ===== Phase 4: `#` CTE-reference operator =====
+
+#[test]
+fn parse_hash_cte_ref() {
+    // `FROM smelt.daily_revenue#daily_agg` must parse as a single
+    // SMELT_PATH_REF with a CTE_SEGMENT child containing the CTE name.
+    // No parse errors expected.
+    use crate::ast::SmeltPathRef;
+    use crate::syntax_kind::SyntaxKind::SMELT_PATH_REF;
+
+    let input = "SELECT day FROM smelt.daily_revenue#daily_agg";
+    let parse = parse(input);
+    assert!(
+        parse.errors.is_empty(),
+        "parse_hash_cte_ref: unexpected errors: {:?}",
+        parse.errors
+    );
+
+    // Collect all SMELT_PATH_REF descendants.
+    let path_refs: Vec<SmeltPathRef> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SMELT_PATH_REF)
+        .filter_map(SmeltPathRef::cast)
+        .collect();
+
+    assert_eq!(
+        path_refs.len(),
+        1,
+        "expected exactly one SMELT_PATH_REF; got {}",
+        path_refs.len()
+    );
+    let pr = &path_refs[0];
+
+    // Path segments (without the CTE suffix) should be ["daily_revenue"].
+    assert_eq!(
+        pr.segments(),
+        vec!["daily_revenue".to_string()],
+        "segments() should not include the CTE name"
+    );
+
+    // cte_name() must return "daily_agg".
+    assert_eq!(
+        pr.cte_name().as_deref(),
+        Some("daily_agg"),
+        "cte_name() should be 'daily_agg'"
+    );
+
+    // hash_range() must be Some (anchored at the `#` character).
+    let hash_range = pr.hash_range();
+    assert!(hash_range.is_some(), "hash_range() should be Some");
+    // The `#` appears at byte offset 35 in "SELECT day FROM smelt.daily_revenue#daily_agg"
+    // (0-indexed: 'S'=0, ...  '#'=35).
+    let hr = hash_range.unwrap();
+    let hash_start: u32 = hr.start().into();
+    assert_eq!(
+        hash_start, 35,
+        "hash_range() start should be at byte offset 35 (the `#`)"
+    );
+    assert_eq!(
+        u32::from(hr.len()),
+        1,
+        "hash_range() should span exactly 1 byte"
+    );
+
+    // Lossless round-trip.
+    let cst_text = parse.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce the exact source"
+    );
+}
+
+#[test]
+fn parse_hash_cte_ref_no_errors_for_plain_ref() {
+    // A plain smelt path ref WITHOUT a `#` suffix must continue to parse
+    // without errors and have no cte_name().
+    use crate::ast::SmeltPathRef;
+    use crate::syntax_kind::SyntaxKind::SMELT_PATH_REF;
+
+    let input = "SELECT * FROM smelt.daily_revenue";
+    let parse = parse(input);
+    assert!(
+        parse.errors.is_empty(),
+        "plain ref: unexpected errors: {:?}",
+        parse.errors
+    );
+    let refs: Vec<SmeltPathRef> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SMELT_PATH_REF)
+        .filter_map(SmeltPathRef::cast)
+        .collect();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(
+        refs[0].cte_name(),
+        None,
+        "plain ref should have no cte_name"
+    );
+    assert_eq!(
+        refs[0].hash_range(),
+        None,
+        "plain ref should have no hash_range"
+    );
+}
+
+#[test]
+fn parse_hash_json_operators_unaffected() {
+    // `#>` and `#>>` (JSON operators) must still lex as HASH_ARROW /
+    // HASH_ARROW_TEXT, not as HASH followed by `>` / `>>`.
+    use crate::syntax_kind::SyntaxKind::{HASH_ARROW, HASH_ARROW_TEXT};
+    let tokens_arrow = crate::lexer::tokenize("col#>'{a}'");
+    let kinds_arrow: Vec<_> = tokens_arrow.iter().map(|t| t.kind).collect();
+    assert!(
+        kinds_arrow.contains(&HASH_ARROW),
+        "#> should lex as HASH_ARROW; got: {:?}",
+        kinds_arrow
+    );
+
+    let tokens_text = crate::lexer::tokenize("col#>>'{a}'");
+    let kinds_text: Vec<_> = tokens_text.iter().map(|t| t.kind).collect();
+    assert!(
+        kinds_text.contains(&HASH_ARROW_TEXT),
+        "#>> should lex as HASH_ARROW_TEXT; got: {:?}",
+        kinds_text
+    );
+}
+
+#[test]
+fn dangling_hash_no_ident_recovers() {
+    // A `smelt.<path>#` with NO following identifier (dangling `#`) must not
+    // panic and must preserve the lossless round-trip invariant.  The orphan
+    // `#` must NOT be captured into a CTE_SEGMENT — `cte_name()` must be None.
+    use crate::ast::SmeltPathRef;
+    use crate::syntax_kind::SyntaxKind::SMELT_PATH_REF;
+
+    let input = "SELECT x FROM smelt.daily_revenue#";
+
+    // Must not panic.
+    let parse = parse(input);
+
+    // Lossless round-trip: ALL source characters must be preserved in the CST.
+    let cst_text = parse.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "dangling `#`: CST must losslessly reproduce the source"
+    );
+
+    // The orphan `#` must NOT have been consumed into a CTE_SEGMENT.
+    // Any SMELT_PATH_REF in the tree must have cte_name() == None.
+    let path_refs: Vec<SmeltPathRef> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SMELT_PATH_REF)
+        .filter_map(SmeltPathRef::cast)
+        .collect();
+
+    for pr in &path_refs {
+        assert_eq!(
+            pr.cte_name(),
+            None,
+            "dangling `#`: cte_name() must be None (orphan `#` must not form a CTE_SEGMENT); \
+             got {:?}",
+            pr.cte_name()
+        );
+        assert_eq!(
+            pr.hash_range(),
+            None,
+            "dangling `#`: hash_range() must be None (orphan `#` must not be inside SMELT_PATH_REF)"
+        );
+    }
+}

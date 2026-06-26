@@ -804,6 +804,35 @@ impl SmeltPathRef {
     pub fn text_range(&self) -> TextRange {
         self.0.text_range()
     }
+
+    /// The optional `CTE_SEGMENT` child node (present when `#<cte>` suffix was
+    /// parsed). Returns `None` when this path ref has no CTE suffix.
+    fn cte_segment_node(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| n.kind() == CTE_SEGMENT)
+    }
+
+    /// The CTE name from a trailing `#<cte>` suffix, or `None` if not present.
+    ///
+    /// For `smelt.daily_revenue#daily_agg` this returns `Some("daily_agg")`.
+    pub fn cte_name(&self) -> Option<String> {
+        let seg = self.cte_segment_node()?;
+        seg.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the `#` token in a trailing `#<cte>` suffix, used for
+    /// anchoring `CteRefOutsideTest` diagnostics at the operator itself.
+    ///
+    /// Returns `None` when this path ref has no CTE suffix.
+    pub fn hash_range(&self) -> Option<TextRange> {
+        let seg = self.cte_segment_node()?;
+        seg.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == HASH)
+            .map(|t| t.text_range())
+    }
 }
 
 /// `smelt.<path>(<args>)` call form, with optional trailing `PASSING` clauses.

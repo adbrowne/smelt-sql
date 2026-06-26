@@ -755,6 +755,13 @@ pub enum DiagnosticCode {
     /// Message: "model declares state.mode {model_mode} but project posture is
     /// {project_mode}; models may narrow but not widen the project posture"
     StateModeWidening,
+    /// Emitted (Error) when a `smelt.<model>#<cte>` CTE reference appears
+    /// outside a `smelt.test` body. The `#` operator is test-local: it may
+    /// only be used inside a `smelt.test` declaration body to address one
+    /// internal CTE of the referenced model. Using it in a model body, a
+    /// `smelt.define` body, or any other position is a hard error.
+    /// Anchored at the `#` operator token.
+    CteRefOutsideTest,
 }
 
 /// Structured metadata attached to diagnostics for code actions

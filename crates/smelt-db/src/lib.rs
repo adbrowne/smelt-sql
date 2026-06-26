@@ -1042,6 +1042,43 @@ pub fn file_diagnostics(
         .collect()
 }
 
+/// Pure structural check: walk all `SMELT_PATH_REF` nodes in `syntax`
+/// that carry a `#`-suffix `CTE_SEGMENT` child.  For each such node, check
+/// whether any ancestor is a `SMELT_TEST` node.  If NOT, emit a
+/// `CteRefOutsideTest` diagnostic anchored at the `#` token.
+///
+/// This is a Salsa-purity-compliant analysis function (no DB access).  The
+/// thin Salsa wrapper in `check_file_diagnostics` calls it after gathering the
+/// parse input.
+fn cte_ref_outside_test_diagnostics(
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+) -> Vec<Diagnostic> {
+    use smelt_parser::ast::SmeltPathRef;
+    use smelt_parser::SyntaxKind::{SMELT_PATH_REF, SMELT_TEST};
+
+    let mut diags = Vec::new();
+    for node in syntax.descendants().filter(|n| n.kind() == SMELT_PATH_REF) {
+        if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
+            if let Some(hash_range) = path_ref.hash_range() {
+                // Emit unless there is a SMELT_TEST ancestor.
+                let inside_test = node.ancestors().any(|a| a.kind() == SMELT_TEST);
+                if !inside_test {
+                    diags.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "CTE references using `#` are only valid inside a `smelt.test` body; \
+                                  remove the `#<cte>` suffix or move this reference inside a `smelt.test` declaration"
+                            .to_string(),
+                        range: hash_range,
+                        code: Some(DiagnosticCode::CteRefOutsideTest),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+    diags
+}
+
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
 /// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
 /// (`architecture.md` §"Planner scope").
@@ -1777,6 +1814,22 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     DiagnosticAcc(diag).accumulate(db);
                 }
             }
+        }
+    }
+
+    // Phase 4 (testing): `#` CTE-reference outside smelt.test.
+    //
+    // A `smelt.<path>#<cte>` reference is only valid inside a `smelt.test`
+    // body.  Walk all SMELT_PATH_REF nodes in the CST and emit
+    // `CteRefOutsideTest` for any that carry a `#` suffix but are not
+    // inside a SMELT_TEST ancestor.  This is a pure structural check that
+    // runs unconditionally (no early-return) so model files, function files,
+    // and test files all surface it correctly.
+    {
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+        for diag in cte_ref_outside_test_diagnostics(&syntax) {
+            DiagnosticAcc(diag).accumulate(db);
         }
     }
 
