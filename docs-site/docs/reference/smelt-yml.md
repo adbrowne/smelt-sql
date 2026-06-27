@@ -104,8 +104,10 @@ The `default_materialization` field and per-model `materialization` field accept
 | `view` | Created as a database view. Re-computed on each query. |
 | `ephemeral` | Not materialized at all. Inlined as a CTE into downstream models. Cannot have incremental config or target overrides. |
 | `materialized_view` | Backend-managed persistent view (e.g., PostgreSQL, Databricks). Refreshed atomically. |
-| `cumulative_aggregate` | Cumulative/running aggregate table. See [Cumulative Aggregates](../guide/cumulative-aggregates.md) for details. |
-| `test` | Test-only model. Executed by `smelt test`; not materialized during normal `smelt run`/`smelt build`. |
+
+Test files are identified by a `smelt.test` declaration in the SQL file, not by a materialization value. See [Testing](../guide/testing.md) for details.
+
+A cumulative/running aggregate table is opted in with `materialization: table` + `refresh: cumulative` — see [Cumulative Aggregates](../guide/cumulative-aggregates.md) for details.
 
 **Precedence for materialization resolution:**
 

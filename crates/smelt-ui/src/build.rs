@@ -35,10 +35,7 @@ pub fn build_graph_response(graph: &DependencyGraph, config: &Config) -> GraphRe
         let metadata = model.metadata.as_deref();
         let tags = config.get_tags(name, metadata);
 
-        let is_test = metadata
-            .and_then(|m| m.materialization.as_ref())
-            .map(|m| *m == smelt_core::config::Materialization::Test)
-            .unwrap_or(false);
+        let is_test = model.is_test();
 
         let node_type = if is_test {
             NodeType::Test
@@ -58,15 +55,7 @@ pub fn build_graph_response(graph: &DependencyGraph, config: &Config) -> GraphRe
             node_type,
         });
 
-        // Link test nodes to the model they test
-        if is_test {
-            if let Some(test_config) = metadata.and_then(|m| m.test.as_ref()) {
-                edges.push(GraphEdge {
-                    source: test_config.model.clone(),
-                    target: name.to_string(),
-                });
-            }
-        }
+        // Test nodes' model refs are captured via regular dependency edges below.
     }
 
     for source_name in graph.iter_sources() {

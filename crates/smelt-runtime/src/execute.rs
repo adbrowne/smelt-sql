@@ -8,9 +8,8 @@
 //!
 //! This file owns the model-plan construction (batch dispatch per
 //! `BatchSafety` shape), the per-model compile+execute loop (full refresh,
-//! incremental batches, and `cumulative_aggregate` dispatch via
-//! `crate::cumulative`), cancellation handling, manifest writes, and
-//! interval-store updates.
+//! incremental batches, and cumulative dispatch via `crate::cumulative`),
+//! cancellation handling, manifest writes, and interval-store updates.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -204,25 +203,29 @@ pub async fn execute_project(
                         .cloned()
                         .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
-                    match materialization {
-                        smelt_core::config::Materialization::CumulativeAggregate => {
-                            ModelStrategy::Cumulative
-                        }
-                        smelt_core::config::Materialization::Ephemeral => ModelStrategy::Ephemeral,
-                        _ => match (
-                            inc_config,
-                            ts_config,
-                            request.start.as_deref(),
-                            request.end.as_deref(),
-                        ) {
-                            (Some(_inc), Some(ts), Some(_), Some(_)) => {
-                                ModelStrategy::Incremental {
-                                    partition_column: ts.partition_column.clone(),
-                                    granularity: format!("{:?}", ts.granularity).to_lowercase(),
-                                }
+                    // Route cumulative detection through is_cumulative().
+                    if metadata.is_some_and(|m| m.is_cumulative()) {
+                        ModelStrategy::Cumulative
+                    } else {
+                        match materialization {
+                            smelt_core::config::Materialization::Ephemeral => {
+                                ModelStrategy::Ephemeral
                             }
-                            _ => ModelStrategy::FullRefresh,
-                        },
+                            _ => match (
+                                inc_config,
+                                ts_config,
+                                request.start.as_deref(),
+                                request.end.as_deref(),
+                            ) {
+                                (Some(_inc), Some(ts), Some(_), Some(_)) => {
+                                    ModelStrategy::Incremental {
+                                        partition_column: ts.partition_column.clone(),
+                                        granularity: format!("{:?}", ts.granularity).to_lowercase(),
+                                    }
+                                }
+                                _ => ModelStrategy::FullRefresh,
+                            },
+                        }
                     }
                 } else {
                     ModelStrategy::FullRefresh
@@ -698,7 +701,12 @@ pub async fn execute_project(
         // incremental / full-refresh branches because it has its own per-
         // partition merge loop (see `smelt_runtime::cumulative` and
         // `docs/specs/cumulative_aggregate.md`).
-        if plan.materialization == smelt_core::config::Materialization::CumulativeAggregate {
+        let plan_is_cumulative = plan
+            .model_file
+            .metadata
+            .as_deref()
+            .is_some_and(|m| m.is_cumulative());
+        if plan_is_cumulative {
             let db_table_name = plan.model_file.db_name_owned();
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
@@ -983,12 +991,6 @@ pub async fn execute_project(
                     }
                     smelt_core::config::Materialization::Ephemeral => {
                         unreachable!("Ephemeral models should be inlined as CTEs, not executed")
-                    }
-                    smelt_core::config::Materialization::Test => {
-                        unreachable!("Test models should not be executed directly")
-                    }
-                    smelt_core::config::Materialization::CumulativeAggregate => {
-                        unreachable!("cumulative_aggregate dispatched above the match")
                     }
                 };
 

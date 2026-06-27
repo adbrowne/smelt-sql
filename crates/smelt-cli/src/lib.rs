@@ -45,7 +45,8 @@ pub use temporal::{
     IncrementalBatch, IncrementalWindows, SingleIncrementalWindow,
 };
 pub use test_compiler::{
-    compile_whole_model_test_with_fns, extract_ctes, validate_test_expect, CteInfo,
+    compile_whole_model_test_with_fns, extract_ctes, find_cte_ref_in_body,
+    record_literal_to_yaml_row, validate_test_expect, CteInfo,
 };
 pub use test_runner::TestResult;
 

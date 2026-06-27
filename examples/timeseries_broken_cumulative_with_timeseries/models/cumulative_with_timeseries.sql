@@ -1,5 +1,6 @@
 ---
-materialization: cumulative_aggregate
+materialization: table
+refresh: cumulative
 timeseries:
   event_time_column: event_date
   partition_column: event_date

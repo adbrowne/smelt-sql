@@ -755,6 +755,24 @@ pub enum DiagnosticCode {
     /// Message: "model declares state.mode {model_mode} but project posture is
     /// {project_mode}; models may narrow but not widen the project posture"
     StateModeWidening,
+    /// Emitted (Error) when a `smelt.<model>#<cte>` CTE reference appears
+    /// outside a `smelt.test` body. The `#` operator is test-local: it may
+    /// only be used inside a `smelt.test` declaration body to address one
+    /// internal CTE of the referenced model. Using it in a model body, a
+    /// `smelt.define` body, or any other position is a hard error.
+    /// Anchored at the `#` operator token.
+    CteRefOutsideTest,
+    /// Emitted (Error) at `smelt test` run time when a `PASSING <dep>` clause
+    /// in a `smelt.test` declaration names a dependency that is not a reachable
+    /// external `smelt.<path>` dep of the assertion query. Catches typos such
+    /// as `PASSING order AS (...)` when the actual dep is `orders`.  A typo'd
+    /// PASSING clause would otherwise produce a false green (the dep gets an
+    /// empty mock CTE). Anchored at the offending PASSING_NAME span.
+    UnknownTestInput,
+    /// Emitted (Error) at `smelt test` run time when a `smelt.<model>#<cte>`
+    /// reference in a `smelt.test` body names a CTE that is absent from the
+    /// referenced model's `WITH` clause. Anchored at the `#<cte>` suffix token.
+    UnknownTestCte,
 }
 
 /// Structured metadata attached to diagnostics for code actions

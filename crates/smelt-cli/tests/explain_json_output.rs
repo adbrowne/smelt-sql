@@ -18,6 +18,7 @@ fn emitted_model_carries_origin_field() {
     let model = ExplainModel {
         dependencies: vec![],
         materialization: Materialization::View,
+        refresh: None,
         incremental: None,
         tags: vec![],
         owner: None,
@@ -62,6 +63,7 @@ fn hand_authored_model_omits_origin_field() {
     let model = ExplainModel {
         dependencies: vec![],
         materialization: Materialization::View,
+        refresh: None,
         incremental: None,
         tags: vec![],
         owner: None,

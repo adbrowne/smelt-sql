@@ -1,12 +1,15 @@
 # cumulative_aggregate Reference
 
-`materialization: cumulative_aggregate` is a stateful-merge materialization. The output has one row per `GROUP BY` key, where each row's columns reflect the combined state across every processed source partition. The unique key and the per-column combiners are derived from the SELECT — the frontmatter is one line.
+The cumulative-aggregate merge loop is a stateful-merge materialization. The output has one row per `GROUP BY` key, where each row's columns reflect the combined state across every processed source partition. The unique key and the per-column combiners are derived from the SELECT.
 
 ## Frontmatter
 
+Use `materialization: table` together with `refresh: cumulative` to enable this mode:
+
 ```sql
 ---
-materialization: cumulative_aggregate
+materialization: table
+refresh: cumulative
 ---
 SELECT
     device_id,
@@ -19,7 +22,7 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-The materialization name is the entire opt-in. There is no `cumulative_aggregate:` configuration block.
+There is no additional configuration block — the SQL is the entire specification.
 
 ## What's derived from the SQL
 
@@ -89,10 +92,10 @@ Reordering merges across source partitions does not change the final state. This
 | `CumulativeForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
 | `CumulativeNoDrivingSource` | No source in the FROM clause declares `timeseries:` |
 | `CumulativeMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
-| `CumulativeForbidsTimeseries` | Model declares both `materialization: cumulative_aggregate` and a `timeseries:` block |
-| `CumulativeForbidsIncremental` | Model declares both `materialization: cumulative_aggregate` and an `incremental:` block |
+| `CumulativeForbidsTimeseries` | Model declares both `refresh: cumulative` and a `timeseries:` block |
+| `CumulativeForbidsIncremental` | Model declares both `refresh: cumulative` and an `incremental:` block |
 
-There is no `safety_overrides:` block for `cumulative_aggregate`. Rejected constructs break the cross-partition equivalence contract, not partial correctness — there is no opt-in escape hatch.
+There is no `safety_overrides:` block for cumulative models. Rejected constructs break the cross-partition equivalence contract, not partial correctness — there is no opt-in escape hatch.
 
 ## Reprocessing
 
@@ -112,4 +115,4 @@ Downstream consumers see the cumulative output as a lookup — there is no parti
 
 - [Materializations guide](../guide/materializations.md#cumulative_aggregate) — author-facing walkthrough.
 - [Incremental Models](../guide/incremental-models.md) — the sibling materialization for per-partition output.
-- [Timeseries reference](timeseries.md) — `timeseries:` block declared on the *source* a cumulative_aggregate model reads from.
+- [Timeseries reference](timeseries.md) — `timeseries:` block declared on the *source* a cumulative model reads from.

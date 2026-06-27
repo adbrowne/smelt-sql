@@ -123,18 +123,23 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         .collect();
     models.extend(emitted_model_files);
 
-    // Collect test-model → target-model mapping before filtering test models out,
+    // Collect test → target-model mapping before filtering test models out,
     // so each catalog model page can list the tests that exercise it.
+    // For new-syntax smelt.test declarations, the subject model(s) are derived
+    // from the smelt.<model> refs in the test's assertion body.
     let mut test_targets: HashMap<String, Vec<TestRef>> = HashMap::new();
     for model in &models {
         if model.is_test() {
-            if let Some(tc) = model.test_config() {
-                let target = tc.model.clone();
-                let test_ref = TestRef {
-                    name: model.name.clone(),
-                    path: model.path.display().to_string(),
-                };
-                test_targets.entry(target).or_default().push(test_ref);
+            let test_ref = TestRef {
+                name: model.name.clone(),
+                path: model.path.display().to_string(),
+            };
+            // Derive subject models from smelt.<path> refs in the body of each
+            // smelt.test declaration (new-syntax path).
+            let leaves =
+                smelt_cli::test_compiler::new_syntax_test_subject_model_leaves(&model.content);
+            for leaf in leaves {
+                test_targets.entry(leaf).or_default().push(test_ref.clone());
             }
         }
     }

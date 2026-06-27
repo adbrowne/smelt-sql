@@ -22,15 +22,6 @@ pub async fn execute_model(
         crate::config::Materialization::Ephemeral => {
             unreachable!("Ephemeral models should be inlined as CTEs, not executed directly")
         }
-        crate::config::Materialization::Test => {
-            unreachable!("Test models should not be executed directly")
-        }
-        crate::config::Materialization::CumulativeAggregate => {
-            unreachable!(
-                "cumulative_aggregate models are dispatched through the cumulative loop, \
-                 not the standard execute_model path"
-            )
-        }
     };
 
     backend

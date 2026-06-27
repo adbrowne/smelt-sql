@@ -1,4 +1,3 @@
-use crate::config::Materialization;
 use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata, TestConfig};
 use crate::model_id::ModelId;
 use crate::refs::extract_refs;
@@ -63,13 +62,14 @@ impl ModelFile {
         self.address_segments.join(".")
     }
 
-    /// Whether this model is a test.
+    /// Whether this model file contains `smelt.test` declarations.
     pub fn is_test(&self) -> bool {
-        self.metadata
-            .as_ref()
-            .and_then(|m| m.materialization.as_ref())
-            .map(|m| *m == Materialization::Test)
-            .unwrap_or(false)
+        let clean = smelt_parser::strip_frontmatter(&self.content);
+        let parse = smelt_parser::parse(&clean);
+        if let Some(file) = AstFile::cast(parse.syntax()) {
+            return file.tests().next().is_some();
+        }
+        false
     }
 
     /// Get test configuration if this is a test model.

@@ -1,5 +1,5 @@
 #![cfg(feature = "duckdb")]
-//! Cross-partition equivalence harness for `materialization: cumulative_aggregate`.
+//! Cross-partition equivalence harness for cumulative aggregate models.
 //!
 //! Asserts the formal contract from `docs/specs/cumulative_aggregate.md`
 //! §"Cross-partition equivalence":

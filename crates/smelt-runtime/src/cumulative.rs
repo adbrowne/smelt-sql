@@ -1,4 +1,4 @@
-//! Per-partition execution loop for `materialization: cumulative_aggregate`.
+//! Per-partition execution loop for `refresh: cumulative` table models.
 //!
 //! See `docs/specs/cumulative_aggregate.md` for the normative spec.
 //!

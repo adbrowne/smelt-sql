@@ -328,13 +328,20 @@ fn inputs_to_string_maps(
 
 /// Run a property-based test: execute the test N times with random values
 /// for missing columns.
+// The test identity (name, model, cte), the SQL under test, the mock inputs,
+// the expectation, and the run knobs (check_order, cases, seed) are all
+// independent values threaded straight through to the runner — bundling them
+// into a struct would add indirection without reducing the real fan-in.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "duckdb")]
 pub fn run_property_test(
     test_name: &str,
     model_name: &str,
     target_cte: Option<&str>,
     model_sql: &str,
-    test_config: &smelt_core::metadata::TestConfig,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    expect: &[BTreeMap<String, serde_yaml::Value>],
+    check_order: bool,
     cases: u32,
     seed: Option<u64>,
 ) -> PropertyTestResult {
@@ -347,11 +354,9 @@ pub fn run_property_test(
             .as_nanos() as u64
     });
 
-    let check_order = test_config.check_order.unwrap_or(false);
-
     // Find missing columns (only for CTE-targeted tests)
     let missing = if let Some(cte) = target_cte {
-        find_missing_columns(model_sql, cte, &test_config.inputs)
+        find_missing_columns(model_sql, cte, inputs)
     } else {
         BTreeMap::new()
     };
@@ -361,8 +366,7 @@ pub fn run_property_test(
         let mut rng = StdRng::seed_from_u64(iter_seed);
 
         // Augment inputs with random values for missing columns
-        let augmented =
-            augment_inputs(&test_config.inputs, &missing, &mut rng, &test_config.inputs);
+        let augmented = augment_inputs(inputs, &missing, &mut rng, inputs);
 
         // Compile the test
         let compiled = if let Some(cte) = target_cte {
@@ -402,7 +406,7 @@ pub fn run_property_test(
             model_name,
             target_cte,
             &compiled_sql,
-            &test_config.expect,
+            expect,
             check_order,
         );
 
@@ -459,33 +463,41 @@ pub fn run_property_test(
 /// Returns `Some(PropertyTestResult)` when `target_cte` is specified and
 /// the target CTE body references columns absent from `inputs` — the
 /// omitted-column signal that marks a property-based test per testing.md
-/// §Semantics. Runs `test_config.cases.unwrap_or(10)` iterations.
+/// §Semantics. Runs `cases.unwrap_or(10)` iterations.
 ///
 /// Returns `None` when all referenced columns are provided (or `target_cte`
 /// is `None`), signalling the caller to fall through to one-shot `run_test`.
 /// Whole-model tests (no `target_cte`) always return `None`; the `cases`
 /// field has no effect for them (see testing.md Known Divergences).
+// Mirrors `run_property_test`'s parameter set (test identity, SQL, inputs,
+// expectation, run knobs); see the rationale on that function.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "duckdb")]
 pub fn try_dispatch_property_test(
     test_name: &str,
     model_name: &str,
     target_cte: Option<&str>,
     model_sql: &str,
-    test_config: &smelt_core::metadata::TestConfig,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    expect: &[BTreeMap<String, serde_yaml::Value>],
+    check_order: bool,
+    cases: Option<u32>,
 ) -> Option<PropertyTestResult> {
     let cte = target_cte?;
-    let missing = find_missing_columns(model_sql, cte, &test_config.inputs);
+    let missing = find_missing_columns(model_sql, cte, inputs);
     if missing.is_empty() {
         return None;
     }
-    let cases = test_config.cases.unwrap_or(10);
+    let cases_val = cases.unwrap_or(10);
     Some(run_property_test(
         test_name,
         model_name,
         Some(cte),
         model_sql,
-        test_config,
-        cases,
+        inputs,
+        expect,
+        check_order,
+        cases_val,
         None,
     ))
 }
@@ -609,8 +621,6 @@ SELECT * FROM daily
     #[cfg(feature = "duckdb")]
     #[test]
     fn test_property_test_basic() {
-        use smelt_core::metadata::TestConfig;
-
         // D-45: target CTE directly reads from external smelt dep.
         // inputs keyed by the external dep dot-key ("raw_data"), not internal CTE name.
         let model_sql = r#"
@@ -651,22 +661,16 @@ SELECT * FROM daily
             "revenue".to_string(),
             serde_yaml::Value::Number(serde_yaml::Number::from(300.0)),
         );
-
-        let test_config = TestConfig {
-            model: "test_model".to_string(),
-            target_cte: Some("daily".to_string()),
-            inputs,
-            expect: vec![expect1],
-            cases: Some(5),
-            check_order: None,
-        };
+        let expect = vec![expect1];
 
         let result = run_property_test(
             "test_prop",
             "test_model",
             Some("daily"),
             model_sql,
-            &test_config,
+            &inputs,
+            &expect,
+            false,
             5,
             Some(42),
         );
@@ -716,8 +720,6 @@ SELECT * FROM formatted
     #[cfg(feature = "duckdb")]
     #[test]
     fn dispatch_cte_with_omitted_col_runs_n_iterations() {
-        use smelt_core::metadata::TestConfig;
-
         // D-45: `result` CTE reads directly from external smelt dep.
         // `flag` is omitted from inputs → property dispatch triggered.
         // SUM(amount) is invariant to `flag`; expect only checks `total`.
@@ -741,22 +743,17 @@ SELECT * FROM result
             "total".to_string(),
             serde_yaml::Value::Number(serde_yaml::Number::from(100)),
         );
-
-        let test_config = TestConfig {
-            model: "test_model".to_string(),
-            target_cte: Some("result".to_string()),
-            inputs,
-            expect: vec![expect_row],
-            cases: Some(3),
-            check_order: None,
-        };
+        let expect = vec![expect_row];
 
         let result = try_dispatch_property_test(
             "test_dispatch",
             "test_model",
             Some("result"),
             model_sql,
-            &test_config,
+            &inputs,
+            &expect,
+            false,
+            Some(3),
         );
 
         assert!(
@@ -771,8 +768,6 @@ SELECT * FROM result
     #[cfg(feature = "duckdb")]
     #[test]
     fn dispatch_fully_specified_cte_returns_none() {
-        use smelt_core::metadata::TestConfig;
-
         // D-45: `result` CTE reads directly from external smelt dep.
         // Both `amount` and `flag` provided → no missing columns → no dispatch.
         let model_sql = r#"
@@ -794,21 +789,15 @@ SELECT * FROM result
         let mut inputs = BTreeMap::new();
         inputs.insert("orders".to_string(), vec![order_row]);
 
-        let test_config = TestConfig {
-            model: "test_model".to_string(),
-            target_cte: Some("result".to_string()),
-            inputs,
-            expect: vec![],
-            cases: Some(3),
-            check_order: None,
-        };
-
         let result = try_dispatch_property_test(
             "test_dispatch",
             "test_model",
             Some("result"),
             model_sql,
-            &test_config,
+            &inputs,
+            &[],
+            false,
+            Some(3),
         );
 
         assert!(

@@ -54,7 +54,15 @@ fn test_retail_analytics_no_undefined_refs() {
             .unwrap();
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let models = discovery.discover_models().unwrap();
+    // Tests are a separate kind, not build-DAG nodes: their body refs are
+    // mock-satisfied by PASSING clauses, so they are excluded from the model
+    // dependency graph exactly as every production run/build path does.
+    let models: Vec<_> = discovery
+        .discover_models()
+        .unwrap()
+        .into_iter()
+        .filter(|m| !m.is_test())
+        .collect();
     let sources = SourcesConfig::load(&project_dir).ok();
     let _seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
@@ -78,7 +86,13 @@ fn test_retail_analytics_dag_is_acyclic() {
             .unwrap();
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let models = discovery.discover_models().unwrap();
+    // Tests are excluded from the build DAG (see `no_undefined_refs` above).
+    let models: Vec<_> = discovery
+        .discover_models()
+        .unwrap()
+        .into_iter()
+        .filter(|m| !m.is_test())
+        .collect();
     let sources = SourcesConfig::load(&project_dir).ok();
     let _seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 

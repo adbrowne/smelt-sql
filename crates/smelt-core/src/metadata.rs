@@ -24,7 +24,7 @@
 //!    ```
 
 use crate::config::{
-    DataLatency, IncrementalConfig, Materialization, StateConfig, TimeseriesConfig,
+    DataLatency, IncrementalConfig, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::{Deserialize, Serialize};
@@ -42,20 +42,11 @@ pub enum ColumnTest {
     Parameterized(BTreeMap<String, serde_yaml::Value>),
 }
 
-/// Configuration for a test model
+/// Frontmatter knobs for a `smelt.test` declaration.
+/// The model under test, mocks, and expectations live in the grammar
+/// (`AS (...)`, `PASSING`, `EXPECT`) — not here.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct TestConfig {
-    /// Name of the model being tested
-    pub model: String,
-    /// Optional CTE name to test in isolation (if absent, tests the whole model)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_cte: Option<String>,
-    /// Mock input data: maps dependency name → list of row objects
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub inputs: BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
-    /// Expected output rows
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expect: Vec<BTreeMap<String, serde_yaml::Value>>,
     /// Number of property-based test cases (default 10)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cases: Option<u32>,
@@ -183,7 +174,8 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub backend_hints: HashMap<String, serde_yaml::Value>,
 
-    /// Test configuration (only for materialization: test)
+    /// Test configuration (frontmatter knobs for `smelt.test` declarations,
+    /// e.g. `cases` and `check_order`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestConfig>,
 
@@ -211,6 +203,27 @@ pub struct ModelMetadata {
     /// snapshot reuse entirely even when the project is `environments`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<StateConfig>,
+
+    /// Refresh axis: how stored output is recomputed across runs.
+    ///
+    /// `None` / `Some(Full)` — default full rebuild from scratch.
+    /// `Some(Cumulative)` — cumulative-aggregate merge loop.
+    /// Opt-in: `materialization: table` + `refresh: cumulative`.
+    ///
+    /// See `docs/specs/models.md` §"Refresh axis" and
+    /// `docs/specs/cumulative_aggregate.md` §Surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<RefreshStrategy>,
+}
+
+impl ModelMetadata {
+    /// Returns `true` when this model uses the cumulative-aggregate merge loop.
+    ///
+    /// The opt-in is `materialization: table` + `refresh: cumulative`.
+    /// Every cumulative detection site must route through this predicate.
+    pub fn is_cumulative(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::Cumulative)
+    }
 }
 
 /// Complete file metadata (single or multi-model)
@@ -308,15 +321,15 @@ pub enum MetadataError {
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
-    /// A model declares `materialization: cumulative_aggregate` and a `timeseries:` block.
+    /// A model declares `refresh: cumulative` and a `timeseries:` block.
     /// Cumulative outputs are not themselves timeseries — the rule reads the
     /// partition shape from the driving source instead (see
     /// `docs/specs/cumulative_aggregate.md` §"Output shape").
-    #[error("CumulativeForbidsTimeseries: cumulative_aggregate models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
+    #[error("CumulativeForbidsTimeseries: cumulative models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
     CumulativeForbidsTimeseries,
 
-    /// A model declares `materialization: cumulative_aggregate` and an `incremental:` block.
-    #[error("CumulativeForbidsIncremental: cumulative_aggregate and incremental are sibling materializations with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
+    /// A model declares `refresh: cumulative` and an `incremental:` block.
+    #[error("CumulativeForbidsIncremental: cumulative and incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
     CumulativeForbidsIncremental,
 }
 
@@ -356,24 +369,43 @@ fn frontmatter_has_generates(source: &str) -> bool {
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
-    // Rule: cumulative_aggregate forbids incremental: — enforced here so the
-    // diagnostic fires alongside the other materialization-block constraints.
-    if matches!(
-        metadata.materialization,
-        Some(Materialization::CumulativeAggregate)
-    ) && metadata.incremental.is_some()
-    {
+    // Rule: cumulative forbids incremental: — enforced here so the diagnostic
+    // fires alongside the other materialization-block constraints.
+    // Triggered by `refresh: cumulative`.
+    if metadata.is_cumulative() && metadata.incremental.is_some() {
         return Err(MetadataError::CumulativeForbidsIncremental);
     }
 
-    // Rule: cumulative_aggregate forbids timeseries: — the cumulative output
+    // Rule: cumulative forbids timeseries: — the cumulative output
     // has no partition column.
-    if matches!(
-        metadata.materialization,
-        Some(Materialization::CumulativeAggregate)
-    ) && metadata.timeseries.is_some()
-    {
+    if metadata.is_cumulative() && metadata.timeseries.is_some() {
         return Err(MetadataError::CumulativeForbidsTimeseries);
+    }
+
+    // `refresh: cumulative` on a non-stored materialization:
+    // - ephemeral: hard error — there is no persisted output to accumulate into.
+    //   Mirrors the existing `ephemeral` + `incremental:` hard-error treatment.
+    // - view: advisory warning only — config is ignored; mirrors `view + incremental`.
+    if metadata.refresh == Some(RefreshStrategy::Cumulative) {
+        if let Some(mat) = &metadata.materialization {
+            match mat {
+                Materialization::Ephemeral => {
+                    return Err(MetadataError::MalformedTimeseries {
+                        message: "ephemeral models cannot use refresh: cumulative \
+                                  (ephemeral models have no persisted output to accumulate into)"
+                            .to_string(),
+                    });
+                }
+                Materialization::View => {
+                    tracing::warn!(
+                        "model has `refresh: cumulative` but `materialization: view` — \
+                         the refresh config is ignored for non-table materializations"
+                    );
+                    // Not an error — fall through.
+                }
+                _ => {}
+            }
+        }
     }
 
     // Rule: incremental: without timeseries: → TimeseriesRequiredForIncremental
@@ -386,22 +418,13 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         None => return Ok(()),
     };
 
-    // Rule: timeseries: on ephemeral or test → MalformedTimeseries
+    // Rule: timeseries: on ephemeral → MalformedTimeseries
     if let Some(mat) = &metadata.materialization {
-        match mat {
-            Materialization::Ephemeral => {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: "timeseries: is not allowed on ephemeral models (no persisted output)"
-                        .to_string(),
-                });
-            }
-            Materialization::Test => {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: "timeseries: is not allowed on test models (not a persistent output)"
-                        .to_string(),
-                });
-            }
-            _ => {}
+        if mat == &Materialization::Ephemeral {
+            return Err(MetadataError::MalformedTimeseries {
+                message: "timeseries: is not allowed on ephemeral models (no persisted output)"
+                    .to_string(),
+            });
         }
     }
 
@@ -657,6 +680,9 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // Pre-validate strict sub-fields before the resilient fallback path.
         // `reuse` uses deny_unknown_fields and `state` uses strict enum variants;
         // both must fail hard rather than be silently stripped (fail-loud discipline).
+        // `materialization: cumulative_aggregate` is also checked here to give a
+        // clear migration error — this value was removed; use `materialization: table`
+        // + `refresh: cumulative` instead.
         for (key, value) in validated_map.iter() {
             let key_str = key.as_str().unwrap_or("");
             if key_str == "reuse" {
@@ -665,6 +691,15 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
             } else if key_str == "state" {
                 serde_yaml::from_value::<StateConfig>(value.clone())
                     .map_err(MetadataError::YamlParseError)?;
+            // Fail hard specifically for the removed `cumulative_aggregate`
+            // value so the error is clear. Other unknown materialization values
+            // use the resilient fallback path below (surfaced as diagnostics
+            // by smelt-db rather than hard-failing discovery).
+            } else if key_str == "materialization" && value.as_str() == Some("cumulative_aggregate")
+            {
+                return Err(MetadataError::YamlParseError(
+                    serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
+                ));
             }
         }
 
@@ -749,6 +784,8 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
             let (validated_map, _fm_diags) =
                 parse_frontmatter(&yaml_content, DeclarationKind::Model);
             // Pre-validate strict sub-fields before the resilient fallback path.
+            // `materialization: cumulative_aggregate` is caught here for a clear
+            // migration error; other unknown values follow the resilient path.
             for (key, value) in validated_map.iter() {
                 let key_str = key.as_str().unwrap_or("");
                 if key_str == "reuse" {
@@ -757,6 +794,12 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 } else if key_str == "state" {
                     serde_yaml::from_value::<StateConfig>(value.clone())
                         .map_err(MetadataError::YamlParseError)?;
+                } else if key_str == "materialization"
+                    && value.as_str() == Some("cumulative_aggregate")
+                {
+                    return Err(MetadataError::YamlParseError(
+                        serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
+                    ));
                 }
             }
 
@@ -1547,14 +1590,32 @@ SELECT dt FROM foo"#;
         );
     }
 
-    // ── cumulative_aggregate frontmatter tests ───────────────────────────────
+    // ── cumulative frontmatter tests ─────────────────────────────────────────
 
-    /// `materialization: cumulative_aggregate` with no other rule-specific keys
-    /// parses cleanly.
+    /// `materialization: cumulative_aggregate` is no longer valid — must fail.
+    /// The new opt-in is `materialization: table` + `refresh: cumulative`.
     #[test]
-    fn test_cumulative_aggregate_frontmatter_parses() {
+    fn test_cumulative_aggregate_frontmatter_is_rejected() {
         let source = r#"---
 materialization: cumulative_aggregate
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.events
+GROUP BY device_id, user_id"#;
+
+        let result = extract_file_metadata(source);
+        assert!(
+            result.is_err(),
+            "`materialization: cumulative_aggregate` must be rejected (unknown value)"
+        );
+    }
+
+    /// `materialization: table` + `refresh: cumulative` parses cleanly.
+    #[test]
+    fn test_refresh_cumulative_frontmatter_parses() {
+        let source = r#"---
+materialization: table
+refresh: cumulative
 ---
 SELECT device_id, user_id, COUNT(*) AS event_count
 FROM smelt.events
@@ -1565,7 +1626,11 @@ GROUP BY device_id, user_id"#;
             FileMetadata::Single { metadata, .. } => {
                 assert_eq!(
                     metadata.materialization,
-                    Some(crate::config::Materialization::CumulativeAggregate)
+                    Some(crate::config::Materialization::Table)
+                );
+                assert_eq!(
+                    metadata.refresh,
+                    Some(crate::config::RefreshStrategy::Cumulative)
                 );
                 assert!(metadata.timeseries.is_none());
                 assert!(metadata.incremental.is_none());
@@ -1574,12 +1639,13 @@ GROUP BY device_id, user_id"#;
         }
     }
 
-    /// A `.sql` file with `materialization: cumulative_aggregate` + a `timeseries:` block
+    /// A model with `refresh: cumulative` + a `timeseries:` block
     /// emits `CumulativeForbidsTimeseries`.
     #[test]
     fn test_cumulative_aggregate_forbids_timeseries() {
         let metadata = ModelMetadata {
-            materialization: Some(crate::config::Materialization::CumulativeAggregate),
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(crate::config::RefreshStrategy::Cumulative),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "ts".to_string(),
                 partition_column: "dt".to_string(),
@@ -1589,7 +1655,7 @@ GROUP BY device_id, user_id"#;
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-            .expect_err("cumulative_aggregate + timeseries must error");
+            .expect_err("refresh: cumulative + timeseries must error");
         assert!(
             matches!(err, MetadataError::CumulativeForbidsTimeseries),
             "Expected CumulativeForbidsTimeseries, got: {}",
@@ -1597,12 +1663,13 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// A `.sql` file with `materialization: cumulative_aggregate` + an `incremental:` block
+    /// A model with `refresh: cumulative` + an `incremental:` block
     /// emits `CumulativeForbidsIncremental`.
     #[test]
     fn test_cumulative_aggregate_forbids_incremental() {
         let metadata = ModelMetadata {
-            materialization: Some(crate::config::Materialization::CumulativeAggregate),
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(crate::config::RefreshStrategy::Cumulative),
             incremental: Some(crate::config::IncrementalConfig {
                 enabled: true,
                 unique_key: vec![],
@@ -1611,7 +1678,7 @@ GROUP BY device_id, user_id"#;
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("cumulative_aggregate + incremental must error");
+            .expect_err("refresh: cumulative + incremental must error");
         assert!(
             matches!(err, MetadataError::CumulativeForbidsIncremental),
             "Expected CumulativeForbidsIncremental, got: {}",

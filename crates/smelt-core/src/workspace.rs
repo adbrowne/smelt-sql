@@ -202,15 +202,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("models/simple.sql"), "SELECT 1 AS x\n").unwrap();
-        let test_content = concat!(
-            "--- name: test_simple ---\n",
-            "materialization: test\n",
-            "test:\n",
-            "  model: simple\n",
-            "  expect:\n",
-            "    - {x: 1}\n",
-            "---\n"
-        );
+        let test_content =
+            "smelt.test test_simple AS (SELECT x FROM smelt.simple)\nPASSING simple AS ({x: 1})\nEXPECT ({x: 1})\n";
         std::fs::write(dir.path().join("tests/test_simple.sql"), test_content).unwrap();
 
         let loaded = load_workspace(dir.path());

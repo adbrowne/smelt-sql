@@ -669,8 +669,7 @@ impl std::fmt::Debug for ResolvedRef {
 /// addressing scheme":
 /// - `.sql` file with a bare SELECT → `Model`
 /// - `.sql` file declaring `smelt.define` → `Function`
-/// - `.sql` file with `materialization: test` (Phase 2a stand-in for
-///   the future `smelt.test` declaration kind) → `Test`
+/// - `.sql` file containing `smelt.test` declarations → `Test`
 /// - `.csv` under a project's `paths` → `Seed`
 /// - `.yml` declaring an external table → `Source`
 ///
@@ -843,41 +842,18 @@ fn file_path_tuple(
 /// and test all live in `.sql` files; the dispatch is on
 /// content/frontmatter, not filename.
 fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
-    let raw_text = file.text(db);
-    // 1. `smelt.define` → Function. Inspect the parsed AST; this is
-    //    cheap because the parse is already cached via Salsa.
+    // 1. `smelt.define` → Function; `smelt.test` → Test. Both dispatch on
+    //    the parsed AST (already cached by Salsa).
     let parse = parse_file(db, file);
     if let Some(ast) = AstFile::cast(parse.syntax()) {
         if ast.defines().next().is_some() {
             return RefKind::Function;
         }
-    }
-    // 2. `materialization: test` frontmatter (Phase 2a stand-in for the
-    //    forthcoming `smelt.test` declaration). Use `extract_file_metadata`
-    //    so multi-model files with mixed materializations are handled.
-    if let Ok(meta) = smelt_core::extract_file_metadata(raw_text) {
-        match meta {
-            smelt_core::FileMetadata::Single { metadata, .. } => {
-                if metadata.materialization == Some(smelt_core::Materialization::Test) {
-                    return RefKind::Test;
-                }
-            }
-            smelt_core::FileMetadata::Multi { models } => {
-                if models
-                    .iter()
-                    .all(|s| s.metadata.materialization == Some(smelt_core::Materialization::Test))
-                    && !models.is_empty()
-                {
-                    return RefKind::Test;
-                }
-            }
-            smelt_core::FileMetadata::Empty => {}
-            // Generator files produce models via meta-language evaluation;
-            // they are not test files.
-            smelt_core::FileMetadata::Generator { .. } => {}
+        if ast.tests().next().is_some() {
+            return RefKind::Test;
         }
     }
-    // 3. Default: Model.
+    // 2. Default: Model.
     RefKind::Model
 }
 
@@ -1040,6 +1016,43 @@ pub fn file_diagnostics(
         .into_iter()
         .map(|d| d.0.clone())
         .collect()
+}
+
+/// Pure structural check: walk all `SMELT_PATH_REF` nodes in `syntax`
+/// that carry a `#`-suffix `CTE_SEGMENT` child.  For each such node, check
+/// whether any ancestor is a `SMELT_TEST` node.  If NOT, emit a
+/// `CteRefOutsideTest` diagnostic anchored at the `#` token.
+///
+/// This is a Salsa-purity-compliant analysis function (no DB access).  The
+/// thin Salsa wrapper in `check_file_diagnostics` calls it after gathering the
+/// parse input.
+fn cte_ref_outside_test_diagnostics(
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+) -> Vec<Diagnostic> {
+    use smelt_parser::ast::SmeltPathRef;
+    use smelt_parser::SyntaxKind::{SMELT_PATH_REF, SMELT_TEST};
+
+    let mut diags = Vec::new();
+    for node in syntax.descendants().filter(|n| n.kind() == SMELT_PATH_REF) {
+        if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
+            if let Some(hash_range) = path_ref.hash_range() {
+                // Emit unless there is a SMELT_TEST ancestor.
+                let inside_test = node.ancestors().any(|a| a.kind() == SMELT_TEST);
+                if !inside_test {
+                    diags.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "CTE references using `#` are only valid inside a `smelt.test` body; \
+                                  remove the `#<cte>` suffix or move this reference inside a `smelt.test` declaration"
+                            .to_string(),
+                        range: hash_range,
+                        code: Some(DiagnosticCode::CteRefOutsideTest),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+    diags
 }
 
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
@@ -1460,9 +1473,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // query only gathers inputs and aggregates, so the editor and the build
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
-        let materialization = if metadata.materialization
-            == Some(smelt_core::config::Materialization::CumulativeAggregate)
-        {
+        // Route cumulative detection through is_cumulative() (a `refresh:
+        // cumulative` model) so it reaches the classifier. The string below is
+        // the classifier's internal key for the cumulative rule, not a user
+        // surface value.
+        let materialization = if metadata.is_cumulative() {
             "cumulative_aggregate"
         } else if metadata.incremental.is_some() {
             "incremental"
@@ -1778,19 +1793,45 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // Phase 4 (testing): `#` CTE-reference outside smelt.test.
+    //
+    // A `smelt.<path>#<cte>` reference is only valid inside a `smelt.test`
+    // body.  Walk all SMELT_PATH_REF nodes in the CST and emit
+    // `CteRefOutsideTest` for any that carry a `#` suffix but are not
+    // inside a SMELT_TEST ancestor.  This is a pure structural check that
+    // runs unconditionally (no early-return) so model files, function files,
+    // and test files all surface it correctly.
+    {
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+        for diag in cte_ref_outside_test_diagnostics(&syntax) {
+            DiagnosticAcc(diag).accumulate(db);
+        }
+    }
+
     // Check if model is valid
     if parse_model(db, file).is_none() {
         let path_str = path.to_str().unwrap_or("");
         let is_virtual_submodel = path_str.contains("::");
         if !is_virtual_submodel && path_str.contains("models/") {
-            DiagnosticAcc(Diagnostic {
-                severity: DiagnosticSeverity::Warning,
-                message: "File does not contain a valid SQL query".to_string(),
-                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
-                code: Some(DiagnosticCode::InvalidModel),
-                data: None,
-            })
-            .accumulate(db);
+            // Files that contain only `smelt.test` declarations are valid — they
+            // have no SELECT body but they are not broken models.  Suppress the
+            // "does not contain a valid SQL query" warning for such files.
+            let parse = parse_file(db, file);
+            let has_smelt_tests = AstFile::cast(parse.syntax())
+                .map(|ast| ast.tests().next().is_some())
+                .unwrap_or(false);
+
+            if !has_smelt_tests {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: "File does not contain a valid SQL query".to_string(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::InvalidModel),
+                    data: None,
+                })
+                .accumulate(db);
+            }
         }
         return;
     }

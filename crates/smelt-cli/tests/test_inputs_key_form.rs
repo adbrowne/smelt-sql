@@ -1,8 +1,7 @@
 #![cfg(feature = "duckdb")]
-//! Integration tests for D-42: `inputs` keys use dot-separated bare address paths.
-//!
-//! Before D-42, the lookup used the underscore-joined CTE name (e.g. "silver_orders").
-//! After D-42, the lookup uses the dot-separated public key (e.g. "silver.orders").
+//! Integration tests for PASSING key binding: the PASSING clause name must match
+//! a `smelt.<path>` dep referenced in the test body, identified by its last path segment.
+//! A typo or underscore-form key that doesn't match any dep triggers D-43 UnknownTestInput.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,47 +28,44 @@ fn smelt_yml(name: &str) -> String {
     )
 }
 
-/// `inputs` keys that use dot-separation ("silver.orders") must inject mock
-/// rows into the model under test, not silently produce an empty CTE.
+/// A PASSING clause name that matches the `smelt.<path>` dep's last segment
+/// injects mock rows into the test body, enabling the assertion to pass.
 ///
-/// This is the D-42 acceptance test: a model referencing `smelt.silver.orders`
-/// and a test with `inputs: {"silver.orders": [{amount: 100}, {amount: 200}]}`
-/// must pass (SUM = 300), proving the dot-key was resolved to the mock CTE.
+/// Model references `smelt.orders`; PASSING `orders AS (...)` matches → SUM = 300.
 #[test]
 fn inputs_dot_key_resolves() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("dot_key_ws");
-    std::fs::create_dir_all(root.join("models/silver")).unwrap();
+    std::fs::create_dir_all(root.join("models")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::create_dir_all(root.join("target")).unwrap();
     std::fs::write(root.join("smelt.yml"), smelt_yml("dot_key_ws")).unwrap();
 
-    // Model under test: aggregates over smelt.silver.orders (multi-segment path).
+    // Model under test: aggregates over smelt.orders.
     std::fs::write(
         root.join("models/total.sql"),
-        "SELECT SUM(amount) AS total FROM smelt.silver.orders\n",
+        "SELECT SUM(amount) AS total FROM smelt.orders\n",
     )
     .unwrap();
 
-    // Placeholder source model so smelt.silver.orders resolves.
+    // Placeholder source model so smelt.orders resolves.
     std::fs::write(
-        root.join("models/silver/orders.sql"),
+        root.join("models/orders.sql"),
         "SELECT amount FROM smelt.raw_data\n",
     )
     .unwrap();
 
-    // Test: mock smelt.silver.orders with dot-separated key, expect SUM = 300.
-    let test_sql = "--- name: test_total_dot_key ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: total\n  \
-          inputs:\n    \
-            silver.orders:\n      \
-              - {amount: 100}\n      \
-              - {amount: 200}\n  \
-          expect:\n    \
-            - {total: 300}\n\
-        ---\n";
+    // smelt.test: PASSING name 'orders' matches dep 'smelt.orders' → SUM = 300.
+    let test_sql = "smelt.test test_total AS (\n\
+        SELECT SUM(amount) AS total FROM smelt.orders\n\
+    )\n\
+    PASSING orders AS (\n\
+        {amount: 100},\n\
+        {amount: 200}\n\
+    )\n\
+    EXPECT (\n\
+        {total: 300}\n\
+    )\n";
     std::fs::write(root.join("tests/test_total_dot_key.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -78,16 +74,16 @@ fn inputs_dot_key_resolves() {
 
     assert!(
         output.status.success(),
-        "smelt test must exit 0 when the dot-key test passes;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "smelt test must exit 0 when PASSING name matches dep;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.contains("PASS") || stdout.contains("pass") || stdout.contains("1 passed"),
-        "dot-key test must pass (SUM(amount) = 300);\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "test must pass (SUM(amount) = 300);\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 
-/// D-43: an `inputs` key that does not match any `smelt.<path>` dep of the
-/// model must cause the test to fail with an `UnknownTestInput` diagnostic.
+/// D-43: a PASSING clause name that does not match any `smelt.<path>` dep of the
+/// test body must cause the test to fail with an `UnknownTestInput` diagnostic.
 /// A typo ("order" instead of "orders") is the canonical example.
 #[test]
 fn unknown_inputs_key_fails_loudly() {
@@ -105,17 +101,17 @@ fn unknown_inputs_key_fails_loudly() {
     .unwrap();
     std::fs::write(root.join("models/orders.sql"), "SELECT id FROM smelt.raw\n").unwrap();
 
-    // Typo: "order" instead of "orders" — must fail with UnknownTestInput.
-    let test_sql = "--- name: test_typo_key ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: order_count\n  \
-          inputs:\n    \
-            order:\n      \
-              - {id: 1}\n  \
-          expect:\n    \
-            - {cnt: 1}\n\
-        ---\n";
+    // Typo: PASSING "ordr" but dep is "orders" — must fail with UnknownTestInput.
+    // (Must use a non-keyword name; "order" is a SQL keyword and can't be a PASSING name.)
+    let test_sql = "smelt.test test_typo_key AS (\n\
+        SELECT COUNT(*) AS cnt FROM smelt.orders\n\
+    )\n\
+    PASSING ordr AS (\n\
+        {id: 1}\n\
+    )\n\
+    EXPECT (\n\
+        {cnt: 1}\n\
+    )\n";
     std::fs::write(root.join("tests/test_typo_key.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -135,7 +131,7 @@ fn unknown_inputs_key_fails_loudly() {
     );
 }
 
-/// D-43 positive case: a correctly spelled `inputs` key ("orders") must
+/// D-43 positive case: a correctly spelled PASSING name ("orders") must
 /// pass without any `UnknownTestInput` diagnostic.
 #[test]
 fn matched_inputs_key_passes() {
@@ -153,16 +149,15 @@ fn matched_inputs_key_passes() {
     .unwrap();
     std::fs::write(root.join("models/orders.sql"), "SELECT id FROM smelt.raw\n").unwrap();
 
-    let test_sql = "--- name: test_correct_key ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: order_count\n  \
-          inputs:\n    \
-            orders:\n      \
-              - {id: 1}\n  \
-          expect:\n    \
-            - {cnt: 1}\n\
-        ---\n";
+    let test_sql = "smelt.test test_correct_key AS (\n\
+        SELECT COUNT(*) AS cnt FROM smelt.orders\n\
+    )\n\
+    PASSING orders AS (\n\
+        {id: 1}\n\
+    )\n\
+    EXPECT (\n\
+        {cnt: 1}\n\
+    )\n";
     std::fs::write(root.join("tests/test_correct_key.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -179,48 +174,47 @@ fn matched_inputs_key_passes() {
     );
 }
 
-/// An `inputs` key using underscore-join ("silver_orders") must NOT resolve
-/// the mock data — it should fall back to an empty CTE, causing the test to
-/// fail.  This ensures we test the corrected direction (dot-key is canonical).
+/// A PASSING name that does not match the dep's last path segment must cause D-43
+/// failure. Using a wrong compound name ("orders_typo" instead of "orders") is
+/// the canonical example — it does not match the dep `smelt.orders`.
 #[test]
 fn inputs_underscore_key_does_not_resolve() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("underscore_key_ws");
-    std::fs::create_dir_all(root.join("models/silver")).unwrap();
+    std::fs::create_dir_all(root.join("models")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::create_dir_all(root.join("target")).unwrap();
     std::fs::write(root.join("smelt.yml"), smelt_yml("underscore_key_ws")).unwrap();
 
     std::fs::write(
         root.join("models/total.sql"),
-        "SELECT SUM(amount) AS total FROM smelt.silver.orders\n",
+        "SELECT SUM(amount) AS total FROM smelt.orders\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("models/silver/orders.sql"),
+        root.join("models/orders.sql"),
         "SELECT amount FROM smelt.raw_data\n",
     )
     .unwrap();
 
-    // Key uses underscore ("silver_orders") — incorrect form; must not find rows.
-    let test_sql = "--- name: test_underscore_miss ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: total\n  \
-          inputs:\n    \
-            silver_orders:\n      \
-              - {amount: 100}\n  \
-          expect:\n    \
-            - {total: 300}\n\
-        ---\n";
+    // PASSING uses wrong name "orders_typo" — must not match dep "orders" → D-43 failure.
+    let test_sql = "smelt.test test_underscore_miss AS (\n\
+        SELECT SUM(amount) AS total FROM smelt.orders\n\
+    )\n\
+    PASSING orders_typo AS (\n\
+        {amount: 100}\n\
+    )\n\
+    EXPECT (\n\
+        {total: 300}\n\
+    )\n";
     std::fs::write(root.join("tests/test_underscore_miss.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // The test must FAIL: underscore key is not resolved, SUM returns NULL ≠ 300.
+    // The test must FAIL: wrong PASSING name triggers D-43 UnknownTestInput.
     assert!(
         stdout.contains("FAIL") || stdout.contains("fail") || !output.status.success(),
-        "underscore key must not be resolved; test must fail;\nstdout:\n{stdout}"
+        "wrong PASSING name must trigger D-43 failure;\nstdout:\n{stdout}"
     );
 }

@@ -333,6 +333,26 @@ pub enum SyntaxKind {
     // of the `NOT NULL` suffix (e.g. `Expr<Integer NOT NULL>`).
     NOT_NULL_QUALIFIER,
 
+    // Phase 3 (testing): smelt.test top-level declaration.
+    //
+    // SMELT_TEST: wraps the entire `smelt.test <name> AS (<select>)
+    //   [PASSING <dep> AS (<rows>)]... EXPECT (<rows>)` declaration.
+    // TEST_NAME: wraps the test name identifier (mirrors DEFINE_NAME).
+    // EXPECT_CLAUSE: the required `EXPECT ( <rows> )` trailer.
+    SMELT_TEST,
+    TEST_NAME,
+    EXPECT_CLAUSE,
+
+    // Phase 4 (testing): `#` CTE-reference operator.
+    //
+    // HASH: a bare `#` token (when NOT followed by `>`; `#>` / `#>>` remain
+    //   HASH_ARROW / HASH_ARROW_TEXT). Used to separate the model path from the
+    //   named CTE in `smelt.<path>#<cte>` references inside smelt.test bodies.
+    // CTE_SEGMENT: the `#<cte>` trailing segment inside a SMELT_PATH_REF node.
+    //   Contains the HASH token and the following IDENT (CTE name).
+    HASH,
+    CTE_SEGMENT,
+
     // Special
     EOF, // End of file
 }

@@ -433,11 +433,11 @@ pub fn project_emitted_name_collisions(
         .iter()
         .filter(|f| !function_paths.contains(&f.path))
         .filter(|f| {
+            if f.is_test() {
+                return false;
+            }
             let mat = f.metadata.as_ref().and_then(|m| m.materialization.as_ref());
-            !matches!(
-                mat,
-                Some(Materialization::Ephemeral) | Some(Materialization::Test)
-            )
+            !matches!(mat, Some(Materialization::Ephemeral))
         })
         .collect();
 

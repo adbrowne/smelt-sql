@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Incremental Models
 
-> **What this is.** Incremental materialization for time-partitioned models: the `incremental:` frontmatter block, the partition-based DELETE+INSERT execution strategy on DuckDB, safety checks the optimizer enforces, per-source lookback derivation from the model's SQL, source-filter pushdown, and the rules around what may be expressed in a logical incremental model. The time-dimension declaration (`event_time_column`, `partition_column`, `granularity`) lives in `timeseries.md` — this spec consumes it.
+> **What this is.** Incremental refresh for time-partitioned models: the `incremental:` frontmatter block, the partition-based DELETE+INSERT execution strategy on DuckDB, safety checks the optimizer enforces, per-source lookback derivation from the model's SQL, source-filter pushdown, and the rules around what may be expressed in a logical incremental model. Incremental is one strategy on the **refresh axis** (`models.md` §"Refresh axis") — a stored `table` recomputed statefully across runs — the sibling of `refresh: cumulative` (`cumulative_aggregate.md`). The time-dimension declaration (`event_time_column`, `partition_column`, `granularity`) lives in `timeseries.md` — this spec consumes it.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >

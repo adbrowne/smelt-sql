@@ -174,7 +174,7 @@ See the [seeds guide](../guide/seeds.md) for more details.
 
 ## tests/ Directory
 
-Test files are `.sql` files with `materialization: test` in YAML frontmatter. By convention, they live in a `tests/` directory, which must be listed in `paths` in your `smelt.yml`:
+Test files contain `smelt.test` declarations. By convention, they live in a `tests/` directory, which must be listed in `paths` in your `smelt.yml`:
 
 ```yaml
 paths:

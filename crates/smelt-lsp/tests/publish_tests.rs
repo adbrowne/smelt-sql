@@ -88,7 +88,7 @@ impl TestWorkspace {
 
     fn add_test_model(&self, name: &str, target_model: &str) {
         let content = format!(
-            "--- name: {name} ---\nmaterialization: test\ntest:\n  model: {target_model}\n  expect:\n    - {{x: 1}}\n---\n"
+            "smelt.test {name} AS (\n    SELECT x FROM smelt.{target_model}\n)\nPASSING {target_model} AS ({{x: 1}})\nEXPECT ({{x: 1}})\n"
         );
         std::fs::write(self.path.join("tests").join(format!("{name}.sql")), content).unwrap();
     }
@@ -272,8 +272,8 @@ async fn publish_tests_entries_have_required_fields() {
         "test uri must point to the test file; got: {entry}"
     );
 
-    // line must be 0 — the `--- name:` delimiter is the first line of the file,
-    // so the gutter icon lands at the declaration, not after the closing `---`.
+    // line must be 0 — the `smelt.test` declaration is the first line of the file,
+    // so the gutter icon lands at the declaration.
     assert_eq!(
         entry["line"].as_u64(),
         Some(0),

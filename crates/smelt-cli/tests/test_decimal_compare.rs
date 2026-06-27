@@ -46,20 +46,19 @@ fn decimal_string_coerces_to_decimal_cte() {
     )
     .unwrap();
 
-    // Test: inputs use decimal-string values; expect the exact DECIMAL sum.
+    // smelt.test: PASSING uses decimal-string values; EXPECT uses the exact DECIMAL sum.
     // If the values were cast to VARCHAR (old behaviour), DuckDB SUM would fail.
     // If cast to DECIMAL, SUM = 100.50 + 200.50 = 301.00.
-    let test_sql = "--- name: test_decimal_coerce ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: total\n  \
-          inputs:\n    \
-            orders:\n      \
-              - {amount: '100.50'}\n      \
-              - {amount: '200.50'}\n  \
-          expect:\n    \
-            - {total: '301.00'}\n\
-        ---\n";
+    let test_sql = "smelt.test test_decimal_coerce AS (\n\
+        SELECT SUM(amount) AS total FROM smelt.orders\n\
+    )\n\
+    PASSING orders AS (\n\
+        {amount: '100.50'},\n\
+        {amount: '200.50'}\n\
+    )\n\
+    EXPECT (\n\
+        {total: '301.00'}\n\
+    )\n";
     std::fs::write(root.join("tests/test_decimal_coerce.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -99,14 +98,13 @@ fn decimal_no_float_tolerance() {
     // Expected: exactly '1.0000000' — differs from actual 1.0000001 by 1e-7.
     // Float tolerance (1e-6 relative) would accept this diff (~1e-7 / 1.0 < 1e-6).
     // DECIMAL exact comparison must reject it.
-    let test_sql = "--- name: test_decimal_exact ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: val\n  \
-          inputs: {}\n  \
-          expect:\n    \
-            - {val: '1.0000000'}\n\
-        ---\n";
+    // No PASSING needed (model has no external smelt deps).
+    let test_sql = "smelt.test test_decimal_exact AS (\n\
+        SELECT CAST('1.0000001' AS DECIMAL(10,7)) AS val\n\
+    )\n\
+    EXPECT (\n\
+        {val: '1.0000000'}\n\
+    )\n";
     std::fs::write(root.join("tests/test_decimal_exact.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -141,14 +139,13 @@ fn float_tolerance_unchanged() {
     .unwrap();
 
     // Expected: 1.0 — diff ≈ 1e-8, tolerance 1e-6, must PASS for DOUBLE.
-    let test_sql = "--- name: test_float_tol ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: val\n  \
-          inputs: {}\n  \
-          expect:\n    \
-            - {val: 1.0}\n\
-        ---\n";
+    // No PASSING needed (model has no external smelt deps).
+    let test_sql = "smelt.test test_float_tol AS (\n\
+        SELECT (1.0::DOUBLE + 1e-8) AS val\n\
+    )\n\
+    EXPECT (\n\
+        {val: 1.0}\n\
+    )\n";
     std::fs::write(root.join("tests/test_float_tol.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);

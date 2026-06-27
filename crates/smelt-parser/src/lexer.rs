@@ -205,7 +205,7 @@ impl<'a> Lexer<'a> {
                 COLON
             }
 
-            // Hash operators (#>, #>>)
+            // Hash operators (#>, #>>) and bare `#` (CTE-reference operator).
             '#' if self.peek_char() == Some('>') => {
                 self.advance(); // #
                 self.advance(); // >
@@ -215,6 +215,13 @@ impl<'a> Lexer<'a> {
                 } else {
                     HASH_ARROW // #>
                 }
+            }
+            // Bare `#` — used in `smelt.<path>#<cte>` CTE references inside
+            // smelt.test bodies.  This arm fires only when the next char is NOT
+            // `>` (the #> / #>> arm above catches that case first).
+            '#' => {
+                self.advance();
+                HASH
             }
             // Containment operator (@>)
             '@' if self.peek_char() == Some('>') => {
@@ -376,6 +383,34 @@ impl<'a> Lexer<'a> {
             self.advance(); // consume '.'
             while self.current_char().is_ascii_digit() {
                 self.advance();
+            }
+        }
+
+        // Handle scientific notation: e/E followed by optional +/- and then digits.
+        // e.g. `1e8`, `1e-8`, `1.5e+3`, `2.3E-4`.
+        // We only enter the exponent branch when the character immediately after
+        // the mantissa is `e`/`E` and the character(s) that follow confirm this
+        // is a numeric exponent, not the start of an identifier (e.g. `enum`).
+        let cur = self.current_char();
+        if cur == 'e' || cur == 'E' {
+            let next = self.peek_char();
+            let is_sci = match next {
+                // e/E followed directly by a digit: `1e8`
+                Some(c) if c.is_ascii_digit() => true,
+                // e/E followed by sign then digit: `1e-8`, `1e+3`
+                Some('+') | Some('-') => self
+                    .peek_two_chars()
+                    .is_some_and(|(_, after_sign)| after_sign.is_ascii_digit()),
+                _ => false,
+            };
+            if is_sci {
+                self.advance(); // consume 'e'/'E'
+                if self.current_char() == '+' || self.current_char() == '-' {
+                    self.advance(); // consume optional sign
+                }
+                while self.current_char().is_ascii_digit() {
+                    self.advance(); // consume exponent digits
+                }
             }
         }
 

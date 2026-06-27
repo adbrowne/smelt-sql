@@ -44,6 +44,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if self.at_smelt_test_trigger() {
+                self.parse_smelt_test();
+                self.skip_trivia();
+                continue;
+            }
+
             if self.at(SELECT_KW) || self.at(WITH_KW) {
                 // Bare SELECT/WITH model body. We only parse the first one; any
                 // following top-level tokens are consumed silently (preserving
@@ -336,6 +342,7 @@ impl<'a> Parser<'a> {
             "source",
             "metric",
             "record",
+            "test",
         ];
         for legacy in LEGACY {
             if seg.eq_ignore_ascii_case(legacy) {
@@ -566,6 +573,7 @@ impl<'a> Parser<'a> {
             if self.at_smelt_define_trigger()
                 || self.at_smelt_extern_trigger()
                 || self.at_smelt_record_trigger()
+                || self.at_smelt_test_trigger()
             {
                 return;
             }
@@ -829,6 +837,229 @@ impl<'a> Parser<'a> {
         self.finish_node(); // SMELT_RECORD_DECL
     }
 
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a top-level `smelt.test` declaration. Does not consume
+    /// any tokens. The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("test")
+    ///
+    /// Like `smelt.define`, `smelt.test` is ONLY special at top-level statement
+    /// position. In expression position it remains an ordinary qualified identifier.
+    pub(super) fn at_smelt_test_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "test".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("test")
+    }
+
+    /// Parse a top-level `smelt.test` declaration. The caller must have
+    /// verified `at_smelt_test_trigger()` first.
+    ///
+    /// Grammar:
+    ///   smelt.test <name> AS ( <select> )
+    ///     [ PASSING <dep> AS ( <rows> ) ]...
+    ///     EXPECT ( <rows> )
+    ///   [;]
+    ///
+    /// `PASSING` and `EXPECT` are contextual keywords — they are ordinary
+    /// identifiers everywhere outside this declaration (same positional rule
+    /// as `PASSING` on function calls).
+    pub(super) fn parse_smelt_test(&mut self) {
+        self.start_node(SMELT_TEST);
+
+        // Consume the three trigger tokens: `smelt`, `.`, `test`.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "test"
+
+        // TEST_NAME: wrap the next identifier (mirrors DEFINE_NAME in smelt.define).
+        self.skip_trivia();
+        if self.at(IDENT) {
+            self.start_node(TEST_NAME);
+            self.advance();
+            self.finish_node();
+        } else {
+            self.error("Expected test name after smelt.test".to_string());
+            self.sync_to(&[AS_KW, EOF]);
+        }
+
+        // Expect AS.
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance();
+        } else {
+            self.error("Expected 'AS' in smelt.test".to_string());
+            // Sync to the start of the body `(` or next top-level / EOF.
+            while !self.at(EOF)
+                && !self.at(LPAREN)
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_test_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+            if !self.at(LPAREN) {
+                self.finish_node();
+                return;
+            }
+        }
+
+        // Body: `(` <select> `)`.
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' to start smelt.test body".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // LPAREN
+        self.skip_trivia();
+        if self.at(SELECT_KW) || self.at(WITH_KW) {
+            self.parse_select_stmt();
+        } else if !self.at(RPAREN) && !self.at(EOF) {
+            // Fallback: parse as expression for error recovery.
+            self.parse_expression();
+        }
+        self.skip_trivia();
+        if self.at(RPAREN) {
+            self.advance();
+        } else {
+            self.error("Expected ')' to close smelt.test body".to_string());
+            // Sync to PASSING/EXPECT/next-decl/EOF.
+            while !self.at(EOF)
+                && !self.at_contextual_keyword("PASSING")
+                && !self.at_contextual_keyword("EXPECT")
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_test_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+        }
+
+        // Zero or more PASSING clauses (reuses existing parse_passing_clause).
+        loop {
+            self.skip_trivia();
+            if !self.at_contextual_keyword("PASSING") {
+                break;
+            }
+            self.parse_passing_clause();
+        }
+
+        // Required EXPECT clause.
+        self.skip_trivia();
+        if self.at_contextual_keyword("EXPECT") {
+            self.parse_expect_clause();
+        } else {
+            self.error("Expected 'EXPECT' clause in smelt.test".to_string());
+        }
+
+        // Optional terminating `;` — consume if present.
+        self.skip_trivia();
+
+        self.finish_node(); // SMELT_TEST
+    }
+
+    /// Parse a single `EXPECT ( <rows> )` clause inside a `smelt.test`.
+    /// The caller must have verified `at_contextual_keyword("EXPECT")` first.
+    ///
+    /// `<rows>` is a comma-separated list of record literals `{key: value, ...}`.
+    /// `EXPECT` is a contextual keyword: it is recognised only here, never
+    /// globally reserved — the same positional rule used for `PASSING`.
+    pub(super) fn parse_expect_clause(&mut self) {
+        self.start_node(EXPECT_CLAUSE);
+
+        // Consume the `EXPECT` contextual keyword (it is an IDENT token).
+        self.skip_trivia();
+        self.advance(); // IDENT "EXPECT"
+
+        // Expect `(`.
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' after EXPECT".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // LPAREN
+
+        // Parse comma-separated list of expressions (expected to be record
+        // literals `{k: v, ...}`; omitted keys are allowed in future phases).
+        self.skip_trivia();
+        loop {
+            if self.at(RPAREN) || self.at(EOF) {
+                break;
+            }
+            if self.at_expression_start() {
+                self.parse_expression();
+            } else {
+                self.error("Expected record literal '{...}' in EXPECT clause".to_string());
+                self.sync_to(&[COMMA, RPAREN, EOF]);
+            }
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance(); // COMMA
+                self.skip_trivia();
+                // Trailing comma allowed.
+                if self.at(RPAREN) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Closing `)`.
+        self.skip_trivia();
+        if self.at(RPAREN) {
+            self.advance();
+        } else {
+            self.error("Expected ')' to close EXPECT clause".to_string());
+        }
+
+        self.finish_node(); // EXPECT_CLAUSE
+    }
+
     /// Parse a brace-struct literal: `{expr AS name, ..spread}`.
     ///
     /// Items are:
@@ -1086,6 +1317,55 @@ impl<'a> Parser<'a> {
         } else {
             // Value form. Wrap the path in SMELT_PATH_REF.
             self.start_node_at(outer_checkpoint, SMELT_PATH_REF);
+
+            // Optional trailing `#<cte>` CTE-reference suffix
+            // (Phase 4 — test-local CTE operator).  Peek past any trivia for a
+            // bare HASH token.  Only consume when HASH is followed by an IDENT
+            // (the CTE name); a dangling `#` alone is NOT consumed so error
+            // recovery in the surrounding expression is unaffected.
+            {
+                let mut hash_la = 0;
+                while let Some(t) = self.tokens.get(self.pos + hash_la) {
+                    if t.kind.is_trivia() {
+                        hash_la += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let next_is_hash = self
+                    .tokens
+                    .get(self.pos + hash_la)
+                    .map(|t| t.kind == HASH)
+                    .unwrap_or(false);
+
+                if next_is_hash {
+                    // Also check that an IDENT follows the HASH (past any trivia).
+                    let mut ident_la = hash_la + 1;
+                    while let Some(t) = self.tokens.get(self.pos + ident_la) {
+                        if t.kind.is_trivia() {
+                            ident_la += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let has_ident_after_hash = self
+                        .tokens
+                        .get(self.pos + ident_la)
+                        .map(|t| t.kind == IDENT)
+                        .unwrap_or(false);
+
+                    if has_ident_after_hash {
+                        let cte_checkpoint = self.builder.checkpoint();
+                        self.skip_trivia(); // trivia before HASH (now inside SMELT_PATH_REF)
+                        self.advance(); // HASH token
+                        self.skip_trivia(); // trivia between HASH and IDENT
+                        self.advance(); // IDENT — CTE name
+                        self.start_node_at(cte_checkpoint, CTE_SEGMENT);
+                        self.finish_node(); // CTE_SEGMENT
+                    }
+                }
+            }
+
             self.finish_node(); // SMELT_PATH_REF
         }
     }
@@ -1116,11 +1396,25 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.advance(); // IDENT "PASSING"
 
-        // Parse the binding name into PASSING_NAME.
+        // Parse the binding name into PASSING_NAME. A test substitutes a table
+        // dependency addressed by its bare path, which may be multi-segment
+        // (e.g. `silver.sessions`); a function substitutes a single-identifier
+        // fragment parameter. Consume `IDENT (DOT IDENT)*` to cover both — in
+        // the function-call context no DOT follows the name, so the loop is a
+        // no-op there.
         self.skip_trivia();
         self.start_node(PASSING_NAME);
         if self.at(IDENT) {
-            self.advance(); // IDENT (name)
+            self.advance(); // IDENT (first segment)
+            while self.at(DOT) {
+                self.advance(); // DOT
+                if self.at(IDENT) {
+                    self.advance(); // IDENT (next segment)
+                } else {
+                    self.error("Expected identifier after '.' in PASSING name".to_string());
+                    break;
+                }
+            }
         } else {
             self.error("Expected identifier after PASSING".to_string());
         }
@@ -1145,13 +1439,37 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // LPAREN
 
-        // Parse the body expression into PASSING_BODY.
+        // Parse comma-separated body expressions into PASSING_BODY.
+        //
+        // For `smelt.test` PASSING clauses the body is a comma-separated list
+        // of record literals.  For function-call PASSING clauses the body is a
+        // single expression (SELECT / aggregate); commas inside a SELECT are
+        // consumed by `parse_expression()` internally, so the top-level loop
+        // always runs exactly once in that case — zero behavioural difference
+        // for the function-call context.
         self.start_node(PASSING_BODY);
         self.skip_trivia();
-        if self.at_expression_start() {
-            self.parse_expression();
-        } else {
-            self.error("Expected expression in PASSING body".to_string());
+        loop {
+            if self.at(RPAREN) || self.at(EOF) {
+                break;
+            }
+            if self.at_expression_start() {
+                self.parse_expression();
+            } else {
+                self.error("Expected expression in PASSING body".to_string());
+                self.sync_to(&[COMMA, RPAREN, EOF]);
+            }
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance(); // COMMA
+                self.skip_trivia();
+                // Trailing comma is allowed.
+                if self.at(RPAREN) {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
         self.finish_node(); // PASSING_BODY
 

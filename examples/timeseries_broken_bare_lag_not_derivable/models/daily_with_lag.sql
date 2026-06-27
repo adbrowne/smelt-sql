@@ -14,4 +14,4 @@ SELECT
     e.user_id,
     e.amount,
     LAG(e.amount) OVER (PARTITION BY e.user_id ORDER BY e.event_ts) AS prev_amount
-FROM smelt.models.events e
+FROM smelt.events e

@@ -110,7 +110,7 @@ Three input shapes are accepted:
 
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
 
-**`smelt explain` excludes test models.** `smelt explain` (with or without `--json`) filters out all `materialization: test` models from its output via the `is_test()` predicate applied to every discovered model. Test models never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
+**`smelt explain` excludes tests.** `smelt explain` (with or without `--json`) filters out all `smelt.test` declarations from its output via the test-kind predicate applied to every discovered entity. Tests never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
 
 ### `smelt explain --json` output schema
 
@@ -119,7 +119,8 @@ Three input shapes are accepted:
   "models": {
     "<model_name>": {
       "dependencies": ["<upstream_model_name>", ...],
-      "materialization": "table" | "view" | "ephemeral" | "materialized_view" | "cumulative_aggregate" | "test",
+      "materialization": "table" | "view" | "ephemeral" | "materialized_view",
+      "refresh": "full" | "cumulative",     // omitted when "full" (default)
       "incremental": {                      // omitted if not incremental
         "granularity": "day" | "hour" | ...,
         "partition_column": "<col>",

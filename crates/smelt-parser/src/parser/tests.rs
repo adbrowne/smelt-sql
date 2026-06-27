@@ -6458,3 +6458,588 @@ fn test_interval_numeric_round_trip() {
         );
     }
 }
+
+// ===== Phase 3: smelt.test declaration grammar =====
+
+use crate::ast::{RecordLiteral, SmeltTest};
+use crate::syntax_kind::SyntaxKind::{EXPECT_CLAUSE, SMELT_TEST};
+
+#[test]
+fn parse_smelt_test_basic() {
+    // A smelt.test declaration with a SELECT body, one PASSING clause,
+    // and an EXPECT clause must parse into a SmeltTest node with the
+    // expected children. Lossless round-trip is also verified.
+    let input = r#"smelt.test check_revenue AS (
+    SELECT a, b FROM smelt.orders WHERE revenue > 0
+)
+PASSING orders AS ({amount: 100})
+EXPECT ({a: 1, b: 'x'})"#;
+
+    let (parse_result, file) = parse_file_text(input);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse_smelt_test_basic: unexpected errors: {:?}",
+        parse_result.errors
+    );
+
+    // There must be exactly one SMELT_TEST node.
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1, "expected exactly one smelt.test");
+    let test = &tests[0];
+
+    // Name
+    assert_eq!(
+        test.name().as_deref(),
+        Some("check_revenue"),
+        "test name should be 'check_revenue'"
+    );
+
+    // Body SELECT exists
+    assert!(
+        test.body_select().is_some(),
+        "smelt.test body should contain a SELECT statement"
+    );
+
+    // One PASSING clause
+    let passing: Vec<_> = test.passing_clauses().collect();
+    assert_eq!(passing.len(), 1, "expected one PASSING clause");
+    assert_eq!(
+        passing[0].name().as_deref(),
+        Some("orders"),
+        "PASSING name should be 'orders'"
+    );
+
+    // EXPECT clause exists
+    let expect = test
+        .expect_clause()
+        .expect("EXPECT clause should be present");
+    let rows: Vec<RecordLiteral> = expect.rows().collect();
+    assert_eq!(rows.len(), 1, "expected one row in EXPECT clause");
+
+    // Lossless round-trip: the CST text (Rowan's lossless representation)
+    // must reproduce the exact source bytes.
+    let cst_text = parse_result.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce the exact source"
+    );
+    // Re-parsing the CST text must produce no errors.
+    let parse2 = parse(&cst_text);
+    assert_eq!(
+        parse2.errors.len(),
+        0,
+        "round-trip re-parse failed: errors={:?}",
+        parse2.errors
+    );
+}
+
+#[test]
+fn parse_smelt_test_multiple_passing_clauses() {
+    // Zero PASSING clauses: body + EXPECT only.
+    let input_zero = r#"smelt.test zero_passing AS (
+    SELECT 1 AS result
+)
+EXPECT ({result: 1})"#;
+
+    let (parse_zero, file_zero) = parse_file_text(input_zero);
+    assert!(
+        parse_zero.errors.is_empty(),
+        "parse_smelt_test_multiple_passing (zero): unexpected errors: {:?}",
+        parse_zero.errors
+    );
+    let tests_zero: Vec<SmeltTest> = file_zero.tests().collect();
+    assert_eq!(
+        tests_zero.len(),
+        1,
+        "expected one smelt.test (zero PASSING)"
+    );
+    let passing_zero: Vec<_> = tests_zero[0].passing_clauses().collect();
+    assert_eq!(
+        passing_zero.len(),
+        0,
+        "expected zero PASSING clauses, got {}",
+        passing_zero.len()
+    );
+
+    // Two PASSING clauses.
+    let input_two = r#"smelt.test two_passing AS (
+    SELECT a.x + b.y AS total FROM smelt.a JOIN smelt.b ON TRUE
+)
+PASSING a AS ({x: 1})
+PASSING b AS ({y: 2})
+EXPECT ({total: 3})"#;
+
+    let (parse_two, file_two) = parse_file_text(input_two);
+    assert!(
+        parse_two.errors.is_empty(),
+        "parse_smelt_test_multiple_passing (two): unexpected errors: {:?}",
+        parse_two.errors
+    );
+    let tests_two: Vec<SmeltTest> = file_two.tests().collect();
+    assert_eq!(tests_two.len(), 1, "expected one smelt.test (two PASSING)");
+    let passing_two: Vec<_> = tests_two[0].passing_clauses().collect();
+    assert_eq!(
+        passing_two.len(),
+        2,
+        "expected two PASSING clauses, got {}",
+        passing_two.len()
+    );
+    assert_eq!(passing_two[0].name().as_deref(), Some("a"));
+    assert_eq!(passing_two[1].name().as_deref(), Some("b"));
+}
+
+#[test]
+fn parse_smelt_test_dotted_passing_names() {
+    // A PASSING <dep> name is the bare address path of a dependency and may be
+    // multi-segment (testing.md §Surface: `orders` or `silver.orders`).
+    let input = r#"smelt.test dotted_deps AS (
+    SELECT session_id FROM smelt.gold.identity_forward_only
+)
+PASSING silver.sessions AS ({session_id: 'sa'})
+PASSING silver.events_parsed AS ({event_id: 1})
+EXPECT ({session_id: 'sa'})"#;
+
+    let (parse, file) = parse_file_text(input);
+    assert!(
+        parse.errors.is_empty(),
+        "dotted PASSING names must parse without errors: {:?}",
+        parse.errors
+    );
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1, "expected one smelt.test");
+    let passing: Vec<_> = tests[0].passing_clauses().collect();
+    assert_eq!(passing.len(), 2, "expected two PASSING clauses");
+    assert_eq!(passing[0].name().as_deref(), Some("silver.sessions"));
+    assert_eq!(passing[1].name().as_deref(), Some("silver.events_parsed"));
+}
+
+#[test]
+fn expect_rows_are_record_literals() {
+    // EXPECT with multiple record literals; omitted keys are allowed.
+    let input = r#"smelt.test multi_row_expect AS (
+    SELECT a, b FROM t
+)
+EXPECT ({a: 1, b: 'x'}, {a: 2})"#;
+
+    let (parse, file) = parse_file_text(input);
+    assert!(
+        parse.errors.is_empty(),
+        "expect_rows_are_record_literals: unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1);
+    let expect = tests[0]
+        .expect_clause()
+        .expect("EXPECT clause must be present");
+
+    // Two record literals: {a: 1, b: 'x'} and {a: 2}.
+    let rows: Vec<RecordLiteral> = expect.rows().collect();
+    assert_eq!(rows.len(), 2, "expected two rows in EXPECT clause");
+
+    // First row has two fields; second has one (omitted key is fine).
+    let fields_0: Vec<_> = rows[0].fields().collect();
+    let fields_1: Vec<_> = rows[1].fields().collect();
+    assert_eq!(
+        fields_0.len(),
+        2,
+        "first EXPECT row should have 2 fields, got {}",
+        fields_0.len()
+    );
+    assert_eq!(
+        fields_1.len(),
+        1,
+        "second EXPECT row should have 1 field (omitted key), got {}",
+        fields_1.len()
+    );
+
+    // Verify the EXPECT_CLAUSE node kind appears in the tree.
+    let has_expect = file
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == EXPECT_CLAUSE);
+    assert!(has_expect, "tree must contain an EXPECT_CLAUSE node");
+}
+
+#[test]
+fn passing_expect_contextual() {
+    // `PASSING` and `EXPECT` must remain ordinary identifiers outside a
+    // smelt.test declaration — no regression to ordinary SQL identifiers.
+
+    // `passing` and `expect` as column aliases.
+    let sql_alias = "SELECT x AS passing, y AS expect FROM t";
+    let (parse_alias, _) = parse_file_text(sql_alias);
+    assert!(
+        parse_alias.errors.is_empty(),
+        "column alias 'passing'/'expect' should parse cleanly: {:?}",
+        parse_alias.errors
+    );
+
+    // `passing` and `expect` as CTE names.
+    let sql_cte =
+        "WITH passing AS (SELECT 1 AS n), expect AS (SELECT 2 AS n) SELECT * FROM passing";
+    let (parse_cte, _) = parse_file_text(sql_cte);
+    assert!(
+        parse_cte.errors.is_empty(),
+        "CTE named 'passing'/'expect' should parse cleanly: {:?}",
+        parse_cte.errors
+    );
+
+    // `passing` and `expect` as table names in FROM clause.
+    let sql_from = "SELECT x FROM passing JOIN expect ON passing.id = expect.id";
+    let (parse_from, _) = parse_file_text(sql_from);
+    assert!(
+        parse_from.errors.is_empty(),
+        "table names 'passing'/'expect' in FROM should parse cleanly: {:?}",
+        parse_from.errors
+    );
+
+    // None of these should produce SMELT_TEST or EXPECT_CLAUSE nodes.
+    for (sql, label) in &[(sql_alias, "alias"), (sql_cte, "cte"), (sql_from, "from")] {
+        let p = parse(sql);
+        let has_test = p.syntax().descendants().any(|n| n.kind() == SMELT_TEST);
+        let has_expect = p.syntax().descendants().any(|n| n.kind() == EXPECT_CLAUSE);
+        assert!(
+            !has_test,
+            "plain SQL ({label}) must not produce SMELT_TEST nodes"
+        );
+        assert!(
+            !has_expect,
+            "plain SQL ({label}) must not produce EXPECT_CLAUSE nodes"
+        );
+    }
+
+    // Regression: PASSING as a column name in SELECT list.
+    let p_passing = parse("SELECT passing FROM t");
+    let passing_test_nodes = p_passing
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == SMELT_TEST);
+    assert!(
+        !passing_test_nodes,
+        "'SELECT passing FROM t' must not produce SMELT_TEST"
+    );
+
+    // Regression: smelt.test only triggers at top-level, not in expression position.
+    // A query that happens to have 'smelt' and 'test' in identifiers must not be
+    // mistaken for a top-level smelt.test declaration.
+    let sql_expr = "SELECT smelt_test FROM t";
+    let (parse_expr, _) = parse_file_text(sql_expr);
+    // This is not a smelt.test trigger (smelt_test is one IDENT, not smelt DOT test).
+    assert!(
+        parse_expr.errors.is_empty(),
+        "identifier 'smelt_test' must parse as plain SQL: {:?}",
+        parse_expr.errors
+    );
+}
+
+// ===== Phase 3: multi-row PASSING body (FIX 1) =====
+
+#[test]
+fn parse_smelt_test_multirow_passing() {
+    // A PASSING clause with two record-literal rows — the spec's canonical example.
+    // Before the fix this produced 3 parse errors and dropped the second row.
+    let input = r#"smelt.test check_revenue AS (
+    SELECT order_id, amount FROM smelt.orders
+)
+PASSING orders AS (
+    {order_id: 1, amount: 100.0},
+    {order_id: 2, amount: 200.0}
+)
+EXPECT ({order_id: 1})"#;
+
+    let (parse_result, file) = parse_file_text(input);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse_smelt_test_multirow_passing: unexpected errors: {:?}",
+        parse_result.errors
+    );
+
+    // Lossless round-trip.
+    let cst_text = parse_result.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce source"
+    );
+    let parse2 = parse(&cst_text);
+    assert_eq!(
+        parse2.errors.len(),
+        0,
+        "round-trip re-parse failed: {:?}",
+        parse2.errors
+    );
+
+    // One test, one PASSING clause, two rows inside it.
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1, "expected one smelt.test");
+    let passing: Vec<_> = tests[0].passing_clauses().collect();
+    assert_eq!(passing.len(), 1, "expected one PASSING clause");
+    assert_eq!(
+        passing[0].name().as_deref(),
+        Some("orders"),
+        "PASSING name should be 'orders'"
+    );
+
+    // The new rows() accessor must return both record literals.
+    let rows: Vec<RecordLiteral> = passing[0].rows().collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "PASSING clause should expose 2 rows, got {}",
+        rows.len()
+    );
+}
+
+// ===== Phase 3: error-recovery tests (FIX 2) =====
+
+#[test]
+fn smelt_test_missing_as_recovers() {
+    // `smelt.test foo (SELECT 1) EXPECT ({a:1})` — missing `AS`.
+    // The parser must return without panicking and produce ≥ 1 parse error.
+    let input = "smelt.test foo (SELECT 1) EXPECT ({a: 1})";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "missing AS should produce at least one parse error"
+    );
+}
+
+#[test]
+fn smelt_test_missing_expect_recovers() {
+    // `smelt.test foo AS (SELECT 1) PASSING x AS ({a:1})` — no EXPECT clause.
+    // The parser must return without panicking and produce ≥ 1 parse error.
+    let input = "smelt.test foo AS (SELECT 1) PASSING x AS ({a: 1})";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "missing EXPECT should produce at least one parse error"
+    );
+}
+
+#[test]
+fn smelt_test_unclosed_body_recovers() {
+    // `smelt.test foo AS (SELECT 1 EXPECT ({a:1})` — missing `)` closing the body.
+    // The parser must return without panicking and produce ≥ 1 parse error.
+    let input = "smelt.test foo AS (SELECT 1 EXPECT ({a: 1})";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "unclosed body should produce at least one parse error"
+    );
+}
+
+// ===== Phase 4: `#` CTE-reference operator =====
+
+#[test]
+fn parse_hash_cte_ref() {
+    // `FROM smelt.daily_revenue#daily_agg` must parse as a single
+    // SMELT_PATH_REF with a CTE_SEGMENT child containing the CTE name.
+    // No parse errors expected.
+    use crate::ast::SmeltPathRef;
+    use crate::syntax_kind::SyntaxKind::SMELT_PATH_REF;
+
+    let input = "SELECT day FROM smelt.daily_revenue#daily_agg";
+    let parse = parse(input);
+    assert!(
+        parse.errors.is_empty(),
+        "parse_hash_cte_ref: unexpected errors: {:?}",
+        parse.errors
+    );
+
+    // Collect all SMELT_PATH_REF descendants.
+    let path_refs: Vec<SmeltPathRef> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SMELT_PATH_REF)
+        .filter_map(SmeltPathRef::cast)
+        .collect();
+
+    assert_eq!(
+        path_refs.len(),
+        1,
+        "expected exactly one SMELT_PATH_REF; got {}",
+        path_refs.len()
+    );
+    let pr = &path_refs[0];
+
+    // Path segments (without the CTE suffix) should be ["daily_revenue"].
+    assert_eq!(
+        pr.segments(),
+        vec!["daily_revenue".to_string()],
+        "segments() should not include the CTE name"
+    );
+
+    // cte_name() must return "daily_agg".
+    assert_eq!(
+        pr.cte_name().as_deref(),
+        Some("daily_agg"),
+        "cte_name() should be 'daily_agg'"
+    );
+
+    // hash_range() must be Some (anchored at the `#` character).
+    let hash_range = pr.hash_range();
+    assert!(hash_range.is_some(), "hash_range() should be Some");
+    // The `#` appears at byte offset 35 in "SELECT day FROM smelt.daily_revenue#daily_agg"
+    // (0-indexed: 'S'=0, ...  '#'=35).
+    let hr = hash_range.unwrap();
+    let hash_start: u32 = hr.start().into();
+    assert_eq!(
+        hash_start, 35,
+        "hash_range() start should be at byte offset 35 (the `#`)"
+    );
+    assert_eq!(
+        u32::from(hr.len()),
+        1,
+        "hash_range() should span exactly 1 byte"
+    );
+
+    // Lossless round-trip.
+    let cst_text = parse.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce the exact source"
+    );
+}
+
+#[test]
+fn parse_hash_cte_ref_no_errors_for_plain_ref() {
+    // A plain smelt path ref WITHOUT a `#` suffix must continue to parse
+    // without errors and have no cte_name().
+    use crate::ast::SmeltPathRef;
+    use crate::syntax_kind::SyntaxKind::SMELT_PATH_REF;
+
+    let input = "SELECT * FROM smelt.daily_revenue";
+    let parse = parse(input);
+    assert!(
+        parse.errors.is_empty(),
+        "plain ref: unexpected errors: {:?}",
+        parse.errors
+    );
+    let refs: Vec<SmeltPathRef> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SMELT_PATH_REF)
+        .filter_map(SmeltPathRef::cast)
+        .collect();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(
+        refs[0].cte_name(),
+        None,
+        "plain ref should have no cte_name"
+    );
+    assert_eq!(
+        refs[0].hash_range(),
+        None,
+        "plain ref should have no hash_range"
+    );
+}
+
+#[test]
+fn parse_hash_json_operators_unaffected() {
+    // `#>` and `#>>` (JSON operators) must still lex as HASH_ARROW /
+    // HASH_ARROW_TEXT, not as HASH followed by `>` / `>>`.
+    use crate::syntax_kind::SyntaxKind::{HASH_ARROW, HASH_ARROW_TEXT};
+    let tokens_arrow = crate::lexer::tokenize("col#>'{a}'");
+    let kinds_arrow: Vec<_> = tokens_arrow.iter().map(|t| t.kind).collect();
+    assert!(
+        kinds_arrow.contains(&HASH_ARROW),
+        "#> should lex as HASH_ARROW; got: {:?}",
+        kinds_arrow
+    );
+
+    let tokens_text = crate::lexer::tokenize("col#>>'{a}'");
+    let kinds_text: Vec<_> = tokens_text.iter().map(|t| t.kind).collect();
+    assert!(
+        kinds_text.contains(&HASH_ARROW_TEXT),
+        "#>> should lex as HASH_ARROW_TEXT; got: {:?}",
+        kinds_text
+    );
+}
+
+#[test]
+fn dangling_hash_no_ident_recovers() {
+    // A `smelt.<path>#` with NO following identifier (dangling `#`) must not
+    // panic and must preserve the lossless round-trip invariant.  The orphan
+    // `#` must NOT be captured into a CTE_SEGMENT — `cte_name()` must be None.
+    use crate::ast::SmeltPathRef;
+    use crate::syntax_kind::SyntaxKind::SMELT_PATH_REF;
+
+    let input = "SELECT x FROM smelt.daily_revenue#";
+
+    // Must not panic.
+    let parse = parse(input);
+
+    // Lossless round-trip: ALL source characters must be preserved in the CST.
+    let cst_text = parse.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "dangling `#`: CST must losslessly reproduce the source"
+    );
+
+    // The orphan `#` must NOT have been consumed into a CTE_SEGMENT.
+    // Any SMELT_PATH_REF in the tree must have cte_name() == None.
+    let path_refs: Vec<SmeltPathRef> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SMELT_PATH_REF)
+        .filter_map(SmeltPathRef::cast)
+        .collect();
+
+    for pr in &path_refs {
+        assert_eq!(
+            pr.cte_name(),
+            None,
+            "dangling `#`: cte_name() must be None (orphan `#` must not form a CTE_SEGMENT); \
+             got {:?}",
+            pr.cte_name()
+        );
+        assert_eq!(
+            pr.hash_range(),
+            None,
+            "dangling `#`: hash_range() must be None (orphan `#` must not be inside SMELT_PATH_REF)"
+        );
+    }
+}
+
+#[test]
+fn test_scientific_notation_number() {
+    // Scientific-notation numeric literals must lex as a single NUMBER token
+    // (mantissa + exponent), not a NUMBER followed by an `e`/`E` identifier.
+    for (sql, lit) in [
+        ("SELECT 1e8 AS x", "1e8"),
+        ("SELECT 1e-8 AS x", "1e-8"),
+        ("SELECT 1.5e+3 AS x", "1.5e+3"),
+        ("SELECT 2.3E-4 AS x", "2.3E-4"),
+    ] {
+        let (parse, _select) = parse_select(sql);
+        let numbers: Vec<String> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == NUMBER)
+            .map(|t| t.text().to_string())
+            .collect();
+        assert!(
+            numbers.iter().any(|n| n == lit),
+            "scientific literal {lit:?} must be a single NUMBER token; got {numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn test_postfix_cast_on_non_ident_primary() {
+    // PostgreSQL-style `expr::type` must parse for non-IDENT primaries
+    // (number, string, parenthesized expr, function-call result) into a
+    // CAST_EXPR node.
+    for sql in [
+        "SELECT 1.0::DOUBLE AS x",
+        "SELECT 'txt'::TEXT AS x",
+        "SELECT (1 + 2)::BIGINT AS x",
+        "SELECT date_trunc('day', ts)::DATE AS d FROM t",
+    ] {
+        let (parse, _select) = parse_select(sql);
+        let has_cast = parse.syntax().descendants().any(|n| n.kind() == CAST_EXPR);
+        assert!(has_cast, "expected a CAST_EXPR node for {sql:?}");
+    }
+}

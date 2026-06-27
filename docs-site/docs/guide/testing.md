@@ -1,229 +1,248 @@
 # Testing
 
-smelt lets you test your SQL models by defining expected inputs and outputs in test files, without needing a running database or executing your full pipeline.
+smelt lets you test your SQL models by defining mock input data and expected output rows
+directly in SQL files, without needing a running database or executing your full pipeline.
 
 ## How it works
 
-Tests are `.sql` files with `materialization: test` in YAML frontmatter. Each test specifies:
+A test declares an assertion query that references the model(s) under test, provides mock
+data for their dependencies via `PASSING` clauses, and states the expected output via an
+`EXPECT` clause. When you run `smelt test`, smelt compiles the assertion query into a
+standalone SQL query with mock data substituted for dependencies, executes it against an
+in-memory DuckDB instance, and compares the actual output to the expected rows.
 
-- A **model** to test (or a specific CTE within that model)
-- **Mock input data** that replaces the model's dependencies
-- **Expected output rows** to compare against
+Tests are discovered the same way as models — by scanning the directories listed in `paths:`
+in your `smelt.yml`. They can live in a dedicated `tests/` directory or co-located in
+model files.
 
-When you run `smelt test`, smelt compiles each test into a standalone SQL query with mock data substituted for dependencies, executes it against an in-memory DuckDB instance, and compares the actual output to your expected rows.
+## smelt.test declarations
 
-Tests live in a `tests/` directory (or co-located in model files) and must be discoverable via `paths:` in your `smelt.yml`:
-
-```yaml
-paths:
-  - models
-  - tests
-```
-
-## Test file format
-
-Test files use the same YAML frontmatter as regular models:
-
-```yaml
---- name: test_name ---
-materialization: test
-test:
-  model: daily_revenue
-  target_cte: daily_agg
-  inputs:
-    cleaned_orders:
-      - {order_id: 1, amount: 100.0, order_date: '2024-01-15'}
-      - {order_id: 2, amount: 200.0, order_date: '2024-01-15'}
-  expect:
-    - {order_date: '2024-01-15', total_revenue: 300.0}
-  check_order: false
-  cases: 10
----
-```
-
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `model` | Yes | | Name of the model to test |
-| `target_cte` | No | | Test a specific CTE within the model instead of the full model |
-| `inputs` | No | | Map of dependency names to arrays of row objects (mock data) |
-| `expect` | Yes | | Array of expected output rows |
-| `check_order` | No | `false` | If `true`, rows are compared positionally instead of as sets |
-| `cases` | No | `10` | Number of iterations for property-based tests |
-
-## Whole-model tests
-
-A whole-model test runs the entire model with mocked dependencies. Each key in `inputs` corresponds to a `smelt.<name>` call in the model's SQL.
+The primary way to write tests is with a `smelt.test` declaration. This keeps the query,
+mock data, and expectations together in a single SQL-native form:
 
 ```sql
---- name: test_user_activity ---
-materialization: test
-test:
-  model: user_activity
-  inputs:
-    users:
-      - {user_id: 1, user_name: Alice, signup_date: '2024-01-01'}
-      - {user_id: 2, user_name: Bob, signup_date: '2024-02-01'}
-    events:
-      - {event_id: 1, user_id: 1, event_type: page_view, event_timestamp: '2024-01-15 10:00:00', properties: null}
-      - {event_id: 2, user_id: 1, event_type: click, event_timestamp: '2024-01-16 11:00:00', properties: null}
-      - {event_id: 3, user_id: 2, event_type: page_view, event_timestamp: '2024-02-15 09:00:00', properties: null}
-  expect:
-    - {user_id: 1, user_name: Alice, total_events: 2}
-    - {user_id: 2, user_name: Bob, total_events: 1}
----
-```
-
-The framework replaces `smelt.users` and `smelt.events` with CTEs containing the mock data, then executes the rewritten query and compares the result to `expect`.
-
-## CTE-level tests
-
-CTE-level tests let you test a single CTE in isolation by setting `target_cte`. The `inputs` keys correspond to the CTEs that the target depends on directly -- not the model's external refs.
-
-```sql
---- name: test_cohort_sizes ---
-materialization: test
-test:
-  model: mart_cohort_retention
-  target_cte: cohort_sizes
-  inputs:
-    cohort_base:
-      - {customer_id: 1, cohort_date: '2024-01-01'}
-      - {customer_id: 2, cohort_date: '2024-01-01'}
-      - {customer_id: 3, cohort_date: '2024-02-01'}
-  expect:
-    - {cohort_date: '2024-01-01', cohort_size: 2}
-    - {cohort_date: '2024-02-01', cohort_size: 1}
----
-```
-
-The framework extracts the `cohort_sizes` CTE from `mart_cohort_retention`, identifies that it depends on `cohort_base`, substitutes the mock data, and runs just the target CTE's SQL.
-
-!!! tip
-    CTE-level tests are ideal for complex models with long CTE chains. Instead of mocking all upstream dependencies for the entire model, you can test each transformation step in isolation -- treating each CTE as a function with defined inputs and outputs.
-
-Here's another example testing a window function:
-
-```sql
---- name: test_customer_quantiles ---
-materialization: test
-test:
-  model: int_customer_segments
-  target_cte: customer_quantiles
-  inputs:
-    customer_metrics:
-      - {customer_id: 1, customer_segment: Premium, order_count: 10, total_revenue: 1000.0, total_net_revenue: 900.0}
-      - {customer_id: 2, customer_segment: Standard, order_count: 5, total_revenue: 500.0, total_net_revenue: 450.0}
-      - {customer_id: 3, customer_segment: Basic, order_count: 2, total_revenue: 100.0, total_net_revenue: 90.0}
-      - {customer_id: 4, customer_segment: Premium, order_count: 8, total_revenue: 800.0, total_net_revenue: 720.0}
-  expect:
-    - {customer_id: 1, revenue_decile: 1, frequency_decile: 1}
-    - {customer_id: 4, revenue_decile: 2, frequency_decile: 2}
-    - {customer_id: 2, revenue_decile: 3, frequency_decile: 3}
-    - {customer_id: 3, revenue_decile: 4, frequency_decile: 4}
----
-```
-
-## Property-based tests
-
-When your input rows have fewer columns than the CTE or model expects, smelt treats the test as property-based. The framework:
-
-1. Parses the target CTE/model to find all referenced columns
-2. Uses type inference to determine the types of omitted columns
-3. Generates random values for those columns
-4. Runs the test multiple times (default 10, configurable via `cases`)
-5. Each iteration: checks that specified output columns match and the query doesn't crash
-
-```sql
---- name: test_daily_agg_property ---
-materialization: test
-test:
-  model: daily_revenue
-  target_cte: daily
-  cases: 20
-  inputs:
-    cleaned:
-      # user_id omitted -- random values generated
-      - {amount: 100.0, created_at: '2024-01-01'}
-      - {amount: 200.0, created_at: '2024-01-01'}
-  expect:
-    # only revenue checked; other columns ignored
-    - {revenue: 300.0}
----
-```
-
-This is useful when you want to assert that a transformation produces correct results regardless of what appears in columns it doesn't use. If any iteration fails, the framework reports the random seed for reproduction.
-
-## Advanced tests (SQL body)
-
-For complex mock data that's awkward to express in YAML, you can include SQL after the frontmatter closing `---`. The SQL body defines mock CTEs directly:
-
-```sql
---- name: test_daily_agg_advanced ---
-materialization: test
-test:
-  model: daily_revenue
-  target_cte: daily
-  expect:
-    - {day: '2024-01-01', revenue: 300.0}
----
-WITH cleaned AS (
-  SELECT i as user_id, (i * 50.0) as amount, '2024-01-01'::date as created_at
-  FROM generate_series(1, 6) as t(i)
+smelt.test daily_revenue_basic AS (
+    SELECT order_date, total_revenue
+    FROM smelt.daily_revenue
+)
+PASSING orders AS (
+    {order_id: 1, amount: 100.0, order_date: '2024-01-15'},
+    {order_id: 2, amount: 200.0, order_date: '2024-01-15'}
+)
+EXPECT (
+    {order_date: '2024-01-15', total_revenue: 300.0}
 )
 ```
 
-The SQL body's CTEs are used as mock data alongside any YAML `inputs`. This is useful for generating large datasets, sequences, or data that requires SQL expressions.
+The grammar is:
 
-## Co-located tests
-
-Tests can live as additional sections in the same file as the model they test. This works because smelt supports multi-section files -- each section separated by a `---` frontmatter block.
-
-```sql
---- name: cleaned_orders ---
-materialization: ephemeral
----
-SELECT
-    order_id,
-    user_id,
-    amount,
-    created_at AS order_date
-FROM smelt.raw_orders
-WHERE status = 'completed'
-
---- name: test_cleaned_orders ---
-materialization: test
-test:
-  model: cleaned_orders
-  inputs:
-    raw_orders:
-      - {order_id: 1, user_id: 100, amount: 29.99, status: completed, created_at: '2024-01-15'}
-      - {order_id: 2, user_id: 101, amount: 49.99, status: completed, created_at: '2024-01-15'}
-      - {order_id: 3, user_id: 100, amount: 15.00, status: cancelled, created_at: '2024-01-16'}
-  expect:
-    - {order_id: 1, user_id: 100, amount: 29.99, order_date: '2024-01-15'}
-    - {order_id: 2, user_id: 101, amount: 49.99, order_date: '2024-01-15'}
----
+```
+smelt.test <name> AS ( <select> )
+  [ PASSING <dep> AS ( <rows> ) ]...
+  EXPECT ( <rows> )
 ```
 
-Tests reference models by name, not by file location, so co-located and separate tests behave identically.
+- **`<select>`** — the assertion query. It references the model(s) under test via
+  `smelt.<path>`. There is no separate `model:` field; the model under test is
+  determined by what the query references.
+- **`PASSING <dep> AS ( <rows> )`** — mock data for one dependency. `<dep>` is the bare
+  address path of the dependency (e.g. `orders` or `silver.orders`) — the `smelt.<path>`
+  reference minus the leading `smelt.`. `<rows>` is a comma-separated list of record
+  literals `{col: value, ...}`. Zero or more `PASSING` clauses are allowed.
+- **`EXPECT ( <rows> )`** — required. The expected output rows as record literals.
+
+Dependencies not named in any `PASSING` clause are replaced with empty CTEs (zero rows).
+A `PASSING` clause that names a dependency the query does not actually reach is reported
+as `UnknownTestInput` and fails the test — this catches typos that would otherwise
+silently produce a false-green result.
+
+### Record-literal value types
+
+Each value in a record literal is automatically cast to the appropriate SQL type:
+
+| Literal | SQL type | Example |
+|---------|----------|---------|
+| Integer | `INTEGER` | `42` |
+| Float | `DOUBLE` | `3.14` |
+| Decimal-shaped string (has `.`, no exponent) | `DECIMAL` | `'300.00'` |
+| `'YYYY-MM-DD'` string | `DATE` | `'2024-01-15'` |
+| `'YYYY-MM-DD HH:MM:SS'` string | `TIMESTAMP` | `'2024-01-15 10:00:00'` |
+| Other string | `VARCHAR` | `'completed'` |
+| Boolean | `BOOLEAN` | `true`, `false` |
+| Null | `NULL` | `null` |
+
+### Frontmatter knobs
+
+A YAML frontmatter block can precede the `smelt.test` declaration to configure test behaviour:
+
+```sql
+---
+test:
+  check_order: true
+  cases: 20
+---
+smelt.test check_revenue_rank AS (
+    SELECT rank, user_id FROM smelt.revenue_report ORDER BY rank
+)
+PASSING ... 
+EXPECT ...
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `check_order` | bool | `false` | If `true`, compare rows positionally (order matters). If `false`, compare as sets. |
+| `cases` | integer | `10` | Number of iterations for property-based tests (see below). |
+
+### Full-query tests
+
+A full-query test inlines the referenced model's SQL and substitutes mock data for every
+`smelt.<path>` dependency named in a `PASSING` clause:
+
+```sql
+smelt.test check_user_activity AS (
+    SELECT user_id, total_events
+    FROM smelt.user_activity
+)
+PASSING users AS (
+    {user_id: 1, user_name: 'Alice', signup_date: '2024-01-01'},
+    {user_id: 2, user_name: 'Bob', signup_date: '2024-02-01'}
+)
+PASSING events AS (
+    {event_id: 1, user_id: 1, event_type: 'page_view'},
+    {event_id: 2, user_id: 1, event_type: 'click'},
+    {event_id: 3, user_id: 2, event_type: 'page_view'}
+)
+EXPECT (
+    {user_id: 1, total_events: 2},
+    {user_id: 2, total_events: 1}
+)
+```
+
+### CTE-level tests with the `#` operator
+
+Within a `smelt.test` body, you can target a specific CTE inside a model using the
+`smelt.<model>#<cte>` syntax:
+
+```sql
+smelt.test daily_agg_rollup AS (
+    SELECT day, revenue
+    FROM smelt.daily_revenue#daily_agg
+)
+PASSING orders AS (
+    {order_id: 1, amount: 100.0, order_date: '2024-01-01'}
+)
+EXPECT (
+    {day: '2024-01-01', revenue: 100.0}
+)
+```
+
+The `#<cte>` suffix selects one CTE within the referenced model. The CTE's upstream
+chain — every CTE it depends on, directly and transitively — runs **as written**.
+Only the model's external `smelt.<path>` dependencies are mockable via `PASSING`.
+
+`PASSING` names in a CTE-level test are the model's external dependency paths (the
+`smelt.<path>` refs reachable from the target CTE's dependency chain), not internal
+CTE names. A `#<cte>` naming a CTE absent from the model is reported as `UnknownTestCte`.
+
+!!! tip
+    CTE-level tests are ideal for complex models with long CTE chains. Instead of mocking
+    all upstream dependencies for the entire model, you can test each transformation step
+    in isolation — treating each CTE as a function with defined inputs and outputs.
+
+Here's an example testing a window function CTE:
+
+```sql
+smelt.test customer_quantiles_check AS (
+    SELECT customer_id, revenue_decile, frequency_decile
+    FROM smelt.int_customer_segments#customer_quantiles
+)
+PASSING customer_metrics AS (
+    {customer_id: 1, customer_segment: 'Premium', order_count: 10, total_revenue: 1000.0, total_net_revenue: 900.0},
+    {customer_id: 2, customer_segment: 'Standard', order_count: 5, total_revenue: 500.0, total_net_revenue: 450.0},
+    {customer_id: 3, customer_segment: 'Basic', order_count: 2, total_revenue: 100.0, total_net_revenue: 90.0},
+    {customer_id: 4, customer_segment: 'Premium', order_count: 8, total_revenue: 800.0, total_net_revenue: 720.0}
+)
+EXPECT (
+    {customer_id: 1, revenue_decile: 1, frequency_decile: 1},
+    {customer_id: 4, revenue_decile: 2, frequency_decile: 2},
+    {customer_id: 2, revenue_decile: 3, frequency_decile: 3},
+    {customer_id: 3, revenue_decile: 4, frequency_decile: 4}
+)
+```
+
+### Property-based tests
+
+When a `PASSING` row omits one or more columns that the CTE or model uses, smelt treats the
+test as property-based. For each of the `cases` iterations (default 10):
+
+1. smelt infers the type of each omitted column from the model's type checker.
+2. Generates a random value of the appropriate type.
+3. Executes the test with the augmented input data.
+4. Checks that specified `EXPECT` columns match (unspecified output columns are ignored).
+5. Verifies the query does not crash.
+
+```sql
+---
+test:
+  cases: 20
+---
+smelt.test daily_agg_property AS (
+    SELECT day, revenue
+    FROM smelt.daily_revenue#daily_agg
+)
+PASSING cleaned AS (
+    -- user_id is omitted: random values are generated each iteration
+    {amount: 100.0, created_at: '2024-01-01'},
+    {amount: 200.0, created_at: '2024-01-01'}
+)
+EXPECT (
+    -- only `revenue` is checked; other columns are ignored
+    {revenue: 300.0}
+)
+```
+
+If any iteration fails, the framework reports the random seed for reproduction.
+
+### File placement
+
+Each `smelt.test` declaration belongs in its own `.sql` file (or a file dedicated to
+tests). Any `.sql` file that contains a `smelt.test` declaration is classified as a
+**test file** by smelt — it will not be treated as a model, and other models cannot
+reference it via `smelt.<name>`.
 
 !!! note
-    **Convention:** Small projects often co-locate tests in model files to keep things together. Larger projects typically use a separate `tests/` directory to keep model files clean. Both approaches work -- choose what fits your team.
+    **Convention:** Place test files in a dedicated `tests/` directory and add it to `paths:`
+    in `smelt.yml`. This keeps model files clean and makes it clear which files contain tests.
+
+    ```yaml
+    # smelt.yml
+    paths:
+      - models
+      - tests
+    ```
 
 ## Comparison behavior
 
 ### Set vs ordered comparison
 
-By default, row order does not matter -- both actual and expected rows are compared as sets. Use `check_order: true` when row order is significant (e.g., testing window functions with specific ordering):
+By default, row order does not matter -- both actual and expected rows are compared as sets. Use `check_order: true` (in frontmatter) when row order is significant (e.g., testing window functions with specific ordering):
 
-```yaml
+```sql
+---
 test:
-  model: my_model
   check_order: true
-  inputs: ...
-  expect:
-    - {rank: 1, user_id: 42}
-    - {rank: 2, user_id: 17}
+---
+smelt.test check_rank AS (
+    SELECT rank, user_id FROM smelt.revenue_report ORDER BY rank
+)
+PASSING revenue_report AS (
+    {rank: 1, user_id: 42},
+    {rank: 2, user_id: 17}
+)
+EXPECT (
+    {rank: 1, user_id: 42},
+    {rank: 2, user_id: 17}
+)
 ```
 
 ### Column filtering
@@ -306,5 +325,5 @@ The command exits with code 0 if all tests pass, or code 1 if any test fails.
 ## Further reading
 
 - [SQL Models](sql-models.md) -- model syntax and YAML frontmatter
-- [Materializations](materializations.md) -- all materialization types including `test`
+- [Materializations](materializations.md) -- all materialization types
 - [CLI Commands](../reference/cli.md#smelt-test) -- full `smelt test` flag reference

@@ -155,7 +155,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 **Rejected alternatives.**
 
 - *Auto-detect delimiter/quote like DuckDB.* Surface that magic only matters when a user has a non-standard CSV; we'd rather have them convert it explicitly or override in the (future) sidecar config.
-- *Tests on seed columns now.* `testing.md` covers `materialization: test` models but does not yet specify column-level assertions on a seed sidecar; reserving a `tests:` key now would commit to a shape before that surface lands. The shared YAML grows uniformly when it does.
+- *Tests on seed columns now.* `testing.md` covers `smelt.test` declarations but does not yet specify column-level assertions on a seed sidecar; reserving a `tests:` key now would commit to a shape before that surface lands. The shared YAML grows uniformly when it does.
 - *`view` and `materialized_view` materialization for seeds.* A view backed by `VALUES` is technically possible but offers little over `ephemeral` (inline) or `table` (real). Out of scope until a concrete need emerges.
 
 ## Constraints & Invariants
@@ -175,7 +175,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 - **No compile/runtime type-divergence diagnostic.** When the first 100 rows fit a narrower type than the full file (e.g. rows 1–100 are integers but row 101 contains `1.5`), compile time infers the narrower type while runtime loads the wider one. No diagnostic is emitted today to flag this divergence; the user must pin the schema in a sidecar YAML (`columns:`) to prevent it. Emitting a warning when the compile-time sample and the full-file inference disagree is deferred.
 - **Drift diagnostic between CSV and pinned YAML.** The "Re-pin schema from CSV" LSP code action is in scope here, but the diagnostic that surfaces drift (column added/removed, inferred type drift) is implementation-deferred to the LSP plan.
 - **Ephemeral seed size limits.** A 100k-row CSV declared `materialization: ephemeral` would generate a `VALUES` literal of dangerous size. A future row-count threshold (warn, then error) is open; today's spec leaves the choice to the user.
-- **Tests on seed columns.** The shared YAML does not yet support `tests:`. Column-level tests on seed/source/model columns will land together when `testing.md` grows that surface (it currently covers only `materialization: test` model files).
+- **Tests on seed columns.** The shared YAML does not yet support `tests:`. Column-level tests on seed/source/model columns will land together when `testing.md` grows that surface (it currently covers only `smelt.test` declarations).
 - **`view` / `materialized_view` materialization for seeds.** Not supported in v1. Possible if a concrete need emerges; would lower as `CREATE VIEW … AS SELECT * FROM (VALUES …)` or backend-equivalent.
 - **Migration tooling.** No `smelt migrate` command exists. A bundled examples migration and a documentation note are the v1 story; a tool is a follow-up plan.
 

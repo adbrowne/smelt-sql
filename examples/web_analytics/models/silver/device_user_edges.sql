@@ -1,12 +1,13 @@
 ---
-materialization: cumulative_aggregate
+materialization: table
+refresh: cumulative
 ---
 -- Cumulative (device_id, user_id) co-occurrence evidence — every signed-in
 -- event contributes one observation, combined across all source partitions
--- into a single row per (device, user) pair.  The cumulative_aggregate
--- materialization derives the unique key from GROUP BY and the per-column
--- combiner from each projection's aggregator (COUNT->SUM, MIN->MIN, MAX->MAX),
--- so each daily run only re-aggregates that day's events and merges into the
+-- into a single row per (device, user) pair.  The cumulative merge loop
+-- derives the unique key from GROUP BY and the per-column combiner from
+-- each projection's aggregator (COUNT->SUM, MIN->MIN, MAX->MAX), so each
+-- daily run only re-aggregates that day's events and merges into the
 -- running cumulative state.
 SELECT
     device_id,
