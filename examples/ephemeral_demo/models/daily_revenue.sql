@@ -31,5 +31,7 @@ PASSING cleaned_orders AS (
 )
 EXPECT (
     {order_date: '2024-01-15', order_count: 2, total_revenue: 79.98},
-    {order_date: '2024-01-16', order_count: 1, total_revenue: 75.50}
+    -- Quote the decimal so its scale (75.50, not 75.5) is preserved for the
+    -- exact DECIMAL comparison — an unquoted number is read as a float.
+    {order_date: '2024-01-16', order_count: 1, total_revenue: '75.50'}
 )
