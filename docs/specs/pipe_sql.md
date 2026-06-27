@@ -151,7 +151,8 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
 - **Native passthrough is not emitted.** Every backend reports `supports_pipe_syntax = false`; only lowered standard SQL is generated. Native pipe emission on BigQuery/Databricks/DuckDB-via-extension is reserved by the capability flag but not implemented. Tracked in `docs/plans/` (forthcoming).
 - **Pipes appended to a leading `SELECT`.** BigQuery also allows `SELECT … FROM … |> WHERE …`. smelt accepts only the FROM-first form; the SELECT-then-pipe form is unspecified surface.
 - **Per-operator native capability matrix.** The `supports_pipe_syntax` flag is currently whole-feature. Backends whose native dialect supports only a subset (Spark omits `RENAME`/`CALL`/`WINDOW`/`DISTINCT`/`ASSERT`) will need a per-operator capability set before native emission can mix passthrough and lowering. Undecided until the native path is built.
-- **Non-passthrough pipe stages are not yet lowered.** Until the lowering for `EXTEND`, `SET`, `DROP`, `RENAME`, `AS`, `AGGREGATE`, `JOIN`, and set-operation stages is implemented (scheduled across the remaining plan phases), the printer falls back to emitting the pipe query verbatim for any query that contains these operators. This means `|>` tokens may reach a backend that reports `supports_pipe_syntax = false`, violating §Constraint 2 for such queries. Tracked in `docs/plans/20260627-pipe_sql.md` (Phases 3–5).
+- **`AGGREGATE`, `JOIN`, and set-operation stages are not yet lowered.** For any pipe query that contains `AGGREGATE`, `JOIN`, or set-operation stages, the printer falls back to emitting the pipe query verbatim, violating §Constraint 2 for `supports_pipe_syntax = false` backends. Tracked in `docs/plans/20260627-pipe_sql.md` (Phases 4–5).
+- **SET/DROP/RENAME lowering is DuckDB-specific.** On the DuckDB backend, `|> SET col = expr` lowers to `SELECT * REPLACE (expr AS col) FROM (prior)`, `|> DROP col` lowers to `SELECT * EXCLUDE (col) FROM (prior)`, and `|> RENAME old AS new` lowers to `SELECT * RENAME (old AS new) FROM (prior)`. These use DuckDB column-selection extensions and are not portable to other backends; non-DuckDB backends treat SET/DROP/RENAME as unhandled and fall back to emitting verbatim pipe syntax until schema-aware lowering is implemented. Tracked in `docs/plans/20260627-pipe_sql.md`.
 
 ## References
 
@@ -161,9 +162,14 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
   - `crates/smelt-db/src/type_inference/` — stage-by-stage schema inference (`binary.rs::walk_select_columns`, `type_context.rs`)
   - `crates/smelt-dialect/src/printer.rs`, `crates/smelt-dialect/src/dialect.rs` — lowering seam and `BackendCapabilities`
   - `crates/smelt-parser-compat/src/gaps.rs` — known parser-compat extension gaps
-- **Tests**: `crates/smelt-parser/tests/pipe_query.rs` — CST shape, FROM-first trigger, per-operator stage markers, error diagnostics (unknown, unsupported, malformed)
+- **Tests**:
+  - `crates/smelt-parser/tests/pipe_query.rs` — CST shape, FROM-first trigger, per-operator stage markers, error diagnostics (unknown, unsupported, malformed)
+  - `crates/smelt-dialect/tests/pipe_lowering.rs` — passthrough collapse, DISTINCT lowering, EXTEND subquery wrap
+  - `crates/smelt-db/tests/pipe_equivalence.rs` — DuckDB oracle equivalence for passthrough and column-editing queries
+  - `crates/smelt-db/tests/pipe_scope.rs` — stage-to-stage scope threading (EXTEND/SET/DROP/RENAME undeclared-column diagnostics)
+  - `examples/test_workspace/models/pipe_orders.sql` — live fixture used by `example_diagnostics`
 - **User docs**: *(forthcoming — `docs-site/docs/guide/` pipe-syntax page)*
-- **Plans (history)**: *(forthcoming)*
+- **Plans (history)**: `docs/plans/20260627-pipe_sql.md`
 - **Related specs**:
   - `meta_language.md` — the meta-world `|>` operator and the `PipeInDataPosition` rule this spec narrows
   - `models.md` — model body surface (a model body may be a pipe query)

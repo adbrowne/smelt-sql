@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rowan::TextRange;
-use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
+use smelt_parser::{self, ast::FromClause, ast::SmeltPathRef, File as AstFile, TableRef};
 use smelt_types::{DataType, TypedColumn};
 
 use crate::function_body_check::{self, infer_tableexpr_return_schema};
@@ -909,6 +909,15 @@ pub fn build_type_context(
         process_from_clause_pure(&select_stmt, refs, &mut ctx);
     }
 
+    // Pipe queries (`FROM … |> …`) have their FROM clause directly on the PIPE_QUERY
+    // node, not on a SELECT_STMT. Process it here so that `type_context()` returns a
+    // properly seeded TypeContext for pipe query files.
+    if let Some(pipe_query) = file.pipe_query() {
+        if let Some(from_clause) = pipe_query.from_clause() {
+            process_from_clause_node_pure(&from_clause, refs, &mut ctx);
+        }
+    }
+
     ctx
 }
 
@@ -918,13 +927,25 @@ fn process_from_clause_pure(
     ctx: &mut TypeContext,
 ) {
     if let Some(from_clause) = select_stmt.from_clause() {
-        for table_ref in from_clause.table_refs() {
+        process_from_clause_node_pure(&from_clause, refs, ctx);
+    }
+}
+
+/// Core FROM-clause processor that operates on a `FromClause` node directly.
+///
+/// Used by both `process_from_clause_pure` (for `SELECT` statements) and the
+/// pipe-query branch in `build_type_context` (for `FROM … |> …` pipe queries).
+fn process_from_clause_node_pure(
+    from_clause: &FromClause,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    for table_ref in from_clause.table_refs() {
+        process_table_ref_pure(&table_ref, refs, ctx);
+    }
+    for join in from_clause.joins() {
+        if let Some(table_ref) = join.table_ref() {
             process_table_ref_pure(&table_ref, refs, ctx);
-        }
-        for join in from_clause.joins() {
-            if let Some(table_ref) = join.table_ref() {
-                process_table_ref_pure(&table_ref, refs, ctx);
-            }
         }
     }
 }

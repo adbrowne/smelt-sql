@@ -114,7 +114,175 @@ fn no_pipe_token_reaches_backend() {
     }
 }
 
-// ── Test 3: LIMIT pipe stage ──────────────────────────────────────────────────
+// ── Test 4 (Phase 3): column_editing_matches_standard_sql ────────────────────
+
+/// DuckDB oracle equivalence for EXTEND.
+///
+/// `FROM nums |> EXTEND n * 2 AS doubled` should produce the same result as
+/// `SELECT n, n * 2 AS doubled FROM nums`.
+#[test]
+fn column_editing_matches_standard_sql() {
+    let oracle = DuckDbOracle::new();
+
+    oracle
+        .execute_ddl("CREATE TABLE nums (n INTEGER); INSERT INTO nums VALUES (1), (2), (3);")
+        .expect("DDL setup failed");
+
+    let pipe_sql = "FROM nums |> EXTEND n * 2 AS doubled";
+    let lowered = lower_pipe_sql(pipe_sql);
+
+    // No |> in output
+    assert!(
+        !lowered.contains("|>"),
+        "lowered SQL must not contain |>, got: {lowered}"
+    );
+
+    // Must be executable on DuckDB
+    let lowered_types = oracle
+        .query_types(&lowered)
+        .unwrap_or_else(|_| panic!("lowered pipe query failed on DuckDB: {lowered}"));
+
+    // Should have two columns: n and doubled
+    assert_eq!(
+        lowered_types.len(),
+        2,
+        "expected 2 columns (n, doubled), got: {lowered_types:?} from: {lowered}"
+    );
+    assert_eq!(
+        lowered_types[0].0, "n",
+        "first column should be 'n', got: {:?} from: {lowered}",
+        lowered_types[0].0
+    );
+    assert_eq!(
+        lowered_types[1].0, "doubled",
+        "second column should be 'doubled', got: {:?} from: {lowered}",
+        lowered_types[1].0
+    );
+}
+
+// ── SET / DROP / RENAME DuckDB oracle tests ───────────────────────────────────
+
+/// `|> SET a = a * 2` must lower to `SELECT * REPLACE (a * 2 AS a) FROM (...)`,
+/// which DuckDB executes correctly — not a boolean comparison.
+#[test]
+fn set_column_matches_standard_sql() {
+    let oracle = DuckDbOracle::new();
+    oracle
+        .execute_ddl(
+            "CREATE TABLE t_set (a INTEGER, b INTEGER); INSERT INTO t_set VALUES (1, 10), (2, 20);",
+        )
+        .expect("DDL setup failed");
+
+    let pipe = "FROM t_set |> SET a = a * 2";
+    let lowered = lower_pipe_sql(pipe);
+    assert!(
+        !lowered.contains("|>"),
+        "lowered SQL must not contain |>, got: {lowered}"
+    );
+    assert!(
+        lowered.contains("REPLACE"),
+        "SET lowering must use SELECT * REPLACE (...) syntax; got: {lowered}"
+    );
+
+    // The lowered form must be executable by DuckDB.
+    let pipe_rows = oracle
+        .query_types(&lowered)
+        .unwrap_or_else(|e| panic!("pipe query failed on DuckDB: {lowered}\n  error: {e}"));
+
+    // Standard SQL equivalent: a is replaced with a * 2, b is kept.
+    let std_sql = "SELECT a * 2 AS a, b FROM t_set";
+    let std_rows = oracle
+        .query_types(std_sql)
+        .unwrap_or_else(|e| panic!("standard SQL failed on DuckDB: {std_sql}\n  error: {e}"));
+
+    assert_eq!(
+        pipe_rows.len(),
+        std_rows.len(),
+        "column count mismatch: pipe={pipe_rows:?}, std={std_rows:?} from: {lowered}"
+    );
+    assert_eq!(
+        pipe_rows[0].0, "a",
+        "first column should be 'a', got: {:?} from: {lowered}",
+        pipe_rows[0].0
+    );
+    assert_eq!(
+        pipe_rows[1].0, "b",
+        "second column should be 'b', got: {:?} from: {lowered}",
+        pipe_rows[1].0
+    );
+}
+
+/// `|> DROP a` must lower to `SELECT * EXCLUDE (a) FROM (...)`, removing the column.
+#[test]
+fn drop_column_matches_standard_sql() {
+    let oracle = DuckDbOracle::new();
+    oracle
+        .execute_ddl(
+            "CREATE TABLE t_drop (a INTEGER, b INTEGER); INSERT INTO t_drop VALUES (1, 10);",
+        )
+        .expect("DDL setup failed");
+
+    let pipe = "FROM t_drop |> DROP a";
+    let lowered = lower_pipe_sql(pipe);
+    assert!(
+        !lowered.contains("|>"),
+        "lowered SQL must not contain |>, got: {lowered}"
+    );
+
+    let pipe_rows = oracle
+        .query_types(&lowered)
+        .unwrap_or_else(|e| panic!("pipe query failed on DuckDB: {lowered}\n  error: {e}"));
+
+    assert_eq!(
+        pipe_rows.len(),
+        1,
+        "DROP a should leave 1 column (b); got: {pipe_rows:?} from: {lowered}"
+    );
+    assert_eq!(
+        pipe_rows[0].0, "b",
+        "remaining column should be 'b'; got: {pipe_rows:?} from: {lowered}"
+    );
+}
+
+/// `|> RENAME a AS x` must lower to `SELECT * RENAME (a AS x) FROM (...)`,
+/// renaming the column without losing the other columns.
+#[test]
+fn rename_column_matches_standard_sql() {
+    let oracle = DuckDbOracle::new();
+    oracle
+        .execute_ddl(
+            "CREATE TABLE t_rename (a INTEGER, b INTEGER); INSERT INTO t_rename VALUES (1, 10);",
+        )
+        .expect("DDL setup failed");
+
+    let pipe = "FROM t_rename |> RENAME a AS x";
+    let lowered = lower_pipe_sql(pipe);
+    assert!(
+        !lowered.contains("|>"),
+        "lowered SQL must not contain |>, got: {lowered}"
+    );
+
+    let pipe_rows = oracle
+        .query_types(&lowered)
+        .unwrap_or_else(|e| panic!("pipe query failed on DuckDB: {lowered}\n  error: {e}"));
+
+    assert_eq!(
+        pipe_rows.len(),
+        2,
+        "RENAME should keep 2 columns; got: {pipe_rows:?} from: {lowered}"
+    );
+    let col_names: Vec<&str> = pipe_rows.iter().map(|c| c.0.as_str()).collect();
+    assert!(
+        col_names.contains(&"x"),
+        "expected column 'x' after rename; got: {col_names:?} from: {lowered}"
+    );
+    assert!(
+        !col_names.contains(&"a"),
+        "old column 'a' should not be present after rename; got: {col_names:?} from: {lowered}"
+    );
+}
+
+// ── Test 3 (original): LIMIT pipe stage ──────────────────────────────────────
 
 /// A pipe query with only a LIMIT stage must lower to SELECT * FROM t LIMIT N.
 #[test]

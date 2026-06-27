@@ -179,7 +179,7 @@ classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1073"]
+["crates/smelt-db/src/queries/schema.rs:1094"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"
@@ -357,6 +357,28 @@ discriminant = "dynamic"
 ["crates/smelt-db/src/type_inference/hof.rs:1121"]
 classification = "legitimate"
 reason = "list literal element type inference fallback — infer_expression_type returns None; conservative Unknown"
+discriminant = "dynamic"
+
+# ── smelt-db / type_inference/pipe ──────────────────────────────────────────
+
+["crates/smelt-db/src/type_inference/pipe.rs:186"]
+classification = "legitimate"
+reason = "pipe SELECT stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:191"]
+classification = "legitimate"
+reason = "pipe SELECT stage: item has no expression node; Unknown placeholder for column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:461"]
+classification = "legitimate"
+reason = "pipe EXTEND stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for new column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:547"]
+classification = "legitimate"
+reason = "pipe SET stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for updated column"
 discriminant = "dynamic"
 
 # ── smelt-db / type_inference/subquery ────────────────────────────────────────

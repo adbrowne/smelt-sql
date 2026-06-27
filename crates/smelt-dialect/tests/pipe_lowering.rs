@@ -170,6 +170,44 @@ fn where_after_select_is_non_passthrough() {
     );
 }
 
+// ── Test 5 (Phase 3): EXTEND wraps prior projection ──────────────────────────
+
+/// After a SELECT that has already fixed the projection, an EXTEND must wrap
+/// the prior query as a subquery.
+///
+/// Input: `FROM t |> SELECT a |> EXTEND a + 1 AS b`
+/// Expected lowered form: `SELECT *, a + 1 AS b FROM (SELECT a FROM t)`
+/// No `|>` in output.
+#[test]
+fn extend_wraps_prior_projection() {
+    let sql = "FROM t |> SELECT a |> EXTEND a + 1 AS b";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+
+    assert!(
+        !result.contains("|>"),
+        "output must not contain |>, got: {result}"
+    );
+
+    // The result must be a subquery wrapping the SELECT a FROM t
+    assert!(
+        result.contains("SELECT a FROM t") || result.contains("SELECT a\nFROM t"),
+        "expected SELECT a FROM t as a subquery, got: {result}"
+    );
+
+    // The EXTEND expression must appear in the outer SELECT
+    assert!(
+        result.contains("a + 1") && result.contains("AS b"),
+        "expected a + 1 AS b in output, got: {result}"
+    );
+
+    // The outer SELECT must project *
+    assert!(
+        result.contains("SELECT *") || result.contains("SELECT *, "),
+        "expected SELECT * or SELECT *, in output, got: {result}"
+    );
+}
+
 // ── Test 6: no pipe token reaches backend ────────────────────────────────────
 
 /// All backends report supports_pipe_syntax = false; none may emit `|>`.

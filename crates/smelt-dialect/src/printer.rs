@@ -299,8 +299,16 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
 /// **Passthrough collapse (Lowering rule 1):** Contiguous passthrough stages
 /// (`FROM`, pre-aggregation `WHERE`, trailing `SELECT`, `ORDER BY`, `LIMIT`,
 /// `DISTINCT`) are collapsed into a single `SELECT … FROM … WHERE … ORDER BY …
-/// LIMIT …`. Non-passthrough operators (EXTEND, AGGREGATE, JOIN, set ops, etc.)
-/// are printed verbatim as a fallback until their own lowering phases are added.
+/// LIMIT …`.
+///
+/// **Projection-editing operators (Lowering rule 4):** `EXTEND`, `SET`, `DROP`,
+/// `RENAME`, and `AS` lower to a re-projection. When such a stage follows a
+/// stage that already fixed the projection (i.e. we have accumulated a prior SQL
+/// fragment), the prior query is wrapped as a subquery:
+/// `SELECT <new_projection> FROM (<prior_query>)`.
+///
+/// AGGREGATE, JOIN, and set-op stages fall back to verbatim printing until
+/// their own lowering phases are added.
 ///
 /// Emitted form:
 /// ```text
@@ -309,98 +317,277 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
 fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
     use SyntaxKind::*;
 
-    // ── Collect stage information ──────────────────────────────────────────
-    //
-    // Walk through PIPE_STAGE children and identify passthrough stages.
-    // If any non-passthrough stage is encountered, fall back to verbatim.
-
-    // Gathered stage bodies (as raw text, post-whitespace-trimmed).
-    let mut where_bodies: Vec<String> = Vec::new();
-    let mut select_body: Option<String> = None;
-    let mut order_by_body: Option<String> = None;
-    let mut limit_body: Option<String> = None;
-    let mut has_distinct = false;
-    let mut has_non_passthrough = false;
-
-    for child in node.children() {
-        match child.kind() {
-            // Optional WITH_CLAUSE: handled separately below.
-            WITH_CLAUSE => {}
-            // The FROM_CLAUSE: not a PIPE_STAGE.
-            FROM_CLAUSE => {}
-            PIPE_STAGE => {
-                // Determine operator kind.
-                let op_kind = child.children().find_map(|c| {
-                    let k = c.kind();
-                    if matches!(
-                        k,
-                        PIPE_OP_WHERE
-                            | PIPE_OP_SELECT
-                            | PIPE_OP_EXTEND
-                            | PIPE_OP_SET
-                            | PIPE_OP_DROP
-                            | PIPE_OP_RENAME
-                            | PIPE_OP_AS
-                            | PIPE_OP_AGGREGATE
-                            | PIPE_OP_ORDER_BY
-                            | PIPE_OP_LIMIT
-                            | PIPE_OP_JOIN
-                            | PIPE_OP_UNION
-                            | PIPE_OP_INTERSECT
-                            | PIPE_OP_EXCEPT
-                            | PIPE_OP_DISTINCT
-                    ) {
-                        Some(k)
-                    } else {
-                        None
-                    }
-                });
-
-                match op_kind {
-                    Some(PIPE_OP_WHERE) => {
-                        if select_body.is_some() {
-                            // WHERE after SELECT cannot collapse into the same level's WHERE clause;
-                            // alias visibility differs across backends. Mark as non-passthrough.
-                            has_non_passthrough = true;
-                        } else {
-                            let body = collect_where_body(&child);
-                            where_bodies.push(body);
-                        }
-                    }
-                    Some(PIPE_OP_SELECT) => {
-                        select_body = Some(collect_select_body(&child));
-                    }
-                    Some(PIPE_OP_ORDER_BY) => {
-                        order_by_body = Some(collect_order_by_body(&child));
-                    }
-                    Some(PIPE_OP_LIMIT) => {
-                        limit_body = Some(collect_limit_body(&child));
-                    }
-                    Some(PIPE_OP_DISTINCT) => {
-                        has_distinct = true;
-                    }
-                    // Non-passthrough operators: fall back to verbatim for now.
-                    _ => {
-                        has_non_passthrough = true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // If there are non-passthrough stages we can't fully lower, print verbatim.
-    if has_non_passthrough {
-        print_children(node, ctx, out);
-        return;
-    }
-
-    // ── Locate the WITH_CLAUSE and FROM_CLAUSE nodes ───────────────────────
+    // ── Collect all pipe stages in order ──────────────────────────────────
 
     let with_clause = node.children().find(|c| c.kind() == WITH_CLAUSE);
     let from_clause = node.children().find(|c| c.kind() == FROM_CLAUSE);
 
-    // ── Emit the lowered SELECT ────────────────────────────────────────────
+    // Collect the FROM body (everything after the FROM keyword).
+    let from_body = from_clause
+        .as_ref()
+        .map(|fc| collect_from_body(fc, ctx))
+        .unwrap_or_default();
+
+    // Collected stages (in order).
+    let stages: Vec<SyntaxNode> = node.children().filter(|c| c.kind() == PIPE_STAGE).collect();
+
+    // Check for any stages we can't handle → verbatim.
+    //
+    // Always-unhandled: AGGREGATE, JOIN, set-ops.
+    // DuckDB-only: SET, DROP, RENAME — handled on DuckDB via REPLACE/EXCLUDE/RENAME
+    //   extensions; on non-DuckDB backends they are unhandled and cause verbatim.
+    let has_unhandled = stages.iter().any(|s| {
+        let op = s.children().find_map(|c| {
+            let k = c.kind();
+            if matches!(
+                k,
+                PIPE_OP_WHERE
+                    | PIPE_OP_SELECT
+                    | PIPE_OP_EXTEND
+                    | PIPE_OP_SET
+                    | PIPE_OP_DROP
+                    | PIPE_OP_RENAME
+                    | PIPE_OP_AS
+                    | PIPE_OP_AGGREGATE
+                    | PIPE_OP_ORDER_BY
+                    | PIPE_OP_LIMIT
+                    | PIPE_OP_JOIN
+                    | PIPE_OP_UNION
+                    | PIPE_OP_INTERSECT
+                    | PIPE_OP_EXCEPT
+                    | PIPE_OP_DISTINCT
+            ) {
+                Some(k)
+            } else {
+                None
+            }
+        });
+        match op {
+            Some(PIPE_OP_AGGREGATE)
+            | Some(PIPE_OP_JOIN)
+            | Some(PIPE_OP_UNION)
+            | Some(PIPE_OP_INTERSECT)
+            | Some(PIPE_OP_EXCEPT)
+            | None => true,
+            // SET/DROP/RENAME are only handled on DuckDB; non-DuckDB → verbatim.
+            Some(PIPE_OP_SET) | Some(PIPE_OP_DROP) | Some(PIPE_OP_RENAME) => {
+                !matches!(ctx.dialect, SqlDialect::DuckDB)
+            }
+            _ => false,
+        }
+    });
+
+    if has_unhandled {
+        print_children(node, ctx, out);
+        return;
+    }
+
+    // ── Two-pass lowering ─────────────────────────────────────────────────
+    //
+    // We process stages left-to-right, accumulating a "current SQL fragment".
+    // The fragment starts as just the FROM source.
+    //
+    // Passthrough stages (WHERE, ORDER BY, LIMIT, DISTINCT) are accumulated
+    // into the current fragment's clauses.
+    //
+    // Projection-fixing stages (SELECT) set the SELECT list and prevent
+    // further WHERE from being pushed into the same level.
+    //
+    // Projection-editing stages (EXTEND, SET, DROP, RENAME, AS) wrap the
+    // current fragment as a subquery and start a fresh outer SELECT.
+
+    // Current accumulated fragment.
+    let mut acc_where: Vec<String> = Vec::new();
+    let mut acc_select: Option<String> = None;
+    let mut acc_order_by: Option<String> = None;
+    let mut acc_limit: Option<String> = None;
+    let mut acc_distinct = false;
+    // The "inner source" that goes in FROM. Starts as the FROM-clause table.
+    let mut inner_source = from_body;
+
+    for stage in &stages {
+        let op_kind = stage.children().find_map(|c| {
+            let k = c.kind();
+            if matches!(
+                k,
+                PIPE_OP_WHERE
+                    | PIPE_OP_SELECT
+                    | PIPE_OP_EXTEND
+                    | PIPE_OP_SET
+                    | PIPE_OP_DROP
+                    | PIPE_OP_RENAME
+                    | PIPE_OP_AS
+                    | PIPE_OP_ORDER_BY
+                    | PIPE_OP_LIMIT
+                    | PIPE_OP_DISTINCT
+            ) {
+                Some(k)
+            } else {
+                None
+            }
+        });
+
+        match op_kind {
+            Some(PIPE_OP_WHERE) => {
+                if acc_select.is_some() {
+                    // WHERE after SELECT: wrap existing fragment into subquery,
+                    // then add this WHERE on the outer level.
+                    let prior = build_select_fragment(
+                        &inner_source,
+                        &acc_where,
+                        &acc_select,
+                        &acc_order_by,
+                        &acc_limit,
+                        acc_distinct,
+                    );
+                    inner_source = format!("({prior})");
+                    acc_where = Vec::new();
+                    acc_select = None;
+                    acc_order_by = None;
+                    acc_limit = None;
+                    acc_distinct = false;
+                }
+                let body = collect_where_body(stage);
+                acc_where.push(body);
+            }
+            Some(PIPE_OP_SELECT) => {
+                acc_select = Some(collect_select_body(stage));
+            }
+            Some(PIPE_OP_ORDER_BY) => {
+                acc_order_by = Some(collect_order_by_body(stage));
+            }
+            Some(PIPE_OP_LIMIT) => {
+                acc_limit = Some(collect_limit_body(stage));
+            }
+            Some(PIPE_OP_DISTINCT) => {
+                acc_distinct = true;
+            }
+            Some(PIPE_OP_EXTEND) => {
+                // Wrap current fragment as subquery, emit SELECT *, <extend_body>.
+                let prior = build_select_fragment(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                );
+                let extend_expr = collect_stage_body_text(stage, ctx, PIPE_OP_EXTEND);
+                inner_source = format!("({prior})");
+                acc_where = Vec::new();
+                acc_select = Some(format!("*, {extend_expr}"));
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+            }
+            Some(PIPE_OP_SET) => {
+                // SET replaces column values using DuckDB's REPLACE extension:
+                //   SELECT * REPLACE (expr AS col, ...) FROM (prior)
+                // This is only reachable when ctx.dialect == DuckDB (non-DuckDB
+                // backends are rejected in the has_unhandled scan above).
+                let prior = build_select_fragment(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                );
+                let set_body = collect_stage_body_text(stage, ctx, PIPE_OP_SET);
+                inner_source = format!("({prior})");
+                acc_where = Vec::new();
+                // Parse "col = expr, col2 = expr2" → emit "expr AS col, expr2 AS col2"
+                // inside a REPLACE clause so existing columns are updated in-place.
+                let assignments = parse_set_assignments(&set_body);
+                let replace_list = assignments
+                    .iter()
+                    .map(|(col, expr)| format!("{expr} AS {col}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                acc_select = Some(format!("* REPLACE ({replace_list})"));
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+            }
+            Some(PIPE_OP_DROP) => {
+                // DROP <col>, ... using DuckDB's EXCLUDE extension:
+                //   SELECT * EXCLUDE (col1, col2) FROM (prior)
+                // This is only reachable when ctx.dialect == DuckDB (non-DuckDB
+                // backends are rejected in the has_unhandled scan above).
+                let prior = build_select_fragment(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                );
+                let drop_body = collect_stage_body_text(stage, ctx, PIPE_OP_DROP);
+                inner_source = format!("({prior})");
+                acc_where = Vec::new();
+                let cols = parse_column_list(&drop_body);
+                let exclude_list = cols.join(", ");
+                acc_select = Some(format!("* EXCLUDE ({exclude_list})"));
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+            }
+            Some(PIPE_OP_RENAME) => {
+                // RENAME old AS new, ... using DuckDB's RENAME extension:
+                //   SELECT * RENAME (old AS new, ...) FROM (prior)
+                // This is only reachable when ctx.dialect == DuckDB (non-DuckDB
+                // backends are rejected in the has_unhandled scan above).
+                let prior = build_select_fragment(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                );
+                let rename_body = collect_stage_body_text(stage, ctx, PIPE_OP_RENAME);
+                inner_source = format!("({prior})");
+                acc_where = Vec::new();
+                let pairs = parse_rename_pairs(&rename_body);
+                let rename_list = pairs
+                    .iter()
+                    .map(|(old, new)| format!("{old} AS {new}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                acc_select = Some(format!("* RENAME ({rename_list})"));
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+            }
+            Some(PIPE_OP_AS) => {
+                // AS <alias> — wrap the current fragment with an alias.
+                let prior = build_select_fragment(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                );
+                let alias = collect_as_alias(stage);
+                inner_source = if let Some(a) = alias {
+                    format!("({prior}) AS {a}")
+                } else {
+                    format!("({prior})")
+                };
+                acc_where = Vec::new();
+                acc_select = None;
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+            }
+            _ => {
+                // Unhandled (already checked above — should not reach here).
+            }
+        }
+    }
+
+    // ── Emit final fragment ────────────────────────────────────────────────
 
     // WITH clause (if any)
     if let Some(ref wc) = with_clause {
@@ -408,64 +595,156 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         out.push(' ');
     }
 
-    // SELECT [DISTINCT]
-    out.push_str("SELECT");
+    let final_sql = build_select_fragment(
+        &inner_source,
+        &acc_where,
+        &acc_select,
+        &acc_order_by,
+        &acc_limit,
+        acc_distinct,
+    );
+    out.push_str(&final_sql);
+}
+
+/// Build a SELECT fragment from accumulated state.
+fn build_select_fragment(
+    inner_source: &str,
+    where_bodies: &[String],
+    select_body: &Option<String>,
+    order_by_body: &Option<String>,
+    limit_body: &Option<String>,
+    has_distinct: bool,
+) -> String {
+    let mut s = String::new();
+
+    s.push_str("SELECT");
     if has_distinct {
-        out.push_str(" DISTINCT");
+        s.push_str(" DISTINCT");
     }
-    out.push(' ');
+    s.push(' ');
 
-    // Select list: explicit body or *
     match select_body {
-        Some(ref body) => out.push_str(body),
-        None => out.push('*'),
+        Some(body) => s.push_str(body),
+        None => s.push('*'),
     }
 
-    // FROM <from_body>
-    out.push_str(" FROM ");
-    if let Some(ref fc) = from_clause {
-        // Print the body of the FROM_CLAUSE, i.e. everything after the FROM keyword.
-        // We collect into a temporary buffer and trim leading/trailing whitespace.
-        let mut from_body = String::new();
-        let mut past_from_kw = false;
-        for child_elem in fc.children_with_tokens() {
-            match child_elem {
-                SyntaxElement::Token(t) => {
-                    if t.kind() == FROM_KW {
-                        past_from_kw = true;
-                        continue;
-                    }
-                    if past_from_kw {
-                        from_body.push_str(t.text());
-                    }
+    s.push_str(" FROM ");
+    s.push_str(inner_source);
+
+    if !where_bodies.is_empty() {
+        s.push_str(" WHERE ");
+        s.push_str(&where_bodies.join(" AND "));
+    }
+
+    if let Some(ob) = order_by_body {
+        s.push_str(" ORDER BY ");
+        s.push_str(ob);
+    }
+
+    if let Some(lim) = limit_body {
+        s.push_str(" LIMIT ");
+        s.push_str(lim);
+    }
+
+    s
+}
+
+/// Collect the FROM body (everything after the FROM keyword) as a printed string.
+fn collect_from_body(from_clause: &SyntaxNode, ctx: &PrintContext) -> String {
+    use SyntaxKind::*;
+
+    let mut body = String::new();
+    let mut past_from_kw = false;
+    for child_elem in from_clause.children_with_tokens() {
+        match child_elem {
+            SyntaxElement::Token(t) => {
+                if t.kind() == FROM_KW {
+                    past_from_kw = true;
+                    continue;
                 }
-                SyntaxElement::Node(n) => {
-                    if past_from_kw {
-                        print_node(&n, ctx, &mut from_body);
-                    }
+                if past_from_kw {
+                    body.push_str(t.text());
+                }
+            }
+            SyntaxElement::Node(n) => {
+                if past_from_kw {
+                    print_node(&n, ctx, &mut body);
                 }
             }
         }
-        out.push_str(from_body.trim());
     }
+    body.trim().to_string()
+}
 
-    // WHERE predicate(s)
-    if !where_bodies.is_empty() {
-        out.push_str(" WHERE ");
-        out.push_str(&where_bodies.join(" AND "));
-    }
+/// Collect the body text of a stage after its operator marker, running nodes
+/// through `print_node` for smelt-path expansion.
+///
+/// The CST for contextual-keyword stages (EXTEND, SET, DROP, RENAME) has:
+///   PIPE_STAGE { PIPE_OP_<X> [zero-width marker]  IDENT("<keyword>")  ... body ... }
+///
+/// We set `past_op` after the zero-width marker node, then skip one more IDENT
+/// that is the operator keyword itself (e.g. "EXTEND", "SET"), and also any
+/// immediately following whitespace, before appending body content.
+fn collect_stage_body_text(stage: &SyntaxNode, ctx: &PrintContext, op_kind: SyntaxKind) -> String {
+    use SyntaxKind::*;
 
-    // ORDER BY
-    if let Some(ref ob) = order_by_body {
-        out.push_str(" ORDER BY ");
-        out.push_str(ob);
-    }
+    let mut past_op = false;
+    let mut skipped_keyword = false;
+    let mut body = String::new();
 
-    // LIMIT
-    if let Some(ref lim) = limit_body {
-        out.push_str(" LIMIT ");
-        out.push_str(lim);
+    for elem in stage.children_with_tokens() {
+        match &elem {
+            SyntaxElement::Node(n) => {
+                if n.kind() == op_kind {
+                    past_op = true;
+                    continue;
+                }
+                if past_op {
+                    print_node(n, ctx, &mut body);
+                }
+            }
+            SyntaxElement::Token(t) => {
+                if !past_op {
+                    continue;
+                }
+                if !skipped_keyword {
+                    // Skip the operator keyword IDENT (e.g. "EXTEND", "SET").
+                    if t.kind() == IDENT {
+                        skipped_keyword = true;
+                        continue;
+                    }
+                    // Skip trivia (whitespace) before we've seen the keyword IDENT.
+                    if t.kind().is_trivia() {
+                        continue;
+                    }
+                    // Anything else: keyword was implicit/absent, start body here.
+                    skipped_keyword = true;
+                    body.push_str(t.text());
+                } else {
+                    body.push_str(t.text());
+                }
+            }
+        }
     }
+    body.trim().to_string()
+}
+
+/// Extract the alias name from a PIPE_OP_AS stage.
+fn collect_as_alias(stage: &SyntaxNode) -> Option<String> {
+    use SyntaxKind::*;
+    let mut past_op = false;
+    for elem in stage.children_with_tokens() {
+        match &elem {
+            SyntaxElement::Node(n) if n.kind() == PIPE_OP_AS => {
+                past_op = true;
+            }
+            SyntaxElement::Token(t) if past_op && !t.kind().is_trivia() && t.kind() == IDENT => {
+                return Some(t.text().to_string());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Collect the body text for a WHERE pipe stage.
@@ -1057,6 +1336,97 @@ fn print_strip_trailing_commas(node: &SyntaxNode, ctx: &PrintContext, out: &mut 
             }
         }
     }
+}
+
+/// Parse a SET stage body `col = expr, col2 = expr2` into `[(col, expr), ...]`.
+///
+/// Splits on commas that are not nested inside parentheses, then for each item
+/// splits on the first `=` to extract the column name (left-hand side) and
+/// expression (right-hand side).  Whitespace is trimmed from both sides.
+///
+/// If any item lacks a `=`, it is skipped — the caller emits the whole body
+/// verbatim in that case (but currently the `has_unhandled` check rejects
+/// syntactically broken SET stages before we get here).
+fn parse_set_assignments(body: &str) -> Vec<(String, String)> {
+    split_comma_top_level(body)
+        .into_iter()
+        .filter_map(|item| {
+            let item = item.trim();
+            let eq_pos = item.find('=')?;
+            let col = item[..eq_pos].trim().to_string();
+            let expr = item[eq_pos + 1..].trim().to_string();
+            if col.is_empty() || expr.is_empty() {
+                None
+            } else {
+                Some((col, expr))
+            }
+        })
+        .collect()
+}
+
+/// Parse a DROP stage body `col1, col2, ...` into `["col1", "col2", ...]`.
+fn parse_column_list(body: &str) -> Vec<String> {
+    split_comma_top_level(body)
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Parse a RENAME stage body `old AS new, old2 AS new2` into `[(old, new), ...]`.
+///
+/// Each item must contain a case-insensitive ` AS ` separator.  Items that lack
+/// it are skipped.
+fn parse_rename_pairs(body: &str) -> Vec<(String, String)> {
+    split_comma_top_level(body)
+        .into_iter()
+        .filter_map(|item| {
+            let item = item.trim();
+            // Find " AS " (case-insensitive).
+            let upper = item.to_uppercase();
+            let as_pos = upper.find(" AS ")?;
+            let old = item[..as_pos].trim().to_string();
+            let new = item[as_pos + 4..].trim().to_string();
+            if old.is_empty() || new.is_empty() {
+                None
+            } else {
+                Some((old, new))
+            }
+        })
+        .collect()
+}
+
+/// Split a comma-separated list at the top level (not inside parentheses).
+///
+/// Tracks paren depth so that expressions like `COALESCE(a, b)` or
+/// `DATE_TRUNC('month', ts)` are not split on their internal commas.
+fn split_comma_top_level(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth: u32 = 0;
+    let mut current = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(current.clone());
+                current.clear();
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 /// Print a FUNCTION_CALL node with the function name replaced by `new_name`.
