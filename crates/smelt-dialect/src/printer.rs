@@ -333,9 +333,10 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
 
     // Check for any stages we can't handle → verbatim.
     //
-    // Always-unhandled: AGGREGATE, JOIN, set-ops.
+    // Always-unhandled: JOIN, set-ops.
     // DuckDB-only: SET, DROP, RENAME — handled on DuckDB via REPLACE/EXCLUDE/RENAME
     //   extensions; on non-DuckDB backends they are unhandled and cause verbatim.
+    // AGGREGATE is now handled on all backends (Phase 4).
     let has_unhandled = stages.iter().any(|s| {
         let op = s.children().find_map(|c| {
             let k = c.kind();
@@ -363,8 +364,7 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             }
         });
         match op {
-            Some(PIPE_OP_AGGREGATE)
-            | Some(PIPE_OP_JOIN)
+            Some(PIPE_OP_JOIN)
             | Some(PIPE_OP_UNION)
             | Some(PIPE_OP_INTERSECT)
             | Some(PIPE_OP_EXCEPT)
@@ -402,6 +402,13 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
     let mut acc_order_by: Option<String> = None;
     let mut acc_limit: Option<String> = None;
     let mut acc_distinct = false;
+    // HAVING: set when a WHERE follows an AGGREGATE stage.
+    let mut acc_having: Vec<String> = Vec::new();
+    // GROUP BY body: retained after an AGGREGATE stage so HAVING can be emitted correctly.
+    let mut acc_group_by: Option<String> = None;
+    // Tracks whether the most recent data-producing stage was an AGGREGATE.
+    // When true, a subsequent WHERE stage lowers to HAVING.
+    let mut after_aggregate = false;
     // The "inner source" that goes in FROM. Starts as the FROM-clause table.
     let mut inner_source = from_body;
 
@@ -417,6 +424,7 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                     | PIPE_OP_DROP
                     | PIPE_OP_RENAME
                     | PIPE_OP_AS
+                    | PIPE_OP_AGGREGATE
                     | PIPE_OP_ORDER_BY
                     | PIPE_OP_LIMIT
                     | PIPE_OP_DISTINCT
@@ -429,16 +437,22 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
 
         match op_kind {
             Some(PIPE_OP_WHERE) => {
-                if acc_select.is_some() {
+                let body = collect_where_body(stage);
+                if after_aggregate {
+                    // WHERE after AGGREGATE → HAVING clause.
+                    acc_having.push(body);
+                } else if acc_select.is_some() {
                     // WHERE after SELECT: wrap existing fragment into subquery,
                     // then add this WHERE on the outer level.
-                    let prior = build_select_fragment(
+                    let prior = build_select_fragment_with_having(
                         &inner_source,
                         &acc_where,
                         &acc_select,
                         &acc_order_by,
                         &acc_limit,
                         acc_distinct,
+                        &acc_group_by,
+                        &acc_having,
                     );
                     inner_source = format!("({prior})");
                     acc_where = Vec::new();
@@ -446,9 +460,13 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                     acc_order_by = None;
                     acc_limit = None;
                     acc_distinct = false;
+                    acc_having = Vec::new();
+                    acc_group_by = None;
+                    after_aggregate = false;
+                    acc_where.push(body);
+                } else {
+                    acc_where.push(body);
                 }
-                let body = collect_where_body(stage);
-                acc_where.push(body);
             }
             Some(PIPE_OP_SELECT) => {
                 acc_select = Some(collect_select_body(stage));
@@ -464,13 +482,15 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             }
             Some(PIPE_OP_EXTEND) => {
                 // Wrap current fragment as subquery, emit SELECT *, <extend_body>.
-                let prior = build_select_fragment(
+                let prior = build_select_fragment_with_having(
                     &inner_source,
                     &acc_where,
                     &acc_select,
                     &acc_order_by,
                     &acc_limit,
                     acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
                 );
                 let extend_expr = collect_stage_body_text(stage, ctx, PIPE_OP_EXTEND);
                 inner_source = format!("({prior})");
@@ -479,19 +499,24 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 acc_order_by = None;
                 acc_limit = None;
                 acc_distinct = false;
+                acc_having = Vec::new();
+                acc_group_by = None;
+                after_aggregate = false;
             }
             Some(PIPE_OP_SET) => {
                 // SET replaces column values using DuckDB's REPLACE extension:
                 //   SELECT * REPLACE (expr AS col, ...) FROM (prior)
                 // This is only reachable when ctx.dialect == DuckDB (non-DuckDB
                 // backends are rejected in the has_unhandled scan above).
-                let prior = build_select_fragment(
+                let prior = build_select_fragment_with_having(
                     &inner_source,
                     &acc_where,
                     &acc_select,
                     &acc_order_by,
                     &acc_limit,
                     acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
                 );
                 let set_body = collect_stage_body_text(stage, ctx, PIPE_OP_SET);
                 inner_source = format!("({prior})");
@@ -508,19 +533,24 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 acc_order_by = None;
                 acc_limit = None;
                 acc_distinct = false;
+                acc_having = Vec::new();
+                acc_group_by = None;
+                after_aggregate = false;
             }
             Some(PIPE_OP_DROP) => {
                 // DROP <col>, ... using DuckDB's EXCLUDE extension:
                 //   SELECT * EXCLUDE (col1, col2) FROM (prior)
                 // This is only reachable when ctx.dialect == DuckDB (non-DuckDB
                 // backends are rejected in the has_unhandled scan above).
-                let prior = build_select_fragment(
+                let prior = build_select_fragment_with_having(
                     &inner_source,
                     &acc_where,
                     &acc_select,
                     &acc_order_by,
                     &acc_limit,
                     acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
                 );
                 let drop_body = collect_stage_body_text(stage, ctx, PIPE_OP_DROP);
                 inner_source = format!("({prior})");
@@ -531,19 +561,24 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 acc_order_by = None;
                 acc_limit = None;
                 acc_distinct = false;
+                acc_having = Vec::new();
+                acc_group_by = None;
+                after_aggregate = false;
             }
             Some(PIPE_OP_RENAME) => {
                 // RENAME old AS new, ... using DuckDB's RENAME extension:
                 //   SELECT * RENAME (old AS new, ...) FROM (prior)
                 // This is only reachable when ctx.dialect == DuckDB (non-DuckDB
                 // backends are rejected in the has_unhandled scan above).
-                let prior = build_select_fragment(
+                let prior = build_select_fragment_with_having(
                     &inner_source,
                     &acc_where,
                     &acc_select,
                     &acc_order_by,
                     &acc_limit,
                     acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
                 );
                 let rename_body = collect_stage_body_text(stage, ctx, PIPE_OP_RENAME);
                 inner_source = format!("({prior})");
@@ -558,16 +593,21 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 acc_order_by = None;
                 acc_limit = None;
                 acc_distinct = false;
+                acc_having = Vec::new();
+                acc_group_by = None;
+                after_aggregate = false;
             }
             Some(PIPE_OP_AS) => {
                 // AS <alias> — wrap the current fragment with an alias.
-                let prior = build_select_fragment(
+                let prior = build_select_fragment_with_having(
                     &inner_source,
                     &acc_where,
                     &acc_select,
                     &acc_order_by,
                     &acc_limit,
                     acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
                 );
                 let alias = collect_as_alias(stage);
                 inner_source = if let Some(a) = alias {
@@ -580,6 +620,52 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 acc_order_by = None;
                 acc_limit = None;
                 acc_distinct = false;
+                acc_having = Vec::new();
+                acc_group_by = None;
+                after_aggregate = false;
+            }
+            Some(PIPE_OP_AGGREGATE) => {
+                // AGGREGATE <agg_expr> [AS alias] [GROUP BY <keys>]
+                //
+                // Flush the current accumulated fragment as the inner source,
+                // then set up accumulators so the fragment builder emits:
+                //   SELECT <group_keys>, <agg_exprs> FROM (<prior>) GROUP BY <group_keys>
+                //
+                // Multiple AGGREGATE stages nest: each one wraps the previous as a subquery.
+                // A subsequent |> WHERE stage sets after_aggregate=true and pushes to acc_having.
+                let prior = build_select_fragment_with_having(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
+                );
+
+                let (agg_body, group_body) = collect_aggregate_parts(stage, ctx);
+
+                // Use the prior fragment as the subquery source.
+                inner_source = format!("({prior})");
+
+                if group_body.is_empty() {
+                    // Full-table aggregation (no GROUP BY).
+                    acc_select = Some(agg_body);
+                    acc_group_by = None;
+                } else {
+                    // Grouped aggregation: keys first, then aggregates (per spec).
+                    acc_select = Some(format!("{group_body}, {agg_body}"));
+                    acc_group_by = Some(group_body);
+                }
+
+                // Reset all other accumulators.
+                acc_where = Vec::new();
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+                acc_having = Vec::new();
+                after_aggregate = true;
             }
             _ => {
                 // Unhandled (already checked above — should not reach here).
@@ -595,25 +681,34 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         out.push(' ');
     }
 
-    let final_sql = build_select_fragment(
+    let final_sql = build_select_fragment_with_having(
         &inner_source,
         &acc_where,
         &acc_select,
         &acc_order_by,
         &acc_limit,
         acc_distinct,
+        &acc_group_by,
+        &acc_having,
     );
     out.push_str(&final_sql);
 }
 
-/// Build a SELECT fragment from accumulated state.
-fn build_select_fragment(
+/// Build a SELECT fragment from accumulated state (with optional GROUP BY and HAVING).
+///
+/// When `group_by_body` is `Some`, emits `GROUP BY <group_by_body>` after the WHERE.
+/// When `having_bodies` is non-empty (requires `group_by_body` to be meaningful), emits
+/// `HAVING <having_bodies joined with AND>`.
+#[allow(clippy::too_many_arguments)]
+fn build_select_fragment_with_having(
     inner_source: &str,
     where_bodies: &[String],
     select_body: &Option<String>,
     order_by_body: &Option<String>,
     limit_body: &Option<String>,
     has_distinct: bool,
+    group_by_body: &Option<String>,
+    having_bodies: &[String],
 ) -> String {
     let mut s = String::new();
 
@@ -634,6 +729,16 @@ fn build_select_fragment(
     if !where_bodies.is_empty() {
         s.push_str(" WHERE ");
         s.push_str(&where_bodies.join(" AND "));
+    }
+
+    if let Some(gb) = group_by_body {
+        s.push_str(" GROUP BY ");
+        s.push_str(gb);
+    }
+
+    if !having_bodies.is_empty() {
+        s.push_str(" HAVING ");
+        s.push_str(&having_bodies.join(" AND "));
     }
 
     if let Some(ob) = order_by_body {
@@ -878,6 +983,98 @@ fn collect_order_by_body(stage: &SyntaxNode) -> String {
 
     // Fallback: return raw text if no ORDER_BY_CLAUSE found.
     stage.text().to_string().trim().to_string()
+}
+
+/// Collect the aggregate expressions and group-by expressions from a PIPE_OP_AGGREGATE stage.
+///
+/// Returns `(agg_body, group_by_body)` where:
+/// - `agg_body` is the comma-separated aggregate expression list (with aliases), as printed SQL.
+/// - `group_by_body` is the comma-separated group-by expression list (with aliases), as printed SQL.
+///   Empty string when there is no GROUP BY clause (full-table aggregation).
+///
+/// CST structure for `|> AGGREGATE sum(x) AS s GROUP BY k`:
+///   PIPE_STAGE {
+///     PIPE_OP_AGGREGATE (zero-width node)
+///     IDENT("AGGREGATE")
+///     EXPRESSION(sum(x))
+///     AS_KW
+///     IDENT("s")
+///     GROUP_KW
+///     BY_KW
+///     EXPRESSION(k)
+///   }
+fn collect_aggregate_parts(stage: &SyntaxNode, ctx: &PrintContext) -> (String, String) {
+    use SyntaxKind::*;
+
+    let children: Vec<SyntaxElement> = stage.children_with_tokens().collect();
+
+    // Find GROUP_KW position (if any) to split agg vs group-by portions.
+    let group_kw_pos = children
+        .iter()
+        .position(|elem| matches!(elem, SyntaxElement::Token(t) if t.kind() == GROUP_KW));
+
+    // Determine end of agg portion (exclusive).
+    let agg_end = group_kw_pos.unwrap_or(children.len());
+
+    // Find where the agg portion starts: past PIPE_OP_AGGREGATE node and the "AGGREGATE" IDENT.
+    let mut agg_start = 0;
+    // Skip PIPE_OP_AGGREGATE zero-width node.
+    for (i, elem) in children.iter().enumerate() {
+        if let SyntaxElement::Node(n) = elem {
+            if n.kind() == PIPE_OP_AGGREGATE {
+                agg_start = i + 1;
+                break;
+            }
+        }
+    }
+    // Skip trivia and then the "AGGREGATE" contextual keyword IDENT.
+    while agg_start < agg_end {
+        match &children[agg_start] {
+            SyntaxElement::Token(t) if t.kind().is_trivia() => agg_start += 1,
+            SyntaxElement::Token(t) if t.kind() == IDENT => {
+                agg_start += 1;
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    // Collect agg portion as printed SQL text.
+    let agg_body = collect_elements_as_text(&children[agg_start..agg_end], ctx)
+        .trim()
+        .to_string();
+
+    // Collect group-by portion (after BY_KW).
+    let group_body = if let Some(gkw) = group_kw_pos {
+        // Find BY_KW after GROUP_KW.
+        let by_pos = children[gkw..]
+            .iter()
+            .position(|elem| matches!(elem, SyntaxElement::Token(t) if t.kind() == BY_KW));
+        if let Some(by_rel) = by_pos {
+            let by_abs = gkw + by_rel + 1; // +1 to skip past BY_KW
+            collect_elements_as_text(&children[by_abs..], ctx)
+                .trim()
+                .to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    (agg_body, group_body)
+}
+
+/// Print a slice of CST elements as SQL text, running nodes through `print_node`.
+fn collect_elements_as_text(elements: &[SyntaxElement], ctx: &PrintContext) -> String {
+    let mut out = String::new();
+    for elem in elements {
+        match elem {
+            SyntaxElement::Token(t) => out.push_str(t.text()),
+            SyntaxElement::Node(n) => print_node(n, ctx, &mut out),
+        }
+    }
+    out
 }
 
 /// Collect the LIMIT value for a LIMIT pipe stage.

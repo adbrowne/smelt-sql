@@ -361,24 +361,29 @@ discriminant = "dynamic"
 
 # ── smelt-db / type_inference/pipe ──────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/pipe.rs:186"]
+["crates/smelt-db/src/type_inference/pipe.rs:187"]
 classification = "legitimate"
 reason = "pipe SELECT stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/pipe.rs:191"]
+["crates/smelt-db/src/type_inference/pipe.rs:192"]
 classification = "legitimate"
 reason = "pipe SELECT stage: item has no expression node; Unknown placeholder for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/pipe.rs:461"]
+["crates/smelt-db/src/type_inference/pipe.rs:463"]
 classification = "legitimate"
 reason = "pipe EXTEND stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for new column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/pipe.rs:547"]
+["crates/smelt-db/src/type_inference/pipe.rs:549"]
 classification = "legitimate"
 reason = "pipe SET stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for updated column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:763"]
+classification = "legitimate"
+reason = "pipe AGGREGATE stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for agg/group-key column"
 discriminant = "dynamic"
 
 # ── smelt-db / type_inference/subquery ────────────────────────────────────────

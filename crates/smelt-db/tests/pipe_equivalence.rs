@@ -310,3 +310,98 @@ fn limit_only_pipe_stage_lowers() {
         "lowered SQL must execute on DuckDB: {lowered}\n  error: {result:?}"
     );
 }
+
+// ── Test: two_aggregates_match_standard_sql ──────────────────────────────────
+
+/// DuckDB oracle: two AGGREGATE stages produce the same result as hand-written nested SQL.
+#[test]
+fn two_aggregates_match_standard_sql() {
+    let oracle = DuckDbOracle::new();
+
+    oracle
+        .execute_ddl(
+            "CREATE TABLE sales2 (region VARCHAR, city VARCHAR, amount DOUBLE);
+             INSERT INTO sales2 VALUES
+               ('East', 'NYC', 100.0), ('East', 'BOS', 200.0),
+               ('West', 'LA', 150.0), ('West', 'SF', 300.0);",
+        )
+        .expect("DDL setup failed");
+
+    // Pipe: first aggregate sums by city+region, second counts cities per region
+    let pipe_sql = "FROM sales2 |> AGGREGATE sum(amount) AS city_total GROUP BY region, city |> AGGREGATE count(*) AS city_count GROUP BY region";
+
+    let lowered = lower_pipe_sql(pipe_sql);
+    assert!(
+        !lowered.contains("|>"),
+        "lowered two-agg must not contain |>, got: {lowered}"
+    );
+
+    // Hand-written equivalent
+    let std_sql = "SELECT region, count(*) AS city_count FROM (SELECT region, city, sum(amount) AS city_total FROM sales2 GROUP BY region, city) GROUP BY region";
+
+    let pipe_rows = oracle.execute_query(&lowered).expect("two-agg pipe failed");
+    let std_rows = oracle
+        .execute_query(std_sql)
+        .expect("standard two-agg failed");
+    assert_eq!(
+        pipe_rows, std_rows,
+        "two-aggregate nesting: pipe result != standard SQL result\npipe lowered: {lowered}\nstd: {std_sql}"
+    );
+}
+
+// ── Test: aggregate_matches_standard_sql ────────────────────────────────────
+
+/// DuckDB oracle: a pipe query with AGGREGATE+GROUP BY produces the same result set
+/// as its hand-written standard SQL equivalent.
+/// Also tests full-table aggregation (no GROUP BY → one output row).
+#[test]
+fn aggregate_matches_standard_sql() {
+    let oracle = DuckDbOracle::new();
+
+    oracle
+        .execute_ddl(
+            "CREATE TABLE sales (customer_id INTEGER, amount DOUBLE);
+             INSERT INTO sales VALUES (1, 100.0), (2, 50.0), (1, 200.0), (2, 75.0);",
+        )
+        .expect("DDL setup failed");
+
+    // --- Test 1: grouped aggregation ---
+    let pipe_sql = "FROM sales |> AGGREGATE sum(amount) AS revenue GROUP BY customer_id";
+    let std_sql = "SELECT customer_id, sum(amount) AS revenue FROM sales GROUP BY customer_id";
+
+    let lowered = lower_pipe_sql(pipe_sql);
+    assert!(
+        !lowered.contains("|>"),
+        "lowered grouped agg must not contain |>, got: {lowered}"
+    );
+
+    let pipe_rows = oracle.execute_query(&lowered).expect("pipe query failed");
+    let std_rows = oracle
+        .execute_query(std_sql)
+        .expect("standard SQL query failed");
+    assert_eq!(
+        pipe_rows, std_rows,
+        "grouped aggregation: pipe result != standard SQL result\npipe lowered: {lowered}"
+    );
+
+    // --- Test 2: full-table aggregation (no GROUP BY) ---
+    let pipe_total = "FROM sales |> AGGREGATE sum(amount) AS total";
+    let std_total = "SELECT sum(amount) AS total FROM sales";
+
+    let lowered_total = lower_pipe_sql(pipe_total);
+    assert!(
+        !lowered_total.contains("|>"),
+        "lowered full-table agg must not contain |>, got: {lowered_total}"
+    );
+
+    let pipe_total_rows = oracle
+        .execute_query(&lowered_total)
+        .expect("pipe total failed");
+    let std_total_rows = oracle
+        .execute_query(std_total)
+        .expect("standard total failed");
+    assert_eq!(
+        pipe_total_rows, std_total_rows,
+        "full-table aggregation: pipe result != standard SQL result\npipe lowered: {lowered_total}"
+    );
+}

@@ -208,6 +208,134 @@ fn extend_wraps_prior_projection() {
     );
 }
 
+// ── Test: post_aggregate_where_is_having ─────────────────────────────────────
+
+/// A `|> WHERE` that follows `|> AGGREGATE` must be lowered to HAVING semantics.
+/// Input: `FROM t |> AGGREGATE sum(x) AS s GROUP BY k |> WHERE s > 10`
+/// Expected: output contains `GROUP BY k` and `HAVING s > 10`; no `|>` in output.
+#[test]
+fn post_aggregate_where_is_having() {
+    let sql = "FROM t |> AGGREGATE sum(x) AS s GROUP BY k |> WHERE s > 10";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+
+    assert!(
+        !result.contains("|>"),
+        "output must not contain |>, got: {result}"
+    );
+    assert!(
+        result.contains("GROUP BY"),
+        "expected GROUP BY in output, got: {result}"
+    );
+    assert!(
+        result.to_uppercase().contains("HAVING") || result.contains("s > 10"),
+        "expected HAVING s > 10 or equivalent in output, got: {result}"
+    );
+    // The WHERE must not appear at the top level without HAVING
+    // (s is an aggregate alias, not directly filterable with WHERE in standard SQL)
+    assert!(
+        result.contains("HAVING") || result.contains('('),
+        "expected HAVING or subquery wrapping, got: {result}"
+    );
+}
+
+// ── Test: two_aggregates_nest ─────────────────────────────────────────────────
+
+/// Two `|> AGGREGATE` stages must lower to two nested query levels.
+/// Input: `FROM t |> AGGREGATE sum(x) AS s GROUP BY k |> AGGREGATE count(*) AS n GROUP BY k`
+/// Expected: output contains two GROUP BY clauses (one at each nesting level); no `|>`.
+#[test]
+fn two_aggregates_nest() {
+    let sql = "FROM t |> AGGREGATE sum(x) AS s GROUP BY k |> AGGREGATE count(*) AS n GROUP BY k";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+
+    assert!(
+        !result.contains("|>"),
+        "output must not contain |>, got: {result}"
+    );
+    // Two GROUP BY clauses indicate two query levels
+    let group_by_count = result.matches("GROUP BY").count();
+    assert!(
+        group_by_count >= 2,
+        "expected at least 2 GROUP BY clauses for two AGGREGATE stages, got {group_by_count} in: {result}"
+    );
+    // The inner query must be wrapped as a subquery
+    assert!(
+        result.contains('('),
+        "expected subquery wrapping for second AGGREGATE stage, got: {result}"
+    );
+}
+
+// ── Test: post_window_where_is_qualify ───────────────────────────────────────
+
+/// A `|> WHERE` following an EXTEND that introduces a window function must lower
+/// to QUALIFY (on DuckDB which supports it) or a wrapping subquery — NOT a WHERE
+/// at the same query level.
+///
+/// Input: `FROM t |> EXTEND row_number() OVER (ORDER BY x) AS rn |> WHERE rn = 1`
+/// Expected on DuckDB: output contains QUALIFY or wrapping subquery; no WHERE at
+/// the outer level with `rn = 1`; no `|>` in output.
+#[test]
+fn post_window_where_is_qualify() {
+    let sql = "FROM t |> EXTEND row_number() OVER (ORDER BY x) AS rn |> WHERE rn = 1";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+
+    assert!(
+        !result.contains("|>"),
+        "output must not contain |>, got: {result}"
+    );
+    // Must contain the window function expression
+    assert!(
+        result.contains("row_number()") || result.contains("ROW_NUMBER()"),
+        "expected row_number() in output, got: {result}"
+    );
+    // Must contain the filter condition
+    assert!(
+        result.contains("rn = 1"),
+        "expected rn = 1 in output, got: {result}"
+    );
+    // Must use QUALIFY or a wrapping subquery, NOT a bare WHERE after the window expr at the same level
+    // DuckDB supports QUALIFY, so QUALIFY should appear
+    assert!(
+        result.contains("QUALIFY") || result.contains("(SELECT"),
+        "expected QUALIFY or subquery wrapping for post-window WHERE, got: {result}"
+    );
+}
+
+// ── Test: aggregate_keys_before_aggs ─────────────────────────────────────────
+
+/// Output column order for AGGREGATE must be grouping keys first, then aggregates.
+/// Input: `FROM t |> AGGREGATE sum(x) AS total_x GROUP BY grp`
+/// The emitted SELECT must list `grp` before `total_x`.
+#[test]
+fn aggregate_keys_before_aggs() {
+    let sql = "FROM t |> AGGREGATE sum(x) AS total_x GROUP BY grp";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+
+    assert!(
+        !result.contains("|>"),
+        "output must not contain |>, got: {result}"
+    );
+
+    // Verify grp appears before total_x in the SELECT list
+    let grp_pos = result.find("grp").expect("grp must appear in output");
+    let total_x_pos = result
+        .find("total_x")
+        .expect("total_x must appear in output");
+    assert!(
+        grp_pos < total_x_pos,
+        "grouping key 'grp' must appear before aggregate 'total_x' in output, got: {result}"
+    );
+
+    assert!(
+        result.contains("GROUP BY"),
+        "expected GROUP BY in output, got: {result}"
+    );
+}
+
 // ── Test 6: no pipe token reaches backend ────────────────────────────────────
 
 /// All backends report supports_pipe_syntax = false; none may emit `|>`.

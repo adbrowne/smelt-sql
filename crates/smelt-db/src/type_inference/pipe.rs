@@ -52,11 +52,12 @@ pub fn infer_pipe_stage_output_schema(
         PIPE_OP_DROP => apply_drop(input_schema, stage),
         PIPE_OP_RENAME => apply_rename(input_schema, stage),
         PIPE_OP_SELECT => apply_select(input_schema, stage, ctx),
+        PIPE_OP_AGGREGATE => apply_aggregate(input_schema, stage, ctx),
         // AS, WHERE, ORDER BY, LIMIT, DISTINCT — schema passes through unchanged
         PIPE_OP_AS | PIPE_OP_WHERE | PIPE_OP_ORDER_BY | PIPE_OP_LIMIT | PIPE_OP_DISTINCT => {
             input_schema.to_vec()
         }
-        // AGGREGATE, JOIN, set-ops — not in Phase 3 scope; pass through
+        // JOIN, set-ops — not in Phase 4 scope; pass through
         _ => input_schema.to_vec(),
     }
 }
@@ -223,6 +224,7 @@ fn check_stage_undeclared_columns(
         PIPE_OP_SET => collect_set_exprs(stage),
         PIPE_OP_SELECT => collect_select_exprs(stage),
         PIPE_OP_ORDER_BY => collect_order_by_exprs(stage),
+        PIPE_OP_AGGREGATE => collect_aggregate_exprs(stage),
         // AS, LIMIT, DISTINCT, DROP, RENAME, JOIN, set-ops — no expression-level column check
         // (DROP and RENAME reference column names at a token level, not expression level,
         // and the existing undeclared-column check handles pure expression refs).
@@ -562,6 +564,211 @@ fn collect_set_assignments(stage: &PipeStage, ctx: &TypeContext) -> Vec<(String,
     }
 
     result
+}
+
+/// AGGREGATE: replace scope with group keys (in order) then aggregate outputs.
+///
+/// Output column order per spec: grouping keys first, then aggregate expressions.
+fn apply_aggregate(
+    _input: &[(String, TypedColumn)],
+    stage: &PipeStage,
+    ctx: &TypeContext,
+) -> Vec<(String, TypedColumn)> {
+    let group_keys = collect_aggregate_group_keys(stage, ctx);
+    let agg_items = collect_aggregate_items(stage, ctx);
+    let mut output = group_keys;
+    output.extend(agg_items);
+    output
+}
+
+/// Parse group-by keys from an AGGREGATE stage: items after GROUP_KW + BY_KW.
+///
+/// Returns `(alias, TypedColumn)` pairs.
+fn collect_aggregate_group_keys(
+    stage: &PipeStage,
+    ctx: &TypeContext,
+) -> Vec<(String, TypedColumn)> {
+    use SyntaxKind::*;
+
+    let children: Vec<SyntaxElement> = stage.syntax().children_with_tokens().collect();
+
+    // Find the position of GROUP_KW in the children list.
+    let group_pos = children
+        .iter()
+        .position(|elem| matches!(elem, SyntaxElement::Token(t) if t.kind() == GROUP_KW));
+    let Some(group_pos) = group_pos else {
+        // No GROUP BY → no group keys (full-table aggregation).
+        return Vec::new();
+    };
+
+    // Skip past GROUP_KW and BY_KW.
+    let mut i = group_pos + 1;
+    while i < children.len() {
+        if let SyntaxElement::Token(t) = &children[i] {
+            if t.kind() == BY_KW {
+                i += 1;
+                break;
+            }
+        }
+        i += 1;
+    }
+
+    // Parse (expression, optional alias) items from the group-by list.
+    collect_expr_alias_items(&children, i, ctx, None)
+}
+
+/// Parse aggregate expressions from an AGGREGATE stage: items before GROUP_KW.
+fn collect_aggregate_items(stage: &PipeStage, ctx: &TypeContext) -> Vec<(String, TypedColumn)> {
+    use SyntaxKind::*;
+
+    let children: Vec<SyntaxElement> = stage.syntax().children_with_tokens().collect();
+
+    // Find the position of GROUP_KW.
+    let end_pos = children
+        .iter()
+        .position(|elem| matches!(elem, SyntaxElement::Token(t) if t.kind() == GROUP_KW));
+    // If no GROUP_KW, all children are aggregate expressions.
+    let end_pos = end_pos.unwrap_or(children.len());
+
+    // Skip past PIPE_OP_AGGREGATE marker and AGGREGATE keyword IDENT.
+    let mut start = 0;
+    // Skip PIPE_OP_AGGREGATE zero-width node.
+    while start < end_pos {
+        if let SyntaxElement::Node(n) = &children[start] {
+            if n.kind() == PIPE_OP_AGGREGATE {
+                start += 1;
+                break;
+            }
+        }
+        start += 1;
+    }
+    // Skip the "AGGREGATE" contextual keyword IDENT and trivia.
+    while start < end_pos {
+        match &children[start] {
+            SyntaxElement::Token(t) if t.kind().is_trivia() => start += 1,
+            SyntaxElement::Token(t) if t.kind() == IDENT => {
+                start += 1;
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    collect_expr_alias_items(&children, start, ctx, Some(end_pos))
+}
+
+/// Collect all expressions from an AGGREGATE stage for undeclared-column checking.
+///
+/// Returns both the aggregate expressions AND the group-by expressions (all reference
+/// input schema columns, not output schema columns).
+fn collect_aggregate_exprs(stage: &PipeStage) -> Vec<Expr> {
+    use SyntaxKind::*;
+    stage
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|elem| match elem {
+            SyntaxElement::Node(n) if n.kind() != PIPE_OP_AGGREGATE => Expr::cast(n),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Shared helper: parse `(expression [AS alias], ...)` items from a children slice.
+///
+/// `start`: index to begin scanning.
+/// `end`: optional exclusive upper bound (None = scan to end of children).
+///
+/// Returns `(alias, TypedColumn)` pairs.
+fn collect_expr_alias_items(
+    children: &[SyntaxElement],
+    start: usize,
+    ctx: &TypeContext,
+    end: Option<usize>,
+) -> Vec<(String, TypedColumn)> {
+    use SyntaxKind::*;
+
+    let limit = end.unwrap_or(children.len());
+    let mut items: Vec<(String, TypedColumn)> = Vec::new();
+    let mut i = start;
+    let mut item_idx = 0usize;
+
+    while i < limit {
+        // Skip trivia and commas.
+        match &children[i] {
+            SyntaxElement::Token(t) if t.kind().is_trivia() => {
+                i += 1;
+                continue;
+            }
+            SyntaxElement::Token(t) if t.kind() == COMMA => {
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        // Expect an EXPRESSION node.
+        let expr = match &children[i] {
+            SyntaxElement::Node(n) => {
+                if let Some(e) = Expr::cast(n.clone()) {
+                    i += 1;
+                    e
+                } else {
+                    i += 1;
+                    continue;
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // Look ahead for optional alias (AS_KW IDENT or bare IDENT).
+        let mut alias: Option<String> = None;
+        let mut j = i;
+        while j < limit {
+            match &children[j] {
+                SyntaxElement::Token(t) if t.kind().is_trivia() => j += 1,
+                SyntaxElement::Token(t) if t.kind() == AS_KW => {
+                    j += 1;
+                    while j < limit {
+                        match &children[j] {
+                            SyntaxElement::Token(t) if t.kind().is_trivia() => j += 1,
+                            SyntaxElement::Token(t) if t.kind() == IDENT => {
+                                alias = Some(t.text().to_string());
+                                j += 1;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    break;
+                }
+                SyntaxElement::Token(t) if t.kind() == IDENT => {
+                    alias = Some(t.text().to_string());
+                    j += 1;
+                    break;
+                }
+                SyntaxElement::Token(t) if t.kind() == COMMA => break,
+                _ => break,
+            }
+        }
+        i = j;
+
+        let col_name = alias.unwrap_or_else(|| {
+            infer_column_name_from_expr(&expr).unwrap_or_else(|| format!("col{}", item_idx + 1))
+        });
+
+        let typed_col = infer_expression_type(&expr, ctx).unwrap_or(TypedColumn {
+            data_type: DataType::Unknown(UnknownReason::Dynamic),
+            nullable: true,
+        });
+
+        items.push((col_name, typed_col));
+        item_idx += 1;
+    }
+
+    items
 }
 
 /// Collect DROP column names from stage: `DROP col1, col2, ...` → `Vec<String>`.

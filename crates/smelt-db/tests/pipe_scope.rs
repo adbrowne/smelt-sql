@@ -191,3 +191,86 @@ fn set_column_stays_in_scope() {
         "Expected no UndeclaredColumn after SET a = a * 2 and WHERE a > 0; got: {undeclared:#?}"
     );
 }
+
+// ── Test: aggregate_collapses_scope ─────────────────────────────────────────
+
+/// After `AGGREGATE sum(amount) AS rev GROUP BY cust_id`:
+///
+/// - `cust_id` and `rev` are in scope
+/// - `amount` (pre-aggregation column) is NOT in scope
+///
+/// A reference to `amount` in a post-AGGREGATE WHERE must raise UndeclaredColumn.
+#[test]
+fn aggregate_collapses_scope() {
+    let root = PathBuf::from("/fake/pipe_agg1");
+    let orders_path = root.join("models").join("orders.sql");
+    let pipe_path = root.join("models").join("pipe_agg.sql");
+
+    // orders has cust_id and amount
+    let orders_sql = "SELECT CAST(NULL AS INTEGER) AS cust_id, CAST(NULL AS DOUBLE) AS amount\n";
+    // After AGGREGATE, `amount` should no longer be in scope
+    let pipe_sql =
+        "FROM smelt.models.orders |> AGGREGATE sum(amount) AS rev GROUP BY cust_id |> WHERE amount > 10\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[(orders_path, orders_sql), (pipe_path.clone(), pipe_sql)],
+    );
+    let pipe_file = files[1];
+
+    let diags = all_diagnostics(&db, ws, pipe_file);
+    let undeclared_amount: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && d.code == Some(DiagnosticCode::UndeclaredColumn)
+                && d.message.to_lowercase().contains("amount")
+        })
+        .collect();
+
+    assert_eq!(
+        undeclared_amount.len(),
+        1,
+        "Expected exactly one UndeclaredColumn for `amount` after AGGREGATE; got: {diags:#?}"
+    );
+}
+
+// ── Test: aggregate_output_in_scope ─────────────────────────────────────────
+
+/// After `AGGREGATE sum(amount) AS rev GROUP BY cust_id`:
+///
+/// - both `cust_id` and `rev` must be accessible in a following stage.
+///
+/// A `|> SELECT cust_id, rev` must produce no UndeclaredColumn diagnostics.
+#[test]
+fn aggregate_output_in_scope() {
+    let root = PathBuf::from("/fake/pipe_agg2");
+    let orders_path = root.join("models").join("orders2.sql");
+    let pipe_path = root.join("models").join("pipe_agg2.sql");
+
+    let orders_sql = "SELECT CAST(NULL AS INTEGER) AS cust_id, CAST(NULL AS DOUBLE) AS amount\n";
+    let pipe_sql =
+        "FROM smelt.models.orders2 |> AGGREGATE sum(amount) AS rev GROUP BY cust_id |> SELECT cust_id, rev\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[(orders_path, orders_sql), (pipe_path.clone(), pipe_sql)],
+    );
+    let pipe_file = files[1];
+
+    let diags = all_diagnostics(&db, ws, pipe_file);
+    let undeclared: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && d.code == Some(DiagnosticCode::UndeclaredColumn)
+        })
+        .collect();
+
+    assert!(
+        undeclared.is_empty(),
+        "Expected no UndeclaredColumn after AGGREGATE when referencing cust_id and rev; got: {undeclared:#?}"
+    );
+}
