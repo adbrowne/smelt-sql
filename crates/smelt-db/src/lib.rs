@@ -1838,14 +1838,24 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let path_str = path.to_str().unwrap_or("");
         let is_virtual_submodel = path_str.contains("::");
         if !is_virtual_submodel && path_str.contains("models/") {
-            DiagnosticAcc(Diagnostic {
-                severity: DiagnosticSeverity::Warning,
-                message: "File does not contain a valid SQL query".to_string(),
-                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
-                code: Some(DiagnosticCode::InvalidModel),
-                data: None,
-            })
-            .accumulate(db);
+            // Files that contain only `smelt.test` declarations are valid — they
+            // have no SELECT body but they are not broken models.  Suppress the
+            // "does not contain a valid SQL query" warning for such files.
+            let parse = parse_file(db, file);
+            let has_smelt_tests = AstFile::cast(parse.syntax())
+                .map(|ast| ast.tests().next().is_some())
+                .unwrap_or(false);
+
+            if !has_smelt_tests {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: "File does not contain a valid SQL query".to_string(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::InvalidModel),
+                    data: None,
+                })
+                .accumulate(db);
+            }
         }
         return;
     }

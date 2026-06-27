@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use smelt_parser::ast::File as AstFile;
+use smelt_parser::ast::{File as AstFile, RecordLiteral};
 use smelt_runtime::{substitute_params_with_named, FnBodyMap};
 
 /// Information about a CTE extracted from a SQL model.
@@ -287,6 +287,82 @@ pub fn yaml_rows_to_sql(name: &str, rows: &[BTreeMap<String, serde_yaml::Value>]
     )
 }
 
+// ── AST → row bridge (Phase 5) ─────────────────────────────────────────────
+
+/// Convert a `RecordLiteral` from the `smelt.test` AST to a row map that the
+/// existing `yaml_rows_to_sql()` / `yaml_value_to_sql()` coercion table accepts.
+///
+/// Each `RecordField` value expression is parsed from its raw source text:
+/// - Integer literal  `42`          → `Value::Number(i64)`
+/// - Float literal    `3.14`        → `Value::Number(f64)`
+/// - Decimal string   `'300.00'`    → `Value::String("300.00")`  (is_decimal_string)
+/// - Date string      `'2024-01-01'`→ `Value::String("2024-01-01")` (is_date_string)
+/// - Other strings    `'hello'`     → `Value::String("hello")`
+/// - Boolean          `true/false`  → `Value::Bool`
+/// - Null             `null`        → `Value::Null`
+///
+/// Omitted fields (property-test rows) are absent from the returned map; the
+/// caller's property loop generates random values for them.
+pub fn record_literal_to_yaml_row(lit: &RecordLiteral) -> BTreeMap<String, serde_yaml::Value> {
+    let mut row = BTreeMap::new();
+    for field in lit.fields() {
+        let name = match field.name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let value_text = match field.value_expr() {
+            Some(expr) => expr.syntax().text().to_string(),
+            None => continue,
+        };
+        let yaml_value = ast_value_text_to_yaml(value_text.trim());
+        row.insert(name, yaml_value);
+    }
+    row
+}
+
+/// Convert raw expression text from a `RecordField` value_expr to a
+/// `serde_yaml::Value`.  The text is the verbatim source text of the
+/// expression — we recognise only the literal forms that are valid in a
+/// `smelt.test` record literal.
+fn ast_value_text_to_yaml(text: &str) -> serde_yaml::Value {
+    // NULL
+    if text.eq_ignore_ascii_case("null") {
+        return serde_yaml::Value::Null;
+    }
+    // Boolean
+    if text.eq_ignore_ascii_case("true") {
+        return serde_yaml::Value::Bool(true);
+    }
+    if text.eq_ignore_ascii_case("false") {
+        return serde_yaml::Value::Bool(false);
+    }
+    // String literal: starts and ends with single quote.
+    // The inner content is used as-is (escaped '' → ' by unescaping).
+    if text.starts_with('\'') && text.ends_with('\'') && text.len() >= 2 {
+        let inner = &text[1..text.len() - 1];
+        let unescaped = inner.replace("''", "'");
+        return serde_yaml::Value::String(unescaped);
+    }
+    // Integer: no decimal point, parseable as i64
+    if !text.contains('.') {
+        if let Ok(n) = text.parse::<i64>() {
+            return serde_yaml::Value::Number(serde_yaml::Number::from(n));
+        }
+    }
+    // Float: has decimal point, parseable as f64
+    if let Ok(f) = text.parse::<f64>() {
+        // Use serde_yaml::Number::from(f64) — note this may lose precision
+        // for very large decimals, but yaml_value_to_sql's `is_decimal_string`
+        // already handles numeric strings passed as Value::String so users
+        // should quote decimal values that need exact precision.
+        return serde_yaml::Value::Number(serde_yaml::Number::from(f));
+    }
+    // Fallback: treat as NULL (covers parse failures and unsupported forms)
+    serde_yaml::Value::Null
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 /// Find external `smelt.<path>` refs in a SQL body, replace them with
 /// underscore-joined CTE names, and return (replaced_sql, [(cte_name, dot_key)]).
 fn find_and_replace_smelt_path_refs(body_sql: &str) -> (String, Vec<(String, String)>) {
@@ -357,6 +433,65 @@ fn collect_transitive_chain(ctes: &[CteInfo], target: &str) -> Vec<String> {
     bfs_order
 }
 
+/// Scan `body_sql` for the first `smelt.<path>#<cte>` reference.
+///
+/// Returns `Some((model_segments, cte_name))` when the body contains a CTE-ref
+/// suffix, signalling a CTE-level `smelt.test`; returns `None` for a
+/// full-query test (no `#` suffix on any path ref).
+pub fn find_cte_ref_in_body(body_sql: &str) -> Option<(Vec<String>, String)> {
+    let parse = smelt_parser::parse(body_sql);
+    let file = AstFile::cast(parse.syntax())?;
+    for node in file.syntax().descendants() {
+        if let Some(path_ref) = smelt_parser::ast::SmeltPathRef::cast(node) {
+            if let Some(cte_name) = path_ref.cte_name() {
+                return Some((path_ref.segments(), cte_name));
+            }
+        }
+    }
+    None
+}
+
+/// Collect the subject model leaf names from all `smelt.test` declarations in a file.
+///
+/// Used by `smelt test --select` to determine which regular models a new-syntax test
+/// file targets so the file can be included or excluded by the selector.
+///
+/// For each `smelt.test` declaration, the assertion body SELECT is scanned for
+/// `smelt.<path>` refs (including `smelt.<model>#<cte>` refs); the leaf segment
+/// of each path (the last segment, i.e. the model name) is collected as the
+/// subject model name.  Duplicate leaf names are deduplicated.
+pub fn new_syntax_test_subject_model_leaves(content: &str) -> Vec<String> {
+    let clean = smelt_parser::strip_frontmatter(content);
+    let parse = smelt_parser::parse(&clean);
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let mut leaves = Vec::new();
+    for smelt_test in file.tests() {
+        let body_select = match smelt_test.body_select() {
+            Some(s) => s.syntax().text().to_string(),
+            None => continue,
+        };
+        let body_parse = smelt_parser::parse(&body_select);
+        let body_file = match AstFile::cast(body_parse.syntax()) {
+            Some(f) => f,
+            None => continue,
+        };
+        for node in body_file.syntax().descendants() {
+            if let Some(path_ref) = smelt_parser::ast::SmeltPathRef::cast(node) {
+                let segments = path_ref.segments();
+                if let Some(leaf) = segments.last() {
+                    if !leaves.contains(leaf) {
+                        leaves.push(leaf.clone());
+                    }
+                }
+            }
+        }
+    }
+    leaves
+}
+
 /// Compile a test that targets a specific CTE within a model.
 ///
 /// Spec §"CTE-level tests" (D-45): the mock boundary is the model's external
@@ -376,7 +511,10 @@ pub fn compile_cte_test(
     let ctes = extract_ctes(model_sql);
 
     if !ctes.iter().any(|c| c.name == target_cte) {
-        return Err(format!("CTE '{}' not found in model", target_cte));
+        return Err(format!(
+            "UnknownTestCte: CTE '{}' not found in model",
+            target_cte
+        ));
     }
 
     // Collect the transitive internal chain in topological order (deps first).

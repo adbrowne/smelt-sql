@@ -762,6 +762,17 @@ pub enum DiagnosticCode {
     /// `smelt.define` body, or any other position is a hard error.
     /// Anchored at the `#` operator token.
     CteRefOutsideTest,
+    /// Emitted (Error) at `smelt test` run time when a `PASSING <dep>` clause
+    /// in a `smelt.test` declaration names a dependency that is not a reachable
+    /// external `smelt.<path>` dep of the assertion query. Catches typos such
+    /// as `PASSING order AS (...)` when the actual dep is `orders`.  A typo'd
+    /// PASSING clause would otherwise produce a false green (the dep gets an
+    /// empty mock CTE). Anchored at the offending PASSING_NAME span.
+    UnknownTestInput,
+    /// Emitted (Error) at `smelt test` run time when a `smelt.<model>#<cte>`
+    /// reference in a `smelt.test` body names a CTE that is absent from the
+    /// referenced model's `WITH` clause. Anchored at the `#<cte>` suffix token.
+    UnknownTestCte,
 }
 
 /// Structured metadata attached to diagnostics for code actions

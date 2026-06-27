@@ -45,7 +45,8 @@ pub enum ColumnTest {
 /// Configuration for a test model
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct TestConfig {
-    /// Name of the model being tested
+    /// Name of the model being tested (legacy path only; new `smelt.test` files omit this).
+    #[serde(default)]
     pub model: String,
     /// Optional CTE name to test in isolation (if absent, tests the whole model)
     #[serde(skip_serializing_if = "Option::is_none")]

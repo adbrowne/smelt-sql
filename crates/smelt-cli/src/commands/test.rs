@@ -13,7 +13,8 @@ use crate::TestArgs;
 #[cfg(feature = "duckdb")]
 pub async fn run_tests(args: TestArgs) -> Result<()> {
     use smelt_cli::test_compiler::{
-        compile_cte_test, compile_whole_model_test, validate_test_expect,
+        compile_cte_test, compile_whole_model_test, find_cte_ref_in_body,
+        record_literal_to_yaml_row, validate_test_expect,
     };
     use smelt_cli::test_runner::{run_test, TestError};
     use std::time::Instant;
@@ -102,13 +103,31 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
 
         // Filter test models: include only those whose target model's canonical
         // path is in the selected set.
+        //
+        // Legacy tests (materialization: test) identify the subject model via
+        // test_config().model.  New-syntax smelt.test files have no `model:`
+        // field; the subject model(s) are derived from the SmeltPathRef nodes
+        // in each declaration's assertion body.
         test_models
             .into_iter()
             .filter(|t| {
-                t.test_config()
-                    .and_then(|tc| leaf_to_canonical.get(&tc.model))
-                    .map(|cp| selected_models.contains(cp))
-                    .unwrap_or(false)
+                // Legacy path: use test_config.model.
+                if let Some(tc) = t.test_config() {
+                    return leaf_to_canonical
+                        .get(&tc.model)
+                        .map(|cp| selected_models.contains(cp))
+                        .unwrap_or(false);
+                }
+                // New-syntax path: include the file if ANY of its smelt.test
+                // declarations references a model in the selected set.
+                smelt_cli::test_compiler::new_syntax_test_subject_model_leaves(&t.content)
+                    .iter()
+                    .any(|leaf| {
+                        leaf_to_canonical
+                            .get(leaf)
+                            .map(|cp| selected_models.contains(cp))
+                            .unwrap_or(false)
+                    })
             })
             .collect()
     };
@@ -128,6 +147,288 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
     let mut results = Vec::new();
 
     for test_model in &selected_tests {
+        // ── New path: smelt.test AST-driven declarations ─────────────────────
+        {
+            let clean_body = smelt_parser::strip_frontmatter(&test_model.content);
+            let parse_result = smelt_parser::parse(&clean_body);
+            let ast_file_opt = smelt_parser::ast::File::cast(parse_result.syntax());
+            if let Some(ast_file) = &ast_file_opt {
+                let smelt_tests: Vec<_> = ast_file.tests().collect();
+                if !smelt_tests.is_empty() {
+                    for smelt_test in smelt_tests {
+                        let test_name =
+                            smelt_test.name().unwrap_or_else(|| test_model.name.clone());
+
+                        // Build inputs from PASSING clauses.
+                        let mut inputs: std::collections::BTreeMap<
+                            String,
+                            Vec<std::collections::BTreeMap<String, serde_yaml::Value>>,
+                        > = std::collections::BTreeMap::new();
+                        for clause in smelt_test.passing_clauses() {
+                            let clause_name = match clause.name() {
+                                Some(n) => n,
+                                None => continue,
+                            };
+                            let rows: Vec<_> = clause
+                                .rows()
+                                .map(|r| record_literal_to_yaml_row(&r))
+                                .collect();
+                            inputs.insert(clause_name, rows);
+                        }
+
+                        // Build expect rows from EXPECT clause.
+                        let expect_rows: Vec<
+                            std::collections::BTreeMap<String, serde_yaml::Value>,
+                        > = smelt_test
+                            .expect_clause()
+                            .map(|ec| ec.rows().map(|r| record_literal_to_yaml_row(&r)).collect())
+                            .unwrap_or_default();
+
+                        if expect_rows.is_empty() {
+                            let result = smelt_cli::test_runner::TestResult {
+                                name: test_name.clone(),
+                                model: test_model.name.clone(),
+                                target_cte: None,
+                                passed: false,
+                                duration: std::time::Duration::from_secs(0),
+                                compiled_sql: String::new(),
+                                error: Some(TestError::CompilationError(
+                                    "smelt.test has no EXPECT clause — at least one \
+                                     expected row is required"
+                                        .to_string(),
+                                )),
+                            };
+                            failed += 1;
+                            if !args.json {
+                                print_test_result(&result, args.verbose, args.show_all);
+                            }
+                            results.push(result);
+                            continue;
+                        }
+
+                        // check_order and cases from frontmatter `test:` block.
+                        let check_order = test_model
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.test.as_ref())
+                            .and_then(|t| t.check_order)
+                            .unwrap_or(false);
+                        let cases_count = test_model
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.test.as_ref())
+                            .and_then(|t| t.cases)
+                            .unwrap_or(10);
+
+                        // Get the body SELECT text.
+                        let body_select = match smelt_test.body_select() {
+                            Some(s) => s.syntax().text().to_string(),
+                            None => {
+                                let result = smelt_cli::test_runner::TestResult {
+                                    name: test_name.clone(),
+                                    model: test_model.name.clone(),
+                                    target_cte: None,
+                                    passed: false,
+                                    duration: std::time::Duration::from_secs(0),
+                                    compiled_sql: String::new(),
+                                    error: Some(TestError::CompilationError(
+                                        "smelt.test has no body SELECT".to_string(),
+                                    )),
+                                };
+                                failed += 1;
+                                if !args.json {
+                                    print_test_result(&result, args.verbose, args.show_all);
+                                }
+                                results.push(result);
+                                continue;
+                            }
+                        };
+
+                        // Detect whether the body contains a `smelt.<path>#<cte>` ref.
+                        let cte_ref = find_cte_ref_in_body(&body_select);
+
+                        if let Some((model_segs, cte_name)) = cte_ref {
+                            // ── CTE-level test ──────────────────────────────────────────────
+                            // Find the referenced model in the project.
+                            let model_canonical = model_segs.join(".");
+                            let model_leaf = model_segs.last().cloned().unwrap_or_default();
+                            let model_file = regular_models.iter().find(|m| {
+                                m.name == model_leaf || m.canonical_path() == model_canonical
+                            });
+                            match model_file {
+                                Some(mf) => {
+                                    // Detect omitted PASSING columns → property-based dispatch.
+                                    // When the target CTE body references columns absent from
+                                    // `inputs`, run `cases` iterations with random augmented rows
+                                    // (mirrors the legacy property-test path in the legacy runner).
+                                    use smelt_cli::test_property::find_missing_columns;
+                                    let missing =
+                                        find_missing_columns(&mf.content, &cte_name, &inputs);
+                                    if !missing.is_empty() {
+                                        use smelt_cli::test_property::run_property_test;
+                                        use smelt_core::metadata::TestConfig;
+                                        let test_config_for_prop = TestConfig {
+                                            model: model_leaf.clone(),
+                                            target_cte: Some(cte_name.clone()),
+                                            inputs: inputs.clone(),
+                                            expect: expect_rows.clone(),
+                                            cases: Some(cases_count),
+                                            check_order: Some(check_order),
+                                        };
+                                        let prop_result = run_property_test(
+                                            &test_name,
+                                            &model_leaf,
+                                            Some(&cte_name),
+                                            &mf.content,
+                                            &test_config_for_prop,
+                                            cases_count,
+                                            None,
+                                        );
+                                        if prop_result.passed {
+                                            passed += 1;
+                                        } else {
+                                            failed += 1;
+                                        }
+                                        if !args.json {
+                                            print_property_test_result(
+                                                &prop_result,
+                                                args.verbose,
+                                                args.show_all,
+                                            );
+                                        }
+                                        // Property test results are not pushed to `results`
+                                        // (matches the legacy property-test path behaviour).
+                                        continue;
+                                    }
+
+                                    // One-shot CTE test (all columns provided).
+                                    match compile_cte_test(&mf.content, &cte_name, &inputs, None) {
+                                        Ok(compiled_sql) => {
+                                            if args.verbose {
+                                                debug!(
+                                                    "Compiled SQL for {}:\n{}",
+                                                    test_name, compiled_sql
+                                                );
+                                            }
+                                            let result = run_test(
+                                                &test_name,
+                                                &model_leaf,
+                                                Some(&cte_name),
+                                                &compiled_sql,
+                                                &expect_rows,
+                                                check_order,
+                                            );
+                                            if result.passed {
+                                                passed += 1;
+                                            } else {
+                                                failed += 1;
+                                            }
+                                            if !args.json {
+                                                print_test_result(
+                                                    &result,
+                                                    args.verbose,
+                                                    args.show_all,
+                                                );
+                                            }
+                                            results.push(result);
+                                        }
+                                        Err(e) => {
+                                            let result = smelt_cli::test_runner::TestResult {
+                                                name: test_name.clone(),
+                                                model: model_leaf.clone(),
+                                                target_cte: Some(cte_name.clone()),
+                                                passed: false,
+                                                duration: std::time::Duration::from_secs(0),
+                                                compiled_sql: String::new(),
+                                                error: Some(TestError::CompilationError(e)),
+                                            };
+                                            failed += 1;
+                                            if !args.json {
+                                                print_test_result(
+                                                    &result,
+                                                    args.verbose,
+                                                    args.show_all,
+                                                );
+                                            }
+                                            results.push(result);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    let result = smelt_cli::test_runner::TestResult {
+                                        name: test_name.clone(),
+                                        model: model_canonical.clone(),
+                                        target_cte: Some(cte_name.clone()),
+                                        passed: false,
+                                        duration: std::time::Duration::from_secs(0),
+                                        compiled_sql: String::new(),
+                                        error: Some(TestError::CompilationError(format!(
+                                            "UnknownTestCte: model '{}' not found \
+                                             in project",
+                                            model_canonical
+                                        ))),
+                                    };
+                                    failed += 1;
+                                    if !args.json {
+                                        print_test_result(&result, args.verbose, args.show_all);
+                                    }
+                                    results.push(result);
+                                }
+                            }
+                            // Done with this CTE-level smelt.test — skip full-query path.
+                            continue;
+                        }
+
+                        // ── Full-query test (no #cte ref) ───────────────────────────────────
+                        match compile_whole_model_test(&body_select, &inputs, None) {
+                            Ok(compiled_sql) => {
+                                if args.verbose {
+                                    debug!("Compiled SQL for {}:\n{}", test_name, compiled_sql);
+                                }
+                                let result = run_test(
+                                    &test_name,
+                                    &test_model.name,
+                                    None,
+                                    &compiled_sql,
+                                    &expect_rows,
+                                    check_order,
+                                );
+                                if result.passed {
+                                    passed += 1;
+                                } else {
+                                    failed += 1;
+                                }
+                                if !args.json {
+                                    print_test_result(&result, args.verbose, args.show_all);
+                                }
+                                results.push(result);
+                            }
+                            Err(e) => {
+                                let result = smelt_cli::test_runner::TestResult {
+                                    name: test_name.clone(),
+                                    model: test_model.name.clone(),
+                                    target_cte: None,
+                                    passed: false,
+                                    duration: std::time::Duration::from_secs(0),
+                                    compiled_sql: String::new(),
+                                    error: Some(TestError::CompilationError(e)),
+                                };
+                                failed += 1;
+                                if !args.json {
+                                    print_test_result(&result, args.verbose, args.show_all);
+                                }
+                                results.push(result);
+                            }
+                        }
+                    }
+                    // All smelt.test declarations in this file are handled above.
+                    // Skip the legacy path.
+                    continue;
+                }
+            }
+        }
+        // ── End new path ─────────────────────────────────────────────────────
+
         let test_config = match test_model.test_config() {
             Some(tc) => tc,
             None => {

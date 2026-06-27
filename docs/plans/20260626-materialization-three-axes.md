@@ -67,8 +67,8 @@ The user surface conflated three independent questions under `materialization` (
 | 1     | done     | 7f202f67 | 2026-06-26 |
 | 2     | done     | 3f9ea474 | 2026-06-26 |
 | 3     | done     | 776ffd15 | 2026-06-26 |
-| 4     | done     |        | 2026-06-26 |
-| 5     | pending  |        |      |
+| 4     | done     | 8d46c64d | 2026-06-26 |
+| 5     | done     |        | 2026-06-27 |
 | 6     | pending  |        |      |
 
 ---

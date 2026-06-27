@@ -437,6 +437,8 @@ impl Backend {
                 }
                 DbCode::StateModeWidening => "state-mode-widening",
                 DbCode::CteRefOutsideTest => "cte-ref-outside-test",
+                DbCode::UnknownTestInput => "unknown-test-input",
+                DbCode::UnknownTestCte => "unknown-test-cte",
             };
             NumberOrString::String(code_str.to_string())
         });
