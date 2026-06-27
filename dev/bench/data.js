@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782533166847,
+  "lastUpdate": 1782533169200,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -26786,6 +26786,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.999141814725657,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d91a982074d8bb7b3a9abb9286ea0004c0b9d5f0",
+          "message": "Merge pull request #144 from adbrowne/impl/materialization-three-axes\n\nSplit materialization into three axes (kind / storage / refresh); tests are smelt.test declarations",
+          "timestamp": "2026-06-27T14:04:23+10:00",
+          "tree_id": "1ceec1f9c987a95986aabcd7d1c52829223a80a5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d91a982074d8bb7b3a9abb9286ea0004c0b9d5f0"
+        },
+        "date": 1782533168513,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.78143353734912,
             "unit": "MB/s"
           }
         ]
