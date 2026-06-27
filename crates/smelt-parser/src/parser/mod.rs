@@ -349,6 +349,7 @@ impl<'a> Parser<'a> {
 
 mod expr;
 mod meta;
+mod pipe;
 mod select;
 mod smelt_ext;
 mod types;

@@ -439,6 +439,10 @@ impl Backend {
                 DbCode::CteRefOutsideTest => "cte-ref-outside-test",
                 DbCode::UnknownTestInput => "unknown-test-input",
                 DbCode::UnknownTestCte => "unknown-test-cte",
+                // Pipe SQL (Data-World |> pipe query) diagnostic codes.
+                DbCode::PipeUnknownOperator => "pipe-unknown-operator",
+                DbCode::PipeOperatorUnsupported => "pipe-operator-unsupported",
+                DbCode::PipeStageMalformed => "pipe-stage-malformed",
             };
             NumberOrString::String(code_str.to_string())
         });

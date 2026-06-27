@@ -285,6 +285,14 @@ Owned by `docs/specs/meta_language.md`.
 | `PipeRhsNotCall` | Error | The RHS of a `|>` is not syntactically a call expression. |
 | `PipeInDataPosition` | Error | A pipe expression `|>` appears in a Data-World grammar position (e.g. inside a WHERE predicate). |
 
+#### Pipe queries (Data-World SQL `|>`)
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `PipeUnknownOperator` | Error | A `\|>` in a FROM-first pipe query is followed by a token that is not a recognised pipe operator keyword. Message: `unknown pipe operator '<kw>'`. |
+| `PipeOperatorUnsupported` | Error | A `\|>` is followed by a recognised-but-deferred operator (`PIVOT`/`UNPIVOT`/`WINDOW`/`CALL`/`TABLESAMPLE`/`ASSERT`). Message: `pipe operator '<kw>' is not supported — <reason>`. |
+| `PipeStageMalformed` | Error | A pipe stage body does not parse against the operator's clause grammar (e.g. `\|> WHERE` with no predicate). Message: `malformed '<kw>' pipe stage`. |
+
 #### Ternary (if-then-else)
 
 | Code | Severity | Trigger |

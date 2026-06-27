@@ -773,6 +773,22 @@ pub enum DiagnosticCode {
     /// reference in a `smelt.test` body names a CTE that is absent from the
     /// referenced model's `WITH` clause. Anchored at the `#<cte>` suffix token.
     UnknownTestCte,
+    /// Emitted when a `|>` in a FROM-first pipe query is followed by a token
+    /// that is not a recognised pipe operator keyword.
+    /// Message: `unknown pipe operator '<kw>'`.
+    /// Anchored at the unrecognised token span.
+    PipeUnknownOperator,
+    /// Emitted when a `|>` in a FROM-first pipe query is followed by a
+    /// recognised-but-deferred operator (`PIVOT`/`UNPIVOT`/`WINDOW`/`CALL`/
+    /// `TABLESAMPLE`/`ASSERT`). Using a deferred operator is a hard error.
+    /// Message: `pipe operator '<kw>' is not supported — <reason>`.
+    /// Anchored at the operator keyword span.
+    PipeOperatorUnsupported,
+    /// Emitted when a pipe stage body does not parse against the operator's
+    /// clause grammar (e.g. `|> WHERE` with no predicate expression).
+    /// Message: `malformed '<kw>' pipe stage`.
+    /// Anchored at the stage span.
+    PipeStageMalformed,
 }
 
 /// Structured metadata attached to diagnostics for code actions

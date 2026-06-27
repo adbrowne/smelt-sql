@@ -160,7 +160,7 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
   - `crates/smelt-db/src/type_inference/` — stage-by-stage schema inference (`binary.rs::walk_select_columns`, `type_context.rs`)
   - `crates/smelt-dialect/src/printer.rs`, `crates/smelt-dialect/src/dialect.rs` — lowering seam and `BackendCapabilities`
   - `crates/smelt-parser-compat/src/gaps.rs` — known parser-compat extension gaps
-- **Tests**: *(forthcoming — pipe-query parse tests, lowering-equivalence oracle tests)*
+- **Tests**: `crates/smelt-parser/tests/pipe_query.rs` — CST shape, FROM-first trigger, per-operator stage markers, error diagnostics (unknown, unsupported, malformed)
 - **User docs**: *(forthcoming — `docs-site/docs/guide/` pipe-syntax page)*
 - **Plans (history)**: *(forthcoming)*
 - **Related specs**:
