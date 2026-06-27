@@ -117,34 +117,8 @@ Best for:
 
 For the deeper rationale, see the [cumulative_aggregate spec](../reference/cumulative-aggregate.md).
 
-### test
-
-A `test` model is not materialized. It defines a unit test for another model — `smelt run` never executes it; `smelt test` does. When you run `smelt test`, smelt compiles the test into a standalone SQL query, substitutes mock input data for the model's dependencies, executes it against a fresh in-memory DuckDB instance (not your project target), and compares the actual output rows against the expected rows declared in `expect:`.
-
-```sql
---- name: test_daily_revenue ---
-materialization: test
-test:
-  model: daily_revenue
-  inputs:
-    orders:
-      - {order_id: 1, amount: 100.0, order_date: '2024-01-15'}
-      - {order_id: 2, amount: 200.0, order_date: '2024-01-15'}
-  expect:
-    - {order_date: '2024-01-15', total_revenue: 300.0}
----
-```
-
-Best for:
-
-- Unit-testing model logic against controlled mock inputs
-- Isolating and testing a single CTE within a larger model (`target_cte:`)
-- Property-based checks on transformations (repeated over `cases:` iterations)
-
-!!! warning "Forbidden combinations"
-    `materialization: test` cannot declare an `incremental:` block, a `timeseries:` block, or a `target` override. All three are hard errors. Test models always execute against an in-memory DuckDB instance regardless of the project target.
-
-For the full test file format, frontmatter keys, and examples see [Testing](testing.md).
+!!! note "Tests are not a materialization"
+    A unit test is a `smelt.test` declaration, not a `materialization` value — it lives on the kind axis alongside models and functions, produces no database object, and is run by `smelt test` (never by `smelt run`). See the [Testing guide](testing.md) for the `smelt.test` grammar (`PASSING`/`EXPECT`, the `#cte` operator, `check_order`/`cases`).
 
 ## Setting materialization
 

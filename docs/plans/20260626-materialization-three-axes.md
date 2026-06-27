@@ -68,8 +68,8 @@ The user surface conflated three independent questions under `materialization` (
 | 2     | done     | 3f9ea474 | 2026-06-26 |
 | 3     | done     | 776ffd15 | 2026-06-26 |
 | 4     | done     | 8d46c64d | 2026-06-26 |
-| 5     | done     |        | 2026-06-27 |
-| 6     | pending  |        |      |
+| 5     | done     | c1f01990 | 2026-06-27 |
+| 6     | done     | (working tree) | 2026-06-27 |
 
 ---
 
@@ -292,6 +292,24 @@ The user surface conflated three independent questions under `materialization` (
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Singular tests (assert-zero-rows against real data) dropped, not migrated.** Two legacy `materialization: test` example files were "singular tests" — a bare `SELECT ... WHERE <bad condition>` run against built data where 0 rows = pass (`examples/ephemeral_demo/models/singular_tests.sql`, `examples/per_cohort_union/tests/cohort_count.test.sql`). The `smelt.test` framework (`testing.md`) is a mocked in-memory unit-test model and has no singular-test concept, so these do not migrate cleanly (a naive migration mocks all deps to empty and trivially passes — a false green). Per user decision (2026-06-27), Phase 6 **deletes** these two files rather than migrating them. Whether smelt should offer a first-class singular/data-quality test mode is a separate spec question, not addressed here.
+
+## Phase 6 — spec gaps closed while migrating example tests (2026-06-27)
+
+Migrating the real example unit tests (web_analytics, retail_analytics) off `materialization: test` exercised parts of the `testing.md` spec that Phases 3 and 5 had under-implemented. These were brought up to spec inside Phase 6 (per user decision, 2026-06-27 — "implement both gaps now"):
+
+- **Lexer/parser: scientific-notation numbers (`1e-8`) and PostgreSQL-style casts on non-IDENT primaries (`1.0::DOUBLE`, `date_trunc(...)::DATE`).** A `smelt.test` body is parsed strictly (unlike top-level model SQL, which flows losslessly to DuckDB), so these common SQL forms must parse to round-trip a migrated test body. Restored in `smelt-parser` `lexer.rs` / `parser/expr.rs` with parser tests.
+- **Parser/AST: dotted `PASSING` dependency names (`PASSING silver.sessions AS (...)`).** `testing.md` §Surface defines a `PASSING <dep>` name as the dependency's bare *address path*, which may be multi-segment; `parse_passing_clause` previously accepted only a single IDENT. Now consumes `IDENT (DOT IDENT)*`; `PassingClause::name()` joins the segments. Function-call `PASSING` (single-segment fragment params) is unaffected.
+- **Runner: whole-query tests inline the model under test.** `testing.md` §Execution model says the assertion query is resolved "inlining the body of every model it references." The whole-query path previously mocked the referenced model as an opaque dependency, so its upstream deps were not mockable. `compile_whole_query_test` (`test_compiler.rs`) now recursively inlines every `smelt.<path>` ref that is **not** directly mocked via `PASSING` and that resolves to a project model; refs present in `PASSING` (and sources/seeds) are substituted with mock CTEs as before. This unifies the self-contained, direct-dependency, and model-reference test styles.
+
+These are spec-conformance fixes (the spec already described the behaviour); no spec edit was required. The faithful example fixtures reference the real model via `smelt.<path>` / `#cte` so `smelt test --select <model>` resolves them and they exercise the actual model code.
+
+Two follow-up limitations of the whole-query inlining path, surfaced in review (not blocking; no current fixture hits them):
+- A single-segment ref (`smelt.users`) to a leaf name shared by two models is rejected with `AmbiguousTestModel` rather than resolved arbitrarily (fail-loud). Reference such a model by its full dotted address.
+- Inlining recurses into upstream model bodies as-written; an upstream model whose SQL does not compile standalone (e.g. relies on per-model config vars or incremental/watermark constructs) would need its boundary mocked via `PASSING` instead of being inlined. This matches the pre-existing limitation for the subject model and is bounded by mocking the offending dep.
+
+- **`MalformedTimeseries` false positive on `timeseries_broken_bare_lag_not_derivable`.** Once `::DATE` parsed (above), the partition column `date_trunc('day', event_ts)::DATE` was inferred nullable because its source `raw_events` was an **undefined extern** (unknown columns default to nullable). CAST/`date_trunc` nullability inference were already correct (they propagate operand nullability and default unknown→NOT NULL). Fixed by giving the example a real source (`models/sources/raw_events.yml`, `event_ts NOT NULL`) and correcting the stale `smelt.models.events` ref to `smelt.events` — completing the example's definition rather than touching type inference.
 
 ## Verification
 

@@ -51,7 +51,7 @@ pub struct SelectionRequest {
 /// compute per-model targets plus cross-engine edges.
 ///
 /// **Filter contract (the Run Pipeline Parity Rule's invariant):**
-/// - Test models (`materialization: test`) are never returned. This filter
+/// - Test models (files containing `smelt.test` declarations) are never returned. This filter
 ///   used to live independently in `smelt-cli/src/commands/run.rs` and in
 ///   the UI's `run_manager.rs` / `build.rs`; today's UI test-model panic
 ///   was an instance of the two filters drifting apart.

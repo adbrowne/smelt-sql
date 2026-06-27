@@ -22,9 +22,6 @@ pub async fn execute_model(
         crate::config::Materialization::Ephemeral => {
             unreachable!("Ephemeral models should be inlined as CTEs, not executed directly")
         }
-        crate::config::Materialization::Test => {
-            unreachable!("Test models should not be executed directly")
-        }
     };
 
     backend

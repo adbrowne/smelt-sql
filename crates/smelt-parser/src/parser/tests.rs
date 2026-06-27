@@ -6589,6 +6589,31 @@ EXPECT ({total: 3})"#;
 }
 
 #[test]
+fn parse_smelt_test_dotted_passing_names() {
+    // A PASSING <dep> name is the bare address path of a dependency and may be
+    // multi-segment (testing.md §Surface: `orders` or `silver.orders`).
+    let input = r#"smelt.test dotted_deps AS (
+    SELECT session_id FROM smelt.gold.identity_forward_only
+)
+PASSING silver.sessions AS ({session_id: 'sa'})
+PASSING silver.events_parsed AS ({event_id: 1})
+EXPECT ({session_id: 'sa'})"#;
+
+    let (parse, file) = parse_file_text(input);
+    assert!(
+        parse.errors.is_empty(),
+        "dotted PASSING names must parse without errors: {:?}",
+        parse.errors
+    );
+    let tests: Vec<SmeltTest> = file.tests().collect();
+    assert_eq!(tests.len(), 1, "expected one smelt.test");
+    let passing: Vec<_> = tests[0].passing_clauses().collect();
+    assert_eq!(passing.len(), 2, "expected two PASSING clauses");
+    assert_eq!(passing[0].name().as_deref(), Some("silver.sessions"));
+    assert_eq!(passing[1].name().as_deref(), Some("silver.events_parsed"));
+}
+
+#[test]
 fn expect_rows_are_record_literals() {
     // EXPECT with multiple record literals; omitted keys are allowed.
     let input = r#"smelt.test multi_row_expect AS (
@@ -6974,5 +6999,47 @@ fn dangling_hash_no_ident_recovers() {
             None,
             "dangling `#`: hash_range() must be None (orphan `#` must not be inside SMELT_PATH_REF)"
         );
+    }
+}
+
+#[test]
+fn test_scientific_notation_number() {
+    // Scientific-notation numeric literals must lex as a single NUMBER token
+    // (mantissa + exponent), not a NUMBER followed by an `e`/`E` identifier.
+    for (sql, lit) in [
+        ("SELECT 1e8 AS x", "1e8"),
+        ("SELECT 1e-8 AS x", "1e-8"),
+        ("SELECT 1.5e+3 AS x", "1.5e+3"),
+        ("SELECT 2.3E-4 AS x", "2.3E-4"),
+    ] {
+        let (parse, _select) = parse_select(sql);
+        let numbers: Vec<String> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == NUMBER)
+            .map(|t| t.text().to_string())
+            .collect();
+        assert!(
+            numbers.iter().any(|n| n == lit),
+            "scientific literal {lit:?} must be a single NUMBER token; got {numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn test_postfix_cast_on_non_ident_primary() {
+    // PostgreSQL-style `expr::type` must parse for non-IDENT primaries
+    // (number, string, parenthesized expr, function-call result) into a
+    // CAST_EXPR node.
+    for sql in [
+        "SELECT 1.0::DOUBLE AS x",
+        "SELECT 'txt'::TEXT AS x",
+        "SELECT (1 + 2)::BIGINT AS x",
+        "SELECT date_trunc('day', ts)::DATE AS d FROM t",
+    ] {
+        let (parse, _select) = parse_select(sql);
+        let has_cast = parse.syntax().descendants().any(|n| n.kind() == CAST_EXPR);
+        assert!(has_cast, "expected a CAST_EXPR node for {sql:?}");
     }
 }

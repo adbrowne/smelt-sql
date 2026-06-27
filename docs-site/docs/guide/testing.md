@@ -203,168 +203,46 @@ EXPECT (
 
 If any iteration fails, the framework reports the random seed for reproduction.
 
-### Co-located tests
+### File placement
 
-A `smelt.test` declaration can be placed in a separate test file or co-located in the same
-file as the model it tests:
-
-```sql
---- name: cleaned_orders ---
-materialization: ephemeral
----
-SELECT order_id, user_id, amount, created_at AS order_date
-FROM smelt.raw_orders
-WHERE status = 'completed'
-
----
-smelt.test check_cleaned_orders AS (
-    SELECT order_id, amount FROM smelt.cleaned_orders
-)
-PASSING raw_orders AS (
-    {order_id: 1, user_id: 100, amount: 29.99, status: 'completed', created_at: '2024-01-15'},
-    {order_id: 2, user_id: 101, amount: 49.99, status: 'completed', created_at: '2024-01-15'},
-    {order_id: 3, user_id: 100, amount: 15.00, status: 'cancelled', created_at: '2024-01-16'}
-)
-EXPECT (
-    {order_id: 1, amount: 29.99},
-    {order_id: 2, amount: 49.99}
-)
-```
+Each `smelt.test` declaration belongs in its own `.sql` file (or a file dedicated to
+tests). Any `.sql` file that contains a `smelt.test` declaration is classified as a
+**test file** by smelt — it will not be treated as a model, and other models cannot
+reference it via `smelt.<name>`.
 
 !!! note
-    **Convention:** Small projects often co-locate tests in model files to keep things
-    together. Larger projects typically use a separate `tests/` directory to keep model
-    files clean. Both approaches work — choose what fits your team.
+    **Convention:** Place test files in a dedicated `tests/` directory and add it to `paths:`
+    in `smelt.yml`. This keeps model files clean and makes it clear which files contain tests.
 
-## YAML-based test format
-
-Tests can also be written using YAML frontmatter. This format is equivalent to
-`smelt.test` declarations and supports the same features.
-
-```yaml
---- name: test_name ---
-materialization: test
-test:
-  model: daily_revenue
-  target_cte: daily_agg
-  inputs:
-    cleaned_orders:
-      - {order_id: 1, amount: 100.0, order_date: '2024-01-15'}
-      - {order_id: 2, amount: 200.0, order_date: '2024-01-15'}
-  expect:
-    - {order_date: '2024-01-15', total_revenue: 300.0}
-  check_order: false
-  cases: 10
----
-```
-
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `model` | Yes | | Name of the model to test |
-| `target_cte` | No | | Test a specific CTE within the model |
-| `inputs` | No | | Map of dependency names to arrays of row objects |
-| `expect` | Yes | | Array of expected output rows |
-| `check_order` | No | `false` | If `true`, compare rows positionally |
-| `cases` | No | `10` | Number of property-based test iterations |
-
-### Whole-model tests
-
-```sql
---- name: test_user_activity ---
-materialization: test
-test:
-  model: user_activity
-  inputs:
-    users:
-      - {user_id: 1, user_name: Alice, signup_date: '2024-01-01'}
-      - {user_id: 2, user_name: Bob, signup_date: '2024-02-01'}
-    events:
-      - {event_id: 1, user_id: 1, event_type: page_view, event_timestamp: '2024-01-15 10:00:00', properties: null}
-      - {event_id: 2, user_id: 1, event_type: click, event_timestamp: '2024-01-16 11:00:00', properties: null}
-      - {event_id: 3, user_id: 2, event_type: page_view, event_timestamp: '2024-02-15 09:00:00', properties: null}
-  expect:
-    - {user_id: 1, user_name: Alice, total_events: 2}
-    - {user_id: 2, user_name: Bob, total_events: 1}
----
-```
-
-### CTE-level tests
-
-```sql
---- name: test_cohort_sizes ---
-materialization: test
-test:
-  model: mart_cohort_retention
-  target_cte: cohort_sizes
-  inputs:
-    cohort_base:
-      - {customer_id: 1, cohort_date: '2024-01-01'}
-      - {customer_id: 2, cohort_date: '2024-01-01'}
-      - {customer_id: 3, cohort_date: '2024-02-01'}
-  expect:
-    - {cohort_date: '2024-01-01', cohort_size: 2}
-    - {cohort_date: '2024-02-01', cohort_size: 1}
----
-```
-
-### Property-based tests
-
-When your input rows have fewer columns than the CTE expects, smelt treats the test as
-property-based. The framework generates random values for omitted columns and runs
-`cases` iterations.
-
-```sql
---- name: test_daily_agg_property ---
-materialization: test
-test:
-  model: daily_revenue
-  target_cte: daily
-  cases: 20
-  inputs:
-    cleaned:
-      # user_id omitted -- random values generated
-      - {amount: 100.0, created_at: '2024-01-01'}
-      - {amount: 200.0, created_at: '2024-01-01'}
-  expect:
-    # only revenue checked; other columns ignored
-    - {revenue: 300.0}
----
-```
-
-### Advanced tests (SQL body)
-
-For complex mock data, include SQL after the frontmatter closing `---`. The SQL body
-defines mock CTEs:
-
-```sql
---- name: test_daily_agg_advanced ---
-materialization: test
-test:
-  model: daily_revenue
-  target_cte: daily
-  expect:
-    - {day: '2024-01-01', revenue: 300.0}
----
-WITH cleaned AS (
-  SELECT i as user_id, (i * 50.0) as amount, '2024-01-01'::date as created_at
-  FROM generate_series(1, 6) as t(i)
-)
-```
+    ```yaml
+    # smelt.yml
+    paths:
+      - models
+      - tests
+    ```
 
 ## Comparison behavior
 
 ### Set vs ordered comparison
 
-By default, row order does not matter -- both actual and expected rows are compared as sets. Use `check_order: true` when row order is significant (e.g., testing window functions with specific ordering):
+By default, row order does not matter -- both actual and expected rows are compared as sets. Use `check_order: true` (in frontmatter) when row order is significant (e.g., testing window functions with specific ordering):
 
-```yaml
+```sql
+---
 test:
-  model: my_model
   check_order: true
-  inputs: ...
-  expect:
-    - {rank: 1, user_id: 42}
-    - {rank: 2, user_id: 17}
+---
+smelt.test check_rank AS (
+    SELECT rank, user_id FROM smelt.revenue_report ORDER BY rank
+)
+PASSING revenue_report AS (
+    {rank: 1, user_id: 42},
+    {rank: 2, user_id: 17}
+)
+EXPECT (
+    {rank: 1, user_id: 42},
+    {rank: 2, user_id: 17}
+)
 ```
 
 ### Column filtering
@@ -447,5 +325,5 @@ The command exits with code 0 if all tests pass, or code 1 if any test fails.
 ## Further reading
 
 - [SQL Models](sql-models.md) -- model syntax and YAML frontmatter
-- [Materializations](materializations.md) -- all materialization types including `test`
+- [Materializations](materializations.md) -- all materialization types
 - [CLI Commands](../reference/cli.md#smelt-test) -- full `smelt test` flag reference

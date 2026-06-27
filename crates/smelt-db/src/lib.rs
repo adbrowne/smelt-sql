@@ -669,8 +669,7 @@ impl std::fmt::Debug for ResolvedRef {
 /// addressing scheme":
 /// - `.sql` file with a bare SELECT → `Model`
 /// - `.sql` file declaring `smelt.define` → `Function`
-/// - `.sql` file with `materialization: test` (Phase 2a stand-in for
-///   the future `smelt.test` declaration kind) → `Test`
+/// - `.sql` file containing `smelt.test` declarations → `Test`
 /// - `.csv` under a project's `paths` → `Seed`
 /// - `.yml` declaring an external table → `Source`
 ///
@@ -843,41 +842,18 @@ fn file_path_tuple(
 /// and test all live in `.sql` files; the dispatch is on
 /// content/frontmatter, not filename.
 fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
-    let raw_text = file.text(db);
-    // 1. `smelt.define` → Function. Inspect the parsed AST; this is
-    //    cheap because the parse is already cached via Salsa.
+    // 1. `smelt.define` → Function; `smelt.test` → Test. Both dispatch on
+    //    the parsed AST (already cached by Salsa).
     let parse = parse_file(db, file);
     if let Some(ast) = AstFile::cast(parse.syntax()) {
         if ast.defines().next().is_some() {
             return RefKind::Function;
         }
-    }
-    // 2. `materialization: test` frontmatter (Phase 2a stand-in for the
-    //    forthcoming `smelt.test` declaration). Use `extract_file_metadata`
-    //    so multi-model files with mixed materializations are handled.
-    if let Ok(meta) = smelt_core::extract_file_metadata(raw_text) {
-        match meta {
-            smelt_core::FileMetadata::Single { metadata, .. } => {
-                if metadata.materialization == Some(smelt_core::Materialization::Test) {
-                    return RefKind::Test;
-                }
-            }
-            smelt_core::FileMetadata::Multi { models } => {
-                if models
-                    .iter()
-                    .all(|s| s.metadata.materialization == Some(smelt_core::Materialization::Test))
-                    && !models.is_empty()
-                {
-                    return RefKind::Test;
-                }
-            }
-            smelt_core::FileMetadata::Empty => {}
-            // Generator files produce models via meta-language evaluation;
-            // they are not test files.
-            smelt_core::FileMetadata::Generator { .. } => {}
+        if ast.tests().next().is_some() {
+            return RefKind::Test;
         }
     }
-    // 3. Default: Model.
+    // 2. Default: Model.
     RefKind::Model
 }
 

@@ -68,8 +68,6 @@ pub enum Materialization {
     Ephemeral,
     /// Backend-managed persistent view (e.g., PostgreSQL, Databricks).
     MaterializedView,
-    /// Test model — not materialized, used for unit testing.
-    Test,
 }
 
 impl<'de> Deserialize<'de> for Materialization {
@@ -83,9 +81,9 @@ impl<'de> Deserialize<'de> for Materialization {
             "view" => Ok(Materialization::View),
             "ephemeral" => Ok(Materialization::Ephemeral),
             "materialized_view" => Ok(Materialization::MaterializedView),
-            "test" => Ok(Materialization::Test),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', 'materialized_view', or 'test'. \
+                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', or 'materialized_view'. \
+                 Note: 'test' has been removed — use `smelt.test` declarations instead. \
                  Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: cumulative` instead.",
                 s
             ))),
@@ -103,7 +101,6 @@ impl Serialize for Materialization {
             Materialization::View => serializer.serialize_str("view"),
             Materialization::Ephemeral => serializer.serialize_str("ephemeral"),
             Materialization::MaterializedView => serializer.serialize_str("materialized_view"),
-            Materialization::Test => serializer.serialize_str("test"),
         }
     }
 }
@@ -613,25 +610,6 @@ impl Config {
                 }
             }
         }
-        // D-33: reject `test` as a project-wide default.
-        // Only table / view / materialized_view / ephemeral are legal defaults;
-        // `test` requires per-model semantics that cannot serve as a project fallback.
-        // `cumulative_aggregate` is no longer a valid materialization value and will
-        // have already failed to deserialize before reaching this check.
-        // (smelt_yml.md §Top-level keys, §Semantics §8).
-        let forbidden_default = match &config.default_materialization {
-            Materialization::Test => Some("test"),
-            _ => None,
-        };
-        if let Some(name) = forbidden_default {
-            use serde::de::Error as _;
-            return Err(serde_yaml::Error::custom(format!(
-                "`default_materialization: {name}` is not permitted as a project-wide default. \
-                 Permitted values: table, view, materialized_view, ephemeral \
-                 (smelt_yml.md §Top-level keys, §Semantics §8)."
-            )));
-        }
-
         Ok((config, warnings))
     }
 
@@ -885,20 +863,6 @@ impl Config {
                         }
                     }
                 }
-                Materialization::Test => {
-                    if incremental.is_some() {
-                        errors.push((
-                            name.to_string(),
-                            "Test models cannot have incremental configuration".to_string(),
-                        ));
-                    }
-                    if target.is_some() {
-                        errors.push((
-                            name.to_string(),
-                            "Test models cannot have a target override".to_string(),
-                        ));
-                    }
-                }
                 Materialization::Table => {} // All config is valid for tables
             }
         }
@@ -972,6 +936,35 @@ models:
         assert_eq!(
             config.models.get("model2").unwrap().materialization,
             Some(Materialization::View)
+        );
+    }
+
+    /// Phase 6: `materialization: test` is no longer a valid surface.
+    /// Tests are declared with `smelt.test` in the SQL body, not via the
+    /// `materialization:` frontmatter key.
+    #[test]
+    fn materialization_test_rejected() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  some_test:
+    materialization: test
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "`materialization: test` must be rejected as an unknown value"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid materialization") || err.contains("unknown variant"),
+            "error must mention the invalid value; got: {err}"
         );
     }
 
@@ -1945,12 +1938,8 @@ default_materialization: {default_mat}
         );
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("test"),
-            "error must name the forbidden value 'test'; got: {err}"
-        );
-        assert!(
-            err.contains("default_materialization"),
-            "error must mention 'default_materialization'; got: {err}"
+            err.contains("test") || err.contains("Invalid"),
+            "error must name the forbidden value 'test' or indicate an invalid value; got: {err}"
         );
     }
 

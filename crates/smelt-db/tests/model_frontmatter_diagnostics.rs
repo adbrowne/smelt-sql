@@ -289,12 +289,12 @@ fn sql_before_section_delimiter_emits_malformed_section_delimiter() {
 SELECT reduce([true, false, true], and_all) AS all_true
 
 --- name: reduce_is_false ---
-materialization: test
-test:
-  model: and_all_predicates
-  expect:
-    - {all_true: false}
+materialization: view
 ---
+smelt.test reduce_check AS (
+    SELECT all_true FROM smelt.and_all_predicates
+)
+EXPECT ({all_true: false})
 ";
     let (db, ws, files) = build_db(root, SMELT_YML, &[(path, src)]);
     let file = files[0];

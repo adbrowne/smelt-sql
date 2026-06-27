@@ -992,9 +992,6 @@ pub async fn execute_project(
                     smelt_core::config::Materialization::Ephemeral => {
                         unreachable!("Ephemeral models should be inlined as CTEs, not executed")
                     }
-                    smelt_core::config::Materialization::Test => {
-                        unreachable!("Test models should not be executed directly")
-                    }
                 };
 
                 let exec_result = backend

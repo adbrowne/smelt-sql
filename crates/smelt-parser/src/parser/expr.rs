@@ -798,6 +798,26 @@ impl<'a> super::Parser<'a> {
             self.parse_arg_list();
             self.finish_node(); // MAP_METHOD_CALL
         }
+
+        // Postfix: PostgreSQL-style cast `expr::type` for non-IDENT primaries.
+        //
+        // The IDENT branch already handles `ident::type` by checking for
+        // DOUBLE_COLON inside the branch and consuming it there.  All other
+        // primary expression kinds (NUMBER, STRING, parenthesized expressions,
+        // subqueries, CAST(…) results, etc.) reach this postfix loop so that
+        // `1.0::DOUBLE`, `'txt'::TEXT`, `(expr)::TYPE`, etc. are handled
+        // uniformly.  Each iteration wraps everything from `primary_checkpoint`
+        // onwards into a CAST_EXPR node (same retroactive-wrap pattern used by
+        // the MAP_METHOD_CALL loop above).
+        self.skip_trivia();
+        while self.at(DOUBLE_COLON) {
+            self.start_node_at(primary_checkpoint, CAST_EXPR);
+            self.advance(); // consume ::
+            self.skip_trivia();
+            self.parse_type_spec();
+            self.finish_node(); // CAST_EXPR
+            self.skip_trivia();
+        }
     }
 
     pub(super) fn parse_array_subscript(&mut self) {

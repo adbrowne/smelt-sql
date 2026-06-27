@@ -57,8 +57,7 @@ pub struct CatalogModel {
     /// models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<ModelOriginKind>,
-    /// Test models (`materialization: test`) that declare `test.model: <this model>`
-    /// in their frontmatter. Omitted when no tests target this model.
+    /// `smelt.test` declarations that reference this model. Omitted when no tests target this model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tests_targeting: Vec<TestRef>,
 }

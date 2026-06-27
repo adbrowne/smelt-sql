@@ -1,6 +1,7 @@
 #![cfg(feature = "duckdb")]
-//! Integration tests for D-45: CTE-level tests mock external `smelt.<path>` deps,
-//! not internal CTEs. The internal CTE chain executes as-written.
+//! Integration tests for D-45: CTE-level `smelt.test` declarations mock external
+//! `smelt.<path>` deps (via PASSING), not internal CTEs. The internal CTE chain
+//! executes as-written.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,20 +67,18 @@ fn cte_test_mocks_external_deps_not_internal_ctes() {
     )
     .unwrap();
 
-    // CTE-level test targeting 'agg'; inputs provides the EXTERNAL dep 'raw_orders'.
-    // cleaned must run as-written (reading from the mocked raw_orders CTE, not mocked itself).
-    let test_sql = "--- name: test_agg_cte ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: orders_agg\n  \
-          target_cte: agg\n  \
-          inputs:\n    \
-            raw_orders:\n      \
-              - {amount: 100}\n      \
-              - {amount: 200}\n  \
-          expect:\n    \
-            - {total: 300}\n\
-        ---\n";
+    // CTE-level test targeting 'agg' via `smelt.orders_agg#agg`.
+    // PASSING mocks the EXTERNAL dep 'raw_orders'; cleaned runs as-written.
+    let test_sql = "smelt.test test_agg_cte AS (\n\
+        SELECT * FROM smelt.orders_agg#agg\n\
+    )\n\
+    PASSING raw_orders AS (\n\
+        {amount: 100},\n\
+        {amount: 200}\n\
+    )\n\
+    EXPECT (\n\
+        {total: 300}\n\
+    )\n";
     std::fs::write(root.join("tests/test_agg_cte.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -132,22 +131,21 @@ fn cte_test_inputs_keys_are_model_deps_not_cte_names() {
     )
     .unwrap();
 
-    // inputs includes "cleaned" (an internal CTE name — NOT a smelt.<path> dep).
+    // PASSING includes "cleaned" (an internal CTE name — NOT a smelt.<path> dep).
     // D-43: this must fail with UnknownTestInput, even though "raw_orders" is also valid.
-    let test_sql = "--- name: test_internal_key_fails ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: orders_agg\n  \
-          target_cte: agg\n  \
-          inputs:\n    \
-            cleaned:\n      \
-              - {amount: 999}\n    \
-            raw_orders:\n      \
-              - {amount: 100}\n      \
-              - {amount: 200}\n  \
-          expect:\n    \
-            - {total: 300}\n\
-        ---\n";
+    let test_sql = "smelt.test test_internal_key_fails AS (\n\
+        SELECT * FROM smelt.orders_agg#agg\n\
+    )\n\
+    PASSING cleaned AS (\n\
+        {amount: 999}\n\
+    )\n\
+    PASSING raw_orders AS (\n\
+        {amount: 100},\n\
+        {amount: 200}\n\
+    )\n\
+    EXPECT (\n\
+        {total: 300}\n\
+    )\n";
     std::fs::write(root.join("tests/test_internal_key_fails.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);
@@ -208,20 +206,18 @@ fn cte_test_transitive_external_deps_reachable() {
     )
     .unwrap();
 
-    // target_cte: c; inputs provides the transitive external dep 'source_data'.
+    // target_cte: c via smelt.chain#c; PASSING mocks the transitive external dep 'source_data'.
     // Chain c→b→a→source_data(external): source_data mock yields SUM=150, doubled=300.
-    let test_sql = "--- name: test_chain_cte ---\n\
-        materialization: test\n\
-        test:\n  \
-          model: chain\n  \
-          target_cte: c\n  \
-          inputs:\n    \
-            source_data:\n      \
-              - {amount: 50}\n      \
-              - {amount: 100}\n  \
-          expect:\n    \
-            - {doubled: 300}\n\
-        ---\n";
+    let test_sql = "smelt.test test_chain_cte AS (\n\
+        SELECT * FROM smelt.chain#c\n\
+    )\n\
+    PASSING source_data AS (\n\
+        {amount: 50},\n\
+        {amount: 100}\n\
+    )\n\
+    EXPECT (\n\
+        {doubled: 300}\n\
+    )\n";
     std::fs::write(root.join("tests/test_chain_cte.sql"), test_sql).unwrap();
 
     let output = run_smelt_test(&root);

@@ -1,8 +1,7 @@
 //! Selection-parity tests. Exercise `smelt_runtime::select_executable_models`
 //! against small in-memory dependency graphs, anchoring Phase 3 invariants:
 //!
-//! - `materialization: test` models are filtered out (today's UI test-model
-//!   panic regression test).
+//! - Test models (`smelt.test` declarations) are filtered out.
 //! - Generator files (`.gen.sql` / `name.gen`) are filtered out.
 //! - Selectors compose with excludes consistently.
 //! - Per-model `target:` metadata overrides win over the request default.
@@ -131,19 +130,11 @@ fn make_emitted_model_with_sql(
 }
 
 fn make_test_model(name: &str, target_model: &str) -> smelt_core::ModelFile {
-    let metadata = ModelMetadata {
-        materialization: Some(Materialization::Test),
-        test: Some(smelt_core::metadata::TestConfig {
-            model: target_model.to_string(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    make_model(
-        name,
-        &format!("SELECT * FROM smelt.{target_model}"),
-        Some(metadata),
-    )
+    // Test models are identified by `smelt.test` declarations in their SQL body.
+    let sql = format!(
+        "smelt.test {name} AS (\n    SELECT * FROM smelt.{target_model}\n)\nPASSING {target_model} AS ({{x: 1}})\nEXPECT ({{x: 1}})\n"
+    );
+    make_model(name, &sql, None)
 }
 
 #[test]

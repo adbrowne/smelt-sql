@@ -1396,11 +1396,25 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.advance(); // IDENT "PASSING"
 
-        // Parse the binding name into PASSING_NAME.
+        // Parse the binding name into PASSING_NAME. A test substitutes a table
+        // dependency addressed by its bare path, which may be multi-segment
+        // (e.g. `silver.sessions`); a function substitutes a single-identifier
+        // fragment parameter. Consume `IDENT (DOT IDENT)*` to cover both — in
+        // the function-call context no DOT follows the name, so the loop is a
+        // no-op there.
         self.skip_trivia();
         self.start_node(PASSING_NAME);
         if self.at(IDENT) {
-            self.advance(); // IDENT (name)
+            self.advance(); // IDENT (first segment)
+            while self.at(DOT) {
+                self.advance(); // DOT
+                if self.at(IDENT) {
+                    self.advance(); // IDENT (next segment)
+                } else {
+                    self.error("Expected identifier after '.' in PASSING name".to_string());
+                    break;
+                }
+            }
         } else {
             self.error("Expected identifier after PASSING".to_string());
         }

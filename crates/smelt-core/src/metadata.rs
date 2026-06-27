@@ -42,21 +42,11 @@ pub enum ColumnTest {
     Parameterized(BTreeMap<String, serde_yaml::Value>),
 }
 
-/// Configuration for a test model
+/// Frontmatter knobs for a `smelt.test` declaration.
+/// The model under test, mocks, and expectations live in the grammar
+/// (`AS (...)`, `PASSING`, `EXPECT`) — not here.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct TestConfig {
-    /// Name of the model being tested (legacy path only; new `smelt.test` files omit this).
-    #[serde(default)]
-    pub model: String,
-    /// Optional CTE name to test in isolation (if absent, tests the whole model)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_cte: Option<String>,
-    /// Mock input data: maps dependency name → list of row objects
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub inputs: BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
-    /// Expected output rows
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expect: Vec<BTreeMap<String, serde_yaml::Value>>,
     /// Number of property-based test cases (default 10)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cases: Option<u32>,
@@ -184,7 +174,8 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub backend_hints: HashMap<String, serde_yaml::Value>,
 
-    /// Test configuration (only for materialization: test)
+    /// Test configuration (frontmatter knobs for `smelt.test` declarations,
+    /// e.g. `cases` and `check_order`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestConfig>,
 
@@ -427,22 +418,13 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         None => return Ok(()),
     };
 
-    // Rule: timeseries: on ephemeral or test → MalformedTimeseries
+    // Rule: timeseries: on ephemeral → MalformedTimeseries
     if let Some(mat) = &metadata.materialization {
-        match mat {
-            Materialization::Ephemeral => {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: "timeseries: is not allowed on ephemeral models (no persisted output)"
-                        .to_string(),
-                });
-            }
-            Materialization::Test => {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: "timeseries: is not allowed on test models (not a persistent output)"
-                        .to_string(),
-                });
-            }
-            _ => {}
+        if mat == &Materialization::Ephemeral {
+            return Err(MetadataError::MalformedTimeseries {
+                message: "timeseries: is not allowed on ephemeral models (no persisted output)"
+                    .to_string(),
+            });
         }
     }
 

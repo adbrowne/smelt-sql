@@ -945,16 +945,22 @@ impl PassingClause {
         &self.0
     }
 
-    /// The binding name — the `IDENT` text inside the `PASSING_NAME` child.
+    /// The binding name — the dependency's bare address path inside the
+    /// `PASSING_NAME` child. May be multi-segment (e.g. `silver.sessions`); the
+    /// `IDENT` segments are joined with `.` (DOT tokens are dropped).
     pub fn name(&self) -> Option<String> {
-        self.0
-            .children()
-            .find(|n| n.kind() == PASSING_NAME)?
+        let name_node = self.0.children().find(|n| n.kind() == PASSING_NAME)?;
+        let segments: Vec<String> = name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
             .filter(|t| t.kind() == IDENT)
             .map(|t| t.text().to_string())
-            .next()
+            .collect();
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments.join("."))
+        }
     }
 
     /// Raw text of the expression inside `(...)` in the `PASSING_BODY` child,

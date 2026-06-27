@@ -492,6 +492,143 @@ pub fn new_syntax_test_subject_model_leaves(content: &str) -> Vec<String> {
     leaves
 }
 
+/// Find the plain (non-`#cte`) `smelt.<path>` model references in a test body
+/// SELECT, returning each ref's address segments and its byte range within
+/// `body_sql`. Refs that carry a `#<cte>` suffix are excluded (those go through
+/// the CTE-level path). Used by the whole-query test path to inline the model
+/// under test.
+pub fn find_plain_model_refs_in_body(body_sql: &str) -> Vec<(Vec<String>, (usize, usize))> {
+    let parse = smelt_parser::parse(body_sql);
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let mut refs = Vec::new();
+    for node in file.syntax().descendants() {
+        if let Some(path_ref) = smelt_parser::ast::SmeltPathRef::cast(node) {
+            if path_ref.cte_name().is_some() {
+                continue;
+            }
+            let range = path_ref.text_range();
+            let start: usize = range.start().into();
+            let end: usize = range.end().into();
+            refs.push((path_ref.segments(), (start, end)));
+        }
+    }
+    refs
+}
+
+/// Resolve a `smelt.<path>` ref's address segments to the body of the project
+/// model it names, if any. A fully-qualified ref matches a canonical address in
+/// `canonical_bodies`. A single-segment ref (`smelt.users`) matches by leaf name
+/// via `leaf_to_canonicals`; if that leaf is the name of two or more distinct
+/// models, the reference is **ambiguous** and resolution fails loud rather than
+/// silently picking one. A ref that names no project model returns `Ok(None)`
+/// (it is a source/seed/extern, left for the mock pass).
+fn resolve_model_body<'a>(
+    segments: &[String],
+    canonical_bodies: &'a BTreeMap<String, String>,
+    leaf_to_canonicals: &BTreeMap<String, Vec<String>>,
+) -> Result<Option<&'a String>, String> {
+    let dot_key = segments.join(".");
+    if let Some(body) = canonical_bodies.get(&dot_key) {
+        return Ok(Some(body));
+    }
+    if segments.len() == 1 {
+        if let Some(canonicals) = leaf_to_canonicals.get(&dot_key) {
+            match canonicals.as_slice() {
+                [only] => return Ok(canonical_bodies.get(only)),
+                many => {
+                    return Err(format!(
+                        "AmbiguousTestModel: 'smelt.{}' matches multiple models ({}); \
+                         reference it by its full address",
+                        dot_key,
+                        many.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Recursively inline `smelt.<path>` model references in `sql` that are NOT
+/// directly mocked via `inputs`. A ref whose dotted address is a key in `inputs`
+/// is left in place (it is substituted with mock rows by the final mock pass);
+/// a ref that resolves to a project model (see [`resolve_model_body`]) is
+/// replaced by its parenthesised body, whose own refs are inlined in turn. A ref
+/// that names no project model (a source/seed/extern) is left for the mock pass.
+fn inline_unmocked_model_refs(
+    sql: &str,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    canonical_bodies: &BTreeMap<String, String>,
+    leaf_to_canonicals: &BTreeMap<String, Vec<String>>,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > 32 {
+        return Err(
+            "smelt.test model inlining exceeded depth 32 — possible dependency cycle".to_string(),
+        );
+    }
+    let refs = find_plain_model_refs_in_body(sql);
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for (segments, (start, end)) in refs {
+        let dot_key = segments.join(".");
+        // Directly mocked → leave for the mock pass.
+        if inputs.contains_key(&dot_key) {
+            continue;
+        }
+        if let Some(body) = resolve_model_body(&segments, canonical_bodies, leaf_to_canonicals)? {
+            let inner = inline_unmocked_model_refs(
+                body,
+                inputs,
+                canonical_bodies,
+                leaf_to_canonicals,
+                depth + 1,
+            )?;
+            replacements.push((start, end, format!("(\n{}\n)", inner)));
+        }
+        // else: not a project model (source/seed/extern) → leave for the mock pass.
+    }
+    // Apply right-to-left so earlier byte offsets stay valid.
+    replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
+    let mut result = sql.to_string();
+    for (start, end, rep) in replacements {
+        result.replace_range(start..end, &rep);
+    }
+    Ok(result)
+}
+
+/// Compile a whole-query (non-`#cte`) test. The assertion `body_select` may:
+///   * be self-contained (no `smelt.<path>` refs), or
+///   * read its dependencies directly (`FROM smelt.users` mocked by `PASSING users`), or
+///   * reference a model under test (`FROM smelt.gold.x`), whose own upstream deps
+///     are mocked via `PASSING`.
+///
+/// Every `smelt.<path>` ref that is NOT directly provided in `inputs` and that
+/// resolves to a project model is inlined recursively, so the assertion runs
+/// against the real model output and the model's upstream deps become the
+/// mockable `PASSING` inputs (testing.md §Execution model — "inlining the body
+/// of every model it references"). The remaining refs (those in `inputs`, plus
+/// sources/seeds) are then substituted with mock CTEs, with `smelt.functions.*`
+/// expanded when `fn_bodies` is provided.
+///
+/// `canonical_bodies` maps every regular model's canonical dotted address to its
+/// frontmatter-stripped body; `leaf_to_canonicals` maps each model's leaf name
+/// to the canonical addresses that share it (so a single-segment ref to an
+/// ambiguous leaf fails loud rather than resolving arbitrarily).
+pub fn compile_whole_query_test(
+    body_select: &str,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    canonical_bodies: &BTreeMap<String, String>,
+    leaf_to_canonicals: &BTreeMap<String, Vec<String>>,
+    fn_bodies: Option<&FnBodyMap>,
+) -> Result<String, String> {
+    let inlined =
+        inline_unmocked_model_refs(body_select, inputs, canonical_bodies, leaf_to_canonicals, 0)?;
+    compile_whole_model_test_inner(&inlined, inputs, None, fn_bodies)
+}
+
 /// Compile a test that targets a specific CTE within a model.
 ///
 /// Spec §"CTE-level tests" (D-45): the mock boundary is the model's external
@@ -1400,6 +1537,152 @@ GROUP BY u.user_id
         assert!(
             !result.contains("WHERE 1=0"),
             "dot-key lookup must not produce an empty CTE; got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compile_whole_query_test_inlines_model_and_mocks_its_deps() {
+        // The assertion query references a model under test via smelt.<path>.
+        // The model itself reads a multi-segment upstream dep. The whole-query
+        // compiler must inline the model (so its upstream dep is mockable) and
+        // mock that dep from `inputs` keyed by the dotted address.
+        let body_select = "SELECT user_id, revenue FROM smelt.marts.customer_revenue";
+        let mut canonical_bodies = BTreeMap::new();
+        canonical_bodies.insert(
+            "marts.customer_revenue".to_string(),
+            "SELECT user_id, amount AS revenue FROM smelt.silver.orders".to_string(),
+        );
+        let mut leaf_to_canonicals = BTreeMap::new();
+        leaf_to_canonicals.insert(
+            "customer_revenue".to_string(),
+            vec!["marts.customer_revenue".to_string()],
+        );
+
+        let mut inputs = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert(
+            "user_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(7)),
+        );
+        row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(250)),
+        );
+        // The dep key is the model's upstream, NOT the model referenced in body.
+        inputs.insert("silver.orders".to_string(), vec![row]);
+
+        let compiled = compile_whole_query_test(
+            body_select,
+            &inputs,
+            &canonical_bodies,
+            &leaf_to_canonicals,
+            None,
+        )
+        .unwrap();
+
+        // The model's upstream dep is mocked with the provided rows.
+        assert!(
+            compiled.contains("silver_orders AS") && compiled.contains("250"),
+            "model's upstream dep must be mocked from inputs; got:\n{compiled}"
+        );
+        // The outer assertion projection is preserved over the inlined subquery.
+        assert!(
+            compiled.contains("revenue FROM ("),
+            "assertion projection must wrap the inlined model as a subquery; got:\n{compiled}"
+        );
+        // The original smelt.<path> ref to the model is gone (inlined).
+        assert!(
+            !compiled.contains("smelt.marts.customer_revenue"),
+            "model ref must be replaced by the inlined subquery; got:\n{compiled}"
+        );
+    }
+
+    #[test]
+    fn test_compile_whole_query_test_self_contained_and_direct_mock() {
+        let no_models: BTreeMap<String, String> = BTreeMap::new();
+        let no_leaves: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        // (a) Self-contained body with no smelt.<path> ref → returned as-is.
+        let self_contained = "SELECT (1.0 + 2.0) AS val";
+        let no_inputs = BTreeMap::new();
+        let compiled =
+            compile_whole_query_test(self_contained, &no_inputs, &no_models, &no_leaves, None)
+                .unwrap();
+        assert!(
+            compiled.contains("SELECT (1.0 + 2.0) AS val"),
+            "self-contained body must pass through; got:\n{compiled}"
+        );
+
+        // (b) Body reads a dep directly; PASSING mocks it in place (no inlining,
+        // even though no model body is supplied for it).
+        let direct = "SELECT SUM(amount) AS total FROM smelt.silver.orders";
+        let mut inputs = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+        inputs.insert("silver.orders".to_string(), vec![row]);
+        let compiled =
+            compile_whole_query_test(direct, &inputs, &no_models, &no_leaves, None).unwrap();
+        assert!(
+            compiled.contains("silver_orders AS") && compiled.contains("100"),
+            "directly-mocked dep must be substituted with rows; got:\n{compiled}"
+        );
+    }
+
+    #[test]
+    fn test_compile_whole_query_test_rejects_unknown_dep() {
+        // A PASSING dep that is not reached by the (inlined) query is an error.
+        let body_select = "SELECT user_id FROM smelt.marts.customer_revenue";
+        let mut canonical_bodies = BTreeMap::new();
+        canonical_bodies.insert(
+            "marts.customer_revenue".to_string(),
+            "SELECT user_id FROM smelt.silver.orders".to_string(),
+        );
+        let no_leaves: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut inputs = BTreeMap::new();
+        inputs.insert("silver.not_a_dep".to_string(), vec![]);
+        let err =
+            compile_whole_query_test(body_select, &inputs, &canonical_bodies, &no_leaves, None)
+                .unwrap_err();
+        assert!(
+            err.contains("UnknownTestInput") && err.contains("silver.not_a_dep"),
+            "expected UnknownTestInput for a non-dependency; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_compile_whole_query_test_ambiguous_leaf_ref_fails_loud() {
+        // A single-segment ref to a leaf name shared by two models must NOT
+        // silently resolve to one — it is rejected (fail-loud discipline).
+        let body_select = "SELECT id FROM smelt.users";
+        let mut canonical_bodies = BTreeMap::new();
+        canonical_bodies.insert(
+            "staging.users".to_string(),
+            "SELECT id FROM smelt.raw.users".to_string(),
+        );
+        canonical_bodies.insert(
+            "marts.users".to_string(),
+            "SELECT id FROM smelt.raw.users".to_string(),
+        );
+        let mut leaf_to_canonicals = BTreeMap::new();
+        leaf_to_canonicals.insert(
+            "users".to_string(),
+            vec!["marts.users".to_string(), "staging.users".to_string()],
+        );
+        let inputs = BTreeMap::new();
+        let err = compile_whole_query_test(
+            body_select,
+            &inputs,
+            &canonical_bodies,
+            &leaf_to_canonicals,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("AmbiguousTestModel") && err.contains("smelt.users"),
+            "ambiguous single-segment ref must fail loud; got: {err}"
         );
     }
 }

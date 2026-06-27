@@ -20,8 +20,8 @@ use smelt_core::ModelOriginKind;
 
 // ── BUG-048 regression ────────────────────────────────────────────────────
 // Spec §Surface: `models/<name>.md` must contain a "Tests" section listing
-// every `materialization: test` model with `test.model: <this model>` in its
-// frontmatter.  Previously, test models were filtered from the pipeline before
+// every `smelt.test` model whose body references `smelt.<this_model>`.
+// Previously, test models were filtered from the pipeline before
 // `build_catalog()` was called, so the section was never rendered.
 
 /// Integration test (BUG-048): a model page renders a "## Tests" section
@@ -30,8 +30,8 @@ use smelt_core::ModelOriginKind;
 #[test]
 fn model_page_lists_targeting_test_models() {
     let model_sql = "SELECT 1 AS id";
-    // A test model that targets "orders".
-    let test_sql = "---\nmaterialization: test\ntest:\n  model: orders\n  expect:\n    - id: 1\n---\nSELECT id FROM orders";
+    // A test model that targets "orders" via smelt.test.
+    let test_sql = "smelt.test test_orders AS (\n    SELECT id FROM smelt.orders\n)\nPASSING orders AS ({id: 1})\nEXPECT ({id: 1})\n";
 
     let tmp = stage_workspace(&[
         ("models/orders.sql", model_sql),
@@ -45,19 +45,18 @@ fn model_page_lists_targeting_test_models() {
     let discovery = smelt_cli::ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let sql_models = discovery.discover_models().expect("discover models");
 
-    // Collect test-target mapping before filtering.
+    // Collect test-target mapping before filtering (new-syntax: derive from smelt.* refs).
     let mut test_targets: std::collections::HashMap<String, Vec<smelt_cli::docs::TestRef>> =
         std::collections::HashMap::new();
     for m in &sql_models {
         if m.is_test() {
-            if let Some(tc) = m.test_config() {
-                test_targets
-                    .entry(tc.model.clone())
-                    .or_default()
-                    .push(smelt_cli::docs::TestRef {
-                        name: m.name.clone(),
-                        path: m.path.display().to_string(),
-                    });
+            let test_ref = smelt_cli::docs::TestRef {
+                name: m.name.clone(),
+                path: m.path.display().to_string(),
+            };
+            let leaves = smelt_cli::test_compiler::new_syntax_test_subject_model_leaves(&m.content);
+            for leaf in leaves {
+                test_targets.entry(leaf).or_default().push(test_ref.clone());
             }
         }
     }

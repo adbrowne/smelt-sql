@@ -1,4 +1,3 @@
-use crate::config::Materialization;
 use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata, TestConfig};
 use crate::model_id::ModelId;
 use crate::refs::extract_refs;
@@ -63,25 +62,8 @@ impl ModelFile {
         self.address_segments.join(".")
     }
 
-    /// Whether this model is a test.
-    ///
-    /// Returns `true` for:
-    /// - Legacy `materialization: test` frontmatter models.
-    /// - New-syntax files that contain at least one `smelt.test` declaration
-    ///   (classified at the content level — no `materialization:` key needed).
+    /// Whether this model file contains `smelt.test` declarations.
     pub fn is_test(&self) -> bool {
-        // Legacy path: explicit materialization: test frontmatter.
-        if self
-            .metadata
-            .as_ref()
-            .and_then(|m| m.materialization.as_ref())
-            .map(|m| *m == Materialization::Test)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        // New path: parse the content and check for smelt.test declarations.
-        // strip_frontmatter removes YAML before parsing so the AST only sees SQL.
         let clean = smelt_parser::strip_frontmatter(&self.content);
         let parse = smelt_parser::parse(&clean);
         if let Some(file) = AstFile::cast(parse.syntax()) {

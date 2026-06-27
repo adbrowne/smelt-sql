@@ -317,7 +317,7 @@ smelt seed --show-results
 
 ## smelt test
 
-Run model tests and report results. Tests are `.sql` files with `materialization: test` in YAML frontmatter, placed in a directory listed in `paths:` (typically `tests/`).
+Run model tests and report results. Tests are `smelt.test` declarations in `.sql` files, placed in a directory listed in `paths:` (typically `tests/`).
 
 Each test defines mock input data and expected output for a model or CTE. smelt compiles the test into a standalone SQL query, executes it against an in-memory DuckDB instance, and compares the result.
 
