@@ -25,6 +25,16 @@ impl File {
         self.0.children().find_map(SelectStmt::cast)
     }
 
+    /// The top-level `PipeQuery` node, if the file body is a FROM-first pipe query.
+    pub fn pipe_query(&self) -> Option<PipeQuery> {
+        self.0.children().find_map(PipeQuery::cast)
+    }
+
+    /// Whether the file has a valid top-level query body (SELECT_STMT or PIPE_QUERY).
+    pub fn has_query_body(&self) -> bool {
+        self.select_stmt().is_some() || self.pipe_query().is_some()
+    }
+
     /// Iterate over top-level `smelt.define` declarations in this file.
     pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
         self.0.children().filter_map(SmeltDefine::cast)

@@ -175,11 +175,16 @@ impl<'a> Parser<'a> {
         self.finish_node(); // zero-width marker
         self.advance(); // consume WHERE_KW
         self.skip_trivia();
+        // Set in_pipe_stage so that `|>` inside the predicate is not consumed
+        // as a meta-language PIPE_EXPR operator — it is the next stage delimiter.
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         if self.at_expression_start() {
             self.parse_expression();
         } else {
             self.error("malformed 'WHERE' pipe stage: expected predicate expression".to_string());
         }
+        self.in_pipe_stage = prev;
     }
 
     /// `|> SELECT <expr> [AS <alias>], …`
@@ -188,8 +193,12 @@ impl<'a> Parser<'a> {
         self.finish_node(); // zero-width marker
         self.advance(); // consume SELECT_KW
         self.skip_trivia();
-        // Reuse the existing SELECT list grammar.
+        // Set in_pipe_stage so that `|>` inside select items is not consumed
+        // as a meta-language PIPE_EXPR — it is the next stage delimiter.
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         self.parse_select_list();
+        self.in_pipe_stage = prev;
     }
 
     /// `|> EXTEND <expr> AS <alias>, …`
@@ -198,6 +207,8 @@ impl<'a> Parser<'a> {
         self.finish_node(); // zero-width marker
         self.advance(); // consume EXTEND ident
         self.skip_trivia();
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         // Comma-separated `expr AS alias` pairs.
         loop {
             if !self.at_expression_start() {
@@ -224,6 +235,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        self.in_pipe_stage = prev;
     }
 
     /// `|> SET <col> = <expr>, …`
@@ -232,6 +244,8 @@ impl<'a> Parser<'a> {
         self.finish_node(); // zero-width marker
         self.advance(); // consume SET ident
         self.skip_trivia();
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         // Comma-separated `col = expr` pairs.
         loop {
             if !self.at(IDENT) {
@@ -254,6 +268,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        self.in_pipe_stage = prev;
     }
 
     /// `|> DROP <col>, …`
@@ -330,6 +345,8 @@ impl<'a> Parser<'a> {
         self.finish_node(); // zero-width marker
         self.advance(); // consume AGGREGATE ident
         self.skip_trivia();
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
 
         // Parse aggregate expressions until GROUP BY or end of stage.
         loop {
@@ -386,20 +403,27 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.in_pipe_stage = prev;
     }
 
     /// `|> ORDER BY <expr> [ASC|DESC] [NULLS …], …`
     fn parse_pipe_order_by(&mut self) {
         self.start_node(PIPE_OP_ORDER_BY);
         self.finish_node(); // zero-width marker
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         self.parse_order_by_clause();
+        self.in_pipe_stage = prev;
     }
 
     /// `|> LIMIT <n> [OFFSET <m>]`
     fn parse_pipe_limit(&mut self) {
         self.start_node(PIPE_OP_LIMIT);
         self.finish_node(); // zero-width marker
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         self.parse_limit_clause();
+        self.in_pipe_stage = prev;
     }
 
     /// `|> [join_type] JOIN <table_ref> [ON <cond> | USING (<cols>)]`

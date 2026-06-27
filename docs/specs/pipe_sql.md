@@ -151,6 +151,7 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
 - **Native passthrough is not emitted.** Every backend reports `supports_pipe_syntax = false`; only lowered standard SQL is generated. Native pipe emission on BigQuery/Databricks/DuckDB-via-extension is reserved by the capability flag but not implemented. Tracked in `docs/plans/` (forthcoming).
 - **Pipes appended to a leading `SELECT`.** BigQuery also allows `SELECT … FROM … |> WHERE …`. smelt accepts only the FROM-first form; the SELECT-then-pipe form is unspecified surface.
 - **Per-operator native capability matrix.** The `supports_pipe_syntax` flag is currently whole-feature. Backends whose native dialect supports only a subset (Spark omits `RENAME`/`CALL`/`WINDOW`/`DISTINCT`/`ASSERT`) will need a per-operator capability set before native emission can mix passthrough and lowering. Undecided until the native path is built.
+- **Non-passthrough pipe stages are not yet lowered.** Until the lowering for `EXTEND`, `SET`, `DROP`, `RENAME`, `AS`, `AGGREGATE`, `JOIN`, and set-operation stages is implemented (scheduled across the remaining plan phases), the printer falls back to emitting the pipe query verbatim for any query that contains these operators. This means `|>` tokens may reach a backend that reports `supports_pipe_syntax = false`, violating §Constraint 2 for such queries. Tracked in `docs/plans/20260627-pipe_sql.md` (Phases 3–5).
 
 ## References
 

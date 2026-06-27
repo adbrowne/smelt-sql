@@ -258,6 +258,9 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             }
             print_children(node, ctx, out);
         }
+        SyntaxKind::PIPE_QUERY if !ctx.capabilities.supports_pipe_syntax => {
+            print_pipe_rewrite(node, ctx, out);
+        }
         SyntaxKind::SELECT_STMT if !ctx.capabilities.supports_qualify => {
             print_select_with_qualify_rewrite(node, ctx, out);
         }
@@ -288,6 +291,357 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             print_children(node, ctx, out);
         }
     }
+}
+
+/// Lower a `PIPE_QUERY` node to standard SQL when the backend does not support
+/// native pipe syntax (`supports_pipe_syntax = false`).
+///
+/// **Passthrough collapse (Lowering rule 1):** Contiguous passthrough stages
+/// (`FROM`, pre-aggregation `WHERE`, trailing `SELECT`, `ORDER BY`, `LIMIT`,
+/// `DISTINCT`) are collapsed into a single `SELECT … FROM … WHERE … ORDER BY …
+/// LIMIT …`. Non-passthrough operators (EXTEND, AGGREGATE, JOIN, set ops, etc.)
+/// are printed verbatim as a fallback until their own lowering phases are added.
+///
+/// Emitted form:
+/// ```text
+/// SELECT [DISTINCT] <select_list> FROM <from_body> [WHERE <pred>] [ORDER BY …] [LIMIT …]
+/// ```
+fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
+    use SyntaxKind::*;
+
+    // ── Collect stage information ──────────────────────────────────────────
+    //
+    // Walk through PIPE_STAGE children and identify passthrough stages.
+    // If any non-passthrough stage is encountered, fall back to verbatim.
+
+    // Gathered stage bodies (as raw text, post-whitespace-trimmed).
+    let mut where_bodies: Vec<String> = Vec::new();
+    let mut select_body: Option<String> = None;
+    let mut order_by_body: Option<String> = None;
+    let mut limit_body: Option<String> = None;
+    let mut has_distinct = false;
+    let mut has_non_passthrough = false;
+
+    for child in node.children() {
+        match child.kind() {
+            // Optional WITH_CLAUSE: handled separately below.
+            WITH_CLAUSE => {}
+            // The FROM_CLAUSE: not a PIPE_STAGE.
+            FROM_CLAUSE => {}
+            PIPE_STAGE => {
+                // Determine operator kind.
+                let op_kind = child.children().find_map(|c| {
+                    let k = c.kind();
+                    if matches!(
+                        k,
+                        PIPE_OP_WHERE
+                            | PIPE_OP_SELECT
+                            | PIPE_OP_EXTEND
+                            | PIPE_OP_SET
+                            | PIPE_OP_DROP
+                            | PIPE_OP_RENAME
+                            | PIPE_OP_AS
+                            | PIPE_OP_AGGREGATE
+                            | PIPE_OP_ORDER_BY
+                            | PIPE_OP_LIMIT
+                            | PIPE_OP_JOIN
+                            | PIPE_OP_UNION
+                            | PIPE_OP_INTERSECT
+                            | PIPE_OP_EXCEPT
+                            | PIPE_OP_DISTINCT
+                    ) {
+                        Some(k)
+                    } else {
+                        None
+                    }
+                });
+
+                match op_kind {
+                    Some(PIPE_OP_WHERE) => {
+                        if select_body.is_some() {
+                            // WHERE after SELECT cannot collapse into the same level's WHERE clause;
+                            // alias visibility differs across backends. Mark as non-passthrough.
+                            has_non_passthrough = true;
+                        } else {
+                            let body = collect_where_body(&child);
+                            where_bodies.push(body);
+                        }
+                    }
+                    Some(PIPE_OP_SELECT) => {
+                        select_body = Some(collect_select_body(&child));
+                    }
+                    Some(PIPE_OP_ORDER_BY) => {
+                        order_by_body = Some(collect_order_by_body(&child));
+                    }
+                    Some(PIPE_OP_LIMIT) => {
+                        limit_body = Some(collect_limit_body(&child));
+                    }
+                    Some(PIPE_OP_DISTINCT) => {
+                        has_distinct = true;
+                    }
+                    // Non-passthrough operators: fall back to verbatim for now.
+                    _ => {
+                        has_non_passthrough = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // If there are non-passthrough stages we can't fully lower, print verbatim.
+    if has_non_passthrough {
+        print_children(node, ctx, out);
+        return;
+    }
+
+    // ── Locate the WITH_CLAUSE and FROM_CLAUSE nodes ───────────────────────
+
+    let with_clause = node.children().find(|c| c.kind() == WITH_CLAUSE);
+    let from_clause = node.children().find(|c| c.kind() == FROM_CLAUSE);
+
+    // ── Emit the lowered SELECT ────────────────────────────────────────────
+
+    // WITH clause (if any)
+    if let Some(ref wc) = with_clause {
+        print_node(wc, ctx, out);
+        out.push(' ');
+    }
+
+    // SELECT [DISTINCT]
+    out.push_str("SELECT");
+    if has_distinct {
+        out.push_str(" DISTINCT");
+    }
+    out.push(' ');
+
+    // Select list: explicit body or *
+    match select_body {
+        Some(ref body) => out.push_str(body),
+        None => out.push('*'),
+    }
+
+    // FROM <from_body>
+    out.push_str(" FROM ");
+    if let Some(ref fc) = from_clause {
+        // Print the body of the FROM_CLAUSE, i.e. everything after the FROM keyword.
+        // We collect into a temporary buffer and trim leading/trailing whitespace.
+        let mut from_body = String::new();
+        let mut past_from_kw = false;
+        for child_elem in fc.children_with_tokens() {
+            match child_elem {
+                SyntaxElement::Token(t) => {
+                    if t.kind() == FROM_KW {
+                        past_from_kw = true;
+                        continue;
+                    }
+                    if past_from_kw {
+                        from_body.push_str(t.text());
+                    }
+                }
+                SyntaxElement::Node(n) => {
+                    if past_from_kw {
+                        print_node(&n, ctx, &mut from_body);
+                    }
+                }
+            }
+        }
+        out.push_str(from_body.trim());
+    }
+
+    // WHERE predicate(s)
+    if !where_bodies.is_empty() {
+        out.push_str(" WHERE ");
+        out.push_str(&where_bodies.join(" AND "));
+    }
+
+    // ORDER BY
+    if let Some(ref ob) = order_by_body {
+        out.push_str(" ORDER BY ");
+        out.push_str(ob);
+    }
+
+    // LIMIT
+    if let Some(ref lim) = limit_body {
+        out.push_str(" LIMIT ");
+        out.push_str(lim);
+    }
+}
+
+/// Collect the body text for a WHERE pipe stage.
+///
+/// The PIPE_STAGE for WHERE contains:
+/// - `PIPE_OP_WHERE` marker (zero-width node)
+/// - `WHERE_KW` token
+/// - whitespace
+/// - `EXPRESSION` node (the predicate)
+///
+/// We skip the marker and the WHERE keyword and return the predicate text.
+fn collect_where_body(stage: &SyntaxNode) -> String {
+    use SyntaxKind::*;
+
+    let mut past_op = false;
+    let mut body = String::new();
+
+    for elem in stage.children_with_tokens() {
+        match &elem {
+            SyntaxElement::Node(n) => {
+                let k = n.kind();
+                if matches!(k, PIPE_OP_WHERE) {
+                    // Skip zero-width marker
+                    continue;
+                }
+                // Any other node (EXPRESSION, etc.) is body content.
+                past_op = true;
+                body.push_str(&n.text().to_string());
+            }
+            SyntaxElement::Token(t) => {
+                if !past_op {
+                    // Skip WHERE_KW and whitespace before the predicate.
+                    if matches!(t.kind(), WHERE_KW | WHITESPACE) {
+                        continue;
+                    }
+                    // First non-keyword, non-whitespace token → body starts.
+                    past_op = true;
+                }
+                body.push_str(t.text());
+            }
+        }
+    }
+
+    body.trim().to_string()
+}
+
+/// Collect the SELECT list body for a SELECT pipe stage.
+///
+/// The PIPE_STAGE for SELECT contains:
+/// - `PIPE_OP_SELECT` marker (zero-width node)
+/// - `SELECT_KW` token
+/// - whitespace
+/// - `SELECT_LIST` node (the projection list)
+///
+/// We skip the marker and SELECT keyword and return the list text.
+fn collect_select_body(stage: &SyntaxNode) -> String {
+    use SyntaxKind::*;
+
+    let mut past_kw = false;
+    let mut body = String::new();
+
+    for elem in stage.children_with_tokens() {
+        match &elem {
+            SyntaxElement::Node(n) => {
+                let k = n.kind();
+                if matches!(k, PIPE_OP_SELECT) {
+                    continue;
+                }
+                // SELECT_LIST or any other node → body
+                past_kw = true;
+                body.push_str(&n.text().to_string());
+            }
+            SyntaxElement::Token(t) => {
+                if !past_kw {
+                    if matches!(t.kind(), SELECT_KW | WHITESPACE) {
+                        continue;
+                    }
+                    past_kw = true;
+                }
+                body.push_str(t.text());
+            }
+        }
+    }
+
+    body.trim().to_string()
+}
+
+/// Collect the ORDER BY body for an ORDER BY pipe stage.
+///
+/// The PIPE_STAGE for ORDER BY contains:
+/// - `PIPE_OP_ORDER_BY` marker (zero-width node)
+/// - `ORDER_BY_CLAUSE` node (which itself starts with ORDER_KW BY_KW)
+///
+/// We emit the text of the ORDER_BY_CLAUSE *after* stripping "ORDER BY " prefix.
+fn collect_order_by_body(stage: &SyntaxNode) -> String {
+    use SyntaxKind::*;
+
+    // Find the ORDER_BY_CLAUSE child node.
+    for child in stage.children() {
+        if child.kind() == ORDER_BY_CLAUSE {
+            // The ORDER_BY_CLAUSE text starts with "ORDER BY …".
+            // We want just the items list (everything after ORDER BY).
+            // Strip leading "ORDER BY " (case-insensitive, may have varying whitespace).
+            // We do this by scanning past the ORDER + BY tokens.
+            let mut past_by = false;
+            let mut body = String::new();
+            for elem in child.children_with_tokens() {
+                match &elem {
+                    SyntaxElement::Token(t) => {
+                        if !past_by {
+                            if matches!(t.kind(), ORDER_KW | BY_KW | WHITESPACE) {
+                                if t.kind() == BY_KW {
+                                    past_by = true;
+                                }
+                                continue;
+                            }
+                            past_by = true;
+                        }
+                        body.push_str(t.text());
+                    }
+                    SyntaxElement::Node(n) => {
+                        if past_by {
+                            body.push_str(&n.text().to_string());
+                        }
+                    }
+                }
+            }
+            return body.trim().to_string();
+        }
+    }
+
+    // Fallback: return raw text if no ORDER_BY_CLAUSE found.
+    stage.text().to_string().trim().to_string()
+}
+
+/// Collect the LIMIT value for a LIMIT pipe stage.
+///
+/// The PIPE_STAGE for LIMIT contains:
+/// - `PIPE_OP_LIMIT` marker (zero-width node)
+/// - `LIMIT_CLAUSE` node (which itself contains LIMIT_KW and the value)
+///
+/// We emit the text of the LIMIT_CLAUSE after stripping "LIMIT " prefix.
+fn collect_limit_body(stage: &SyntaxNode) -> String {
+    use SyntaxKind::*;
+
+    for child in stage.children() {
+        if child.kind() == LIMIT_CLAUSE {
+            // Strip the LIMIT keyword, return just the value (and optional OFFSET).
+            let mut past_kw = false;
+            let mut body = String::new();
+            for elem in child.children_with_tokens() {
+                match &elem {
+                    SyntaxElement::Token(t) => {
+                        if !past_kw {
+                            if matches!(t.kind(), LIMIT_KW | WHITESPACE) {
+                                if t.kind() == LIMIT_KW {
+                                    past_kw = true;
+                                }
+                                continue;
+                            }
+                            past_kw = true;
+                        }
+                        body.push_str(t.text());
+                    }
+                    SyntaxElement::Node(n) => {
+                        if past_kw {
+                            body.push_str(&n.text().to_string());
+                        }
+                    }
+                }
+            }
+            return body.trim().to_string();
+        }
+    }
+
+    stage.text().to_string().trim().to_string()
 }
 
 /// Reparse an expanded `smelt.define` body so any nested `SMELT_PATH_CALL`

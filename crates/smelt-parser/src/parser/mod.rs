@@ -86,6 +86,12 @@ struct Parser<'a> {
     /// `IDENT < IDENT` is parsed as a comparison expression, not as a
     /// generic type.
     pub(super) in_smelt_call_args: bool,
+    /// Whether the parser is currently inside a pipe SQL stage body.
+    ///
+    /// When `true`, `parse_pipe_expr` must NOT fold `|>` into a `PIPE_EXPR`
+    /// meta-language expression node.  The `|>` token at this position is the
+    /// next pipe-SQL stage delimiter, not an infix meta-language pipe operator.
+    pub(super) in_pipe_stage: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -100,6 +106,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             current_define_row_vars: Vec::new(),
             in_smelt_call_args: false,
+            in_pipe_stage: false,
         }
     }
 

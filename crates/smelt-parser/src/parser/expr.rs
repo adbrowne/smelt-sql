@@ -148,7 +148,9 @@ impl<'a> super::Parser<'a> {
         }
 
         // Fold left-associative pipe operators.
-        while self.at(PIPE_ARROW) {
+        // Guard: when inside a pipe SQL stage body, `|>` is the next stage
+        // delimiter — do NOT consume it as a meta-language pipe operator.
+        while self.at(PIPE_ARROW) && !self.in_pipe_stage {
             self.start_node_at(checkpoint, PIPE_EXPR);
             // Wrap the already-parsed LHS in an EXPRESSION node.  The builder
             // checkpoint mechanism means the LHS tokens are already consumed;
