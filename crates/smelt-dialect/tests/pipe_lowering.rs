@@ -358,3 +358,81 @@ fn no_pipe_token_reaches_backend() {
         );
     }
 }
+
+// ── Phase 5: JOIN lowering ────────────────────────────────────────────────────
+
+#[test]
+fn join_lowers_with_pipe_input_as_left() {
+    let sql = "FROM a |> JOIN b ON a.k = b.k";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+    assert!(
+        !result.contains("|>"),
+        "no |> in lowered output, got: {result}"
+    );
+    // FROM a must be the left side (appears before JOIN)
+    let from_a_pos = result
+        .find("FROM a")
+        .or_else(|| result.find("FROM\na"))
+        .unwrap_or_else(|| panic!("expected 'FROM a' in output, got: {result}"));
+    let join_b_pos = result
+        .find("JOIN b")
+        .unwrap_or_else(|| panic!("expected 'JOIN b' in output, got: {result}"));
+    assert!(
+        from_a_pos < join_b_pos,
+        "FROM a must appear before JOIN b, got: {result}"
+    );
+    // ON condition must be present
+    assert!(
+        result.contains("a.k = b.k") || result.contains("ON"),
+        "expected ON condition in output, got: {result}"
+    );
+}
+
+// ── Phase 5: set-op lowering ─────────────────────────────────────────────────
+
+#[test]
+fn setops_left_fold() {
+    // Two operands → left-fold produces 2 UNION ALLs
+    let sql = "FROM t |> UNION ALL (SELECT * FROM u), (SELECT * FROM v)";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+    assert!(
+        !result.contains("|>"),
+        "no |> in lowered output, got: {result}"
+    );
+    // Two UNION ALLs for three-way union (left fold)
+    let union_count = result.matches("UNION").count();
+    assert!(
+        union_count >= 2,
+        "expected at least 2 UNION occurrences for 3-way union, got {union_count} in: {result}"
+    );
+    // All three sources must appear somewhere
+    assert!(
+        result.contains('t'),
+        "expected 't' in output, got: {result}"
+    );
+    assert!(
+        result.contains('u'),
+        "expected 'u' in output, got: {result}"
+    );
+    assert!(
+        result.contains('v'),
+        "expected 'v' in output, got: {result}"
+    );
+}
+
+#[test]
+fn join_then_order_by() {
+    let sql = "FROM a |> JOIN b ON a.k = b.k |> ORDER BY a.k";
+    let (d, c) = duckdb_ctx();
+    let result = print_with(sql, &d, &c, "main");
+    assert!(
+        !result.contains("|>"),
+        "no |> in lowered output, got: {result}"
+    );
+    assert!(
+        result.contains("ORDER BY"),
+        "expected ORDER BY, got: {result}"
+    );
+}

@@ -430,7 +430,13 @@ impl<'a> Parser<'a> {
     fn parse_pipe_join(&mut self) {
         self.start_node(PIPE_OP_JOIN);
         self.finish_node(); // zero-width marker
+                            // Guard: set in_pipe_stage so the ON condition's expression parser stops
+                            // at the next `|>` delimiter and doesn't consume it as a meta-language
+                            // PIPE_EXPR node.
+        let prev = self.in_pipe_stage;
+        self.in_pipe_stage = true;
         self.parse_join_clause();
+        self.in_pipe_stage = prev;
     }
 
     /// `|> DISTINCT`

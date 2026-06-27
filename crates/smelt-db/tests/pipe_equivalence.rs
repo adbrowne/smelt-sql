@@ -405,3 +405,59 @@ fn aggregate_matches_standard_sql() {
         "full-table aggregation: pipe result != standard SQL result\npipe lowered: {lowered_total}"
     );
 }
+
+// ── Phase 5: JOIN and set-op DuckDB oracle ────────────────────────────────────
+
+#[test]
+fn join_and_setops_match_standard_sql() {
+    let oracle = DuckDbOracle::new();
+
+    oracle
+        .execute_ddl(
+            "CREATE TABLE emps (dept_id INTEGER, name VARCHAR);
+         INSERT INTO emps VALUES (1, 'Alice'), (2, 'Bob');
+         CREATE TABLE depts (dept_id INTEGER, dept_name VARCHAR);
+         INSERT INTO depts VALUES (1, 'Engineering'), (2, 'Marketing');
+         CREATE TABLE extra_emps (dept_id INTEGER, name VARCHAR);
+         INSERT INTO extra_emps VALUES (3, 'Dave');",
+        )
+        .expect("DDL setup failed");
+
+    // Test 1: JOIN equivalence
+    let pipe_join = "FROM emps |> JOIN depts ON emps.dept_id = depts.dept_id |> ORDER BY name";
+    let lowered_join = lower_pipe_sql(pipe_join);
+    assert!(
+        !lowered_join.contains("|>"),
+        "lowered JOIN must not contain |>, got: {lowered_join}"
+    );
+    let std_join = "SELECT * FROM emps JOIN depts ON emps.dept_id = depts.dept_id ORDER BY name";
+    let pipe_rows = oracle
+        .execute_query(&lowered_join)
+        .expect("pipe JOIN failed on DuckDB");
+    let std_rows = oracle
+        .execute_query(std_join)
+        .expect("standard JOIN failed on DuckDB");
+    assert_eq!(
+        pipe_rows, std_rows,
+        "JOIN: pipe result != standard SQL\npipe lowered: {lowered_join}\nstd: {std_join}"
+    );
+
+    // Test 2: UNION ALL equivalence
+    let pipe_union = "FROM emps |> UNION ALL (SELECT * FROM extra_emps) |> ORDER BY name";
+    let lowered_union = lower_pipe_sql(pipe_union);
+    assert!(
+        !lowered_union.contains("|>"),
+        "lowered UNION must not contain |>, got: {lowered_union}"
+    );
+    let std_union = "SELECT * FROM emps UNION ALL SELECT * FROM extra_emps ORDER BY name";
+    let pipe_union_rows = oracle
+        .execute_query(&lowered_union)
+        .expect("pipe UNION failed on DuckDB");
+    let std_union_rows = oracle
+        .execute_query(std_union)
+        .expect("standard UNION failed on DuckDB");
+    assert_eq!(
+        pipe_union_rows, std_union_rows,
+        "UNION: pipe result != standard SQL\npipe lowered: {lowered_union}\nstd: {std_union}"
+    );
+}

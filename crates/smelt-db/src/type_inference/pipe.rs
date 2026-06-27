@@ -11,7 +11,7 @@
 //! No Salsa imports, no `#[salsa::tracked]`. Callers build inputs via Salsa queries
 //! and pass them as plain data.
 
-use smelt_parser::ast::{Expr, PipeQuery, PipeStage, SelectList};
+use smelt_parser::ast::{Expr, PipeQuery, PipeStage, SelectList, TableRef};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind};
 use smelt_types::{DataType, TypedColumn, UnknownReason};
 
@@ -38,6 +38,7 @@ pub fn infer_pipe_stage_output_schema(
     input_schema: &[(String, TypedColumn)],
     stage: &PipeStage,
     ctx: &TypeContext,
+    base_ctx: &TypeContext,
 ) -> Vec<(String, TypedColumn)> {
     use SyntaxKind::*;
 
@@ -53,11 +54,11 @@ pub fn infer_pipe_stage_output_schema(
         PIPE_OP_RENAME => apply_rename(input_schema, stage),
         PIPE_OP_SELECT => apply_select(input_schema, stage, ctx),
         PIPE_OP_AGGREGATE => apply_aggregate(input_schema, stage, ctx),
-        // AS, WHERE, ORDER BY, LIMIT, DISTINCT — schema passes through unchanged
-        PIPE_OP_AS | PIPE_OP_WHERE | PIPE_OP_ORDER_BY | PIPE_OP_LIMIT | PIPE_OP_DISTINCT => {
-            input_schema.to_vec()
-        }
-        // JOIN, set-ops — not in Phase 4 scope; pass through
+        // JOIN: extend schema with the right side's columns (spec §3).
+        PIPE_OP_JOIN => apply_join(input_schema, stage, base_ctx),
+        // AS, WHERE, ORDER BY, LIMIT, DISTINCT, set-ops — schema passes through unchanged.
+        // For set-ops the output schema is the left side's schema (type-matching is a
+        // separate check; we just pass through for scope purposes).
         _ => input_schema.to_vec(),
     }
 }
@@ -95,7 +96,8 @@ pub fn check_pipe_undeclared_columns(
         result.extend(stage_diags);
 
         // Advance the running schema.
-        running_schema = infer_pipe_stage_output_schema(&running_schema, &stage, &stage_ctx);
+        running_schema =
+            infer_pipe_stage_output_schema(&running_schema, &stage, &stage_ctx, base_ctx);
     }
 
     result
@@ -196,6 +198,64 @@ fn apply_select(
         output.push((col_name, typed_col));
     }
     output
+}
+
+/// JOIN: extend scope with the right side's columns (spec §3).
+///
+/// Extracts the right table's qualifier from the JOIN_CLAUSE's TABLE_REF and
+/// looks up its columns in `base_ctx`. Both the left side's columns (already
+/// in `input`) and the right side's columns are visible to later stages.
+fn apply_join(
+    input: &[(String, TypedColumn)],
+    stage: &PipeStage,
+    base_ctx: &TypeContext,
+) -> Vec<(String, TypedColumn)> {
+    use SyntaxKind::JOIN_CLAUSE;
+
+    // Find the JOIN_CLAUSE node inside the PIPE_STAGE.
+    let join_clause = stage.syntax().children().find(|c| c.kind() == JOIN_CLAUSE);
+    let Some(jc) = join_clause else {
+        return input.to_vec();
+    };
+
+    // Extract the qualifier from the right table's TABLE_REF.
+    let right_qualifier = extract_join_right_qualifier(&jc);
+
+    let mut output = input.to_vec();
+    if let Some(qual) = right_qualifier {
+        let right_cols = base_ctx.columns_for_qualifier(&qual);
+        for (col_name, typed_col) in right_cols {
+            output.push((col_name.to_string(), typed_col.clone()));
+        }
+    }
+    output
+}
+
+/// Extract the qualifier name for the right-hand table of a JOIN clause.
+///
+/// For `JOIN smelt.models.jb ON ...` → returns `"jb"` (last segment).
+/// For `JOIN jb ON ...` → returns `"jb"` (bare identifier).
+/// For `JOIN jb AS b ON ...` → returns `"b"` (alias shadows base name).
+fn extract_join_right_qualifier(
+    join_clause: &smelt_parser::syntax_kind::SyntaxNode,
+) -> Option<String> {
+    use SyntaxKind::TABLE_REF;
+    for child in join_clause.children() {
+        if child.kind() == TABLE_REF {
+            let tr = TableRef::cast(child)?;
+            // Prefer alias (e.g. `smelt.models.jb AS b` → "b").
+            if let Some(alias) = tr.alias() {
+                return Some(alias);
+            }
+            // Smelt path ref: last segment is the model name.
+            if let Some(path_ref) = tr.smelt_path_ref() {
+                return path_ref.segments().last().cloned();
+            }
+            // Bare identifier.
+            return tr.identifier();
+        }
+    }
+    None
 }
 
 // ── Stage-level undeclared-column checking ───────────────────────────────────

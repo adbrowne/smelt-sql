@@ -274,3 +274,46 @@ fn aggregate_output_in_scope() {
         "Expected no UndeclaredColumn after AGGREGATE when referencing cust_id and rev; got: {undeclared:#?}"
     );
 }
+
+// ── Test: join_extends_scope ──────────────────────────────────────────────────
+
+/// After `|> JOIN jb ON ja.k = jb.k`, columns from both `ja` and `jb` must be
+/// visible to subsequent stages. In particular, `bv` (from `jb`) must be in
+/// scope in a `|> SELECT av, bv` that follows.
+#[test]
+fn join_extends_scope() {
+    let root = PathBuf::from("/fake/pipe_scope_join");
+    let a_path = root.join("models").join("ja.sql");
+    let b_path = root.join("models").join("jb.sql");
+    let pipe_path = root.join("models").join("pipe_join_scope.sql");
+
+    let a_sql = "SELECT CAST(NULL AS INTEGER) AS k, CAST(NULL AS INTEGER) AS av\n";
+    let b_sql = "SELECT CAST(NULL AS INTEGER) AS k, CAST(NULL AS INTEGER) AS bv\n";
+    // After JOIN, bv (from jb) must be visible in SELECT
+    let pipe_sql = "FROM smelt.models.ja |> JOIN smelt.models.jb ON ja.k = jb.k |> SELECT av, bv\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (a_path, a_sql),
+            (b_path, b_sql),
+            (pipe_path.clone(), pipe_sql),
+        ],
+    );
+    let pipe_file = files[2];
+
+    let diags = all_diagnostics(&db, ws, pipe_file);
+    let undeclared: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && d.code == Some(DiagnosticCode::UndeclaredColumn)
+        })
+        .collect();
+
+    assert!(
+        undeclared.is_empty(),
+        "Expected no UndeclaredColumn — bv from jb must be in scope after JOIN; got: {undeclared:#?}"
+    );
+}

@@ -310,6 +310,52 @@ fn malformed_stage_diagnostic() {
     );
 }
 
+// ── Test 8: join_variants_parse ─────────────────────────────────────────────
+
+#[test]
+fn join_variants_parse() {
+    let cases = &[
+        ("FROM t |> JOIN s ON t.id = s.id", SyntaxKind::PIPE_OP_JOIN),
+        (
+            "FROM t |> INNER JOIN s ON t.id = s.id",
+            SyntaxKind::PIPE_OP_JOIN,
+        ),
+        (
+            "FROM t |> LEFT JOIN s ON t.id = s.id",
+            SyntaxKind::PIPE_OP_JOIN,
+        ),
+        (
+            "FROM t |> RIGHT JOIN s ON t.id = s.id",
+            SyntaxKind::PIPE_OP_JOIN,
+        ),
+        (
+            "FROM t |> FULL JOIN s ON t.id = s.id",
+            SyntaxKind::PIPE_OP_JOIN,
+        ),
+        ("FROM t |> CROSS JOIN s", SyntaxKind::PIPE_OP_JOIN),
+        ("FROM t |> JOIN s USING (id)", SyntaxKind::PIPE_OP_JOIN),
+    ];
+    for (sql, expected_marker) in cases {
+        let p = parse(sql);
+        assert!(
+            p.errors.is_empty(),
+            "join variant parse error for `{sql}`: {:?}",
+            p.errors
+        );
+        let root = p.syntax();
+        let pq = find_node(&root, SyntaxKind::PIPE_QUERY)
+            .unwrap_or_else(|| panic!("no PIPE_QUERY for: {sql}"));
+        let stages = find_all_nodes(&pq, SyntaxKind::PIPE_STAGE);
+        assert_eq!(stages.len(), 1, "expected 1 PIPE_STAGE for: {sql}");
+        let join_marker = find_node(&stages[0], *expected_marker);
+        assert!(
+            join_marker.is_some(),
+            "expected {:?} marker for: {sql}",
+            expected_marker
+        );
+    }
+}
+
 // ── Test 7: deferred_operator_diagnostic ────────────────────────────────────
 
 #[test]

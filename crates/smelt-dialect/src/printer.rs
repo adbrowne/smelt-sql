@@ -307,8 +307,18 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
 /// fragment), the prior query is wrapped as a subquery:
 /// `SELECT <new_projection> FROM (<prior_query>)`.
 ///
-/// AGGREGATE, JOIN, and set-op stages fall back to verbatim printing until
-/// their own lowering phases are added.
+/// **AGGREGATE (Lowering rule 2/3/5):** lowers to `SELECT keys, aggs … GROUP BY keys`;
+/// a following `WHERE` becomes `HAVING`; multiple aggregations nest as subqueries.
+///
+/// **JOIN (Lowering rule 1):** the right-hand table is folded into the same FROM
+/// clause as the pipe input (left side). If aggregate/order/limit state has
+/// accumulated first, the current fragment is flushed to a subquery before joining.
+///
+/// **Set operations (Lowering rule 6):** left-fold `(q1), (q2), …` into a chain of
+/// binary `UNION / INTERSECT / EXCEPT` operations.
+///
+/// **`SET`/`DROP`/`RENAME` on non-DuckDB backends:** these use DuckDB column-selection
+/// extensions and fall back to verbatim pipe syntax on other backends.
 ///
 /// Emitted form:
 /// ```text
@@ -333,10 +343,9 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
 
     // Check for any stages we can't handle → verbatim.
     //
-    // Always-unhandled: JOIN, set-ops.
     // DuckDB-only: SET, DROP, RENAME — handled on DuckDB via REPLACE/EXCLUDE/RENAME
     //   extensions; on non-DuckDB backends they are unhandled and cause verbatim.
-    // AGGREGATE is now handled on all backends (Phase 4).
+    // Unknown op_kind (None): verbatim.
     let has_unhandled = stages.iter().any(|s| {
         let op = s.children().find_map(|c| {
             let k = c.kind();
@@ -364,11 +373,7 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             }
         });
         match op {
-            Some(PIPE_OP_JOIN)
-            | Some(PIPE_OP_UNION)
-            | Some(PIPE_OP_INTERSECT)
-            | Some(PIPE_OP_EXCEPT)
-            | None => true,
+            None => true,
             // SET/DROP/RENAME are only handled on DuckDB; non-DuckDB → verbatim.
             Some(PIPE_OP_SET) | Some(PIPE_OP_DROP) | Some(PIPE_OP_RENAME) => {
                 !matches!(ctx.dialect, SqlDialect::DuckDB)
@@ -427,6 +432,10 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                     | PIPE_OP_AGGREGATE
                     | PIPE_OP_ORDER_BY
                     | PIPE_OP_LIMIT
+                    | PIPE_OP_JOIN
+                    | PIPE_OP_UNION
+                    | PIPE_OP_INTERSECT
+                    | PIPE_OP_EXCEPT
                     | PIPE_OP_DISTINCT
             ) {
                 Some(k)
@@ -666,6 +675,60 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 acc_distinct = false;
                 acc_having = Vec::new();
                 after_aggregate = true;
+            }
+            Some(PIPE_OP_JOIN) => {
+                // JOIN folds into the same FROM clause when possible (Lowering rule 1).
+                // If we're after an aggregate (or have ORDER BY/LIMIT pending), flush first.
+                if after_aggregate || acc_order_by.is_some() || acc_limit.is_some() {
+                    let prior = build_select_fragment_with_having(
+                        &inner_source,
+                        &acc_where,
+                        &acc_select,
+                        &acc_order_by,
+                        &acc_limit,
+                        acc_distinct,
+                        &acc_group_by,
+                        &acc_having,
+                    );
+                    let join_text = collect_join_clause_text(stage, ctx);
+                    inner_source = format!("({prior}) {join_text}");
+                    acc_where = Vec::new();
+                    acc_select = None;
+                    acc_order_by = None;
+                    acc_limit = None;
+                    acc_distinct = false;
+                    acc_having = Vec::new();
+                    acc_group_by = None;
+                    after_aggregate = false;
+                } else {
+                    // Fold JOIN into the same FROM clause.
+                    let join_text = collect_join_clause_text(stage, ctx);
+                    inner_source = format!("{inner_source} {join_text}");
+                }
+            }
+            Some(PIPE_OP_UNION) | Some(PIPE_OP_INTERSECT) | Some(PIPE_OP_EXCEPT) => {
+                // Flush current fragment as the left side, then left-fold the set-op operands.
+                let left = build_select_fragment_with_having(
+                    &inner_source,
+                    &acc_where,
+                    &acc_select,
+                    &acc_order_by,
+                    &acc_limit,
+                    acc_distinct,
+                    &acc_group_by,
+                    &acc_having,
+                );
+                let set_expr = build_set_op_expression(&left, stage, ctx);
+                // Wrap as subquery so further stages can fold on top.
+                inner_source = format!("({set_expr})");
+                acc_where = Vec::new();
+                acc_select = None;
+                acc_order_by = None;
+                acc_limit = None;
+                acc_distinct = false;
+                acc_having = Vec::new();
+                acc_group_by = None;
+                after_aggregate = false;
             }
             _ => {
                 // Unhandled (already checked above — should not reach here).
@@ -1686,6 +1749,86 @@ fn print_function_with_renamed(
             }
         }
     }
+}
+
+/// Collect the JOIN clause text from a JOIN pipe stage.
+///
+/// The CST for a JOIN stage is:
+///   PIPE_STAGE { PIPE_OP_JOIN (zero-width)  JOIN_CLAUSE { ... } }
+///
+/// We print the JOIN_CLAUSE node as SQL text and return it trimmed.
+fn collect_join_clause_text(stage: &SyntaxNode, ctx: &PrintContext) -> String {
+    use SyntaxKind::JOIN_CLAUSE;
+    for child in stage.children() {
+        if child.kind() == JOIN_CLAUSE {
+            let mut text = String::new();
+            print_node(&child, ctx, &mut text);
+            return text.trim().to_string();
+        }
+    }
+    // Fallback: collect everything after the PIPE_OP_JOIN marker.
+    collect_stage_body_text(stage, ctx, SyntaxKind::PIPE_OP_JOIN)
+}
+
+/// Build a left-folded set-op expression from the prior (left) fragment and
+/// the PIPE_STAGE containing the set-op operands.
+///
+/// `|> UNION ALL (q1), (q2)` with left `L` produces:
+///   `L UNION ALL (q1) UNION ALL (q2)`
+///
+/// Implements Lowering rule 6.
+fn build_set_op_expression(left: &str, stage: &SyntaxNode, ctx: &PrintContext) -> String {
+    use SyntaxKind::*;
+
+    // Determine operator keyword from the zero-width marker node kind.
+    let op_marker_kind = stage.children().find_map(|c| {
+        let k = c.kind();
+        if matches!(k, PIPE_OP_UNION | PIPE_OP_INTERSECT | PIPE_OP_EXCEPT) {
+            Some(k)
+        } else {
+            None
+        }
+    });
+    let op_kw = match op_marker_kind {
+        Some(PIPE_OP_INTERSECT) => "INTERSECT",
+        Some(PIPE_OP_EXCEPT) => "EXCEPT",
+        _ => "UNION",
+    };
+
+    // Determine modifier (ALL / DISTINCT) by scanning tokens after the op keyword token.
+    let mut modifier = "";
+    let mut found_op_kw = false;
+    for elem in stage.children_with_tokens() {
+        if let SyntaxElement::Token(t) = &elem {
+            match t.kind() {
+                UNION_KW | INTERSECT_KW | EXCEPT_KW => found_op_kw = true,
+                ALL_KW if found_op_kw => {
+                    modifier = " ALL";
+                    break;
+                }
+                DISTINCT_KW if found_op_kw => {
+                    modifier = " DISTINCT";
+                    break;
+                }
+                LPAREN if found_op_kw => break,
+                _ => {}
+            }
+        }
+    }
+
+    // Left-fold: start with `left`, then for each operand `(q)` append `OP MOD (q)`.
+    let mut result = left.to_string();
+    for child in stage.children() {
+        let kind = child.kind();
+        if kind == SUBQUERY || kind == PIPE_QUERY {
+            let mut text = String::new();
+            print_node(&child, ctx, &mut text);
+            let trimmed = text.trim();
+            result = format!("{result} {op_kw}{modifier} ({trimmed})");
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
