@@ -79,7 +79,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 |-------|-------|--------|--------|------|
 | P1 | Spark runtime scripts (Connect + shared warehouse + pinned client) | done (2026-06-28) | chore(spark): reproducible Spark Connect runtime scripts | 2026-06-28 |
 | P2 | Dual-target test harness (`tests/common`, `TargetKind`, skip-when-no-Spark) | done (2026-06-28) | test(cli): dual-target harness over {DuckDb, Spark} | 2026-06-28 |
-| P3 | Smoke `examples/multi_engine` on live Spark + record break list | pending | test(spark): multi_engine smoke + recorded break list | — |
+| P3 | Smoke `examples/multi_engine` on live Spark + record break list | done (2026-06-28) | test(spark): multi_engine smoke + recorded break list | 2026-06-28 |
 
 ---
 
@@ -252,6 +252,17 @@ this list; P1 already surfaced one.
   Spark Connect `createDataFrame` (no path), or stage the temp Parquet inside the shared
   `warehouse` mount that both host and container see. `python/smelt/spark_adapter.py`
   `load_arrow_table` + `crates/smelt-backend-spark/src/lib.rs` `load_table`.
+
+- **BL-2 (Spark backend does not auto-create the target schema).** Found in P3 running
+  `spark_smoke_multi_engine` against `examples/multi_engine`. When the smelt Spark backend
+  connects and tries to `SET CURRENT DATABASE <schema>` (e.g., `analytics`), Spark returns
+  `[SCHEMA_NOT_FOUND] The schema 'spark_catalog'.'analytics' cannot be found` because the schema
+  was never created. This blocks **every** model on first run against a fresh Spark instance.
+  Affects: `stg_sessions`, `int_visitor_daily` (all Spark-targeted models in the smoke).
+  **Fix direction (W-wave):** emit `CREATE SCHEMA IF NOT EXISTS spark_catalog.<schema>` before
+  executing the first model in each session. See `crates/smelt-backend-spark/src/lib.rs`
+  session-init path (the `execute_sql` / session setup block where the current database is set).
+  Relevant `BackendCapabilities` flag: none yet — needs a new `requires_schema_init: bool`.
 
 ## Blocked phases
 

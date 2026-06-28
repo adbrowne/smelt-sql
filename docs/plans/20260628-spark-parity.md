@@ -49,7 +49,7 @@ sub-plan and add a NOT-`done` row here.
 
 | Sub-plan | Wave / what it delivers | Status |
 |----------|-------------------------|--------|
-| `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | pending |
+| `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
 
 ## Wave scaffolding queue
 
@@ -87,3 +87,9 @@ _(none yet)_
   venv; all 8 `smelt-backend-spark` integration tests green (incl. MERGE). First break-list item
   recorded — **BL-1**: the seed-load Parquet exchange assumes Spark shares the host filesystem
   (breaks for containerized/remote Connect). P2 (harness) + P3 (smoke) remain.
+- **2026-06-28** — W1 **fully done** (P2 was committed 2026-06-28; P3 completed this iteration).
+  `crates/smelt-cli/tests/spark_smoke.rs` smoke harness committed. Two break-list items recorded:
+  **BL-1** (host-temp Parquet path in `load_table` visible to host but not Spark container) and
+  **BL-2** (Spark backend does not auto-create the target schema — `[SCHEMA_NOT_FOUND]` on first
+  run). W2 scaffolding ready: human should add schema-auto-create fix (BL-2) and Parquet-exchange
+  fix (BL-1) as W2 phases and add the W2 registry row.
