@@ -50,6 +50,10 @@ GROUP BY 1
 
 Each section delimiter must follow the exact form `--- name: <model_name> ---` (leading/trailing spaces around the name are trimmed). Any other `--- X ---` form is a hard parse error.
 
+### Query body forms
+
+A model's SQL body may be written either as a standard `SELECT` statement or as a **pipe query** — the FROM-first `FROM t |> WHERE … |> AGGREGATE …` form. A body that begins with a bare `FROM` (no leading `SELECT`) followed by `|>` stages is a pipe query and is lowered to standard SQL during code generation; all frontmatter (`materialization`, `refresh`, `incremental`, `tags`, …) applies identically regardless of body form. See `pipe_sql.md` for the pipe operator set, scoping rules, and lowering.
+
 ### Model naming
 
 | File type | Name source |
@@ -254,3 +258,4 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
   - `cumulative_aggregate.md` — the `refresh: cumulative` strategy
   - `testing.md` — the `smelt.test` declaration kind
   - `schema_evolution.md` — `schema_evolution:` and `columns.default/backfill` frontmatter keys (forthcoming)
+  - `pipe_sql.md` — the FROM-first pipe-query body form a model may use

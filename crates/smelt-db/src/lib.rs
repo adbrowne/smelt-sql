@@ -1078,6 +1078,31 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
     }
 }
 
+/// Remap a parse error message to a more specific diagnostic code when the
+/// error originated from the pipe-stage parser.
+///
+/// The pipe-stage parser emits errors via `Parser::error()`, which stores them
+/// as parse errors with the message text. This function inspects the message to
+/// promote those errors to their proper diagnostic codes so consumers can
+/// distinguish pipe-specific errors from generic syntax errors.
+///
+/// Mapping rules:
+/// - `"pipe operator '<kw>' is not supported — …"` → `PipeOperatorUnsupported`
+/// - `"unknown pipe operator '<kw>'"` → `PipeUnknownOperator`
+/// - `"malformed '<kw>' pipe stage"` → `PipeStageMalformed`
+/// - anything else → `ParseError` (unchanged)
+fn remap_pipe_parse_error_code(message: &str) -> DiagnosticCode {
+    if message.starts_with("pipe operator '") && message.contains("is not supported") {
+        DiagnosticCode::PipeOperatorUnsupported
+    } else if message.starts_with("unknown pipe operator '") {
+        DiagnosticCode::PipeUnknownOperator
+    } else if message.starts_with("malformed '") && message.contains("pipe stage") {
+        DiagnosticCode::PipeStageMalformed
+    } else {
+        DiagnosticCode::ParseError
+    }
+}
+
 /// Resolve a `smelt.<path>` ref string to its definition's frontmatter
 /// `timeseries:` block, when it resolves to a model that declares one. This
 /// reconstructs (project-scoped) the `smelt.<path> → timeseries` lookup the
@@ -1532,11 +1557,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     let parse = parse_file(db, file);
     for error in parse.errors.iter() {
         let range = error.range;
+        // Remap pipe-operator parse errors to their proper diagnostic codes so
+        // consumers can distinguish them from generic syntax errors.
+        let code = remap_pipe_parse_error_code(&error.message);
         DiagnosticAcc(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: error.message.clone(),
             range,
-            code: Some(DiagnosticCode::ParseError),
+            code: Some(code),
             data: None,
         })
         .accumulate(db);

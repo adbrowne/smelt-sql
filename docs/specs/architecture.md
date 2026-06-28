@@ -292,6 +292,7 @@ Two identity properties hold across the pipeline. Both are property-testable.
 **2. Print-level identity for the DuckDB dialect.** The DuckDB printer emits SQL byte-identical to the input, modulo:
 
 - **Smelt-extension resolution** (universal across dialects): `smelt.<path>` → backend-resolvable identifier (`<schema>.<emitted_name>` for models and seeds, source-declared name for sources); `smelt.<path>(<args>)` → expanded function body; `smelt.as_struct(alias [EXCEPT …])` → DuckDB struct literal; bare-name `smelt.extern` calls are emitted verbatim (or with the configured backend-namespace remap from `functions.md`).
+- **Pipe-query lowering** (universal across dialects unless the backend reports `supports_pipe_syntax`): a FROM-first `FROM t |> …` pipe query (`pipe_sql.md`) is lowered to standard SQL — collecting contiguous stages into a query level, nesting on each `AGGREGATE`, and mapping post-aggregate/post-window `|> WHERE` to `HAVING`/`QUALIFY`. The lowered SQL is a generated artifact and is not a byte-identity target. `BackendCapabilities::supports_pipe_syntax` (false for all current backends) reserves native pipe emission for capable backends.
 - **Cross-dialect function-name normalization** for the short list of constructs where smelt's accepted surface diverges from DuckDB's surface:
   - `EXPLODE(x)` → `UNNEST(x)`
   - `EVERY(b)` → `BOOL_AND(b)`
@@ -501,6 +502,6 @@ Each in-spec Known Divergence cross-references this anchor.
 - **Tests**: dialect printer identity tests under `crates/smelt-dialect/tests/`; parse-level pg_query / Spark equivalence tests in `crates/smelt-parser-compat/tests/`; pure-function tests in `crates/smelt-db/tests/type_property_tests.rs`
 - **User docs**: `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/developing/architecture.md`
 - **Plans (history)**: see `docs/plans/` for area-specific implementation work
-- **Related specs**: feature specs under `docs/specs/` extend this one — `functions.md` (the function half of the models-as-functions equivalence), `timeseries.md` (time-dimension declaration), `incremental_models.md` (model materialization keys), `types.md` (type vocabulary), `planner_integration.md` (planner consumption of frontmatter properties), `diagnostics.md` (diagnostic-code catalogue and fail-loud discipline)
+- **Related specs**: feature specs under `docs/specs/` extend this one — `functions.md` (the function half of the models-as-functions equivalence), `timeseries.md` (time-dimension declaration), `incremental_models.md` (model materialization keys), `types.md` (type vocabulary), `planner_integration.md` (planner consumption of frontmatter properties), `diagnostics.md` (diagnostic-code catalogue and fail-loud discipline), `pipe_sql.md` (FROM-first pipe-query body form and its lowering at the dialect-printer seam)
 - **Research**: `docs/research/20260413-smelt-functions.md` §4 (the unified-model framing)
 - **Legacy reference (will thin out)**: `docs/architecture_overview.md` — superseded by this spec

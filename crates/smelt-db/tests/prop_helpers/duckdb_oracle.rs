@@ -78,6 +78,38 @@ impl DuckDbOracle {
     }
 }
 
+impl DuckDbOracle {
+    /// Execute a query and return rows as sorted `Vec<Vec<String>>` for comparison.
+    ///
+    /// Each inner `Vec<String>` is one row's values as strings (in column order).
+    /// The outer vec is sorted so that comparison is order-independent.
+    pub fn execute_query(&self, sql: &str) -> Result<Vec<Vec<String>>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("prepare: {e}"))?;
+
+        let mut rows_raw: Vec<Vec<String>> = Vec::new();
+
+        let mut query_rows = stmt.query([]).map_err(|e| format!("query: {e}"))?;
+
+        while let Some(row) = query_rows.next().map_err(|e| format!("row: {e}"))? {
+            // Collect column values; grow the vec as we encounter each index.
+            let mut row_vals: Vec<String> = Vec::new();
+            let mut col_idx = 0usize;
+            while let Ok(val) = row.get::<_, duckdb::types::Value>(col_idx) {
+                row_vals.push(format!("{val:?}"));
+                col_idx += 1;
+            }
+            rows_raw.push(row_vals);
+        }
+
+        // Sort rows for deterministic comparison (result sets are unordered).
+        rows_raw.sort();
+        Ok(rows_raw)
+    }
+}
+
 impl TypeOracle for DuckDbOracle {
     fn query_types(&self, sql: &str) -> Result<Vec<(String, DataType)>, String> {
         let mut stmt = self

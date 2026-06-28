@@ -21,6 +21,7 @@ pub mod hof;
 pub mod literal;
 pub mod loader_and_reflection;
 pub mod multi_model;
+pub mod pipe;
 pub mod record;
 pub mod subquery;
 pub mod ternary;
@@ -118,3 +119,5 @@ pub use values::{
 };
 
 pub use collation::{check_collation_diagnostics, infer_collate_expr_type};
+
+pub use pipe::{check_pipe_undeclared_columns, infer_pipe_stage_output_schema};
