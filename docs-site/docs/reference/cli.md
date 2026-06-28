@@ -369,6 +369,70 @@ See the [Testing guide](../guide/testing.md) for how to write tests.
 
 ---
 
+## smelt check
+
+Run data-quality checks against built pipeline data. Checks are `smelt.check` declarations in `.sql` files, placed in a directory listed in `paths:` (typically `checks/`).
+
+Each check is a **failing-rows query**: it returns the rows that violate an invariant. The check passes when the query returns zero rows and fails when it returns one or more. Unlike `smelt test` — which runs against mock data in an in-memory DuckDB — `smelt check` compiles each check's `smelt.<path>` references to the **real materialized relations** in the configured target and executes against the data the pipeline actually produced.
+
+**Usage:**
+
+```
+smelt check [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--select` | `-s` | string[] | | Filter checks by name (repeatable, substring match) |
+| `--target` | | string | `dev` | Target environment from `smelt.yml` |
+| `--database` | | path | | DuckDB database file path (overrides `smelt.yml`) |
+| `--verbose` | `-v` | bool | `false` | Show compiled SQL for each check |
+
+**Output:**
+
+Each check is reported as a `PASS`, `FAIL`, or `WARN` line. A violation includes the violating row count and a capped inline sample of the offending rows for debugging; violating rows are not persisted to the warehouse. A summary line shows total counts.
+
+```
+smelt check
+
+  PASS  daily_revenue_non_negative
+  FAIL  amount_must_exceed_500 — 3 violating row(s)
+    {"order_id": "7", "amount": "120.00"}
+  WARN  amount_above_threshold — 1 violating row(s)
+
+  1 passed, 1 failed, 1 warned, 3 total
+```
+
+**Exit codes:**
+
+- Exits `0` when every `error`-severity check passes (zero violating rows).
+- Exits `1` when any `error`-severity check has violations.
+- `warn`-severity checks never affect the exit code — a `severity: warn` check with violations reports `WARN` and the command still exits `0`.
+- A check whose referenced model has not been built in the target fails with `CheckTargetNotBuilt` (exit `1`), never a silent pass on an absent relation.
+
+**Examples:**
+
+```bash
+# Run all checks against the dev target
+smelt check
+
+# Run checks matching "revenue"
+smelt check --select revenue
+
+# Run against a specific target
+smelt check --target prod
+
+# Show the compiled SQL for each check
+smelt check --verbose
+```
+
+See the [Testing guide](../guide/testing.md) for how to write checks.
+
+---
+
 ## smelt diff
 
 Show pending schema changes between model definitions and deployed state. Compares the inferred schema (from SQL parsing and type inference) against the last deployed schema (stored in `.smelt/schemas/`).

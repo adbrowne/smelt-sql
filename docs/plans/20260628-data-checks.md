@@ -63,8 +63,8 @@ The materialization-three-axes work left two follow-ups in `testing.md`. First, 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 204b0f31 | 2026-06-28 |
-| 2     | done     |        | 2026-06-28 |
-| 3     | pending  |        |      |
+| 2     | done     | 46f6358d | 2026-06-28 |
+| 3     | done     |        | 2026-06-28 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 
@@ -249,6 +249,9 @@ The materialization-three-axes work left two follow-ups in `testing.md`. First, 
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 3 — `CheckTargetNotBuilt` skip-list is narrower than the graph dep-exclusion list.** The `smelt check` pre-check (`commands/check.rs`) skips only `sources`/`functions` refs before calling `backend.table_exists`, whereas `DependencyGraph::build` also excludes `seeds`, `config`, and the `models.with_tag`/`models.all` meta-accessors. A check body that directly references `smelt.seeds.*`, `smelt.config.var(...)`, or `smelt.models.*` could surface a spurious `CheckTargetNotBuilt`. Not triggered by any current fixture; align the skip-list with `graph.rs` in a follow-up.
+- **Phase 3 — single `smelt.check` per file.** The `smelt check` loop processes only the first check declaration in a file (`AstFile::checks().next()`), unlike the `smelt.test` runner which loops over all. The spec does not address multi-check files; if supported later, loop over all `checks()`.
 
 ## Verification
 

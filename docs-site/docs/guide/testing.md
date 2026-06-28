@@ -252,7 +252,7 @@ smelt.check <name> AS ( <select> )
 |---|---|---|
 | Input data | Mock rows supplied via `PASSING` clauses | Real tables built by the pipeline |
 | Assertion | `EXPECT` clause lists expected rows | Any returned row is a failure |
-| When it runs | `smelt test` (before or without a full build) | After `smelt run` builds dependencies |
+| When it runs | `smelt test` (before or without a full build) | `smelt check`, against already-built data |
 | `PASSING` / `EXPECT` | Valid | Error — not permitted on a check |
 
 ### Severity
@@ -290,6 +290,44 @@ paths:
 Any `.sql` file that contains a `smelt.check` declaration is classified as a **check
 file**. Check files do not materialise a DB object and are excluded from `smelt run`,
 `smelt explain`, and `smelt build` — they are not part of the execution graph.
+
+### Running checks
+
+Run checks with `smelt check`. Each check's `smelt.<path>` references are compiled to the
+real materialized relations in the configured target, and the failing-rows query is executed
+against the data your pipeline has already built:
+
+```bash
+# Run all checks against the dev target
+smelt check
+
+# Run only checks whose name contains "revenue"
+smelt check --select revenue
+
+# Run against a different target
+smelt check --target prod
+```
+
+Each check is reported as `PASS` (zero rows), `FAIL` (an `error`-severity violation), or
+`WARN` (a `warn`-severity violation). A violation shows the violating row count and a capped
+sample of the offending rows; the rows are shown inline only and are not written to the
+warehouse.
+
+```
+smelt check
+
+  PASS  daily_revenue_non_negative
+  FAIL  amount_must_exceed_500 — 3 violating row(s)
+    {"order_id": "7", "amount": "120.00"}
+
+  1 passed, 1 failed, 0 warned, 2 total
+```
+
+`smelt check` exits `0` when every `error`-severity check passes and `1` when any
+`error`-severity check has violations; `warn`-severity violations never change the exit code.
+A check that references a model which has not been built in the target fails loudly with
+`CheckTargetNotBuilt` rather than silently passing on a missing relation, so build the
+pipeline (`smelt build`) before running checks against it.
 
 ## Comparison behavior
 
