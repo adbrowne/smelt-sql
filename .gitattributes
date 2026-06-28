@@ -1,0 +1,9 @@
+# The autonomy loop merges origin/main into this feature branch every iteration
+# to stay current with main's code. `.claude/active-plan` is a per-branch loop
+# pointer: main drives its own backlog (spec-impl), this branch drives the
+# Spark→DuckDB parity backlog. Without this rule those two pointers conflict on
+# every merge (main advances its active_subplan continuously), halting the loop.
+# `merge=ours` keeps THIS branch's active-plan across merges while still merging
+# all of main's actual code. Requires `git config merge.ours.driver true`
+# (set in the repo's git config; see docs/plans/20260628-spark-parity.md).
+.claude/active-plan merge=ours
