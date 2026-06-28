@@ -222,6 +222,16 @@ fn capabilities_match_spark_semantics() {
     assert!(caps.supports_insert_overwrite);
 }
 
+#[test]
+fn capabilities_all_backends_require_schema_init() {
+    // W2·P1 spec oracle: multi_backend.md §Surface `requires_schema_init` matrix row.
+    // All backends must create the target schema before selecting it.
+    use smelt_backend::BackendCapabilities;
+    assert!(BackendCapabilities::duckdb().requires_schema_init);
+    assert!(BackendCapabilities::spark_delta().requires_schema_init);
+    assert!(BackendCapabilities::spark_parquet().requires_schema_init);
+}
+
 // ─── Integration Tests (require Spark Connect) ─────────────────────────────
 //
 // These tests need a running Spark Connect server. Set SPARK_CONNECT_URL
@@ -256,6 +266,55 @@ mod integration {
                 None
             }
         }
+    }
+
+    #[tokio::test]
+    async fn integration_fresh_schema_auto_creates() {
+        // W2·P1 acceptance test: connecting to a schema that doesn't exist yet must
+        // succeed — the backend auto-creates it before selecting it.
+        let Some(url) = spark_connect_url() else {
+            return;
+        };
+
+        let catalog = "spark_catalog";
+        let fresh_schema = "smelt_fresh_schema_w2p1";
+
+        // Drop the schema first so it is genuinely absent (idempotent, uses default schema).
+        if let Ok(b) = crate::SparkBackend::new(&url, catalog, "default", None).await {
+            let _ = b
+                .execute_sql(&format!(
+                    "DROP DATABASE IF EXISTS {}.{} CASCADE",
+                    catalog, fresh_schema
+                ))
+                .await;
+        }
+
+        // Before fix: SparkBackend::new fails with [SCHEMA_NOT_FOUND].
+        // After fix: the backend auto-creates the schema before setCurrentDatabase.
+        let backend = crate::SparkBackend::new(&url, catalog, fresh_schema, None)
+            .await
+            .expect("SparkBackend::new must auto-create a fresh schema before selecting it");
+
+        // Verify we can run a model in the newly-created schema.
+        backend
+            .create_table_as(fresh_schema, "smelt_probe_w2p1", "SELECT 42 AS n")
+            .await
+            .expect("create_table_as in auto-created schema should succeed");
+        assert_eq!(
+            backend
+                .get_row_count(fresh_schema, "smelt_probe_w2p1")
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Cleanup.
+        let _ = backend
+            .execute_sql(&format!(
+                "DROP DATABASE IF EXISTS {}.{} CASCADE",
+                catalog, fresh_schema
+            ))
+            .await;
     }
 
     #[tokio::test]

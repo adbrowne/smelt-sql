@@ -15,7 +15,7 @@ import pyarrow as pa
 class SparkAdapter:
     """Wraps a PySpark SparkSession for SQL execution with Arrow results."""
 
-    def __init__(self, connect_url, catalog=None, schema=None):
+    def __init__(self, connect_url, catalog=None):
         from pyspark.sql import SparkSession
 
         builder = SparkSession.builder
@@ -25,8 +25,14 @@ class SparkAdapter:
 
         if catalog:
             self.spark.catalog.setCurrentCatalog(catalog)
-        if schema:
-            self.spark.catalog.setCurrentDatabase(schema)
+
+    def select_current_schema(self, schema):
+        """Select the current database/schema.
+
+        Called by SparkBackend::new() after ensure_schema() has created the schema,
+        so the schema is guaranteed to exist before setCurrentDatabase is called.
+        """
+        self.spark.catalog.setCurrentDatabase(schema)
 
     def execute_sql(self, sql):
         """Execute SQL and return a pyarrow.Table.

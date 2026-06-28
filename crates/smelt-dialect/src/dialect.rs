@@ -89,6 +89,14 @@ pub struct BackendCapabilities {
     /// so future backends (e.g. BigQuery, which has native pipe support) can opt
     /// in without code changes.
     pub supports_pipe_syntax: bool,
+
+    /// Backend requires explicit schema creation during session init.
+    ///
+    /// When `true`, the backend creates the target schema (via `ensure_schema`)
+    /// before selecting it as the current database. All current backends require
+    /// this — it is `true` universally and exists so the capability matrix stays
+    /// accurate and callers can assert the contract.
+    pub requires_schema_init: bool,
 }
 
 impl BackendCapabilities {
@@ -115,6 +123,7 @@ impl BackendCapabilities {
             supports_merge_schema_write: false,
             supports_column_mapping: false,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 
@@ -146,6 +155,7 @@ impl BackendCapabilities {
             supports_merge_schema_write: true,
             supports_column_mapping: true,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 
@@ -172,6 +182,7 @@ impl BackendCapabilities {
             supports_merge_schema_write: true,
             supports_column_mapping: false,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 
@@ -198,6 +209,7 @@ impl BackendCapabilities {
             supports_merge_schema_write: false,
             supports_column_mapping: false,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 }

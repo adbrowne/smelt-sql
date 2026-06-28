@@ -59,7 +59,6 @@ impl SparkBackend {
 
         let adapter = tokio::task::spawn_blocking({
             let catalog = catalog.clone();
-            let schema = schema.clone();
             move || {
                 Python::attach(|py| {
                     let module = py.import("smelt.spark_adapter").map_err(|e| {
@@ -77,7 +76,9 @@ impl SparkBackend {
                         ))
                     })?;
 
-                    let adapter = cls.call1((&connect_url, &catalog, &schema)).map_err(|e| {
+                    // Pass only connect_url + catalog — schema selection is deferred until
+                    // after ensure_schema() creates the database (see below).
+                    let adapter = cls.call1((&connect_url, &catalog)).map_err(|e| {
                         BackendError::connection_failed(format!(
                             "Failed to create SparkSession: {}",
                             e
@@ -91,18 +92,29 @@ impl SparkBackend {
         .await
         .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))??;
 
-        tracing::info!(
-            "Spark session established (catalog={}, schema={})",
-            catalog,
-            schema
-        );
-
-        Ok(Self {
+        let backend = Self {
             adapter,
             catalog,
-            schema,
+            schema: schema.clone(),
             warehouse: warehouse.map(|s| s.to_string()),
-        })
+        };
+
+        // Create the schema before selecting it (spec: multi_backend.md §Semantics
+        // "Session initialization" — requires_schema_init = true for all backends).
+        // ensure_schema() is the single source of the CREATE DATABASE statement;
+        // select_current_schema() then makes it the session default.
+        if !schema.is_empty() {
+            backend.ensure_schema(&schema).await?;
+            backend.py_select_schema(&schema).await?;
+        }
+
+        tracing::info!(
+            "Spark session established (catalog={}, schema={})",
+            backend.catalog,
+            backend.schema
+        );
+
+        Ok(backend)
     }
 
     /// Build a fully qualified table name: catalog.schema.table
@@ -156,6 +168,30 @@ impl SparkBackend {
                 }
 
                 Ok(batches)
+            })
+        })
+        .await
+        .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))?
+    }
+
+    /// Call Python `select_current_schema(schema)` to set the session's current database.
+    ///
+    /// Must only be called after `ensure_schema()` has created the schema — Spark's
+    /// `setCurrentDatabase` raises `[SCHEMA_NOT_FOUND]` on a non-existent schema.
+    async fn py_select_schema(&self, schema: &str) -> Result<(), BackendError> {
+        let schema = schema.to_string();
+        let adapter = Python::attach(|py| self.adapter.clone_ref(py));
+        tokio::task::spawn_blocking(move || {
+            Python::attach(|py| {
+                adapter
+                    .call_method1(py, "select_current_schema", (&schema,))
+                    .map_err(|e| {
+                        BackendError::connection_failed(format!(
+                            "Failed to select schema '{}': {}",
+                            schema, e
+                        ))
+                    })?;
+                Ok(())
             })
         })
         .await
