@@ -51,7 +51,7 @@ sub-plan and add a NOT-`done` row here.
 |----------|-------------------------|--------|
 | `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
 | `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
-| `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | pending |
+| `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | done (2026-06-29) |
 
 ## Wave scaffolding queue
 
@@ -60,12 +60,12 @@ intentionally **not** detailed until W3's re-smoke produces concrete dialect fai
 sketches, not commitments. (W3 — source seeding in the smoke + re-smoke — is now scaffolded and in
 the registry above.)
 
-- **W4 — dialect lowerings.** One phase per real lowering W3's re-smoke surfaces (QUALIFY →
+- **W4 — dialect lowerings.** One phase per real lowering that surfaces (QUALIFY →
   subquery, `DATE '…'` → `to_date`, `::` → `CAST`, `[…]` → `ARRAY(…)`, trailing-comma strip, …).
   Each: red dual-target test → printer lowering → green. Oracle: `multi_backend.md` §Semantics
-  "Required lowerings". **If the `multi_engine` models are too simple to surface dialect breaks**
-  (W3·P3 records a clean parity pass), W4's breaks come from the **broad CLI mirror (W5)** instead —
-  scaffold W4 from whichever wave first surfaces a real Spark dialect rejection.
+  "Required lowerings". **W3·P3 recorded a clean parity pass** (`examples/multi_engine` too simple
+  to surface dialect breaks) — W4's breaks therefore come from **W5 (broad CLI mirror)** instead.
+  Scaffold W4 after W5's first failed Spark run identifies concrete dialect rejections.
 - **W5 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
   `{DuckDb, Spark}` via the W1 harness; fix each exec/state gap (incremental DELETE+INSERT,
   schema evolution, seeds, MERGE on Delta).
@@ -131,3 +131,10 @@ _(none yet)_
   **W3**, scaffolded by a human from W2's extended list. Spec diff landed in `multi_backend.md`
   (matrix row + "Session initialization" / "Loading data into a backend" §Semantics + a data-loading
   §Constraint).
+- **2026-06-29** — **W3 fully done** (P1 seed helper + P2 smoke wiring + P3 re-smoke complete).
+  BL-3/BL-4 resolved. **W3·P3 PARITY PASS**: `staging.stg_sessions` and
+  `intermediate.int_visitor_daily` both passed on live Spark (Spark 4.1.1) with no dialect errors.
+  Break list: **(none)** — `examples/multi_engine` too simple to surface dialect breaks. **W4
+  dialect lowerings** will be scoped from **W5 (broad CLI mirror)**, not this re-smoke. Human
+  should scaffold W5 (broad CLI mirror over ~50 DuckDB integration tests) next; W4 follows from
+  whatever Spark dialect rejections W5 surfaces.

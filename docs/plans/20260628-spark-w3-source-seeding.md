@@ -96,7 +96,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 |-------|-------|--------|--------|------|
 | P1 | Harness source-seed helper (materialize a source table into either target from identical data) | done | | 2026-06-29 |
 | P2 | Wire source seeding into the `multi_engine` smoke for both targets (resolves BL-3/BL-4) | done | | 2026-06-29 |
-| P3 | Re-smoke; record the now-reachable dialect/exec breaks (→ W4) | pending | | |
+| P3 | Re-smoke; record the now-reachable dialect/exec breaks (→ W4) | done | | 2026-06-29 |
 
 ---
 
@@ -225,7 +225,15 @@ Carries forward; P2 resolves BL-3/BL-4, P3 appends what the deeper smoke surface
 - **BL-4 (cascade — upstream model output absent).** _Resolved in W3·P2 — once the source is seeded,
   `stg_sessions` materializes `analytics.staging_stg_sessions`, so `int_visitor_daily` finds it._
 
-_(P3 appends newly-surfaced dialect/exec breaks below.)_
+**W3·P3 PARITY PASS (2026-06-29)** — Re-smoke ran both models on live Spark
+(SPARK_CONNECT_URL=sc://localhost:15002, Spark 4.1.1). Results:
+- `staging.stg_sessions` → **PASS**
+- `intermediate.int_visitor_daily` → **PASS**
+
+Break list: **(none)**. `examples/multi_engine` models are simple enough that Spark
+executes them identically to DuckDB — no dialect construct rejections surfaced. Dialect-break
+discovery for W4 must come from a richer model set. W4 is sourced from **W5 (broad CLI mirror)**
+instead of this re-smoke. See master plan §"Wave scaffolding queue" W4 note.
 
 ## Blocked phases
 
