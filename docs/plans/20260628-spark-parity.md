@@ -50,7 +50,7 @@ sub-plan and add a NOT-`done` row here.
 | Sub-plan | Wave / what it delivers | Status |
 |----------|-------------------------|--------|
 | `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
-| `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | pending |
+| `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
 
 ## Wave scaffolding queue
 
@@ -59,11 +59,16 @@ intentionally **not** detailed until W2's re-smoke produces concrete dialect fai
 sketches, not commitments. (W2 — the two blocker fixes + re-smoke — is now scaffolded and in the
 registry above.)
 
-- **W3 — dialect lowerings.** One phase per real lowering W2's **extended** break list surfaces
-  (QUALIFY → subquery, `DATE '…'` → `to_date`, `::` → `CAST`, `[…]` → `ARRAY(…)`, trailing-comma
-  strip, …). Each: red dual-target test → printer lowering → green. Oracle: `multi_backend.md`
-  §Semantics "Required lowerings". These breaks were hidden in W1 because BL-2 aborted every model
-  on first run; W2's re-smoke is what surfaces them.
+- **W3 — source loading + remaining dialect lowerings.** W2's extended break list (BL-3, BL-4)
+  shows the primary gap is **source data not loaded into Spark before model execution** — the run
+  pipeline has no step to pre-populate `smelt.sources.*` tables in the Spark session, and the smoke
+  harness doesn't run `smelt-datagen` first. W3 phases: (P1) add a pre-run `load_table` step for
+  all `smelt.sources.*` dependencies of selected models (load from `data/<source>/` Parquet via
+  `createDataFrame`); (P2) update the smoke harness to run `smelt-datagen` or seed a minimal
+  in-memory Arrow batch; (P3) re-smoke to confirm BL-3/BL-4 resolved and surface any remaining
+  dialect lowering breaks (QUALIFY → subquery, `DATE '…'` → `to_date`, `::` → `CAST`,
+  `[…]` → `ARRAY(…)`, trailing-comma strip, …). Each lowering: red dual-target test → printer
+  lowering → green. Oracle: `multi_backend.md` §Semantics "Required lowerings".
 - **W4 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
   `{DuckDb, Spark}` via the W1 harness; fix each exec/state gap (incremental DELETE+INSERT,
   schema evolution, seeds, MERGE on Delta).
@@ -96,6 +101,12 @@ _(none yet)_
   **BL-2** (Spark backend does not auto-create the target schema — `[SCHEMA_NOT_FOUND]` on first
   run). W2 scaffolding ready: human should add schema-auto-create fix (BL-2) and Parquet-exchange
   fix (BL-1) as W2 phases and add the W2 registry row.
+- **2026-06-28** — **W2 fully done** (P3 re-smoke complete). Two new breaks recorded: **BL-3**
+  (source table `analytics.sources_raw_sessions` not materialized in Spark — run pipeline has no
+  source-load step + datagen not run) and **BL-4** (cascade: `analytics.staging_stg_sessions`
+  absent because BL-3 blocked `stg_sessions`). The smoke ran past session-init (BL-2 resolved) and
+  past seed-load (BL-1 resolved), reaching actual SQL execution on both models. Extended break list
+  committed. W3 scoped: pre-run source loading + datagen step in the smoke harness.
 - **2026-06-28** — **W2 scaffolded** (`docs/plans/20260628-spark-w2-unblock-resmoke.md`, registry
   row added). Reframed from the original "W2 = dialect lowerings" sketch: the recorded break list is
   **shallow because BL-2 aborts every model on first run**, so no dialect break could surface in W1.

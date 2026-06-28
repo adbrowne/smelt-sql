@@ -84,7 +84,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 |-------|-------|--------|--------|------|
 | P1 | BL-2: session schema-init (`requires_schema_init` flag + create-before-select ordering) | done | fix(spark): BL-2 session schema-init | 2026-06-28 |
 | P2 | BL-1: load Arrow into Spark via `createDataFrame`, not a host-path Parquet | done | fix(spark): BL-1 load Arrow via IPC+createDataFrame, not host-path Parquet | 2026-06-28 |
-| P3 | Re-smoke `examples/multi_engine` on live Spark; extend the recorded break list (→ W3) | pending | | |
+| P3 | Re-smoke `examples/multi_engine` on live Spark; extend the recorded break list (→ W3) | done | test(spark): W2·P3 re-smoke — BL-3/BL-4 recorded | 2026-06-28 |
 
 ---
 
@@ -222,7 +222,22 @@ Carries forward the W1 list; P1/P2 resolve BL-1 and BL-2, P3 appends what the de
   symptom: `python/smelt/spark_adapter.py::__init__` called `setCurrentDatabase(schema)` before
   `ensure_schema()` ran, so a fresh schema failed `[SCHEMA_NOT_FOUND]` on every model's first run.
 
-_(P3 appends newly-surfaced dialect/exec breaks below.)_
+- **BL-3 (source table not materialized in Spark / run pipeline gap).** _Surfaced in W2·P3._ Model
+  `staging.stg_sessions` fails with `[TABLE_OR_VIEW_NOT_FOUND] analytics.sources_raw_sessions`.
+  Root cause (two-part): (a) `examples/multi_engine/data/sessions/` Parquet files don't exist — the
+  `smelt-datagen` step was never run, so there is no source data to load; (b) even if source data
+  existed, the smelt run pipeline has no step to pre-load `smelt.sources.*` tables into the Spark
+  session before executing model SQL — the reference `smelt.sources.raw.sessions` compiles to
+  `analytics.sources_raw_sessions` in SQL but the table is never created in the Spark catalog.
+  Suspected W3 fix: (1) add a pre-run `load_table` step for all `smelt.sources.*` dependencies of
+  selected models (load from Parquet files in `data/<source>/` via `createDataFrame`); (2) update
+  the smoke harness to either run `smelt-datagen` first or seed a minimal in-memory Arrow batch
+  directly so the source table exists before the model runs.
+
+- **BL-4 (cascade from BL-3 — upstream table absent).** _Surfaced in W2·P3._ Model
+  `intermediate.int_visitor_daily` fails with `[TABLE_OR_VIEW_NOT_FOUND]
+  analytics.staging_stg_sessions` because `stg_sessions` (BL-3) never materialized its output
+  table. Resolves automatically once BL-3 is fixed and `stg_sessions` succeeds.
 
 ## Blocked phases
 
