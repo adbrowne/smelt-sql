@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782608614714,
+  "lastUpdate": 1782608616846,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -26909,6 +26909,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.78143353734912,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8b74b9d21818c75a8b08023a5b9d3a21120e47ba",
+          "message": "Merge pull request #147 from adbrowne/worktree-pipesql\n\nPipe SQL (|>) — implementation",
+          "timestamp": "2026-06-28T11:01:12+10:00",
+          "tree_id": "d0ba5884e12f25c20c225f5e714b24b8f7d18ece",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/8b74b9d21818c75a8b08023a5b9d3a21120e47ba"
+        },
+        "date": 1782608616349,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.71605789897385,
             "unit": "MB/s"
           }
         ]
