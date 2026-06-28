@@ -402,8 +402,8 @@ impl Backend for SparkBackend {
         arrow_schema: SchemaRef,
         batches: Vec<RecordBatch>,
     ) -> Result<(), BackendError> {
-        use parquet::arrow::ArrowWriter;
-        use std::fs::File;
+        use arrow::ipc::writer::StreamWriter;
+        use std::io::Cursor;
 
         let full_table_name = self.qualified_name(schema, name);
 
@@ -425,46 +425,33 @@ impl Backend for SparkBackend {
             }
         }
 
-        // Write batches to a temporary Parquet file.
-        let tmp_file = tempfile::NamedTempFile::new()
-            .map_err(|e| BackendError::execution_failed(full_table_name.clone(), e.to_string()))?;
-        let tmp_path = tmp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| {
-                BackendError::execution_failed(
-                    full_table_name.clone(),
-                    "temp file path is not UTF-8",
-                )
-            })?
-            .to_string();
-
+        // Serialize batches to Arrow IPC stream bytes — no host filesystem path.
+        let mut ipc_buf = Vec::<u8>::new();
         {
-            let file = File::create(tmp_file.path()).map_err(|e| {
+            let cursor = Cursor::new(&mut ipc_buf);
+            let mut writer = StreamWriter::try_new(cursor, &arrow_schema).map_err(|e| {
                 BackendError::execution_failed(full_table_name.clone(), e.to_string())
             })?;
-            let mut writer =
-                ArrowWriter::try_new(file, arrow_schema.clone(), None).map_err(|e| {
-                    BackendError::execution_failed(full_table_name.clone(), e.to_string())
-                })?;
             for batch in &batches {
                 writer.write(batch).map_err(|e| {
                     BackendError::execution_failed(full_table_name.clone(), e.to_string())
                 })?;
             }
-            writer.close().map_err(|e| {
+            writer.finish().map_err(|e| {
                 BackendError::execution_failed(full_table_name.clone(), e.to_string())
             })?;
         }
 
-        // Call the Python adapter to load the Parquet file as a Spark table.
+        // Send IPC bytes across the PyO3 boundary; Python reconstructs the table
+        // via pyarrow.ipc and loads it through createDataFrame (no host path).
         let adapter = Python::attach(|py| self.adapter.clone_ref(py));
         let full_table_name_clone = full_table_name.clone();
 
         tokio::task::spawn_blocking(move || {
             Python::attach(|py| {
+                let ipc_bytes = pyo3::types::PyBytes::new(py, &ipc_buf);
                 adapter
-                    .call_method1(py, "load_arrow_table", (&tmp_path, &full_table_name_clone))
+                    .call_method1(py, "load_arrow_table", (ipc_bytes, &full_table_name_clone))
                     .map_err(|e| {
                         BackendError::execution_failed(
                             full_table_name_clone.clone(),

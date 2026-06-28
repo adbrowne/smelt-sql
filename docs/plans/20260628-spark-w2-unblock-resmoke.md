@@ -83,7 +83,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
 | P1 | BL-2: session schema-init (`requires_schema_init` flag + create-before-select ordering) | done | fix(spark): BL-2 session schema-init | 2026-06-28 |
-| P2 | BL-1: load Arrow into Spark via `createDataFrame`, not a host-path Parquet | pending | | |
+| P2 | BL-1: load Arrow into Spark via `createDataFrame`, not a host-path Parquet | done | fix(spark): BL-1 load Arrow via IPC+createDataFrame, not host-path Parquet | 2026-06-28 |
 | P3 | Re-smoke `examples/multi_engine` on live Spark; extend the recorded break list (→ W3) | pending | | |
 
 ---
