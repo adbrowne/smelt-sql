@@ -4,14 +4,11 @@
 //! Unlike `type_property_tests.rs` which documents divergences, these tests
 //! assert zero divergences: every column must match exactly after wrapping.
 
-#[allow(dead_code)]
-mod prop_helpers;
-
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
-use prop_helpers::generators::{
+use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
+use crate::prop_helpers::generators::{
     self, assemble_cte_query, generate_expr, test_scenario_strategy, TypedExpr,
 };
-use prop_helpers::spark_oracle::SparkOracle;
+use crate::prop_helpers::spark_oracle::SparkOracle;
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_dialect::{wrap_with_type_casts, BackendCapabilities, PrintContext, SqlDialect};

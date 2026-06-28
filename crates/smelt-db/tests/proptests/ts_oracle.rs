@@ -4,12 +4,9 @@
 //! - `TIMESTAMPTZ` columns infer as `Timestamp { with_timezone: true }`
 //! - `NOW()` returns `Timestamp { with_timezone: true }` (non-nullable)
 
-#[allow(dead_code)]
-mod prop_helpers;
-
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
-use prop_helpers::generators;
-use prop_helpers::type_comparison::{compare_types, TypeMatch};
+use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
+use crate::prop_helpers::generators;
+use crate::prop_helpers::type_comparison::{compare_types, TypeMatch};
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;
