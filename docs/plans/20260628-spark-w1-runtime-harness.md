@@ -78,7 +78,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
 | P1 | Spark runtime scripts (Connect + shared warehouse + pinned client) | done (2026-06-28) | chore(spark): reproducible Spark Connect runtime scripts | 2026-06-28 |
-| P2 | Dual-target test harness (`tests/common`, `TargetKind`, skip-when-no-Spark) | pending | test(cli): dual-target harness over {DuckDb, Spark} | — |
+| P2 | Dual-target test harness (`tests/common`, `TargetKind`, skip-when-no-Spark) | done (2026-06-28) | test(cli): dual-target harness over {DuckDb, Spark} | 2026-06-28 |
 | P3 | Smoke `examples/multi_engine` on live Spark + record break list | pending | test(spark): multi_engine smoke + recorded break list | — |
 
 ---
