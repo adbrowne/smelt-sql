@@ -786,6 +786,22 @@ impl TypeContext {
         result
     }
 
+    /// Return all model columns as `(column_name, TypedColumn)` pairs, stripping qualifiers.
+    ///
+    /// Used by pipe-scope inference when we want all columns from the base context
+    /// without knowing the qualifier (e.g. for a fallback when the FROM qualifier
+    /// cannot be determined).
+    pub fn all_model_columns_unqualified(&self) -> Vec<(String, TypedColumn)> {
+        self.model_columns
+            .iter()
+            .filter_map(|(key, tc)| {
+                // Key is "qualifier.column_name" — extract the column part.
+                key.split_once('.')
+                    .map(|(_, col)| (col.to_string(), tc.clone()))
+            })
+            .collect()
+    }
+
     /// Take and clear the list of column lookups that returned None.
     /// Used by property-based tests to discover missing columns.
     pub fn take_missed_lookups(&self) -> Vec<(Option<String>, String)> {

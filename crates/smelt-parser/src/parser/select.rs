@@ -352,6 +352,16 @@ impl<'a> super::Parser<'a> {
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();
+            } else if self.at(FROM_KW) {
+                // Pipe query used as a parenthesised subquery:
+                // `FROM (FROM t |> WHERE p) alias` — spec §"Where a pipe query
+                // may appear": "As a subquery or CTE body — anywhere a
+                // parenthesised query … is legal."
+                self.start_node_at(checkpoint, SUBQUERY);
+                self.parse_pipe_query();
+                self.skip_trivia();
+                self.expect(RPAREN);
+                self.finish_node();
             } else {
                 // Not a subquery, error
                 self.error("Expected SELECT in subquery".to_string());
@@ -995,6 +1005,14 @@ impl<'a> super::Parser<'a> {
             self.finish_node();
         } else if self.at(VALUES_KW) {
             self.parse_values_clause();
+        } else if self.at(FROM_KW) {
+            // Pipe query as a CTE body:
+            // `WITH recent AS (FROM events |> WHERE ts > 0) …`
+            // Spec §"Where a pipe query may appear": "As a subquery or CTE body
+            // — anywhere a parenthesised query or a WITH CTE body is legal."
+            self.start_node(SUBQUERY);
+            self.parse_pipe_query();
+            self.finish_node();
         } else if self.at_smelt_path_trigger() {
             // smelt.<path> migration, Phase 1: a CTE body is a bare
             // `smelt.<path>(args)` call. Phase 5b removes the smelt.fn.* arm

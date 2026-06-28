@@ -58,7 +58,7 @@
 # scaffolding); when the loop reports <<MASTER_EXHAUSTED>> a human scaffolds the
 # next wave via /smelt:plan and adds its registry row.
 master_plan: docs/plans/20260613-spec-impl.md
-active_subplan: docs/plans/20260613-w1-resolve-addressing.md
+active_subplan: docs/plans/20260627-pipe_sql.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.
