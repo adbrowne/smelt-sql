@@ -1,13 +1,11 @@
-//! P3 smoke test: run `examples/multi_engine` Spark-targeted models against
-//! a live Spark Connect server and **record every failure** as the break list
-//! that scopes W2+.
-//!
-//! Success criterion for P3: the smoke ran and the break list was captured.
-//! The test itself stays green even when every Spark model fails — W2 waves
-//! fix the breaks. Only flip this assertion off after W2 ships.
+//! W3·P2 smoke: seed `analytics.sources_raw_sessions` into Spark then run
+//! `examples/multi_engine` Spark-targeted models against a live Spark Connect
+//! server.  Breaks are collected (not asserted) so the test is always green —
+//! the break list scopes W4.  BL-3/BL-4 (TABLE_OR_VIEW_NOT_FOUND for the
+//! source table) are asserted as *resolved* after the P2 seeding.
 
 mod common;
-use common::spark_connect_url;
+use common::{seed_source_table, sessions_arrow_schema, sessions_record_batch, spark_connect_url};
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -59,10 +57,13 @@ fn smelt_run_select(
     )
 }
 
-/// P3 smoke: probe each Spark-targeted model in `examples/multi_engine`.
+/// W3·P2 smoke: seed the source table then probe Spark-targeted models.
 ///
-/// The test collects (model, error) pairs and prints them as a break list.
-/// It does NOT assert that the models succeed — that is W2's job.
+/// Seeds `analytics.sources_raw_sessions` into the Spark catalog via the P1
+/// helper, then runs each Spark-targeted model in `examples/multi_engine`.
+/// Breaks are collected and printed (collect-don't-abort shape for W4
+/// scoping), except that BL-3/BL-4 are *asserted* resolved — the source
+/// table must be found after seeding.
 #[test]
 fn spark_smoke_multi_engine() {
     // Skip when the `spark` feature wasn't compiled in (no Spark support in the binary).
@@ -95,6 +96,21 @@ fn spark_smoke_multi_engine() {
         .replace("target/spark", warehouse.to_str().unwrap());
     fs::write(&yml_path, yml).unwrap();
 
+    // W3·P2: seed analytics.sources_raw_sessions into the Spark catalog before
+    // running models (resolves BL-3/BL-4 — the source table was never created
+    // by the pipeline because smelt has no source-materialization step).
+    // db_path is unused for Spark; pass a stable path inside the tmp workspace.
+    let db_path = proj.join("target/warehouse.duckdb");
+    seed_source_table(
+        &common::TargetKind::Spark,
+        &db_path,
+        &warehouse,
+        "analytics.sources_raw_sessions",
+        sessions_arrow_schema(),
+        sessions_record_batch(),
+    );
+    println!("[SEED] analytics.sources_raw_sessions → Spark catalog (3 rows)");
+
     // Probe each Spark-targeted model individually to isolate failures.
     // Models live under subdirectories so the selector requires the dotted path.
     let spark_models = &["staging.stg_sessions", "intermediate.int_visitor_daily"];
@@ -122,18 +138,28 @@ fn spark_smoke_multi_engine() {
 
     // Print break-list summary for human recording in the plan.
     println!(
-        "\n=== Spark Smoke P3 Break List ({} failure(s)) ===",
+        "\n=== Spark Smoke W3·P2 Break List ({} failure(s)) ===",
         breaks.len()
     );
     if breaks.is_empty() {
         println!("  (none — all Spark models passed on live Spark)");
     } else {
         for (i, (model, err)) in breaks.iter().enumerate() {
-            println!("  BL-{}  model={}  err={}", i + 2, model, err);
+            println!("  BL-{}  model={}  err={}", i + 5, model, err);
         }
     }
     println!("=== End Break List ===\n");
 
-    // P3 goal: break list captured. Do NOT assert success here.
-    // After W2 ships dialect lowerings, flip this to assert breaks.is_empty().
+    // BL-3/BL-4 resolved: the seeded source table must be found.
+    // Any remaining error should be a *dialect* construct, not a missing table.
+    let bl3_present = breaks.iter().any(|(_, err)| {
+        err.contains("sources_raw_sessions") && err.contains("TABLE_OR_VIEW_NOT_FOUND")
+    });
+    assert!(
+        !bl3_present,
+        "BL-3 not resolved: analytics.sources_raw_sessions still missing after seeding — \
+         check seed_source_table"
+    );
+
+    // Dialect/exec errors are expected and scoped to W4 — do not assert success here.
 }
