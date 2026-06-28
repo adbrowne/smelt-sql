@@ -167,6 +167,7 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
   - `crates/smelt-dialect/tests/pipe_lowering.rs` — passthrough collapse, DISTINCT lowering, EXTEND subquery wrap
   - `crates/smelt-db/tests/pipe_equivalence.rs` — DuckDB oracle equivalence for passthrough and column-editing queries
   - `crates/smelt-db/tests/pipe_scope.rs` — stage-to-stage scope threading (EXTEND/SET/DROP/RENAME undeclared-column diagnostics)
+  - `crates/smelt-db/tests/pipe_diagnostics.rs` — deferred-operator hard errors (`PipeOperatorUnsupported`), stage-boundary disambiguation, and meta-pipe non-interference
   - `examples/test_workspace/models/pipe_orders.sql` — live fixture used by `example_diagnostics`
 - **User docs**: *(forthcoming — `docs-site/docs/guide/` pipe-syntax page)*
 - **Plans (history)**: `docs/plans/20260627-pipe_sql.md`
