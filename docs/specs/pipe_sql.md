@@ -166,9 +166,12 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
   - `crates/smelt-parser/tests/pipe_query.rs` — CST shape, FROM-first trigger, per-operator stage markers, error diagnostics (unknown, unsupported, malformed)
   - `crates/smelt-dialect/tests/pipe_lowering.rs` — passthrough collapse, DISTINCT lowering, EXTEND subquery wrap
   - `crates/smelt-db/tests/pipe_equivalence.rs` — DuckDB oracle equivalence for passthrough and column-editing queries
+  - `crates/smelt-db/tests/pipe_placement.rs` — DuckDB oracle equivalence for subquery-body and CTE-body placement positions
   - `crates/smelt-db/tests/pipe_scope.rs` — stage-to-stage scope threading (EXTEND/SET/DROP/RENAME undeclared-column diagnostics)
   - `crates/smelt-db/tests/pipe_diagnostics.rs` — deferred-operator hard errors (`PipeOperatorUnsupported`), stage-boundary disambiguation, and meta-pipe non-interference
-  - `examples/test_workspace/models/pipe_orders.sql` — live fixture used by `example_diagnostics`
+  - `examples/test_workspace/models/pipe_orders.sql` — model-body placement fixture used by `example_diagnostics`
+  - `examples/test_workspace/models/pipe_cte_clicks.sql` — CTE-body placement fixture used by `example_diagnostics`
+  - `examples/test_workspace/models/pipe_subquery_clicks.sql` — subquery-body placement fixture used by `example_diagnostics`
 - **User docs**: *(forthcoming — `docs-site/docs/guide/` pipe-syntax page)*
 - **Plans (history)**: `docs/plans/20260627-pipe_sql.md`
 - **Related specs**:
