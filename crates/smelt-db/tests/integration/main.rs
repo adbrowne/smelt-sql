@@ -1,0 +1,61 @@
+// Consolidated integration-test binary (prototype).
+// Each former tests/<name>.rs is now a module here, so Cargo links ONE
+// binary instead of 55 — the heavy deps (duckdb/datafusion/arrow) link once.
+#![allow(dead_code, unused_imports, unused_macros)]
+
+mod as_struct_tests;
+mod backends_inference;
+mod bidirectional_generics;
+mod byte_offset_helpers;
+mod common;
+mod context_binding;
+mod cross_function_cte_schema;
+mod cte_column_list_rebinding;
+mod cte_splice;
+mod decimal_arithmetic_tests;
+mod diagnostic_range_is_text_range;
+mod diagnostics_catalogue;
+mod emitted_model_body_diagnostics;
+mod emitted_model_consumer_typing;
+mod emitted_model_typed_schema;
+mod expr_kind;
+mod extract_alias_extraction;
+mod fn_path_call_diagnostics;
+mod fragment_context_binding;
+mod frontmatter_parse_diagnostics;
+mod function_body_check;
+mod function_registry;
+mod function_return_type;
+mod join_alias_visibility;
+mod legacy_sources_yaml_diag;
+mod meta_list_scalar;
+mod model_frontmatter_diagnostics;
+mod model_input_constraints_set_ops;
+mod outer_join_nullability;
+mod overlay_diag_surface;
+mod overlay_dispatch;
+mod path_prefix_enforcement;
+mod path_resolution;
+mod phase52_lints;
+mod phase_d_wiring;
+mod provenance_validator;
+mod registry_inference;
+mod seed_temporal_inference;
+mod session_rollup;
+mod smelt_fn_call_check;
+mod source_leaf_collision;
+mod state_mode_widening;
+mod strict_refs;
+mod struct_field_type;
+mod struct_field_type_validation;
+mod struct_return_type_tests;
+mod struct_row_var_tests;
+mod swallowed_errors;
+mod tableexpr_arg_shapes;
+mod tableexpr_body_check;
+mod tier2_body_check;
+mod tier2_tier1_expansion;
+mod ts_function_returns;
+mod ts_mixing;
+mod values_derived_table_typing;
+mod workspace_signatures;

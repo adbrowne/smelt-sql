@@ -9,13 +9,10 @@
 //!   CAST(EXTRACT(YEAR FROM ts) AS VARCHAR)
 //!   COALESCE(SUM(x), 0)
 
-#[allow(dead_code)]
-mod prop_helpers;
-
-use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
-use prop_helpers::generators::{self, assemble_cte_query, column_pool_strategy, TypedExpr};
-use prop_helpers::type_comparison::{compare_types, TypeMatch};
+use crate::prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
+use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
+use crate::prop_helpers::generators::{self, assemble_cte_query, column_pool_strategy, TypedExpr};
+use crate::prop_helpers::type_comparison::{compare_types, TypeMatch};
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;

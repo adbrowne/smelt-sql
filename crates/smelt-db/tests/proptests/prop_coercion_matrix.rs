@@ -6,12 +6,9 @@
 //!
 //! Coverage: +, -, *, /, ||, <, >, =, !=, <=, >=
 
-#[allow(dead_code)]
-mod prop_helpers;
-
-use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
-use prop_helpers::type_comparison::{compare_types, TypeMatch};
+use crate::prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
+use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
+use crate::prop_helpers::type_comparison::{compare_types, TypeMatch};
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;
@@ -220,14 +217,14 @@ fn arithmetic_query(left: NumericType, right: NumericType, op: ArithOp) -> Strin
 fn arithmetic_sources(
     left: NumericType,
     right: NumericType,
-) -> Vec<prop_helpers::generators::TypedSource> {
+) -> Vec<crate::prop_helpers::generators::TypedSource> {
     vec![
-        prop_helpers::generators::TypedSource {
+        crate::prop_helpers::generators::TypedSource {
             name: "l".into(),
             data_type: left.to_smelt_type(),
             cast_sql: left.cast_sql().into(),
         },
-        prop_helpers::generators::TypedSource {
+        crate::prop_helpers::generators::TypedSource {
             name: "r".into(),
             data_type: right.to_smelt_type(),
             cast_sql: right.cast_sql().into(),
@@ -249,14 +246,14 @@ fn comparison_query(left: ComparableType, right: ComparableType, op: CompOp) -> 
 fn comparison_sources(
     left: ComparableType,
     right: ComparableType,
-) -> Vec<prop_helpers::generators::TypedSource> {
+) -> Vec<crate::prop_helpers::generators::TypedSource> {
     vec![
-        prop_helpers::generators::TypedSource {
+        crate::prop_helpers::generators::TypedSource {
             name: "l".into(),
             data_type: left.to_smelt_type(),
             cast_sql: left.cast_sql().into(),
         },
-        prop_helpers::generators::TypedSource {
+        crate::prop_helpers::generators::TypedSource {
             name: "r".into(),
             data_type: right.to_smelt_type(),
             cast_sql: right.cast_sql().into(),
@@ -276,7 +273,7 @@ fn concat_query(left_cast: &str, right_cast: &str) -> String {
 /// Parse SQL with smelt and run type inference.
 fn run_smelt_inference(
     sql: &str,
-    columns: &[prop_helpers::generators::TypedSource],
+    columns: &[crate::prop_helpers::generators::TypedSource],
 ) -> Vec<(String, DataType)> {
     let parse = smelt_parser::parse(sql);
     let root = parse.syntax();
@@ -312,7 +309,7 @@ fn check_types_against_oracle(
     oracle: &dyn TypeOracle,
     backend: &str,
     sql: &str,
-    columns: &[prop_helpers::generators::TypedSource],
+    columns: &[crate::prop_helpers::generators::TypedSource],
     divergences: &[TypeDivergence],
 ) -> Result<(), String> {
     let actual_types = match oracle.query_types(sql) {
@@ -560,12 +557,12 @@ fn exhaustive_string_concat() {
         for (right_cast, right_type) in &string_casts {
             let sql = concat_query(left_cast, right_cast);
             let columns = vec![
-                prop_helpers::generators::TypedSource {
+                crate::prop_helpers::generators::TypedSource {
                     name: "l".into(),
                     data_type: left_type.clone(),
                     cast_sql: left_cast.to_string(),
                 },
-                prop_helpers::generators::TypedSource {
+                crate::prop_helpers::generators::TypedSource {
                     name: "r".into(),
                     data_type: right_type.clone(),
                     cast_sql: right_cast.to_string(),
@@ -685,12 +682,12 @@ fn smoke_string_concat() {
     let divergences = known_divergences();
     let sql = "WITH data AS (SELECT CAST('hello' AS VARCHAR) AS l, CAST(' world' AS VARCHAR) AS r) SELECT l || r AS expr_0 FROM data";
     let columns = vec![
-        prop_helpers::generators::TypedSource {
+        crate::prop_helpers::generators::TypedSource {
             name: "l".into(),
             data_type: DataType::Varchar { max_length: None },
             cast_sql: "CAST('hello' AS VARCHAR)".into(),
         },
-        prop_helpers::generators::TypedSource {
+        crate::prop_helpers::generators::TypedSource {
             name: "r".into(),
             data_type: DataType::Varchar { max_length: None },
             cast_sql: "CAST(' world' AS VARCHAR)".into(),
