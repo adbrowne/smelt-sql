@@ -3,12 +3,9 @@
 //! Tests that smelt's `promote_types()` correctly widens column types when
 //! combining branches of UNION/INTERSECT/EXCEPT, validated against DuckDB.
 
-#[allow(dead_code)]
-mod prop_helpers;
-
-use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
-use prop_helpers::type_comparison::{compare_types, TypeMatch};
+use crate::prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
+use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
+use crate::prop_helpers::type_comparison::{compare_types, TypeMatch};
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;

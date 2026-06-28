@@ -1,0 +1,5 @@
+# Local developer build-speed config (not normative to the project).
+# Use the mold linker for much faster incremental links of the many
+# integration-test binaries in this workspace.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

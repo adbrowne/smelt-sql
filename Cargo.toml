@@ -7,6 +7,14 @@ resolver = "2"
 # Enable proc macros for Salsa
 procMacro.enable = true
 
+# Dev-profile build-speed tuning: trim debuginfo to cut link time and target
+# size. `line-tables-only` keeps usable backtraces; dependencies get none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.package]
 version = "0.3.2"
 edition = "2021"
