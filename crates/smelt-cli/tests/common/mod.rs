@@ -7,9 +7,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use tempfile::TempDir;
 
+use arrow::array::{BooleanArray, Int32Array, StringArray};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::record_batch::RecordBatch;
+
 /// Which execution target this harness is running against.
+#[derive(Debug)]
 pub enum TargetKind {
     DuckDb,
     Spark,
@@ -117,4 +123,177 @@ pub fn run_smelt_on(
     .env_remove("RUST_LOG");
     cmd.output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt run`: {e}"))
+}
+
+// ─── W3·P1: Source-seeding helpers ──────────────────────────────────────────
+
+/// Arrow schema matching `examples/multi_engine/models/sources/raw/sessions.yml`.
+///
+/// Column order and types must match what `staging/stg_sessions.sql` reads.
+pub fn sessions_arrow_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("visitor_id", DataType::Utf8, true),
+        Field::new("session_id", DataType::Utf8, true),
+        Field::new("session_date", DataType::Utf8, true),
+        Field::new("page_views", DataType::Int32, true),
+        Field::new("revenue_cents", DataType::Int32, true),
+        Field::new("country", DataType::Utf8, true),
+        Field::new("traffic_source", DataType::Utf8, true),
+        Field::new("device_type", DataType::Utf8, true),
+        Field::new("is_converted", DataType::Boolean, true),
+    ]))
+}
+
+/// A small deterministic `RecordBatch` of sessions data (3 rows).
+///
+/// Every test that calls `seed_source_table` uses this batch, so assertions
+/// on row count always expect exactly 3.
+pub fn sessions_record_batch() -> RecordBatch {
+    let schema = sessions_arrow_schema();
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["v1", "v2", "v3"])),
+            Arc::new(StringArray::from(vec!["s1", "s2", "s3"])),
+            Arc::new(StringArray::from(vec![
+                "2024-01-01",
+                "2024-01-01",
+                "2024-01-02",
+            ])),
+            Arc::new(Int32Array::from(vec![3, 5, 2])),
+            Arc::new(Int32Array::from(vec![100, 0, 250])),
+            Arc::new(StringArray::from(vec!["US", "GB", "AU"])),
+            Arc::new(StringArray::from(vec!["organic", "paid", "email"])),
+            Arc::new(StringArray::from(vec!["mobile", "desktop", "tablet"])),
+            Arc::new(BooleanArray::from(vec![true, false, true])),
+        ],
+    )
+    .expect("sessions_record_batch: schema/data mismatch")
+}
+
+/// Splits `schema.table` into `(schema, table)`.
+fn split_fqn(fqn: &str) -> (&str, &str) {
+    let dot = fqn.rfind('.').expect("table_fqn must contain '.'");
+    (&fqn[..dot], &fqn[dot + 1..])
+}
+
+/// Materializes `table_fqn` (e.g. `analytics.sources_raw_sessions`) into the
+/// given target from the supplied Arrow data.
+///
+/// - **DuckDb**: opens `db_path` and calls `load_table`. `_warehouse` is unused.
+/// - **Spark**: reads `SPARK_CONNECT_URL` from the environment; uses `_warehouse`
+///   as the Delta warehouse root. Requires `--features spark`; panics otherwise.
+///
+/// Panics if the backend returns an error.
+pub fn seed_source_table(
+    target: &TargetKind,
+    db_path: &Path,
+    _warehouse: &Path,
+    table_fqn: &str,
+    arrow_schema: SchemaRef,
+    batch: RecordBatch,
+) {
+    let (schema, table) = split_fqn(table_fqn);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime for seed_source_table");
+
+    match target {
+        TargetKind::DuckDb => {
+            #[cfg(not(feature = "duckdb"))]
+            panic!("DuckDB seeding requires --features duckdb");
+            #[cfg(feature = "duckdb")]
+            {
+                use smelt_backend::Backend;
+                use smelt_backend_duckdb::DuckDbBackend;
+                rt.block_on(async {
+                    let backend = DuckDbBackend::new(db_path, schema)
+                        .await
+                        .unwrap_or_else(|e| panic!("DuckDB open failed for seed: {e}"));
+                    backend
+                        .load_table(schema, table, arrow_schema, vec![batch])
+                        .await
+                        .unwrap_or_else(|e| panic!("DuckDB load_table failed: {e}"));
+                });
+            }
+        }
+        TargetKind::Spark => {
+            #[cfg(not(feature = "spark"))]
+            panic!("Spark seeding requires --features spark");
+            #[cfg(feature = "spark")]
+            {
+                use smelt_backend::Backend;
+                use smelt_backend_spark::SparkBackend;
+                let url =
+                    spark_connect_url().expect("SPARK_CONNECT_URL must be set for Spark seeding");
+                let wh = _warehouse
+                    .to_str()
+                    .expect("warehouse path must be valid UTF-8");
+                rt.block_on(async {
+                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh))
+                        .await
+                        .unwrap_or_else(|e| panic!("Spark connect failed for seed: {e}"));
+                    backend
+                        .load_table(schema, table, arrow_schema, vec![batch])
+                        .await
+                        .unwrap_or_else(|e| panic!("Spark load_table failed: {e}"));
+                });
+            }
+        }
+    }
+}
+
+/// Returns the row count of `schema.table` in the given target.
+///
+/// Uses the same connection parameters as `seed_source_table`.
+pub fn count_table_rows(
+    target: &TargetKind,
+    db_path: &Path,
+    _warehouse: &Path,
+    schema: &str,
+    table: &str,
+) -> usize {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime for count_table_rows");
+
+    match target {
+        TargetKind::DuckDb => {
+            #[cfg(not(feature = "duckdb"))]
+            panic!("DuckDB count requires --features duckdb");
+            #[cfg(feature = "duckdb")]
+            {
+                use smelt_backend::Backend;
+                use smelt_backend_duckdb::DuckDbBackend;
+                rt.block_on(async {
+                    let backend = DuckDbBackend::new(db_path, schema)
+                        .await
+                        .unwrap_or_else(|e| panic!("DuckDB open failed for count: {e}"));
+                    backend
+                        .get_row_count(schema, table)
+                        .await
+                        .unwrap_or_else(|e| panic!("DuckDB get_row_count failed: {e}"))
+                })
+            }
+        }
+        TargetKind::Spark => {
+            #[cfg(not(feature = "spark"))]
+            panic!("Spark count requires --features spark");
+            #[cfg(feature = "spark")]
+            {
+                use smelt_backend::Backend;
+                use smelt_backend_spark::SparkBackend;
+                let url =
+                    spark_connect_url().expect("SPARK_CONNECT_URL must be set for Spark count");
+                let wh = _warehouse
+                    .to_str()
+                    .expect("warehouse path must be valid UTF-8");
+                rt.block_on(async {
+                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh))
+                        .await
+                        .unwrap_or_else(|e| panic!("Spark connect failed for count: {e}"));
+                    backend
+                        .get_row_count(schema, table)
+                        .await
+                        .unwrap_or_else(|e| panic!("Spark get_row_count failed: {e}"))
+                })
+            }
+        }
+    }
 }

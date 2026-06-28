@@ -94,7 +94,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
-| P1 | Harness source-seed helper (materialize a source table into either target from identical data) | pending | | |
+| P1 | Harness source-seed helper (materialize a source table into either target from identical data) | done | | 2026-06-29 |
 | P2 | Wire source seeding into the `multi_engine` smoke for both targets (resolves BL-3/BL-4) | pending | | |
 | P3 | Re-smoke; record the now-reachable dialect/exec breaks (→ W4) | pending | | |
 
