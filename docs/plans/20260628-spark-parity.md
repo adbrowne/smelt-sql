@@ -82,3 +82,8 @@ _(none yet)_
 
 - **2026-06-28** — Master + W1 scaffolded; `multi_backend.md` spec authored; design doc
   committed. W2+ await W1's break list.
+- **2026-06-28** — W1·P1 **done** interactively: Spark Connect (Spark 4.1.1, image
+  `apache/spark:latest`) live on `:15002` via `scripts/spark-up.sh`; pinned pyspark 4.1.1 client
+  venv; all 8 `smelt-backend-spark` integration tests green (incl. MERGE). First break-list item
+  recorded — **BL-1**: the seed-load Parquet exchange assumes Spark shares the host filesystem
+  (breaks for containerized/remote Connect). P2 (harness) + P3 (smoke) remain.

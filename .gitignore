@@ -38,3 +38,7 @@ smelt_sql.data/
 
 # Local maturin wheel builds (used by the agent-loop harness)
 /dist/
+
+# Local Spark Connect runtime (scripts/spark-up.sh) — not committed
+.smelt-spark-warehouse/
+.smelt-spark-venv/

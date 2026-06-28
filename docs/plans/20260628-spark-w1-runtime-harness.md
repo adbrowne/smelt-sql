@@ -77,7 +77,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
-| P1 | Spark runtime scripts (Connect + Delta + shared warehouse + pinned client) | pending | chore(spark): reproducible Spark Connect runtime scripts | — |
+| P1 | Spark runtime scripts (Connect + shared warehouse + pinned client) | done (2026-06-28) | chore(spark): reproducible Spark Connect runtime scripts | 2026-06-28 |
 | P2 | Dual-target test harness (`tests/common`, `TargetKind`, skip-when-no-Spark) | pending | test(cli): dual-target harness over {DuckDb, Spark} | — |
 | P3 | Smoke `examples/multi_engine` on live Spark + record break list | pending | test(spark): multi_engine smoke + recorded break list | — |
 
@@ -233,6 +233,25 @@ to a human to scaffold W2 from the recorded breaks.
 - Gated CI job + `CLAUDE.md`/`docs-site` updates → **W5**.
 
 ---
+
+## Recorded break list
+
+Empirical failures found running real Spark against the live Connect server. Each is a
+candidate phase for a human-scaffolded W-wave (see master "## Wave scaffolding queue"). P3 grows
+this list; P1 already surfaced one.
+
+- **BL-1 (seed load / Parquet exchange path assumes shared filesystem).** Found in P1 running
+  `cargo test -p smelt-backend-spark --test load_table` (`round_trips_via_create_dataframe`).
+  `SparkBackend::load_table` writes the Arrow batches to a **host** temp Parquet
+  (`/tmp/.tmpXXXX`) and asks Spark to `read.parquet(<path>)`. With Spark in a container (or any
+  remote Connect server), that host path is invisible to the JVM →
+  `AnalysisException [PATH_NOT_FOUND] Path does not exist: file:/tmp/.tmpICEE6N`. The 8 core
+  DDL/DML integration tests (`execute_sql`, `create_table_and_query`, `insert_into`,
+  `merge_into`, `delete_partitions`, `create_view`, `execute_model`, dialect/capabilities) all
+  **pass** — only the host-temp-file seed path breaks. **Fix direction (W-wave):** load Arrow via
+  Spark Connect `createDataFrame` (no path), or stage the temp Parquet inside the shared
+  `warehouse` mount that both host and container see. `python/smelt/spark_adapter.py`
+  `load_arrow_table` + `crates/smelt-backend-spark/src/lib.rs` `load_table`.
 
 ## Blocked phases
 
