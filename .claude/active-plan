@@ -64,7 +64,7 @@
 # Bring it up once with scripts/spark-up.sh (created in W1·P1) + export
 # SPARK_CONNECT_URL into the loop's env. When unset, Spark assertions skip (green).
 master_plan: docs/plans/20260628-spark-parity.md
-active_subplan: docs/plans/20260628-spark-w3-source-seeding.md
+active_subplan: docs/plans/20260629-spark-w4-shared-backend-factory.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.

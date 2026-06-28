@@ -52,29 +52,36 @@ sub-plan and add a NOT-`done` row here.
 | `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
 | `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
 | `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | done (2026-06-29) |
+| `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | pending |
 
 ## Wave scaffolding queue
 
-Scaffolded **just-in-time**, one wave at a time, by a human after the prior wave lands. W4+ are
-intentionally **not** detailed until W3's re-smoke produces concrete dialect failures — they are
-sketches, not commitments. (W3 — source seeding in the smoke + re-smoke — is now scaffolded and in
-the registry above.)
+Scaffolded **just-in-time**, one wave at a time, by a human after the prior wave lands. W5+ are
+intentionally **not** detailed until they're reached — they are sketches, not commitments. (W4 —
+the shared backend factory — is now scaffolded and in the registry above.)
 
-- **W4 — dialect lowerings.** One phase per real lowering that surfaces (QUALIFY →
-  subquery, `DATE '…'` → `to_date`, `::` → `CAST`, `[…]` → `ARRAY(…)`, trailing-comma strip, …).
-  Each: red dual-target test → printer lowering → green. Oracle: `multi_backend.md` §Semantics
-  "Required lowerings". **W3·P3 recorded a clean parity pass** (`examples/multi_engine` too simple
-  to surface dialect breaks) — W4's breaks therefore come from **W5 (broad CLI mirror)** instead.
-  Scaffold W4 after W5's first failed Spark run identifies concrete dialect rejections.
-- **W5 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
-  `{DuckDb, Spark}` via the W1 harness; fix each exec/state gap (incremental DELETE+INSERT,
-  schema evolution, seeds, MERGE on Delta).
+**Note — the "dialect lowerings" wave dissolved.** An audit (2026-06-29) found **all six**
+spec-required Spark lowerings (QUALIFY, `DATE '…'`, `::`, `[…]`, trailing commas, CREATE OR REPLACE
+emulation) are **already implemented and unit-tested** in `crates/smelt-dialect/src/printer.rs` (+
+the Spark backend). Combined with W3·P3's clean `multi_engine` parity pass, there is **no
+dialect-lowering work to scaffold**. The residual risk is that those lowerings are unit-tested with a
+synthetic `spark_ctx()` but **not yet executed on live Spark** — so live-execution coverage of them
+folds into **W5** (below), not a separate wave.
+
+- **W5 — broad CLI mirror / independent Spark coverage.** Parametrize the bulk of the ~50 DuckDB CLI
+  integration tests over `{DuckDb, Spark}` via the W1 harness **and/or** add independent Spark
+  integration tests — the goal is *robust Spark coverage*, not DuckDB-test-for-DuckDB-test
+  duplication. Fix each exec/state gap surfaced (incremental DELETE+INSERT, schema evolution, seeds,
+  MERGE on Delta). This is also where the implemented dialect lowerings get **executed on live
+  Spark**; if any lowering is rejected by a real server, fix it here (red dual-target test → printer
+  fix → green; oracle `multi_backend.md` §"Required lowerings").
 - **W6 — capability conformance + cross-engine.** One conformance test per `BackendCapabilities`
   flag; assert the constructors match the `multi_backend.md` matrix; validate Spark→DuckDB
   Parquet type conformance (decimal precision, timestamp TZ).
 - **W7 — CI gate + docs.** Gated CI job (`spark-up.sh` → `cargo test --features spark` with
   `SPARK_CONNECT_URL` → `spark-down.sh`); `CLAUDE.md` "Commands" entry; `docs-site/` backend
-  pages; retract the `multi_backend.md` "parity not yet verified" Known-Divergence once green.
+  pages (incl. a backend-support note now that the UI runs Spark); retract the `multi_backend.md`
+  "parity not yet verified" Known-Divergence once green.
 
 **Deferred product decision (not a wave yet).** W3 surfaced that smelt has **no source-
 materialization step in the run pipeline for any backend** — `smelt.sources.*` compiles to a table
@@ -138,3 +145,16 @@ _(none yet)_
   dialect lowerings** will be scoped from **W5 (broad CLI mirror)**, not this re-smoke. Human
   should scaffold W5 (broad CLI mirror over ~50 DuckDB integration tests) next; W4 follows from
   whatever Spark dialect rejections W5 surfaces.
+- **2026-06-29** — **W4 re-scoped + scaffolded** (`docs/plans/20260629-spark-w4-shared-backend-factory.md`,
+  registry row added). The "W4 = dialect lowerings" slot **dissolved**: an audit found all six
+  spec-required Spark lowerings already implemented + unit-tested, and W3·P3 was a clean parity pass —
+  so there is no dialect-lowering work to scaffold (live-execution coverage of the existing lowerings
+  folds into W5). In its place, a **structural CLI↔UI parity fix** surfaced: backend selection is
+  duplicated across `smelt-cli/src/backend_registry.rs` (DuckDB+Spark) and
+  `smelt-ui/src/run_manager.rs`'s `UiBackendFactory` (**DuckDB-only**) — so a Spark project runs from
+  `smelt run` but **cannot run from the UI at all**. W4 = extract one shared `smelt-backends` factory
+  both consumers delegate to (P1 crate + CLI delegate → P2 UI delegate, gaining Spark → P3 dual-consumer
+  guard test → P4 fail-loud on unknown backend `type:`, fixing the silent `_ => DuckDB` fallback).
+  Spec diff landed in `architecture.md` §"Run pipeline parity rule (CLI ↔ UI)" (backend-selection
+  contract + DO/DON'T bullets + the UI-DuckDB-only Mode-B incident). Dialect lowerings no longer a
+  standalone wave; broad CLI mirror / independent Spark coverage renumbers to **W5**.
