@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use smelt_core::discovery::ModelFile;
 use smelt_state::ModelRunRecord;
 use std::collections::HashMap;
 
@@ -95,6 +96,19 @@ pub struct ExecuteRequest {
     /// ephemeral seeds are present; the UI defaults to empty.
     #[serde(default)]
     pub ephemeral_seed_ctes: Vec<(String, String, String)>,
+
+    /// When `true`, run `smelt.check`s after each model materializes (build
+    /// semantics). `false` for `smelt run` and `smelt backbuild` (run
+    /// semantics — checks are a build/check concern, not a run concern).
+    #[serde(default)]
+    pub run_checks: bool,
+
+    /// Check model files to run during the build. Populated by `smelt build`
+    /// from discovery; excluded from the dependency graph (supplied separately
+    /// so fresh discovery inside `execute_project` is never needed).
+    /// Skipped during serde: `ModelFile` is a runtime type, not a wire type.
+    #[serde(skip)]
+    pub checks: Vec<ModelFile>,
 }
 
 fn default_true() -> bool {
@@ -121,6 +135,10 @@ pub struct RunOutcome {
     /// (full refresh, incremental, cumulative, ephemeral, or skipped). When
     /// `dry_run` is `false` this is `None`.
     pub plan_summary: Option<PlanSummary>,
+
+    /// Check results collected during the build, in model-execution order.
+    /// Empty when `ExecuteRequest::run_checks` is `false` (i.e. `smelt run`).
+    pub check_results: Vec<crate::check_runner::CheckOutcome>,
 }
 
 /// Resolved execution plan returned by `execute_project` when `dry_run = true`.

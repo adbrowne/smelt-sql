@@ -204,6 +204,8 @@ async fn incremental_run_pushes_source_filter() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let outcome = execute_project(
@@ -308,6 +310,8 @@ async fn source_pushdown_preserves_correctness() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let outcome = execute_project(

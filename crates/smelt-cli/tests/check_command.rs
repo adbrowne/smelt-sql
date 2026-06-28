@@ -55,6 +55,10 @@ fn build_example(example_name: &str) -> (TempDir, PathBuf) {
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"));
 
+    // The example workspaces used here build cleanly (their committed checks
+    // pass or warn — `smelt build` runs the check gate but warn/pass never set a
+    // nonzero exit). Tests that need a failing check inject one into the temp
+    // copy *after* this build and exercise it via the isolated `smelt check` run.
     assert!(
         out.status.success(),
         "smelt build failed for '{example_name}':\nstdout: {}\nstderr: {}",
@@ -101,10 +105,17 @@ fn check_passes_on_clean_data() {
 /// A check that returns rows → FAIL, exit 1; report shows violation count and sample.
 #[test]
 fn check_fails_on_violation() {
-    // Build data_checks (revenue has amount=100.0; amount_must_exceed_500 → returns row).
+    // Build data_checks cleanly (its committed checks pass/warn), then inject a
+    // failing error-severity check and run `smelt check` against the built data.
+    // revenue.amount = 100.0, so `amount < 500` returns a row → error-severity FAIL.
     let (_tmp, project_dir) = build_example("data_checks");
+    std::fs::write(
+        project_dir.join("checks/must_exceed_500.sql"),
+        "smelt.check must_exceed_500 AS (\n    SELECT order_id, amount FROM smelt.revenue WHERE amount < 500\n)\n",
+    )
+    .unwrap();
 
-    let out = run_check(&project_dir, &["--select", "amount_must_exceed_500"]);
+    let out = run_check(&project_dir, &["--select", "must_exceed_500"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -184,7 +195,7 @@ fn check_select_substring() {
     let (_tmp, project_dir) = build_example("data_checks");
 
     // --select "no_negative" only matches `no_negative_amounts` (PASSes).
-    // `amount_must_exceed_500` (which would FAIL) is excluded.
+    // `amount_above_500_warn` (the other committed check) is excluded.
     let out = run_check(&project_dir, &["--select", "no_negative"]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -197,9 +208,9 @@ fn check_select_substring() {
         stdout.contains("PASS"),
         "output should contain PASS.\nstdout: {stdout}"
     );
-    // The failing check must not appear in output
+    // The non-matching check must not appear in output
     assert!(
-        !stdout.contains("amount_must_exceed_500"),
-        "failing check must be excluded by --select.\nstdout: {stdout}"
+        !stdout.contains("amount_above_500_warn"),
+        "non-matching check must be excluded by --select.\nstdout: {stdout}"
     );
 }

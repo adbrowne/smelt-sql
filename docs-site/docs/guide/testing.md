@@ -288,8 +288,10 @@ paths:
 ```
 
 Any `.sql` file that contains a `smelt.check` declaration is classified as a **check
-file**. Check files do not materialise a DB object and are excluded from `smelt run`,
-`smelt explain`, and `smelt build` — they are not part of the execution graph.
+file**. Check files never materialise a DB object — they are not part of the execution
+graph and are not built by `smelt run`, `smelt explain`, or `smelt build`. They are
+*evaluated* in two places: on demand via `smelt check`, and automatically during
+`smelt build` after the models they reference materialise (see below).
 
 ### Running checks
 
@@ -328,6 +330,25 @@ smelt check
 A check that references a model which has not been built in the target fails loudly with
 `CheckTargetNotBuilt` rather than silently passing on a missing relation, so build the
 pipeline (`smelt build`) before running checks against it.
+
+### Checks during `smelt build`
+
+`smelt build` runs each check automatically, **immediately after the model it references
+materialises**, against the freshly written data. This makes checks a guardrail on the
+pipeline rather than a separate after-the-fact step:
+
+- An **`error`-severity** violation **skips every model downstream of the checked model**
+  for the rest of the build, so bad data never propagates, and the build exits `1`.
+- A **`warn`-severity** violation is reported and the build **continues** — downstream models
+  still build and the build exits `0`.
+
+Skipped models are listed in the build summary. Because the dependency edge is derived from
+the check's `smelt.<path>` references, a check guards exactly the models it reads (and
+everything downstream of them).
+
+`smelt run` does **not** run checks — it only materialises models. Checks are a
+`smelt build` / `smelt check` concern, so use `smelt build` (or a `smelt run` followed by
+`smelt check`) when you want the data validated.
 
 ## Comparison behavior
 

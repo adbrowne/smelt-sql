@@ -21,6 +21,7 @@ use smelt_cli::{
     CompilerRegistry, Config, ModelDiscovery,
 };
 use smelt_core::{graph::DependencyGraph, metadata::CheckSeverity};
+use smelt_runtime::{run_single_check, CheckStatus};
 use std::collections::{HashMap, HashSet};
 
 use crate::CheckArgs;
@@ -44,8 +45,6 @@ pub async fn run_checks(args: CheckArgs) -> Result<()> {
 
 #[cfg(feature = "duckdb")]
 async fn run_checks_inner(args: CheckArgs) -> Result<()> {
-    use smelt_cli::test_runner::batches_to_rows;
-
     // 1. Find project root and load config.
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
@@ -167,25 +166,6 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
     let mut warn_count = 0usize;
 
     for check_model in &selected_checks {
-        // Parse the check declaration from the model content.
-        let clean_body = smelt_parser::strip_frontmatter(&check_model.content);
-        let parse = smelt_parser::parse(&clean_body);
-        let ast_file_opt = smelt_parser::ast::File::cast(parse.syntax());
-
-        let check = match ast_file_opt.as_ref().and_then(|f| f.checks().next()) {
-            Some(c) => c,
-            None => {
-                println!(
-                    "  FAIL  {} — no smelt.check declaration found in file",
-                    check_model.name
-                );
-                fail_count += 1;
-                continue;
-            }
-        };
-
-        let check_name = check.name().unwrap_or_else(|| check_model.name.clone());
-
         // Determine severity (default: Error).
         let severity: CheckSeverity = check_model
             .metadata
@@ -194,122 +174,53 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
             .map(|c| c.severity.clone())
             .unwrap_or_default();
 
-        // ── CheckTargetNotBuilt pre-check ─────────────────────────────────
-        // For each smelt.<path> ref in the check model that is not ephemeral,
-        // not a source, and not a function — verify the relation exists in the
-        // target before executing the SQL. A missing relation is always a loud
-        // error (fail-loud discipline), regardless of `severity`.
-        let mut target_not_built: Option<String> = None;
-        for ref_info in &check_model.refs {
-            let segs = ref_info.smelt_ref.to_path();
-            if segs.is_empty() {
-                continue;
-            }
-            // Skip special smelt.<path> namespaces that don't map to built models.
-            if segs[0] == "sources" || segs[0] == "functions" {
-                continue;
-            }
-            let relation_name = segs.join("_");
-            // Skip ephemeral models — they are inlined as CTEs, never materialised.
-            if ephemeral_names.contains(&relation_name) {
-                continue;
-            }
-            match backend.table_exists(schema, &relation_name).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    target_not_built = Some(format!(
-                        "CheckTargetNotBuilt: model '{}' referenced by check '{}' \
-                         has not been built in target '{}'",
-                        segs.join("."),
-                        check_name,
-                        target
-                    ));
-                    break;
-                }
-                Err(e) => {
-                    target_not_built = Some(format!(
-                        "CheckTargetNotBuilt: error verifying '{}' in target '{}': {}",
-                        relation_name, target, e
-                    ));
-                    break;
-                }
-            }
-        }
-
-        if let Some(msg) = target_not_built {
-            println!("  FAIL  {} — {}", check_name, msg);
-            fail_count += 1;
-            continue;
-        }
-
-        // ── Extract the check body SELECT ─────────────────────────────────
-        let body_select_text = match check.body_select() {
-            Some(s) => s.syntax().text().to_string(),
-            None => {
-                println!("  FAIL  {} — check has no SELECT body", check_name);
-                fail_count += 1;
-                continue;
-            }
-        };
-
-        // ── Compile through the sanctioned CompilerRegistry path ──────────
-        // `compile_with_sql_and_ephemerals` translates `smelt.<path>` refs to
-        // `schema.relation_name` and inlines any ephemeral CTE dependencies.
-        let compiled = match compiler.compile_with_sql_and_ephemerals(
-            check_model,
+        // Compile + execute through the shared runtime helper. Run-pipeline
+        // parity: the compile/execute path lives in `smelt-runtime`, so the
+        // same `run_single_check` drives both `smelt check` and `smelt build`'s
+        // build-time check pass — neither duplicates the execute logic.
+        let outcome = run_single_check(
+            compiler,
+            backend,
             schema,
-            &body_select_text,
+            check_model,
+            severity,
+            &ephemeral_names,
             &ephemeral_resolver,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                println!("  FAIL  {} — compilation error: {}", check_name, e);
-                fail_count += 1;
-                continue;
-            }
-        };
+        )
+        .await?;
 
         if args.verbose {
-            println!("  -- Compiled SQL for {}:", check_name);
-            println!("{}", compiled.sql);
+            if let Some(sql) = &outcome.sql {
+                println!("  -- Compiled SQL for {}:", outcome.name);
+                println!("{}", sql);
+            }
         }
 
-        // ── Execute the failing-rows query ────────────────────────────────
-        let batches = match backend.execute_sql(&compiled.sql).await {
-            Ok(b) => b,
-            Err(e) => {
-                println!("  FAIL  {} — execution error: {}", check_name, e);
-                fail_count += 1;
-                continue;
+        match outcome.status {
+            CheckStatus::Pass => {
+                println!("  PASS  {}", outcome.name);
+                pass_count += 1;
             }
-        };
-
-        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-
-        if row_count == 0 {
-            // Zero rows = PASS.
-            println!("  PASS  {}", check_name);
-            pass_count += 1;
-        } else {
-            // One or more rows = violation.
-            let sample = batches_to_rows(&batches);
-            let sample_capped: Vec<_> = sample.iter().take(5).collect();
-
-            match severity {
-                CheckSeverity::Error => {
-                    println!("  FAIL  {} — {} violating row(s)", check_name, row_count);
-                    for row in &sample_capped {
-                        println!("    {:?}", row);
-                    }
-                    fail_count += 1;
+            CheckStatus::Fail => {
+                let detail = outcome.message.as_deref().unwrap_or("violation");
+                println!("  FAIL  {} — {}", outcome.name, detail);
+                for row in &outcome.sample {
+                    println!("    {:?}", row);
                 }
-                CheckSeverity::Warn => {
-                    println!("  WARN  {} — {} violating row(s)", check_name, row_count);
-                    for row in &sample_capped {
-                        println!("    {:?}", row);
-                    }
-                    warn_count += 1;
+                fail_count += 1;
+            }
+            CheckStatus::Warn => {
+                let detail = outcome.message.as_deref().unwrap_or("violation");
+                println!("  WARN  {} — {}", outcome.name, detail);
+                for row in &outcome.sample {
+                    println!("    {:?}", row);
                 }
+                warn_count += 1;
+            }
+            CheckStatus::TargetNotBuilt => {
+                let detail = outcome.message.as_deref().unwrap_or("CheckTargetNotBuilt");
+                println!("  FAIL  {} — {}", outcome.name, detail);
+                fail_count += 1;
             }
         }
     }

@@ -4315,6 +4315,7 @@ name = "smelt-runtime"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "arrow",
  "chrono",
  "line-index",
  "pyo3",

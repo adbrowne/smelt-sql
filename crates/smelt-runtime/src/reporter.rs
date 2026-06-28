@@ -83,6 +83,10 @@ pub trait RunReporter: Send + Sync {
 
     /// Run cancelled via the cancellation token.
     fn run_cancelled(&self, _run_id: &str) {}
+
+    /// A `smelt.check` executed during `smelt build`. `status` is one of
+    /// `"pass"`, `"fail"`, `"warn"`, or `"target_not_built"`.
+    fn check_result(&self, _run_id: &str, _check: &str, _status: &str, _row_count: usize) {}
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that
