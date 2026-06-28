@@ -44,8 +44,8 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    // Filter out test models
-    models.retain(|m| !m.is_test());
+    // Filter out assertion files (tests and checks)
+    models.retain(|m| !m.is_assertion());
 
     let python_files = discovery
         .discover_python_files()

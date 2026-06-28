@@ -31,6 +31,8 @@ pub enum EntityKind {
     Function,
     /// A `smelt.test` SQL file.
     Test,
+    /// A `smelt.check` SQL file (data-quality assertion; produces no DB object).
+    Check,
     /// A `.csv` file, optionally paired with a sidecar `.yml`.
     Seed {
         /// Path to the sibling `.yml` file, if one exists.
@@ -190,13 +192,20 @@ pub fn classify(
 ///
 /// Precedence:
 /// 1. Contains `smelt.define` → Function
-/// 2. Contains `smelt.test` → Test
-/// 3. Otherwise → Model (bare SELECT)
+/// 2. Contains `smelt.check` → Check
+/// 3. Contains `smelt.test` → Test
+/// 4. Otherwise → Model (bare SELECT)
+///
+/// Note: `smelt.check` is checked before `smelt.test` to ensure a file that
+/// starts with `smelt.check` is not accidentally matched by a substring of
+/// `smelt.test`. The two tokens are mutually exclusive in practice.
 fn classify_sql(content: &str) -> EntityKind {
     // Quick string-based dispatch. We look for the literal token sequences
     // that the parser recognises.
     if content.contains("smelt.define") {
         EntityKind::Function
+    } else if content.contains("smelt.check") {
+        EntityKind::Check
     } else if content.contains("smelt.test") {
         EntityKind::Test
     } else {
@@ -567,6 +576,18 @@ mod tests {
         let path = PathBuf::from("/tmp/x/check.sql");
         let kind = classify(&path, Some("smelt.test check_nulls AS (SELECT ...)"), &[]).unwrap();
         assert_eq!(kind, EntityKind::Test);
+    }
+
+    #[test]
+    fn classify_sql_check_is_check() {
+        let path = PathBuf::from("/tmp/x/no_nulls.sql");
+        let kind = classify(
+            &path,
+            Some("smelt.check no_nulls AS (SELECT id FROM smelt.orders WHERE id IS NULL)"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(kind, EntityKind::Check);
     }
 
     #[test]

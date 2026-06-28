@@ -23,6 +23,8 @@ pub enum DeclarationKind {
     Define,
     /// A `smelt.extern` function reference.
     Extern,
+    /// A `smelt.check` data-quality assertion.
+    Check,
 }
 
 /// A diagnostic produced by the frontmatter parser.
@@ -99,6 +101,8 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
         "backends",
         &[DeclarationKind::Define, DeclarationKind::Extern],
     ),
+    // Check-only keys.
+    ("severity", &[DeclarationKind::Check]),
     // Shared keys — applicable to all declaration kinds.
     (
         "tags",
@@ -106,6 +110,7 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
             DeclarationKind::Model,
             DeclarationKind::Define,
             DeclarationKind::Extern,
+            DeclarationKind::Check,
         ],
     ),
 ];
@@ -181,6 +186,7 @@ pub fn parse_frontmatter(
         DeclarationKind::Model => "model",
         DeclarationKind::Define => "define",
         DeclarationKind::Extern => "extern",
+        DeclarationKind::Check => "check",
     };
 
     for (k, v) in mapping {

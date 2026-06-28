@@ -55,6 +55,28 @@ pub struct TestConfig {
     pub check_order: Option<bool>,
 }
 
+/// Severity of a `smelt.check` violation.
+///
+/// `error` (default): a failing check (non-zero rows returned) fails the run
+/// and blocks downstream steps. `warn`: reported but does not fail/block.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckSeverity {
+    /// A violation fails the check (nonzero exit; blocks downstream).
+    #[default]
+    Error,
+    /// A violation is reported but does not fail/block.
+    Warn,
+}
+
+/// Frontmatter knobs for a `smelt.check` declaration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct CheckConfig {
+    /// Severity of a check violation (default: `error`).
+    #[serde(default)]
+    pub severity: CheckSeverity,
+}
+
 /// Schema evolution configuration for a model.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct SchemaEvolutionConfig {
@@ -178,6 +200,14 @@ pub struct ModelMetadata {
     /// e.g. `cases` and `check_order`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestConfig>,
+
+    /// Check configuration (frontmatter knobs for `smelt.check` declarations,
+    /// e.g. `severity`). Not deserialized directly by serde (the `severity`
+    /// key is top-level in the YAML); populated in `extract_single_model` by
+    /// detecting the declaration kind from the body and extracting `severity`
+    /// from the validated frontmatter map.
+    #[serde(skip)]
+    pub check: Option<CheckConfig>,
 
     /// Schema evolution configuration (opt out with strategy: full_refresh)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -665,16 +695,52 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
     let yaml_lines = &lines[1..closing_line];
     let yaml_content = yaml_lines.join("\n");
 
+    // Detect the declaration kind from the body text (everything after the
+    // closing `---` line). Used to route `severity` through the catalogue for
+    // check files and to populate `metadata.check`.
+    let body_text: String = lines[(closing_line + 1)..].join("\n");
+    let decl_kind = if body_text.contains("smelt.check") {
+        DeclarationKind::Check
+    } else {
+        DeclarationKind::Model
+    };
+
     // Route through the unified catalogue to filter unknown/inapplicable keys.
     // fm_diags are discarded here; smelt-db re-runs parse_frontmatter for the
     // diagnostic path so errors surface through file_diagnostics.
-    let (validated_map, _fm_diags) = parse_frontmatter(&yaml_content, DeclarationKind::Model);
+    let (validated_map, _fm_diags) = parse_frontmatter(&yaml_content, decl_kind);
+
+    // For check files, extract `severity` from the validated map BEFORE serde
+    // deserialization. The `severity` key is top-level in the YAML but is NOT
+    // a serde field on `ModelMetadata`; we populate `metadata.check` from it.
+    // For non-check files `validated_map` won't contain `severity` (it would
+    // have been excluded by the catalogue as inapplicable).
+    let check_config: Option<CheckConfig> = if decl_kind == DeclarationKind::Check {
+        // Fail-loud: a present-but-invalid `severity` value (e.g. `severity: bogus`)
+        // must surface as an error, never silently default to Error. An ABSENT key
+        // defaults to Error (CheckSeverity::default()). Mirrors the reuse/state
+        // strict-validation pattern below.
+        let severity = match validated_map.get(serde_yaml::Value::String("severity".to_string())) {
+            Some(v) => serde_yaml::from_value::<CheckSeverity>(v.clone())
+                .map_err(MetadataError::YamlParseError)?,
+            None => CheckSeverity::default(),
+        };
+        Some(CheckConfig { severity })
+    } else {
+        None
+    };
+
+    // Build a map suitable for ModelMetadata deserialization by removing the
+    // check-only `severity` key (ModelMetadata has no `severity` field; serde
+    // would ignore it with unknown-field tolerance, but we strip it for clarity).
+    let mut model_map = validated_map.clone();
+    model_map.remove(serde_yaml::Value::String("severity".to_string()));
 
     // Deserialize ModelMetadata from the validated (catalogue-filtered) map.
     // If a nested field (e.g. timeseries.granularity) fails to deserialize,
     // recover by stripping it so the model is still discovered. smelt-db emits
     // the MalformedTimeseries diagnostic via its own parse_frontmatter call.
-    let metadata: ModelMetadata = if validated_map.is_empty() {
+    let mut metadata: ModelMetadata = if model_map.is_empty() {
         ModelMetadata::default()
     } else {
         // Pre-validate strict sub-fields before the resilient fallback path.
@@ -683,7 +749,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // `materialization: cumulative_aggregate` is also checked here to give a
         // clear migration error — this value was removed; use `materialization: table`
         // + `refresh: cumulative` instead.
-        for (key, value) in validated_map.iter() {
+        for (key, value) in model_map.iter() {
             let key_str = key.as_str().unwrap_or("");
             if key_str == "reuse" {
                 serde_yaml::from_value::<ReuseConfig>(value.clone())
@@ -703,19 +769,22 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
             }
         }
 
-        match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map.clone())) {
+        match serde_yaml::from_value(serde_yaml::Value::Mapping(model_map.clone())) {
             Ok(m) => m,
             Err(_) => {
                 // Strip known keys whose invalid values are surfaced as diagnostics
                 // by smelt-db (MalformedTimeseries, etc.) so the model is still
                 // discoverable.
-                let mut fallback = validated_map;
+                let mut fallback = model_map;
                 fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
                 fallback.remove(serde_yaml::Value::String("incremental".to_string()));
                 serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
             }
         }
     };
+
+    // Populate the derived `check` config for check declarations.
+    metadata.check = check_config;
 
     // Route generator files to `extract_generator`.
     if metadata.generates.is_some() {

@@ -221,6 +221,76 @@ reference it via `smelt.<name>`.
       - tests
     ```
 
+## smelt.check declarations
+
+`smelt.check` is a **data-quality assertion** that runs against your built pipeline data —
+not mocked data. Where a `smelt.test` supplies mock inputs and expected output rows, a
+check queries the tables that your pipeline has actually materialised and flags rows that
+violate a condition. If the query returns any rows, the check fails.
+
+```sql
+smelt.check no_negative_amounts AS (
+    SELECT order_id, amount
+    FROM smelt.revenue
+    WHERE amount < 0
+)
+```
+
+The grammar is:
+
+```
+smelt.check <name> AS ( <select> )
+```
+
+- **`<name>`** — identifier for the check, used in CLI output and selector expressions.
+- **`<select>`** — a query that returns **failing rows**. The check passes when the result
+  set is empty and fails when it contains at least one row.
+
+### Difference from smelt.test
+
+| | `smelt.test` | `smelt.check` |
+|---|---|---|
+| Input data | Mock rows supplied via `PASSING` clauses | Real tables built by the pipeline |
+| Assertion | `EXPECT` clause lists expected rows | Any returned row is a failure |
+| When it runs | `smelt test` (before or without a full build) | After `smelt run` builds dependencies |
+| `PASSING` / `EXPECT` | Valid | Error — not permitted on a check |
+
+### Severity
+
+By default a failing check is an `error`. Set `severity: warn` in frontmatter to emit a
+warning instead (the command exits 0 but reports the check as a warning):
+
+```sql
+---
+severity: warn
+---
+smelt.check no_negative_amounts AS (
+    SELECT order_id, amount
+    FROM smelt.revenue
+    WHERE amount < 0
+)
+```
+
+| Key | Values | Default | Description |
+|-----|--------|---------|-------------|
+| `severity` | `error`, `warn` | `error` | Exit code and display treatment when the check fails. |
+
+### File placement
+
+Place check files in a directory listed in `paths:` in `smelt.yml`. A dedicated
+`checks/` directory is conventional:
+
+```yaml
+# smelt.yml
+paths:
+  - models
+  - checks
+```
+
+Any `.sql` file that contains a `smelt.check` declaration is classified as a **check
+file**. Check files do not materialise a DB object and are excluded from `smelt run`,
+`smelt explain`, and `smelt build` — they are not part of the execution graph.
+
 ## Comparison behavior
 
 ### Set vs ordered comparison

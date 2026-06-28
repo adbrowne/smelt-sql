@@ -428,12 +428,12 @@ pub fn project_emitted_name_collisions(
             .into_iter()
             .collect();
 
-    // Filter to persisted-only: no functions, no ephemeral, no test.
+    // Filter to persisted-only: no functions, no ephemeral, no test, no check.
     let persisted: Vec<&smelt_core::discovery::ModelFile> = sql_files
         .iter()
         .filter(|f| !function_paths.contains(&f.path))
         .filter(|f| {
-            if f.is_test() {
+            if f.is_assertion() {
                 return false;
             }
             let mat = f.metadata.as_ref().and_then(|m| m.materialization.as_ref());

@@ -62,8 +62,8 @@ The materialization-three-axes work left two follow-ups in `testing.md`. First, 
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     | 0df65939 | 2026-06-28 |
-| 2     | pending  |        |      |
+| 1     | done     | 204b0f31 | 2026-06-28 |
+| 2     | done     |        | 2026-06-28 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |

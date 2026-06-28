@@ -44,7 +44,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
 
     // 3. Separate test models from regular models
     let test_models: Vec<_> = models.iter().filter(|m| m.is_test()).collect();
-    let regular_models: Vec<_> = models.iter().filter(|m| !m.is_test()).collect();
+    // The non-test pool excludes all assertion files (tests AND checks): a check
+    // is not an inlinable model body and must not appear in the test selector graph.
+    let regular_models: Vec<_> = models.iter().filter(|m| !m.is_assertion()).collect();
 
     // Whole-query test inlining inputs (testing.md §Execution model):
     //   * `canonical_bodies` — every regular model's frontmatter-stripped body,
@@ -103,9 +105,12 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
             resolve_selector_args(&salsa_db, salsa_ws, salsa_proj, None, &args.select)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // Build a dependency graph from regular (non-test) models only.
-        let regular_model_files: Vec<smelt_cli::ModelFile> =
-            all_models.into_iter().filter(|m| !m.is_test()).collect();
+        // Build a dependency graph from regular models only — exclude all
+        // assertion files (tests AND checks); a check is not part of the graph.
+        let regular_model_files: Vec<smelt_cli::ModelFile> = all_models
+            .into_iter()
+            .filter(|m| !m.is_assertion())
+            .collect();
         // Map leaf-name → canonical path so we can match test_config.model.
         let leaf_to_canonical: HashMap<String, String> = regular_model_files
             .iter()

@@ -3760,3 +3760,18 @@ fn incremental_broken_union_event_time() {
         "models/union_mart.sql",
     );
 }
+
+// ===== smelt.check Phase 2 TDD tests =====
+
+/// Phase 2 TDD: `examples/data_checks/` — a workspace containing a `smelt.check`
+/// and a regular model loads with zero diagnostics. The check is excluded from
+/// materialization (not in the explain catalog) and produces no warnings.
+#[test]
+fn check_excluded_from_run_and_explain() {
+    // The data_checks fixture contains:
+    //   models/revenue.sql         — a regular model
+    //   checks/no_negative_amounts.sql — a smelt.check declaration
+    // The check must load without diagnostics (it is not materialized, not in
+    // the explain/catalog, and must not cause the workspace to emit warnings).
+    check_workspace_no_diagnostics("examples/data_checks");
+}

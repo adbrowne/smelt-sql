@@ -81,6 +81,7 @@ pub async fn run_seed(args: SeedArgs, scope: Option<&str>) -> Result<()> {
                         RefKind::Model => "model",
                         RefKind::Function => "function",
                         RefKind::Test => "test",
+                        RefKind::Check => "check",
                         RefKind::Seed => unreachable!(),
                     };
                     anyhow::bail!(
