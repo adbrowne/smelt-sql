@@ -353,6 +353,16 @@ pub enum SyntaxKind {
     HASH,
     CTE_SEGMENT,
 
+    // Phase 1 (data-checks): smelt.check top-level declaration.
+    //
+    // SMELT_CHECK: wraps the entire `smelt.check <name> AS (<select>)` declaration.
+    //   Unlike smelt.test there is no required PASSING/EXPECT — those are errors.
+    //   Any stray PASSING/EXPECT clause is captured as a child node so Phase 2
+    //   can emit CheckHasTestClause diagnostics.
+    // CHECK_NAME: wraps the check name identifier (mirrors TEST_NAME / DEFINE_NAME).
+    SMELT_CHECK,
+    CHECK_NAME,
+
     // Special
     EOF, // End of file
 }

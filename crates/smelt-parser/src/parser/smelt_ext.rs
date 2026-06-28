@@ -50,6 +50,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if self.at_smelt_check_trigger() {
+                self.parse_smelt_check();
+                self.skip_trivia();
+                continue;
+            }
+
             if self.at(SELECT_KW) || self.at(WITH_KW) {
                 // Bare SELECT/WITH model body. We only parse the first one; any
                 // following top-level tokens are consumed silently (preserving
@@ -574,6 +580,7 @@ impl<'a> Parser<'a> {
                 || self.at_smelt_extern_trigger()
                 || self.at_smelt_record_trigger()
                 || self.at_smelt_test_trigger()
+                || self.at_smelt_check_trigger()
             {
                 return;
             }
@@ -932,6 +939,7 @@ impl<'a> Parser<'a> {
                 && !self.at(LPAREN)
                 && !self.at_smelt_define_trigger()
                 && !self.at_smelt_test_trigger()
+                && !self.at_smelt_check_trigger()
                 && !self.at_smelt_extern_trigger()
             {
                 self.start_node(ERROR);
@@ -970,6 +978,7 @@ impl<'a> Parser<'a> {
                 && !self.at_contextual_keyword("EXPECT")
                 && !self.at_smelt_define_trigger()
                 && !self.at_smelt_test_trigger()
+                && !self.at_smelt_check_trigger()
                 && !self.at_smelt_extern_trigger()
             {
                 self.start_node(ERROR);
@@ -999,6 +1008,168 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
 
         self.finish_node(); // SMELT_TEST
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a top-level `smelt.check` declaration. Does not consume
+    /// any tokens. The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("check")
+    ///
+    /// Like `smelt.test`, `smelt.check` is ONLY special at top-level statement
+    /// position. In expression position it remains an ordinary qualified identifier.
+    pub(super) fn at_smelt_check_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "check".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("check")
+    }
+
+    /// Parse a top-level `smelt.check` declaration. The caller must have
+    /// verified `at_smelt_check_trigger()` first.
+    ///
+    /// Grammar:
+    ///   smelt.check <name> AS ( <select> )
+    ///   [;]
+    ///
+    /// Unlike `smelt.test` there is no required `PASSING`/`EXPECT`. A stray
+    /// `PASSING` or `EXPECT` clause is captured inside the node (rather than
+    /// being dropped or causing a panic) so Phase 2 can emit a
+    /// `CheckHasTestClause` diagnostic.
+    pub(super) fn parse_smelt_check(&mut self) {
+        self.start_node(SMELT_CHECK);
+
+        // Consume the three trigger tokens: `smelt`, `.`, `check`.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "check"
+
+        // CHECK_NAME: wrap the next identifier (mirrors TEST_NAME in smelt.test).
+        self.skip_trivia();
+        if self.at(IDENT) {
+            self.start_node(CHECK_NAME);
+            self.advance();
+            self.finish_node();
+        } else {
+            self.error("Expected check name after smelt.check".to_string());
+            self.sync_to(&[AS_KW, EOF]);
+        }
+
+        // Expect AS.
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance();
+        } else {
+            self.error("Expected 'AS' in smelt.check".to_string());
+            // Sync to the start of the body `(` or next top-level / EOF.
+            while !self.at(EOF)
+                && !self.at(LPAREN)
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_test_trigger()
+                && !self.at_smelt_check_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+            if !self.at(LPAREN) {
+                self.finish_node();
+                return;
+            }
+        }
+
+        // Body: `(` <select> `)`.
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' to start smelt.check body".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // LPAREN
+        self.skip_trivia();
+        if self.at(SELECT_KW) || self.at(WITH_KW) {
+            self.parse_select_stmt();
+        } else if !self.at(RPAREN) && !self.at(EOF) {
+            // Fallback: parse as expression for error recovery.
+            self.parse_expression();
+        }
+        self.skip_trivia();
+        if self.at(RPAREN) {
+            self.advance();
+        } else {
+            self.error("Expected ')' to close smelt.check body".to_string());
+            // Sync to PASSING/EXPECT/next-decl/EOF.
+            while !self.at(EOF)
+                && !self.at_contextual_keyword("PASSING")
+                && !self.at_contextual_keyword("EXPECT")
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_test_trigger()
+                && !self.at_smelt_check_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+        }
+
+        // Optionally capture stray PASSING/EXPECT clauses inside the node so
+        // Phase 2 can emit CheckHasTestClause diagnostics. These are NOT errors
+        // at the parser level — we capture them for Phase 2 to diagnose.
+        loop {
+            self.skip_trivia();
+            if self.at_contextual_keyword("PASSING") {
+                self.parse_passing_clause();
+            } else if self.at_contextual_keyword("EXPECT") {
+                self.parse_expect_clause();
+            } else {
+                break;
+            }
+        }
+
+        // Optional terminating `;` — consume if present.
+        self.skip_trivia();
+
+        self.finish_node(); // SMELT_CHECK
     }
 
     /// Parse a single `EXPECT ( <rows> )` clause inside a `smelt.test`.

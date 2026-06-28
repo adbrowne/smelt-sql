@@ -38,6 +38,11 @@ impl File {
     pub fn tests(&self) -> impl Iterator<Item = SmeltTest> + '_ {
         self.0.children().filter_map(SmeltTest::cast)
     }
+
+    /// Iterate over top-level `smelt.check` declarations in this file.
+    pub fn checks(&self) -> impl Iterator<Item = SmeltCheck> + '_ {
+        self.0.children().filter_map(SmeltCheck::cast)
+    }
 }
 
 // ===== smelt.define (Step 1, Phase 1) =====
@@ -302,6 +307,79 @@ impl SmeltTest {
 
     /// Byte offset at which this declaration starts in the source text.
     /// See `SmeltDefine::source_offset` for the offset-stability rationale.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+}
+
+// ===== smelt.check (Phase 1, data-checks) =====
+
+/// Top-level `smelt.check <name> AS ( <select> )` declaration.
+///
+/// A check is a data-quality assertion query: rows returned by `<select>` are
+/// considered failures. A check has **no** `PASSING` or `EXPECT` clauses —
+/// those are `smelt.test`-only surface. Any stray `PASSING`/`EXPECT` clause
+/// captured on the node is diagnosable in Phase 2 as `CheckHasTestClause`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltCheck(SyntaxNode);
+
+impl SmeltCheck {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `SMELT_CHECK` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_CHECK {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The check name — text of the IDENT token inside the `CHECK_NAME` child.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == CHECK_NAME)?
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the `CHECK_NAME` child — the name identifier span.
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == CHECK_NAME)?;
+        let ident = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)?;
+        Some(ident.text_range())
+    }
+
+    /// The `SELECT` (or `WITH ... SELECT`) statement body of the check assertion.
+    pub fn body_select(&self) -> Option<SelectStmt> {
+        self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// Iterate over any stray `PASSING` clauses captured on the node.
+    ///
+    /// For well-formed checks this iterator is empty. Phase 2 uses this to
+    /// emit `CheckHasTestClause` diagnostics when it is non-empty.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
+
+    /// The stray `EXPECT` clause captured on the node, if present.
+    ///
+    /// For well-formed checks this returns `None`. Phase 2 uses this to
+    /// emit `CheckHasTestClause` diagnostics when it is `Some`.
+    pub fn expect_clause(&self) -> Option<ExpectClause> {
+        self.0.children().find_map(ExpectClause::cast)
+    }
+
+    /// Byte offset at which this declaration starts in the source text.
     pub fn source_offset(&self) -> usize {
         usize::from(self.0.text_range().start())
     }
