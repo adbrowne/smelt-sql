@@ -333,6 +333,54 @@ pub enum SyntaxKind {
     // of the `NOT NULL` suffix (e.g. `Expr<Integer NOT NULL>`).
     NOT_NULL_QUALIFIER,
 
+    // Phase 3 (testing): smelt.test top-level declaration.
+    //
+    // SMELT_TEST: wraps the entire `smelt.test <name> AS (<select>)
+    //   [PASSING <dep> AS (<rows>)]... EXPECT (<rows>)` declaration.
+    // TEST_NAME: wraps the test name identifier (mirrors DEFINE_NAME).
+    // EXPECT_CLAUSE: the required `EXPECT ( <rows> )` trailer.
+    SMELT_TEST,
+    TEST_NAME,
+    EXPECT_CLAUSE,
+
+    // Phase 4 (testing): `#` CTE-reference operator.
+    //
+    // HASH: a bare `#` token (when NOT followed by `>`; `#>` / `#>>` remain
+    //   HASH_ARROW / HASH_ARROW_TEXT). Used to separate the model path from the
+    //   named CTE in `smelt.<path>#<cte>` references inside smelt.test bodies.
+    // CTE_SEGMENT: the `#<cte>` trailing segment inside a SMELT_PATH_REF node.
+    //   Contains the HASH token and the following IDENT (CTE name).
+    HASH,
+    CTE_SEGMENT,
+
+    // Pipe SQL (|>) — Data-World SQL pipe query nodes and operator markers.
+    //
+    // PIPE_QUERY: Root node for a FROM-first pipe query. Children are an optional
+    //   WITH_CLAUSE, a FROM_CLAUSE (the entry), and zero or more PIPE_STAGE nodes.
+    // PIPE_STAGE: One `|> OPERATOR body` stage. Contains a zero-width operator
+    //   marker (PIPE_OP_*) and the body tokens/nodes for that operator.
+    //
+    // The PIPE_OP_* markers follow the EXPR_KIND_* zero-width marker pattern:
+    // they are emitted as empty child nodes so that AST wrappers can dispatch
+    // on SyntaxKind rather than inspecting token text.
+    PIPE_QUERY,
+    PIPE_STAGE,
+    PIPE_OP_WHERE,
+    PIPE_OP_SELECT,
+    PIPE_OP_EXTEND,
+    PIPE_OP_SET,
+    PIPE_OP_DROP,
+    PIPE_OP_RENAME,
+    PIPE_OP_AS,
+    PIPE_OP_AGGREGATE,
+    PIPE_OP_ORDER_BY,
+    PIPE_OP_LIMIT,
+    PIPE_OP_JOIN,
+    PIPE_OP_UNION,
+    PIPE_OP_INTERSECT,
+    PIPE_OP_EXCEPT,
+    PIPE_OP_DISTINCT,
+
     // Special
     EOF, // End of file
 }

@@ -148,19 +148,13 @@ fn resolve_ref_path_form_returns_model_schema() {
 
 #[test]
 fn resolve_ref_kind_mismatch_on_test_path() {
-    // A `.sql` file under `tests/` declaring a test (today carried by the
-    // `materialization: test` frontmatter; spec uses `smelt.test`) cannot
+    // A `.sql` file under `tests/` containing a `smelt.test` declaration cannot
     // appear in a `TableExpr` (FROM) position. Resolving the path tuple
     // succeeds with `RefKind::Test`, but using it in FROM emits a
     // kind-mismatch diagnostic.
     let root = PathBuf::from("/fake/project");
     let test_path = root.join("tests").join("foo.sql");
-    let test_src = "\
----
-materialization: test
----
-SELECT 1 AS x WHERE 1 = 0
-";
+    let test_src = "smelt.test foo AS (SELECT 1 AS x WHERE 1 = 0)\nEXPECT ({x: 1})\n";
     let model_path = root.join("models").join("uses_test.sql");
     let model_src = "SELECT * FROM smelt.tests.foo\n";
 

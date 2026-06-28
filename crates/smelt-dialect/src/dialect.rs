@@ -81,6 +81,14 @@ pub struct BackendCapabilities {
 
     /// Supports ID-based column mapping (Delta only)
     pub supports_column_mapping: bool,
+
+    /// Supports pipe SQL (`|>`) syntax natively.
+    ///
+    /// When `false`, the dialect printer rewrites pipe queries to standard SQL
+    /// before emitting. Every current backend reports `false`; this field exists
+    /// so future backends (e.g. BigQuery, which has native pipe support) can opt
+    /// in without code changes.
+    pub supports_pipe_syntax: bool,
 }
 
 impl BackendCapabilities {
@@ -106,6 +114,7 @@ impl BackendCapabilities {
             supports_nested_array_ddl: true,
             supports_merge_schema_write: false,
             supports_column_mapping: false,
+            supports_pipe_syntax: false,
         }
     }
 
@@ -136,6 +145,7 @@ impl BackendCapabilities {
             supports_nested_array_ddl: false,
             supports_merge_schema_write: true,
             supports_column_mapping: true,
+            supports_pipe_syntax: false,
         }
     }
 
@@ -161,6 +171,7 @@ impl BackendCapabilities {
             supports_nested_array_ddl: false,
             supports_merge_schema_write: true,
             supports_column_mapping: false,
+            supports_pipe_syntax: false,
         }
     }
 
@@ -186,6 +197,7 @@ impl BackendCapabilities {
             supports_nested_array_ddl: false,
             supports_merge_schema_write: false,
             supports_column_mapping: false,
+            supports_pipe_syntax: false,
         }
     }
 }

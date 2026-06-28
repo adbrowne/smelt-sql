@@ -159,6 +159,15 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         planned_fix: false,
     },
     KnownGap {
+        id: "pipe_query",
+        description: "Pipe SQL (|>) syntax: FROM-first pipe queries (smelt extension, not PostgreSQL grammar)",
+        category: "pg_fails",
+        dialect: "pg",
+        patterns: &[r"\|>"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
         id: "trailing_comma",
         description: "Trailing commas in SELECT list and GROUP BY (DuckDB extension)",
         category: "pg_fails",

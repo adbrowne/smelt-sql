@@ -42,9 +42,9 @@ fn build_db(
 fn test_path_in_tableexpr_position_diagnostic() {
     let root = PathBuf::from("/fake/diag_project");
 
-    // A test file (identified by `materialization: test` frontmatter).
+    // A test file (identified by a `smelt.test` declaration).
     let test_path = root.join("tests").join("foo.sql");
-    let test_src = "---\nmaterialization: test\n---\nSELECT 1 AS x WHERE 1 = 0\n";
+    let test_src = "smelt.test foo AS (SELECT 1 AS x WHERE 1 = 0)\nEXPECT ({x: 1})\n";
 
     // A model that incorrectly uses the test in a FROM position.
     let model_path = root.join("models").join("bad_from.sql");

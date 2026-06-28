@@ -32,12 +32,12 @@ fn stage_test_workspace(tmp: &TempDir, name: &str) -> PathBuf {
     init_workspace(&root, name);
     std::fs::write(
         root.join("tests/test_pass.sql"),
-        "--- name: test_pass ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 1}\n---\n",
+        "smelt.test test_pass AS (\n    SELECT x FROM smelt.simple\n)\nPASSING simple AS ({x: 1})\nEXPECT ({x: 1})\n",
     )
     .unwrap();
     std::fs::write(
         root.join("tests/test_fail.sql"),
-        "--- name: test_fail ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 2}\n---\n",
+        "smelt.test test_fail AS (\n    SELECT x FROM smelt.simple\n)\nPASSING simple AS ({x: 1})\nEXPECT ({x: 2})\n",
     )
     .unwrap();
     root
@@ -49,7 +49,7 @@ fn stage_passing_workspace(tmp: &TempDir, name: &str) -> PathBuf {
     init_workspace(&root, name);
     std::fs::write(
         root.join("tests/test_pass.sql"),
-        "--- name: test_pass ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 1}\n---\n",
+        "smelt.test test_pass AS (\n    SELECT x FROM smelt.simple\n)\nPASSING simple AS ({x: 1})\nEXPECT ({x: 1})\n",
     )
     .unwrap();
     root
@@ -61,7 +61,7 @@ fn stage_failing_workspace(tmp: &TempDir, name: &str) -> PathBuf {
     init_workspace(&root, name);
     std::fs::write(
         root.join("tests/test_fail.sql"),
-        "--- name: test_fail ---\nmaterialization: test\ntest:\n  model: simple\n  expect:\n    - {x: 2}\n---\n",
+        "smelt.test test_fail AS (\n    SELECT x FROM smelt.simple\n)\nPASSING simple AS ({x: 1})\nEXPECT ({x: 2})\n",
     )
     .unwrap();
     root

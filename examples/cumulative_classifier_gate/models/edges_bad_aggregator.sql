@@ -1,5 +1,6 @@
 ---
-materialization: cumulative_aggregate
+materialization: table
+refresh: cumulative
 ---
 -- STRING_AGG is NOT in the cumulative allowlist; the classifier must refuse
 -- this model (CumulativeUnknownAggregator) regardless of run window.

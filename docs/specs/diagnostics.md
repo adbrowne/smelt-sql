@@ -124,16 +124,16 @@ Owned by `docs/specs/cumulative_aggregate.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `CumulativeRequiresGroupBy` | Error | A `cumulative_aggregate` SELECT has no GROUP BY (key columns are required). |
-| `CumulativeUnknownAggregator` | Error | A `cumulative_aggregate` projection uses a non-allowlisted aggregator or composite expression over aggregates. |
-| `CumulativeGroupByContainsPartitionColumn` | Error | The `cumulative_aggregate` GROUP BY contains the driving source's `partition_column`. |
-| `CumulativeForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `cumulative_aggregate`. |
-| `CumulativeForbidsNondeterministic` | Error | A non-deterministic function appears in a `cumulative_aggregate` SELECT. |
-| `CumulativeNoDrivingSource` | Error | No source in a `cumulative_aggregate`'s FROM declares a `timeseries:` block. |
-| `CumulativeMultipleDrivingSources` | Error | Multiple timeseries-tagged sources in a `cumulative_aggregate`'s FROM (v1 supports exactly one). |
-| `CumulativeSqlNotParseable` | Error | A `cumulative_aggregate` SELECT could not be parsed for aggregator classification. |
-| `CumulativeForbidsTimeseries` | Error | A `cumulative_aggregate` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
-| `CumulativeForbidsIncremental` | Error | A `cumulative_aggregate` model incorrectly declares an `incremental:` block. Anchored at offset 0. |
+| `CumulativeRequiresGroupBy` | Error | A `refresh: cumulative` model's SELECT has no GROUP BY (key columns are required). |
+| `CumulativeUnknownAggregator` | Error | A `refresh: cumulative` model's projection uses a non-allowlisted aggregator or composite expression over aggregates. |
+| `CumulativeGroupByContainsPartitionColumn` | Error | The `refresh: cumulative` model's GROUP BY contains the driving source's `partition_column`. |
+| `CumulativeForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: cumulative` model. |
+| `CumulativeForbidsNondeterministic` | Error | A non-deterministic function appears in a `refresh: cumulative` model's SELECT. |
+| `CumulativeNoDrivingSource` | Error | No source in a `refresh: cumulative` model's FROM declares a `timeseries:` block. |
+| `CumulativeMultipleDrivingSources` | Error | Multiple timeseries-tagged sources in a `refresh: cumulative` model's FROM (v1 supports exactly one). |
+| `CumulativeSqlNotParseable` | Error | A `refresh: cumulative` model's SELECT could not be parsed for aggregator classification. |
+| `CumulativeForbidsTimeseries` | Error | A `refresh: cumulative` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
+| `CumulativeForbidsIncremental` | Error | A `refresh: cumulative` model incorrectly declares an `incremental:` block. Anchored at offset 0. |
 
 ---
 
@@ -143,7 +143,9 @@ Owned by `docs/specs/testing.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `UnknownTestInput` | Error | An `inputs:` key in a `materialization: test` model names no compiled dependency of the model under test (catches a typo that would otherwise be silently replaced with an empty CTE → a false-green test). Anchored at the offending key. |
+| `UnknownTestInput` | Error | A `PASSING <dep>` clause in a `smelt.test` declaration names no compiled dependency of the assertion query (catches a typo that would otherwise be silently replaced with an empty CTE → a false-green test). Anchored at the offending name. |
+| `UnknownTestCte` | Error | A `smelt.<model>#<cte>` reference names a CTE absent from the referenced model's `WITH` clause. Anchored at the `#<cte>` suffix. |
+| `CteRefOutsideTest` | Error | A `smelt.<model>#<cte>` CTE reference appears outside a `smelt.test` body. Anchored at the `#` operator. |
 
 ---
 
@@ -282,6 +284,14 @@ Owned by `docs/specs/meta_language.md`.
 |------|----------|---------|
 | `PipeRhsNotCall` | Error | The RHS of a `|>` is not syntactically a call expression. |
 | `PipeInDataPosition` | Error | A pipe expression `|>` appears in a Data-World grammar position (e.g. inside a WHERE predicate). |
+
+#### Pipe queries (Data-World SQL `|>`)
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `PipeUnknownOperator` | Error | A `\|>` in a FROM-first pipe query is followed by a token that is not a recognised pipe operator keyword. Message: `unknown pipe operator '<kw>'`. |
+| `PipeOperatorUnsupported` | Error | A `\|>` is followed by a recognised-but-deferred operator (`PIVOT`/`UNPIVOT`/`WINDOW`/`CALL`/`TABLESAMPLE`/`ASSERT`). Message: `pipe operator '<kw>' is not supported — <reason>`. |
+| `PipeStageMalformed` | Error | A pipe stage body does not parse against the operator's clause grammar (e.g. `\|> WHERE` with no predicate). Message: `malformed '<kw>' pipe stage`. |
 
 #### Ternary (if-then-else)
 

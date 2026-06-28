@@ -50,6 +50,10 @@ GROUP BY 1
 
 Each section delimiter must follow the exact form `--- name: <model_name> ---` (leading/trailing spaces around the name are trimmed). Any other `--- X ---` form is a hard parse error.
 
+### Query body forms
+
+A model's SQL body may be written either as a standard `SELECT` statement or as a **pipe query** — the FROM-first `FROM t |> WHERE … |> AGGREGATE …` form. A body that begins with a bare `FROM` (no leading `SELECT`) followed by `|>` stages is a pipe query and is lowered to standard SQL during code generation; all frontmatter (`materialization`, `refresh`, `incremental`, `tags`, …) applies identically regardless of body form. See `pipe_sql.md` for the pipe operator set, scoping rules, and lowering.
+
 ### Model naming
 
 | File type | Name source |
@@ -66,20 +70,32 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `name` | string | — | Accepted but ignored in single-model files; overridden by delimiter in multi-model files |
-| `materialization` | enum | project default (`view`) | How to persist the model's output. See Materialization modes. |
+| `materialization` | enum | project default (`view`) | How to store the model's output (the storage axis). See Materialization (storage) modes. |
+| `refresh` | enum | `full` | How stored output is recomputed across runs (the refresh axis). `full` (default) or `cumulative`. See Refresh axis. |
 | `timeseries` | object | — | Time-dimension declaration (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Required when `incremental:` is declared. |
-| `incremental` | object | — | Incremental configuration. See `incremental_models.md`. Requires `timeseries:` to be present. |
-| `target` | string | — | Override execution target for this model (overrides `smelt.yml` and `--target`). Not valid on `ephemeral` or `test` models. |
+| `incremental` | object | — | Incremental configuration (the refresh axis's incremental strategy). See `incremental_models.md`. Requires `timeseries:` to be present. |
+| `target` | string | — | Override execution target for this model (overrides `smelt.yml` and `--target`). Not valid on `ephemeral` models. |
 | `tags` | string[] | `[]` | Organization labels. Merged with `smelt.yml` model config tags (union, deduplicated). |
 | `owner` | string | — | Responsible team or person. Informational; surfaced in data catalog. |
 | `description` | string | — | Human-readable model description. Surfaced in data catalog. |
 | `columns` | object | `{}` | Per-column metadata. See Column metadata below. |
 | `backend_hints` | object | `{}` | Freeform backend-specific hints (forward compatibility). Not validated. |
-| `test` | object | — | Test specification. Only valid when `materialization: test`. See `testing.md`. |
 | `schema_evolution` | object | — | Schema evolution strategy. See `schema_evolution.md`. |
 | `format` | enum (`delta` \| `parquet`) | target default | Override table format. Ignored for DuckDB targets; Spark targets default to `delta`. |
 
-### Materialization modes
+### Three orthogonal axes
+
+A model is described by three independent questions, each with its own surface:
+
+| Axis | Question | Surface | Values |
+|------|----------|---------|--------|
+| **Kind** | What kind of node is this? | file format / `smelt.<noun>` keyword | `model` · `test` · `function` · `extern` · `seed` · `source` (see `architecture.md`) |
+| **Storage** | How is a model's output stored? | `materialization:` | `view` · `table` · `materialized_view` · `ephemeral` |
+| **Refresh** | How is stored output recomputed across runs? | `refresh:` / `incremental:` | `full` (default) · `incremental` · `cumulative` |
+
+`materialization` answers **only** the storage question. Kind is determined elsewhere — a unit test is a `smelt.test` declaration (`testing.md`), not a `materialization` value. Refresh is a separate axis — a cumulative aggregate is `materialization: table` + `refresh: cumulative` (`cumulative_aggregate.md`), and incremental is `materialization: table` + an `incremental:` block (`incremental_models.md`).
+
+### Materialization (storage) modes
 
 | Value | Behavior |
 |-------|----------|
@@ -87,8 +103,18 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 | `table` | Persists the query result as a physical table. |
 | `ephemeral` | Not materialized. SQL is inlined as a CTE into every downstream model that references it. |
 | `materialized_view` | Backend-managed persistent view; the backend controls refresh scheduling. |
-| `test` | Not materialized. The model defines a unit test. SQL body is a test query; `test:` key in frontmatter declares mock data and assertions. See `testing.md`. |
-| `cumulative_aggregate` | Stateful merge. The SELECT's `GROUP BY` is the unique key; non-key projections must be allowlisted aggregators. Driving partition shape is read from a single `timeseries:`-tagged source in the FROM clause. See `cumulative_aggregate.md`. |
+
+### Refresh axis
+
+A stored output (`materialization: table` or `materialized_view`) is recomputed across runs according to the **refresh** axis. `full` — the default, rebuild from scratch — needs no key. The two stateful strategies are members of the same axis, each with its own detailed surface:
+
+| Strategy | Surface | Spec |
+|----------|---------|------|
+| `full` | *(default; no key)* | — |
+| `incremental` | `incremental:` block + `timeseries:` source | `incremental_models.md` |
+| `cumulative` | `refresh: cumulative` | `cumulative_aggregate.md` |
+
+`refresh` and a refresh strategy only apply to stored outputs: `refresh` on a `view`, `ephemeral`, or `materialized_view` model is a warning (the config is ignored), mirroring the existing `incremental` treatment in the Constraint violations table.
 
 ### Materialization precedence (highest to lowest)
 
@@ -138,15 +164,14 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 | Combination | Result |
 |-------------|--------|
 | `ephemeral` + `incremental` | Hard error |
+| `ephemeral` + `refresh: cumulative` | Hard error |
 | `ephemeral` + `timeseries` | Hard error (see `timeseries.md`) |
 | `ephemeral` + `target` override | Hard error |
-| `test` + `incremental` | Hard error |
-| `test` + `timeseries` | Hard error (see `timeseries.md`) |
-| `test` + `target` override | Hard error |
 | `incremental` without `timeseries` | Hard error (`TimeseriesRequiredForIncremental`) |
-| `cumulative_aggregate` + `timeseries` | Hard error (`CumulativeForbidsTimeseries`; see `cumulative_aggregate.md`) |
-| `cumulative_aggregate` + `incremental` | Hard error (`CumulativeForbidsIncremental`) |
+| `refresh: cumulative` + `timeseries` | Hard error (`CumulativeForbidsTimeseries`; see `cumulative_aggregate.md`) |
+| `refresh: cumulative` + `incremental` | Hard error (`CumulativeForbidsIncremental`) |
 | `view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
+| `view` + `refresh: cumulative` | Warning (stderr); refresh config ignored |
 | `materialized_view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
 | Unknown frontmatter key | Hard error (`deny_unknown_fields`) |
 
@@ -188,7 +213,9 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 **Multi-model files.** The `--- name: model_name ---` syntax allows logically-related models to live in one file without requiring a directory hierarchy. This is useful for staging + mart pairs or small pipelines that belong together conceptually. The name must be in the delimiter (not just YAML body) so the file can be scanned without full YAML parsing.
 
-**Five materialization modes, not three.** dbt has three modes; smelt adds `materialized_view` (backend-managed refresh lifecycle) and `test` (first-class test declaration). `test` as a materialization mode keeps test SQL in the same format as model SQL — no separate test file format — which means the parser, type checker, and LSP all work uniformly across models and tests.
+**`materialization` is the storage axis only.** dbt's `materialized` value conflates three questions — what kind of node this is (`test`), how output is stored (`table`/`view`), and how it is refreshed (`incremental`). smelt keeps these on three orthogonal axes (see "Three orthogonal axes"). `materialization` answers only "how is output stored", with four storage modes: `view`, `table`, the backend-managed `materialized_view`, and `ephemeral` (inlined, no stored object). This matches the backend's own storage-only notion of materialization. A unit test is a different *kind* of node — it produces no output and nothing depends on it — so it is a `smelt.test` declaration on the kind axis (`testing.md`), not a `materialization` value. A stateful refresh strategy (cumulative, incremental) is a different *axis* — `materialization: table` + `refresh:`/`incremental:` — because two models can share a storage mode while differing in how they are recomputed.
+
+**Why `cumulative` joins `incremental` on the refresh axis, not `materialization`.** Cumulative aggregate and incremental are siblings: both keep a stored table and recompute it statefully across runs, differing only in their equivalence contract (`cumulative_aggregate.md`, `incremental_models.md`). Modelling one as a `materialization` value and the other as a config block on a `table` would put two members of one family on two different axes. Placing both on the refresh axis keeps the family together and keeps `materialization` purely about storage.
 
 **Tag union, not override.** Tags accumulate across config layers rather than overriding. This lets a project-level `smelt.yml` add organization-wide tags (e.g., `pii`, `sla`) to specific models without preventing model authors from adding their own. Override semantics would require model authors to re-declare all project-level tags whenever they add their own.
 
@@ -200,7 +227,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 1. **Every model file is pure SQL.** No Jinja, no conditionals, no `is_incremental()`. The framework injects time filters and other execution-time rewrites; the logical SQL is static.
 2. **Ephemeral models have no database object.** They produce no `CREATE TABLE`, `CREATE VIEW`, or DDL of any kind. Their SQL exists only as text substituted into downstream models.
-3. **Test models have no database object.** `materialization: test` models are executed in-memory against a mock dataset; they never produce persistent state.
+3. **Tests are not models and have no database object.** A unit test is a `smelt.test` declaration (`testing.md`), not a model and not a `materialization` value. Tests are executed in-memory against a mock dataset; they never produce persistent state.
 4. **Canonical addresses are unique within a project.** The discovery pass must not yield two `ModelFile` entries with the same canonical `smelt.<path>` address. Uniqueness is keyed on the full canonical address, not the bare leaf model name — `models/users.sql` (address `users`) and `models/archive/users.sql` (address `archive.users`) are distinct and legal.
 5. **Unknown frontmatter keys are rejected.** The parser must not silently accept and ignore unknown YAML keys.
 6. **Tags are additive.** No frontmatter tag can remove a tag assigned by `smelt.yml`.
@@ -227,6 +254,8 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **Related specs**:
   - `architecture.md` — `smelt.<path>` addressing scheme and identity-from-structure principle
   - `timeseries.md` — `timeseries:` frontmatter block
-  - `incremental_models.md` — incremental frontmatter keys
-  - `testing.md` — `materialization: test` and the `test:` frontmatter key (forthcoming)
+  - `incremental_models.md` — incremental frontmatter keys (the refresh axis's incremental strategy)
+  - `cumulative_aggregate.md` — the `refresh: cumulative` strategy
+  - `testing.md` — the `smelt.test` declaration kind
   - `schema_evolution.md` — `schema_evolution:` and `columns.default/backfill` frontmatter keys (forthcoming)
+  - `pipe_sql.md` — the FROM-first pipe-query body form a model may use

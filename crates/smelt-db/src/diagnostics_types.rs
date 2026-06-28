@@ -755,6 +755,40 @@ pub enum DiagnosticCode {
     /// Message: "model declares state.mode {model_mode} but project posture is
     /// {project_mode}; models may narrow but not widen the project posture"
     StateModeWidening,
+    /// Emitted (Error) when a `smelt.<model>#<cte>` CTE reference appears
+    /// outside a `smelt.test` body. The `#` operator is test-local: it may
+    /// only be used inside a `smelt.test` declaration body to address one
+    /// internal CTE of the referenced model. Using it in a model body, a
+    /// `smelt.define` body, or any other position is a hard error.
+    /// Anchored at the `#` operator token.
+    CteRefOutsideTest,
+    /// Emitted (Error) at `smelt test` run time when a `PASSING <dep>` clause
+    /// in a `smelt.test` declaration names a dependency that is not a reachable
+    /// external `smelt.<path>` dep of the assertion query. Catches typos such
+    /// as `PASSING order AS (...)` when the actual dep is `orders`.  A typo'd
+    /// PASSING clause would otherwise produce a false green (the dep gets an
+    /// empty mock CTE). Anchored at the offending PASSING_NAME span.
+    UnknownTestInput,
+    /// Emitted (Error) at `smelt test` run time when a `smelt.<model>#<cte>`
+    /// reference in a `smelt.test` body names a CTE that is absent from the
+    /// referenced model's `WITH` clause. Anchored at the `#<cte>` suffix token.
+    UnknownTestCte,
+    /// Emitted when a `|>` in a FROM-first pipe query is followed by a token
+    /// that is not a recognised pipe operator keyword.
+    /// Message: `unknown pipe operator '<kw>'`.
+    /// Anchored at the unrecognised token span.
+    PipeUnknownOperator,
+    /// Emitted when a `|>` in a FROM-first pipe query is followed by a
+    /// recognised-but-deferred operator (`PIVOT`/`UNPIVOT`/`WINDOW`/`CALL`/
+    /// `TABLESAMPLE`/`ASSERT`). Using a deferred operator is a hard error.
+    /// Message: `pipe operator '<kw>' is not supported — <reason>`.
+    /// Anchored at the operator keyword span.
+    PipeOperatorUnsupported,
+    /// Emitted when a pipe stage body does not parse against the operator's
+    /// clause grammar (e.g. `|> WHERE` with no predicate expression).
+    /// Message: `malformed '<kw>' pipe stage`.
+    /// Anchored at the stage span.
+    PipeStageMalformed,
 }
 
 /// Structured metadata attached to diagnostics for code actions

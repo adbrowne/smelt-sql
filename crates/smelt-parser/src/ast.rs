@@ -1,5 +1,6 @@
 /// Typed AST wrappers over Rowan CST
 use crate::syntax_kind::SyntaxNode;
+use crate::SyntaxKind;
 use crate::SyntaxKind::*;
 use rowan::TextRange;
 
@@ -24,6 +25,16 @@ impl File {
         self.0.children().find_map(SelectStmt::cast)
     }
 
+    /// The top-level `PipeQuery` node, if the file body is a FROM-first pipe query.
+    pub fn pipe_query(&self) -> Option<PipeQuery> {
+        self.0.children().find_map(PipeQuery::cast)
+    }
+
+    /// Whether the file has a valid top-level query body (SELECT_STMT or PIPE_QUERY).
+    pub fn has_query_body(&self) -> bool {
+        self.select_stmt().is_some() || self.pipe_query().is_some()
+    }
+
     /// Iterate over top-level `smelt.define` declarations in this file.
     pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
         self.0.children().filter_map(SmeltDefine::cast)
@@ -32,6 +43,11 @@ impl File {
     /// Iterate over top-level `smelt.extern` declarations in this file.
     pub fn externs(&self) -> impl Iterator<Item = SmeltExtern> + '_ {
         self.0.children().filter_map(SmeltExtern::cast)
+    }
+
+    /// Iterate over top-level `smelt.test` declarations in this file.
+    pub fn tests(&self) -> impl Iterator<Item = SmeltTest> + '_ {
+        self.0.children().filter_map(SmeltTest::cast)
     }
 }
 
@@ -230,6 +246,106 @@ impl SmeltExtern {
         let off = self.source_offset();
         let attached = crate::attach_frontmatter_to_decls(raw_text, &[off]);
         attached.into_iter().next().flatten().map(|b| b.inner_text)
+    }
+}
+
+// ===== smelt.test (Phase 3: parser-only declaration) =====
+
+/// Top-level `smelt.test <name> AS (<select>) [PASSING <dep> AS (<rows>)]... EXPECT (<rows>)`
+/// declaration.
+///
+/// A test is a peer of `smelt.define`/`smelt.extern` on the kind axis. The
+/// body `<select>` is an assertion query; the `PASSING` clauses supply inline
+/// table data; the `EXPECT` clause lists expected result rows. Semantic wiring
+/// (Phase 5) classifies the kind and wires the runner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltTest(SyntaxNode);
+
+impl SmeltTest {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `SMELT_TEST` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_TEST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The test name — text of the IDENT token inside the `TEST_NAME` child.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == TEST_NAME)?
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the `TEST_NAME` child — the name identifier span.
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == TEST_NAME)?;
+        let ident = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)?;
+        Some(ident.text_range())
+    }
+
+    /// The `SELECT` (or `WITH ... SELECT`) statement body of the test assertion.
+    pub fn body_select(&self) -> Option<SelectStmt> {
+        self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// Iterate over `PASSING` clauses in source order.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
+
+    /// The required `EXPECT` clause (the expected result rows).
+    pub fn expect_clause(&self) -> Option<ExpectClause> {
+        self.0.children().find_map(ExpectClause::cast)
+    }
+
+    /// Byte offset at which this declaration starts in the source text.
+    /// See `SmeltDefine::source_offset` for the offset-stability rationale.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+}
+
+/// The `EXPECT ( <rows> )` clause inside a `smelt.test` declaration.
+///
+/// `<rows>` is a comma-separated list of record literals `{key: value, ...}`.
+/// Omitted keys are allowed (partial match shape for property tests).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExpectClause(SyntaxNode);
+
+impl ExpectClause {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `EXPECT_CLAUSE` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == EXPECT_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over the expected result rows (record literals) in source order.
+    ///
+    /// Each row is a `RECORD_LITERAL` node produced by parsing a `{k: v, ...}`
+    /// expression. Because `parse_expression()` wraps each row in an `EXPRESSION`
+    /// node, we use `descendants()` to surface the inner `RECORD_LITERAL` nodes.
+    pub fn rows(&self) -> impl Iterator<Item = RecordLiteral> + '_ {
+        self.0.descendants().filter_map(RecordLiteral::cast)
     }
 }
 
@@ -699,6 +815,35 @@ impl SmeltPathRef {
     pub fn text_range(&self) -> TextRange {
         self.0.text_range()
     }
+
+    /// The optional `CTE_SEGMENT` child node (present when `#<cte>` suffix was
+    /// parsed). Returns `None` when this path ref has no CTE suffix.
+    fn cte_segment_node(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| n.kind() == CTE_SEGMENT)
+    }
+
+    /// The CTE name from a trailing `#<cte>` suffix, or `None` if not present.
+    ///
+    /// For `smelt.daily_revenue#daily_agg` this returns `Some("daily_agg")`.
+    pub fn cte_name(&self) -> Option<String> {
+        let seg = self.cte_segment_node()?;
+        seg.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the `#` token in a trailing `#<cte>` suffix, used for
+    /// anchoring `CteRefOutsideTest` diagnostics at the operator itself.
+    ///
+    /// Returns `None` when this path ref has no CTE suffix.
+    pub fn hash_range(&self) -> Option<TextRange> {
+        let seg = self.cte_segment_node()?;
+        seg.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == HASH)
+            .map(|t| t.text_range())
+    }
 }
 
 /// `smelt.<path>(<args>)` call form, with optional trailing `PASSING` clauses.
@@ -811,16 +956,22 @@ impl PassingClause {
         &self.0
     }
 
-    /// The binding name — the `IDENT` text inside the `PASSING_NAME` child.
+    /// The binding name — the dependency's bare address path inside the
+    /// `PASSING_NAME` child. May be multi-segment (e.g. `silver.sessions`); the
+    /// `IDENT` segments are joined with `.` (DOT tokens are dropped).
     pub fn name(&self) -> Option<String> {
-        self.0
-            .children()
-            .find(|n| n.kind() == PASSING_NAME)?
+        let name_node = self.0.children().find(|n| n.kind() == PASSING_NAME)?;
+        let segments: Vec<String> = name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
             .filter(|t| t.kind() == IDENT)
             .map(|t| t.text().to_string())
-            .next()
+            .collect();
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments.join("."))
+        }
     }
 
     /// Raw text of the expression inside `(...)` in the `PASSING_BODY` child,
@@ -846,6 +997,16 @@ impl PassingClause {
             .children()
             .find(|n| n.kind() == PASSING_NAME)
             .map(|n| n.text_range())
+    }
+
+    /// Iterate over the body rows (record literals) in source order.
+    ///
+    /// For `smelt.test` PASSING clauses the body is a comma-separated list of
+    /// record literals `{k: v, ...}`.  For function-call PASSING clauses the
+    /// body is typically a single expression (SELECT / aggregate), so this
+    /// iterator returns exactly one result in that case.
+    pub fn rows(&self) -> impl Iterator<Item = RecordLiteral> + '_ {
+        self.0.descendants().filter_map(RecordLiteral::cast)
     }
 }
 
@@ -4235,5 +4396,121 @@ mod tests {
                 call_text
             );
         }
+    }
+}
+
+// ===== Pipe SQL (Data-World |> pipe query) =====
+
+/// A FROM-first pipe query: `[WITH …] FROM <table_ref> |> STAGE … |> STAGE …`.
+///
+/// Children (in order):
+/// - optional `WITH_CLAUSE`
+/// - `FROM_CLAUSE` (the entry source)
+/// - zero or more `PIPE_STAGE` nodes
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipeQuery(SyntaxNode);
+
+impl PipeQuery {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PIPE_QUERY {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `WITH_CLAUSE` node, if present.
+    pub fn with_clause(&self) -> Option<WithClause> {
+        self.0.children().find_map(WithClause::cast)
+    }
+
+    /// The `FROM_CLAUSE` entry source.
+    pub fn from_clause(&self) -> Option<FromClause> {
+        self.0.children().find_map(FromClause::cast)
+    }
+
+    /// Iterator over all `PIPE_STAGE` children in declaration order.
+    pub fn stages(&self) -> impl Iterator<Item = PipeStage> + '_ {
+        self.0.children().filter_map(PipeStage::cast)
+    }
+}
+
+/// One `|> OPERATOR body` stage inside a `PIPE_QUERY`.
+///
+/// Children:
+/// - a zero-width `PIPE_OP_*` marker identifying the operator
+/// - body tokens/nodes for the stage
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipeStage(SyntaxNode);
+
+impl PipeStage {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PIPE_STAGE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `PIPE_OP_*` marker kind identifying which operator this stage is.
+    /// Returns `None` only for error-recovery stages with no recognised operator.
+    pub fn op_kind(&self) -> Option<SyntaxKind> {
+        self.0.children().find_map(|c| {
+            let k = c.kind();
+            if matches!(
+                k,
+                PIPE_OP_WHERE
+                    | PIPE_OP_SELECT
+                    | PIPE_OP_EXTEND
+                    | PIPE_OP_SET
+                    | PIPE_OP_DROP
+                    | PIPE_OP_RENAME
+                    | PIPE_OP_AS
+                    | PIPE_OP_AGGREGATE
+                    | PIPE_OP_ORDER_BY
+                    | PIPE_OP_LIMIT
+                    | PIPE_OP_JOIN
+                    | PIPE_OP_UNION
+                    | PIPE_OP_INTERSECT
+                    | PIPE_OP_EXCEPT
+                    | PIPE_OP_DISTINCT
+            ) {
+                Some(k)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The first non-marker child node (the body of the stage), if any.
+    pub fn body(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|c| {
+            !matches!(
+                c.kind(),
+                PIPE_OP_WHERE
+                    | PIPE_OP_SELECT
+                    | PIPE_OP_EXTEND
+                    | PIPE_OP_SET
+                    | PIPE_OP_DROP
+                    | PIPE_OP_RENAME
+                    | PIPE_OP_AS
+                    | PIPE_OP_AGGREGATE
+                    | PIPE_OP_ORDER_BY
+                    | PIPE_OP_LIMIT
+                    | PIPE_OP_JOIN
+                    | PIPE_OP_UNION
+                    | PIPE_OP_INTERSECT
+                    | PIPE_OP_EXCEPT
+                    | PIPE_OP_DISTINCT
+            )
+        })
     }
 }

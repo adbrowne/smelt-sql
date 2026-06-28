@@ -10,4 +10,4 @@ SELECT
     event_ts,
     date_trunc('day', event_ts)::DATE AS event_date,
     amount
-FROM raw_events
+FROM smelt.sources.raw_events

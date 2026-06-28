@@ -1,7 +1,7 @@
 use crate::discovery::ModelFile;
 use anyhow::Result;
 use serde::Serialize;
-use smelt_core::config::{Config, TimeseriesConfig};
+use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
@@ -21,6 +21,11 @@ pub struct ExplainOutput {
 pub struct ExplainModel {
     pub dependencies: Vec<String>,
     pub materialization: Materialization,
+    /// Refresh axis: `"cumulative"` when the model uses the cumulative-aggregate
+    /// merge loop (`materialization: table` + `refresh: cumulative`). Omitted
+    /// when the model uses the default full-refresh strategy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<RefreshStrategy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental: Option<ExplainIncremental>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -150,11 +155,17 @@ pub fn build_explain_output(
                 generator_name: gn.clone(),
             });
 
+        // Emit `refresh: "cumulative"` when the model is cumulative; omit otherwise.
+        let refresh = metadata
+            .and_then(|m| m.refresh.clone())
+            .filter(|r| *r == RefreshStrategy::Cumulative);
+
         models.insert(
             model_name.clone(),
             ExplainModel {
                 dependencies,
                 materialization,
+                refresh,
                 incremental,
                 tags,
                 owner,
@@ -580,6 +591,99 @@ mod tests {
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")
+        );
+    }
+
+    /// `smelt explain --json` must emit `"materialization": "table"` and
+    /// `"refresh": "cumulative"` for a cumulative model, and must NOT emit
+    /// `"cumulative_aggregate"` anywhere in the materialization field.
+    ///
+    /// Spec oracle: `docs/specs/cli.md` §"`smelt explain --json` output schema".
+    #[test]
+    fn explain_json_emits_refresh_cumulative_for_cumulative_model() {
+        use crate::metadata::ModelMetadata;
+        use smelt_core::config::RefreshStrategy;
+
+        let mut model = make_model(
+            "device_stats",
+            vec![],
+            "SELECT device_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id",
+        );
+        model.metadata = Some(Box::new(ModelMetadata {
+            materialization: Some(Materialization::Table),
+            refresh: Some(RefreshStrategy::Cumulative),
+            ..Default::default()
+        }));
+
+        let models = vec![model];
+        let config = make_config(vec![]);
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        let output =
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+
+        let model_entry = &output.models["device_stats"];
+
+        // The `materialization` field must be `table` (the storage kind).
+        assert_eq!(
+            model_entry.materialization,
+            Materialization::Table,
+            "cumulative model materialization must be 'table', not anything else"
+        );
+
+        // The `refresh` field must be `Some(Cumulative)`.
+        assert_eq!(
+            model_entry.refresh,
+            Some(RefreshStrategy::Cumulative),
+            "cumulative model must have refresh: Some(Cumulative)"
+        );
+
+        // Verify the JSON serialization: must emit `"refresh": "cumulative"`
+        // and `"materialization": "table"`, must NOT contain `"cumulative_aggregate"`.
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(
+            json.contains("\"refresh\": \"cumulative\""),
+            "JSON must contain '\"refresh\": \"cumulative\"'; got:\n{json}"
+        );
+        assert!(
+            json.contains("\"materialization\": \"table\""),
+            "JSON must contain '\"materialization\": \"table\"'; got:\n{json}"
+        );
+        assert!(
+            !json.contains("\"cumulative_aggregate\""),
+            "JSON must not contain '\"cumulative_aggregate\"' in the materialization field; got:\n{json}"
+        );
+    }
+
+    /// A plain `materialization: table` model (no `refresh: cumulative`) must
+    /// NOT emit a `refresh` field in the JSON — the field is omitted for
+    /// the default full-refresh strategy.
+    #[test]
+    fn explain_json_omits_refresh_for_full_refresh_model() {
+        let mut model = make_model("orders", vec![], "SELECT * FROM raw_orders");
+        model.metadata = Some(Box::new(crate::metadata::ModelMetadata {
+            materialization: Some(Materialization::Table),
+            refresh: None,
+            ..Default::default()
+        }));
+
+        let models = vec![model];
+        let config = make_config(vec![]);
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        let output =
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+
+        let model_entry = &output.models["orders"];
+        assert_eq!(
+            model_entry.refresh, None,
+            "full-refresh model must have no refresh field"
+        );
+
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(
+            !json.contains("\"refresh\""),
+            "full-refresh model JSON must not emit a 'refresh' field; got:\n{json}"
         );
     }
 }

@@ -23,6 +23,7 @@ fn emitted_model_carries_origin_in_docs_json() {
         owner: None,
         tags: vec![],
         materialization: "view".to_string(),
+        refresh: None,
         path: "models/cohorts.gen.sql".to_string(),
         columns: vec![],
         upstream: vec![],

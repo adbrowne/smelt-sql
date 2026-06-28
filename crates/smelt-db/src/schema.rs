@@ -1,6 +1,6 @@
-/// Kind of an entity referenced by a `smelt.<path>` value or call
-/// (Phase 2a). Determined by the file format/content at the resolved
-/// path per architecture Surface §"Resolution".
+/// Kind of an entity referenced by a `smelt.<path>` value or call.
+/// Determined by the file format/content at the resolved path per
+/// architecture Surface §"Resolution".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefKind {
     /// `.sql` file with a bare SELECT.
@@ -9,11 +9,9 @@ pub enum RefKind {
     Seed,
     /// `.yml` file declaring an external table.
     Source,
-    /// `.sql` file declaring `smelt.define <name>`. Today Phase 2a
-    /// dispatches on `materialization: test` frontmatter or path-prefix
-    /// `tests/`; the `smelt.test` keyword landing is future work.
+    /// `.sql` file declaring `smelt.define <name>`.
     Function,
-    /// `.sql` file containing test models. Cannot be used in
+    /// `.sql` file containing `smelt.test` declarations. Cannot be used in
     /// `TableExpr` positions per the spec.
     Test,
 }

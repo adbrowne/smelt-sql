@@ -54,7 +54,10 @@ pub fn parse_model(db: &dyn salsa::Database, file: SourceFile) -> Option<Arc<Mod
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let ast = AstFile::cast(syntax)?;
-    ast.select_stmt()?;
+    // A valid model body is either a SELECT_STMT or a PIPE_QUERY (FROM-first pipe query).
+    if !ast.has_query_body() {
+        return None;
+    }
 
     Some(Arc::new(Model {
         name: model_name,

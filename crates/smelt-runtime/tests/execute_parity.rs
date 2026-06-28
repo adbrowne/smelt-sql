@@ -378,7 +378,7 @@ async fn test_cli_ui_manifest_parity() {
     );
 }
 
-/// Verify that test models (materialization: test) are filtered out of execution
+/// Verify that test models (`smelt.test` declarations) are filtered out of execution
 /// and do not appear in the `RunOutcome.models` map.
 #[tokio::test]
 async fn test_cli_ui_manifest_parity_with_test_models() {
@@ -388,11 +388,11 @@ async fn test_cli_ui_manifest_parity_with_test_models() {
 
     write_model(project_dir, "base", "SELECT 42 AS val");
 
-    // Write a test model with `materialization: test` frontmatter.
+    // Write a test model using `smelt.test` syntax — must be filtered from execution.
     write_model(
         project_dir,
         "test_base",
-        "---\nmaterialization: test\n---\nSELECT val FROM smelt.base WHERE val = 42",
+        "smelt.test check_val AS (\n    SELECT val FROM smelt.base WHERE val = 42\n)\nPASSING base AS ({val: 42})\nEXPECT ({val: 42})\n",
     );
 
     let db1_path = project_dir.join("run1.duckdb");

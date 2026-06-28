@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rowan::TextRange;
-use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
+use smelt_parser::{self, ast::FromClause, ast::SmeltPathRef, File as AstFile, TableRef};
 use smelt_types::{DataType, TypedColumn};
 
 use crate::function_body_check::{self, infer_tableexpr_return_schema};
@@ -909,6 +909,25 @@ pub fn build_type_context(
         process_from_clause_pure(&select_stmt, refs, &mut ctx);
     }
 
+    // Pipe queries (`FROM … |> …`) have their FROM clause directly on the PIPE_QUERY
+    // node, not on a SELECT_STMT. Process it here so that `type_context()` returns a
+    // properly seeded TypeContext for pipe query files.
+    //
+    // We also process the right-hand table in any `|> JOIN` stages so that those
+    // tables' columns are available to the scope-threading logic in
+    // `infer_pipe_stage_output_schema` (Phase 5: JOIN lowering).
+    if let Some(pipe_query) = file.pipe_query() {
+        if let Some(from_clause) = pipe_query.from_clause() {
+            process_from_clause_node_pure(&from_clause, refs, &mut ctx);
+        }
+        // Seed JOIN right-hand table schemas.
+        for stage in pipe_query.stages() {
+            if stage.op_kind() == Some(smelt_parser::syntax_kind::SyntaxKind::PIPE_OP_JOIN) {
+                process_pipe_join_stage_pure(&stage, refs, &mut ctx);
+            }
+        }
+    }
+
     ctx
 }
 
@@ -918,13 +937,48 @@ fn process_from_clause_pure(
     ctx: &mut TypeContext,
 ) {
     if let Some(from_clause) = select_stmt.from_clause() {
-        for table_ref in from_clause.table_refs() {
+        process_from_clause_node_pure(&from_clause, refs, ctx);
+    }
+}
+
+/// Core FROM-clause processor that operates on a `FromClause` node directly.
+///
+/// Used by both `process_from_clause_pure` (for `SELECT` statements) and the
+/// pipe-query branch in `build_type_context` (for `FROM … |> …` pipe queries).
+fn process_from_clause_node_pure(
+    from_clause: &FromClause,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    for table_ref in from_clause.table_refs() {
+        process_table_ref_pure(&table_ref, refs, ctx);
+    }
+    for join in from_clause.joins() {
+        if let Some(table_ref) = join.table_ref() {
             process_table_ref_pure(&table_ref, refs, ctx);
         }
-        for join in from_clause.joins() {
-            if let Some(table_ref) = join.table_ref() {
-                process_table_ref_pure(&table_ref, refs, ctx);
+    }
+}
+
+/// Process the right-hand TABLE_REF in a `|> JOIN` pipe stage, seeding its
+/// columns into the context so that subsequent scope-threading can find them.
+fn process_pipe_join_stage_pure(
+    stage: &smelt_parser::ast::PipeStage,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    use smelt_parser::syntax_kind::SyntaxKind::JOIN_CLAUSE;
+    // Find the JOIN_CLAUSE child of the PIPE_STAGE.
+    for child in stage.syntax().children() {
+        if child.kind() == JOIN_CLAUSE {
+            // The first TABLE_REF inside the JOIN_CLAUSE is the right-hand table.
+            for jc_child in child.children() {
+                if let Some(tr) = TableRef::cast(jc_child) {
+                    process_table_ref_pure(&tr, refs, ctx);
+                    break;
+                }
             }
+            break;
         }
     }
 }

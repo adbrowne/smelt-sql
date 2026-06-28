@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use smelt_core::config::RefreshStrategy;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelOriginKind;
 use smelt_db::ColumnSource;
@@ -41,6 +42,10 @@ pub struct CatalogModel {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     pub materialization: String,
+    /// Refresh axis: `"cumulative"` when the model uses the cumulative-aggregate
+    /// merge loop. Omitted when the model uses the default full-refresh strategy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<RefreshStrategy>,
     pub path: String,
     pub columns: Vec<CatalogColumn>,
     pub upstream: Vec<String>,
@@ -52,8 +57,7 @@ pub struct CatalogModel {
     /// models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<ModelOriginKind>,
-    /// Test models (`materialization: test`) that declare `test.model: <this model>`
-    /// in their frontmatter. Omitted when no tests target this model.
+    /// `smelt.test` declarations that reference this model. Omitted when no tests target this model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tests_targeting: Vec<TestRef>,
 }
@@ -296,6 +300,11 @@ pub fn build_catalog(
 
         let tests_targeting = test_targets.get(model_name).cloned().unwrap_or_default();
 
+        // Emit `refresh: "cumulative"` when the model is cumulative; omit otherwise.
+        let refresh = metadata
+            .and_then(|m| m.refresh.clone())
+            .filter(|r| *r == RefreshStrategy::Cumulative);
+
         models.insert(
             model_name.to_string(),
             CatalogModel {
@@ -304,6 +313,7 @@ pub fn build_catalog(
                 owner,
                 tags,
                 materialization,
+                refresh,
                 path: workspace_relative(&model_file.path, project_dir),
                 columns,
                 upstream,

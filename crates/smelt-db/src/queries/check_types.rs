@@ -404,6 +404,22 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 })
                 .accumulate(db);
             }
+        } else if let Some(pipe_query) = ast.pipe_query() {
+            let ctx = type_context(db, workspace, file);
+            let undeclared = type_inference::check_pipe_undeclared_columns(&pipe_query, &ctx);
+            for info in undeclared {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: info.message,
+                    range: info.range,
+                    code: Some(DiagnosticCode::UndeclaredColumn),
+                    data: Some(DiagnosticData::UndeclaredColumn {
+                        qualifier: info.qualifier,
+                        column_name: info.column_name,
+                    }),
+                })
+                .accumulate(db);
+            }
         }
     }
 

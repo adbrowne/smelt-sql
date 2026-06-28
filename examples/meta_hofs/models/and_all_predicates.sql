@@ -8,10 +8,9 @@
 -- Aliased so the build-path type-cast wrapper has a stable column name.
 SELECT reduce([true, false, true], and_all) AS all_true
 
---- name: reduce_is_false ---
-materialization: test
-test:
-  model: and_all_predicates
-  expect:
-    - {all_true: false}
----
+smelt.test reduce_is_false AS (
+    SELECT reduce([true, false, true], and_all) AS all_true
+)
+EXPECT (
+    {all_true: false}
+)

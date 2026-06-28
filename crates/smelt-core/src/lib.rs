@@ -20,7 +20,7 @@ pub mod workspace;
 pub use config::{
     parse_active_backends, parse_unstable_schema_flag, BackendType, Config, ConfigError,
     DataLatency, Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
-    Materialization, ModelConfig, Target, Weekday,
+    Materialization, ModelConfig, RefreshStrategy, Target, Weekday,
 };
 pub use discovery::{
     discover_function_file_paths, parse_sql_file, ModelDiscovery, ModelFile, ModelKind,

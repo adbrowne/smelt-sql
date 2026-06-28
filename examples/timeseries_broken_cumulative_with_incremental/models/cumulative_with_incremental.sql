@@ -1,5 +1,6 @@
 ---
-materialization: cumulative_aggregate
+materialization: table
+refresh: cumulative
 incremental:
   enabled: true
 ---

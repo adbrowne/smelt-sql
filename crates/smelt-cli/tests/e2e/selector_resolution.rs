@@ -450,13 +450,13 @@ fn test_select_uses_selector_syntax() {
     // Test for tagged_model (should run when selecting tag:core).
     fs::write(
         root.join("tests/test_tagged.sql"),
-        "--- name: test_tagged ---\nmaterialization: test\ntest:\n  model: tagged_model\n  expect:\n    - {x: 1}\n---\n",
+        "smelt.test test_tagged AS (\n    SELECT x FROM smelt.tagged_model\n)\nPASSING tagged_model AS ({x: 1})\nEXPECT ({x: 1})\n",
     )
     .unwrap();
     // Test for untagged_model (must NOT run when selecting tag:core).
     fs::write(
         root.join("tests/test_untagged.sql"),
-        "--- name: test_untagged ---\nmaterialization: test\ntest:\n  model: untagged_model\n  expect:\n    - {y: 2}\n---\n",
+        "smelt.test test_untagged AS (\n    SELECT y FROM smelt.untagged_model\n)\nPASSING untagged_model AS ({y: 2})\nEXPECT ({y: 2})\n",
     )
     .unwrap();
 
@@ -506,7 +506,7 @@ fn test_select_unresolvable_is_hard_error() {
     fs::write(root.join("models/base.sql"), "SELECT 1 AS x\n").unwrap();
     fs::write(
         root.join("tests/test_base.sql"),
-        "--- name: test_base ---\nmaterialization: test\ntest:\n  model: base\n  expect:\n    - {x: 1}\n---\n",
+        "smelt.test test_base AS (\n    SELECT x FROM smelt.base\n)\nPASSING base AS ({x: 1})\nEXPECT ({x: 1})\n",
     )
     .unwrap();
 

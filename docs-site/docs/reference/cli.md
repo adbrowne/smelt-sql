@@ -164,7 +164,7 @@ smelt run --auto
 
 Rebuild a target model and all its upstream dependencies for a specified time range. Useful for backfilling historical data or repairing a specific model and everything it depends on.
 
-`smelt backbuild` handles both incremental and cumulative aggregate models uniformly. For `materialization: incremental` models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `materialization: cumulative_aggregate` models, it dispatches the per-partition merge loop: each partition in the window is merged into the cumulative table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
+`smelt backbuild` handles both incremental and cumulative aggregate models uniformly. For incremental models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: cumulative` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the cumulative table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
 
 **Usage:**
 
@@ -317,7 +317,7 @@ smelt seed --show-results
 
 ## smelt test
 
-Run model tests and report results. Tests are `.sql` files with `materialization: test` in YAML frontmatter, placed in a directory listed in `paths:` (typically `tests/`).
+Run model tests and report results. Tests are `smelt.test` declarations in `.sql` files, placed in a directory listed in `paths:` (typically `tests/`).
 
 Each test defines mock input data and expected output for a model or CTE. smelt compiles the test into a standalone SQL query, executes it against an in-memory DuckDB instance, and compares the result.
 
