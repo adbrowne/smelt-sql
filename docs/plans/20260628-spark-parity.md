@@ -51,33 +51,37 @@ sub-plan and add a NOT-`done` row here.
 |----------|-------------------------|--------|
 | `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
 | `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
+| `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | pending |
 
 ## Wave scaffolding queue
 
-Scaffolded **just-in-time**, one wave at a time, by a human after the prior wave lands. W3+ are
-intentionally **not** detailed until W2's re-smoke produces concrete dialect failures — they are
-sketches, not commitments. (W2 — the two blocker fixes + re-smoke — is now scaffolded and in the
-registry above.)
+Scaffolded **just-in-time**, one wave at a time, by a human after the prior wave lands. W4+ are
+intentionally **not** detailed until W3's re-smoke produces concrete dialect failures — they are
+sketches, not commitments. (W3 — source seeding in the smoke + re-smoke — is now scaffolded and in
+the registry above.)
 
-- **W3 — source loading + remaining dialect lowerings.** W2's extended break list (BL-3, BL-4)
-  shows the primary gap is **source data not loaded into Spark before model execution** — the run
-  pipeline has no step to pre-populate `smelt.sources.*` tables in the Spark session, and the smoke
-  harness doesn't run `smelt-datagen` first. W3 phases: (P1) add a pre-run `load_table` step for
-  all `smelt.sources.*` dependencies of selected models (load from `data/<source>/` Parquet via
-  `createDataFrame`); (P2) update the smoke harness to run `smelt-datagen` or seed a minimal
-  in-memory Arrow batch; (P3) re-smoke to confirm BL-3/BL-4 resolved and surface any remaining
-  dialect lowering breaks (QUALIFY → subquery, `DATE '…'` → `to_date`, `::` → `CAST`,
-  `[…]` → `ARRAY(…)`, trailing-comma strip, …). Each lowering: red dual-target test → printer
-  lowering → green. Oracle: `multi_backend.md` §Semantics "Required lowerings".
-- **W4 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
+- **W4 — dialect lowerings.** One phase per real lowering W3's re-smoke surfaces (QUALIFY →
+  subquery, `DATE '…'` → `to_date`, `::` → `CAST`, `[…]` → `ARRAY(…)`, trailing-comma strip, …).
+  Each: red dual-target test → printer lowering → green. Oracle: `multi_backend.md` §Semantics
+  "Required lowerings". **If the `multi_engine` models are too simple to surface dialect breaks**
+  (W3·P3 records a clean parity pass), W4's breaks come from the **broad CLI mirror (W5)** instead —
+  scaffold W4 from whichever wave first surfaces a real Spark dialect rejection.
+- **W5 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
   `{DuckDb, Spark}` via the W1 harness; fix each exec/state gap (incremental DELETE+INSERT,
   schema evolution, seeds, MERGE on Delta).
-- **W5 — capability conformance + cross-engine.** One conformance test per `BackendCapabilities`
+- **W6 — capability conformance + cross-engine.** One conformance test per `BackendCapabilities`
   flag; assert the constructors match the `multi_backend.md` matrix; validate Spark→DuckDB
   Parquet type conformance (decimal precision, timestamp TZ).
-- **W6 — CI gate + docs.** Gated CI job (`spark-up.sh` → `cargo test --features spark` with
+- **W7 — CI gate + docs.** Gated CI job (`spark-up.sh` → `cargo test --features spark` with
   `SPARK_CONNECT_URL` → `spark-down.sh`); `CLAUDE.md` "Commands" entry; `docs-site/` backend
   pages; retract the `multi_backend.md` "parity not yet verified" Known-Divergence once green.
+
+**Deferred product decision (not a wave yet).** W3 surfaced that smelt has **no source-
+materialization step in the run pipeline for any backend** — `smelt.sources.*` compiles to a table
+name but nothing creates the table; DuckDB examples seed sources manually in `run.sh`. W3 seeds at
+the *test* level to unblock parity. Whether smelt should grow a real source-load step (pipeline
+pre-load, or declarative per-source `path:`/`data:` with `read_parquet`/`spark.read` lowering) is a
+product decision to be taken separately, with a spec, before it becomes a wave.
 
 ## Blocked phases (master-level triage ledger)
 
@@ -107,6 +111,15 @@ _(none yet)_
   absent because BL-3 blocked `stg_sessions`). The smoke ran past session-init (BL-2 resolved) and
   past seed-load (BL-1 resolved), reaching actual SQL execution on both models. Extended break list
   committed. W3 scoped: pre-run source loading + datagen step in the smoke harness.
+- **2026-06-28** — **W3 scaffolded** (`docs/plans/20260628-spark-w3-source-seeding.md`, registry row
+  added). Investigation of BL-3 found smelt has **no pipeline source-materialization step for any
+  backend** (DuckDB examples seed sources manually in `run.sh`); the compiler emits
+  `analytics.sources_raw_sessions` but nothing creates it. **Human-gate decision:** keep W3 a
+  *test-harness* wave — seed source data identically into both `{DuckDb, Spark}` in the smoke
+  (P1 reusable seed helper → P2 wire into the `multi_engine` smoke, resolving BL-3/BL-4 → P3 re-smoke
+  to surface dialect breaks) — and treat real source materialization as a separate product decision
+  (recorded under the wave queue's "Deferred product decision"). No spec change. Dialect lowerings
+  renumber to **W4**, scaffolded from W3's re-smoke breaks.
 - **2026-06-28** — **W2 scaffolded** (`docs/plans/20260628-spark-w2-unblock-resmoke.md`, registry
   row added). Reframed from the original "W2 = dialect lowerings" sketch: the recorded break list is
   **shallow because BL-2 aborts every model on first run**, so no dialect break could surface in W1.
