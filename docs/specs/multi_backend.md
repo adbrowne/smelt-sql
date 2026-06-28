@@ -53,6 +53,7 @@ owners: [andrew]
   | `supports_nested_array_ddl` | ✓ | ✓ | ✗ |
   | `supports_merge_schema_write` | ✗ | ✓ | ✓ |
   | `supports_column_mapping` | ✗ | ✓ | ✗ |
+  | `requires_schema_init` | ✓ | ✓ | ✓ |
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
   constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`) match
@@ -85,6 +86,27 @@ suite is the executable list):
   TABLE` (the Spark backend already does this).
 - `supports_insert_overwrite = false` → emulate via range `DELETE` + `INSERT` (DuckDB).
 - `supports_materialized_views = false` → fall back to `Table` materialization (DuckDB).
+
+### Session initialization
+Before any model executes, a backend's session must be usable against a target schema that may
+not exist yet (first run against a fresh warehouse). When `requires_schema_init = true`, the
+backend **creates the target schema** (`CREATE SCHEMA IF NOT EXISTS` / `CREATE DATABASE IF NOT
+EXISTS <catalog>.<schema>`) during session init, **before** it selects the current
+schema/database and before the first model runs. Selecting a non-existent schema must never be
+the first statement a fresh session issues — on backends whose `setCurrentDatabase`/`USE` hard-
+fails for a missing schema (Spark Connect raises `[SCHEMA_NOT_FOUND]`), that ordering bug blocks
+every model on first run. The flag is `true` for every backend today; the conformance suite
+asserts each constructor sets it and that a first-run model against a fresh schema succeeds.
+
+### Loading data into a backend
+Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the
+backend's process shares the host filesystem. The transfer is performed through the backend's
+own client API — for Spark Connect, the rows are sent as an in-memory frame
+(`createDataFrame` from Arrow), **not** by writing a host-path file and asking the server to
+read it back (`spark.read.parquet('/tmp/…')`), which fails with `PATH_NOT_FOUND` against any
+containerized or remote Connect server whose JVM cannot see the host path. This is distinct from
+cross-engine *exchange* below, where the shared `warehouse` filesystem is an explicit
+requirement; data **loading** carries no such assumption.
 
 ### Cross-engine data exchange
 When a model on backend A references a model pinned to backend B (a cross-backend edge, found
@@ -144,6 +166,10 @@ resolves nested widening to a table rewrite.
   only in the gated job that provides the server.
 - **Cross-engine exchange is filesystem-local today.** Remote object stores (S3/GCS/ADLS) are
   explicitly out of scope until a mirrored test demands one.
+- **Data loading carries no host-filesystem assumption.** A backend's load path (seeds, test
+  fixtures, Arrow batches) must transfer rows through the backend client API, never via a host
+  path the server is asked to read. A load path that only works when the server shares the host
+  filesystem is a bug, not a deployment constraint (see §"Loading data into a backend").
 - **No new logical surface per backend.** Backends may differ in physical SQL and capability
   flags only; the set of writable smelt models is backend-independent.
 
@@ -155,6 +181,12 @@ resolves nested widening to a table rewrite.
   tracked in `docs/plans/20260628-spark-parity.md`. Until that lands, the matrix above is the
   *intended* contract, and specific lowerings (QUALIFY, date literals, `::` cast, array
   literals) may emit invalid Spark SQL where the printer does not yet honor the flag.
+- **Session init and Arrow loading are not yet honored by the Spark backend.** The Spark adapter
+  selects the current schema before creating it (so a first run against a fresh schema fails
+  `[SCHEMA_NOT_FOUND]`), and `load_table` stages a host-path Parquet the remote JVM cannot read
+  (`[PATH_NOT_FOUND]`). The §Semantics "Session initialization" and "Loading data into a backend"
+  contracts above describe the intended behavior; the fixes are tracked in
+  `docs/plans/20260628-spark-parity.md`.
 - **Cross-engine type conformance at the Parquet boundary is unvalidated.** Decimal precision
   and timestamp-timezone round-tripping across Spark→DuckDB are not yet asserted by a test.
   Tracked in `docs/plans/20260628-spark-parity.md`.

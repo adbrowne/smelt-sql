@@ -50,24 +50,27 @@ sub-plan and add a NOT-`done` row here.
 | Sub-plan | Wave / what it delivers | Status |
 |----------|-------------------------|--------|
 | `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
+| `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | pending |
 
 ## Wave scaffolding queue
 
-Scaffolded **just-in-time**, one wave at a time, by a human after the prior wave lands. W2+ are
-intentionally **not** detailed until W1 produces concrete failures — they are sketches, not
-commitments:
+Scaffolded **just-in-time**, one wave at a time, by a human after the prior wave lands. W3+ are
+intentionally **not** detailed until W2's re-smoke produces concrete dialect failures — they are
+sketches, not commitments. (W2 — the two blocker fixes + re-smoke — is now scaffolded and in the
+registry above.)
 
-- **W2 — dialect lowerings.** One phase per real lowering W1's break list surfaces (QUALIFY →
-  subquery, `DATE '…'` → `to_date`, `::` → `CAST`, `[…]` → `ARRAY(…)`, trailing-comma strip,
-  …). Each: red dual-target test → printer lowering → green. Oracle: `multi_backend.md`
-  §Semantics "Required lowerings".
-- **W3 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
+- **W3 — dialect lowerings.** One phase per real lowering W2's **extended** break list surfaces
+  (QUALIFY → subquery, `DATE '…'` → `to_date`, `::` → `CAST`, `[…]` → `ARRAY(…)`, trailing-comma
+  strip, …). Each: red dual-target test → printer lowering → green. Oracle: `multi_backend.md`
+  §Semantics "Required lowerings". These breaks were hidden in W1 because BL-2 aborted every model
+  on first run; W2's re-smoke is what surfaces them.
+- **W4 — broad CLI mirror.** Parametrize the bulk of the ~50 DuckDB CLI integration tests over
   `{DuckDb, Spark}` via the W1 harness; fix each exec/state gap (incremental DELETE+INSERT,
   schema evolution, seeds, MERGE on Delta).
-- **W4 — capability conformance + cross-engine.** One conformance test per `BackendCapabilities`
+- **W5 — capability conformance + cross-engine.** One conformance test per `BackendCapabilities`
   flag; assert the constructors match the `multi_backend.md` matrix; validate Spark→DuckDB
   Parquet type conformance (decimal precision, timestamp TZ).
-- **W5 — CI gate + docs.** Gated CI job (`spark-up.sh` → `cargo test --features spark` with
+- **W6 — CI gate + docs.** Gated CI job (`spark-up.sh` → `cargo test --features spark` with
   `SPARK_CONNECT_URL` → `spark-down.sh`); `CLAUDE.md` "Commands" entry; `docs-site/` backend
   pages; retract the `multi_backend.md` "parity not yet verified" Known-Divergence once green.
 
@@ -93,3 +96,14 @@ _(none yet)_
   **BL-2** (Spark backend does not auto-create the target schema — `[SCHEMA_NOT_FOUND]` on first
   run). W2 scaffolding ready: human should add schema-auto-create fix (BL-2) and Parquet-exchange
   fix (BL-1) as W2 phases and add the W2 registry row.
+- **2026-06-28** — **W2 scaffolded** (`docs/plans/20260628-spark-w2-unblock-resmoke.md`, registry
+  row added). Reframed from the original "W2 = dialect lowerings" sketch: the recorded break list is
+  **shallow because BL-2 aborts every model on first run**, so no dialect break could surface in W1.
+  W2 is therefore an **unblock-and-re-smoke** wave — P1 fixes BL-2 (new `requires_schema_init`
+  capability flag + create-schema-before-`setCurrentDatabase` ordering; root cause is
+  `spark_adapter.py::__init__` selecting the schema before `ensure_schema()` runs), P2 fixes BL-1
+  (load Arrow via Connect `createDataFrame`, not a host-path Parquet), P3 re-runs the smoke to
+  **extend** the break list with the now-reachable dialect/exec breaks. Dialect lowerings renumber to
+  **W3**, scaffolded by a human from W2's extended list. Spec diff landed in `multi_backend.md`
+  (matrix row + "Session initialization" / "Loading data into a backend" §Semantics + a data-loading
+  §Constraint).
