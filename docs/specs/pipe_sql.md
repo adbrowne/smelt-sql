@@ -172,7 +172,7 @@ Pipe syntax is a deliberate extension beyond PostgreSQL grammar; the `pg_query`-
   - `examples/test_workspace/models/pipe_orders.sql` — model-body placement fixture used by `example_diagnostics`
   - `examples/test_workspace/models/pipe_cte_clicks.sql` — CTE-body placement fixture used by `example_diagnostics`
   - `examples/test_workspace/models/pipe_subquery_clicks.sql` — subquery-body placement fixture used by `example_diagnostics`
-- **User docs**: *(forthcoming — `docs-site/docs/guide/` pipe-syntax page)*
+- **User docs**: [`docs-site/docs/guide/pipe-syntax.md`](../../docs-site/docs/guide/pipe-syntax.md)
 - **Plans (history)**: `docs/plans/20260627-pipe_sql.md`
 - **Related specs**:
   - `meta_language.md` — the meta-world `|>` operator and the `PipeInDataPosition` rule this spec narrows

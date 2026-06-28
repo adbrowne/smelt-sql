@@ -82,6 +82,7 @@ nav:
     - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md
+    - Pipe Syntax: guide/pipe-syntax.md
     - Sources: guide/sources.md
     - Materializations: guide/materializations.md
     - Incremental Models: guide/incremental-models.md
