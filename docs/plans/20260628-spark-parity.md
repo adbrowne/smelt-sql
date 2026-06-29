@@ -53,6 +53,7 @@ sub-plan and add a NOT-`done` row here.
 | `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
 | `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | done (2026-06-29) |
 | `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | done (2026-06-29) |
+| `docs/plans/20260629-spark-w5-broad-cli-mirror.md` | W5 — parametrize the high-value exec/state CLI integration tests over `{DuckDb, Spark}` and make them pass on a **live** server: seed `load_table` end-to-end, the six required dialect lowerings, incremental DELETE+INSERT, MERGE (Delta), schema evolution, materializations — fixing each gap a live run surfaces. Verification wave (no spec change). | pending |
 
 ## Wave scaffolding queue
 
@@ -179,3 +180,14 @@ _(none yet)_
   `Result<BackendType, anyhow::Error>` — unknown `type:` values produce a clear error rather than
   silently running on DuckDB. All verification gates green. Human should scaffold **W5 (broad CLI
   mirror / independent Spark coverage)**.
+- **2026-06-29** — **W5 scaffolded** (`docs/plans/20260629-spark-w5-broad-cli-mirror.md`, registry row
+  added). A **verification wave** (no spec change): it parametrizes the high-value exec/state CLI
+  integration tests over `{DuckDb, Spark}` on the W1 harness (`crates/smelt-cli/tests/common/mod.rs`)
+  and makes them pass on a **live** Spark server, fixing each gap a live run surfaces. Six phases —
+  P1 seed `load_table` end-to-end + a reusable `assert_table_parity` helper, P2 the six required
+  dialect lowerings executed live, P3 incremental DELETE+INSERT, P4 MERGE (Delta), P5 schema
+  evolution, P6 view/materialized-view + a no-silent-cap coverage-gap log. Oracle: `multi_backend.md`
+  §"Parity contract" (Required-lowerings list) + capability matrix. The "source materialization"
+  decision was **struck** (not a wave) — sources are external; `docs/specs/sources.md`. **Prerequisite
+  reminder:** W5 only delivers value with `SPARK_CONNECT_URL` live; run the loop with `spark-up.sh`
+  up. Next after W5: **W6 (capability conformance + cross-engine)**.
