@@ -190,13 +190,6 @@ resolves nested widening to a table rewrite.
   and timezone-naive (`TIMESTAMP_NTZ`) round-tripping across Spark→DuckDB are asserted by a test.
   Timezone-aware timestamp round-tripping is not yet asserted. Tracked in
   `docs/plans/20260628-spark-parity.md`.
-- **One capability cell is provisional pending a Delta-enabled server.** For
-  `supports_nested_array_ddl` on Spark (Delta), the matrix value above and the `BackendCapabilities`
-  constructor disagree, and which is correct is a question of real Delta DDL behavior. The test server
-  in use does not bundle Delta Lake (`CREATE TABLE … USING DELTA` raises `[DATA_SOURCE_NOT_FOUND]`),
-  so the cell cannot be verified there. It is resolved to the observed truth — matrix and constructor
-  set together — once a Delta-enabled server runs the check, tracked in
-  `docs/plans/20260628-spark-parity.md`. The capability-conformance suite asserts every other cell.
 - **Partition-pruned cross-engine reads.** The `read_parquet()` substitution reads the full
   Parquet glob on every downstream run; partition pruning at the exchange boundary is a
   performance gap, not a correctness one. Deferred.

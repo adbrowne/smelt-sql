@@ -4,18 +4,16 @@
 //! This is the standing drift gate required by the spec §Constraints. When a flag
 //! changes, this test and the spec table change in the **same commit**.
 //!
-//! Two cells were excluded from P1's assertions pending live verification (W6·P2):
+//! One cell was excluded from P1's assertions pending live verification (W6·P2):
 //!   - `supports_struct_field_ddl` / spark_parquet  — RESOLVED: false (W6·P2 live test)
-//!   - `supports_nested_array_ddl` / spark_delta    — PENDING: Delta Lake not available on
-//!     test server; constructor=false, matrix=✓ still unresolved. See Blocked phases.
+//!   - `supports_nested_array_ddl` / spark_delta    — RESOLVED: true (W7·P2 live Delta test)
 
 use smelt_dialect::BackendCapabilities;
 
 /// Assert every `BackendCapabilities` flag against the matrix in
 /// `docs/specs/multi_backend.md` §Surface.
 ///
-/// Row order follows the spec table. Two provisional cells are excluded
-/// (commented out with PENDING markers); all others are asserted.
+/// Row order follows the spec table. All cells are asserted — no provisional exclusions remain.
 #[test]
 fn every_flag_matches_matrix() {
     let duckdb = BackendCapabilities::duckdb();
@@ -140,9 +138,8 @@ fn every_flag_matches_matrix() {
 
     // supports_nested_array_ddl
     cell!(duckdb, supports_nested_array_ddl, true, "DuckDB");
-    // PENDING live-Spark verification — W6 P2
-    // code=false but matrix=✓; excluded until empirically resolved.
-    // cell!(delta, supports_nested_array_ddl, true, "Spark(Delta)");
+    // Empirically resolved W7·P2: Delta ALTER on array-of-struct column succeeds → true
+    cell!(delta, supports_nested_array_ddl, true, "Spark(Delta)");
     cell!(parquet, supports_nested_array_ddl, false, "Spark(Parquet)");
 
     // supports_merge_schema_write
@@ -168,8 +165,6 @@ fn every_flag_matches_matrix() {
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a
 /// compile error when a new field is added without updating this test and the matrix.
-/// The two provisional fields are still listed here for compile-time coverage;
-/// their value assertions are omitted above until W6·P2 resolves them empirically.
 #[test]
 fn all_fields_destructured() {
     let BackendCapabilities {

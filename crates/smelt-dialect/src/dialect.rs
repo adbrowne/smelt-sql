@@ -152,7 +152,7 @@ impl BackendCapabilities {
             // Schema evolution: Delta supports struct field DDL and column mapping
             supports_struct_field_ddl: true,
             supports_alter_column_using: false,
-            supports_nested_array_ddl: false,
+            supports_nested_array_ddl: true,
             supports_merge_schema_write: true,
             supports_column_mapping: true,
             supports_pipe_syntax: false,
