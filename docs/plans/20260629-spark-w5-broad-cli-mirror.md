@@ -98,7 +98,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
 | P1 | Seed / `load_table` end-to-end parity on live Spark (+ reusable result-parity helper) | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P1 — seed load_table parity + fetch_rows/assert_table_parity helpers | 2026-06-29 |
-| P2 | The six required dialect lowerings executed on live Spark | pending | | |
+| P2 | The six required dialect lowerings executed on live Spark | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live. **ARRAY literal lowering** (`supports_array_literal`) not reachable via user SQL (smelt treats `ARRAY[...]` as a meta-language list; triggers `MetaListInScalarPosition`); covered by printer unit tests only — logged in §"Coverage gaps deferred". | feat(spark-w5): P2 — five dialect lowerings dual-target test (QUALIFY/DATE/cast/comma/CREATE OR REPLACE) | 2026-06-29 |
 | P3 | Incremental DELETE+INSERT parity on live Spark | pending | | |
 | P4 | MERGE / cumulative parity on live Spark (Delta) | pending | | |
 | P5 | Schema-evolution parity on live Spark | pending | | |
@@ -279,7 +279,19 @@ surfacing to a human to scaffold **W6 (capability conformance + cross-engine)**.
 
 ## Coverage gaps deferred
 
-_(P6 appends the list of un-mirrored DuckDb integration areas here.)_
+**P2 finding — `supports_array_literal` lowering not reachable via user SQL:**
+In smelt, `ARRAY[a, b]` is always parsed as a smelt meta-language list literal, not as a SQL
+array literal.  A bare `ARRAY[...]` in a scalar SELECT position triggers `MetaListInScalarPosition`
+(design decision in `docs/specs/meta_language.md`).  The `print_array_rewrite` lowering (`ARRAY[...]
+→ ARRAY(...)`) fires only for compiler-generated SQL (e.g. inside expanded smelt function bodies),
+never for user-written model SQL.  Consequence: this lowering cannot be covered by a CLI integration
+test against a live Spark server — it is tested only by the printer unit tests in
+`crates/smelt-dialect/src/printer.rs` (lines ~2081–2098).  The coverage gap is limited: any smelt
+function that generates array-valued SQL already exercises the lowering via the printer unit tests;
+a live-Spark execution test would only add value if a smelt function produces array-valued SQL that
+is passed to Spark, which is not yet a scenario in the codebase.
+
+_(P6 appends additional un-mirrored DuckDb integration areas here.)_
 
 ---
 
