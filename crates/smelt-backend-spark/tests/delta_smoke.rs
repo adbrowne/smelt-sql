@@ -21,7 +21,7 @@ async fn delta_table_create_and_merge_smoke() {
         return;
     };
 
-    let backend = match SparkBackend::new(&url, "spark_catalog", "default", None).await {
+    let backend = match SparkBackend::new(&url, "spark_catalog", "default", None, true).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Skipping — could not connect to Spark: {}", e);

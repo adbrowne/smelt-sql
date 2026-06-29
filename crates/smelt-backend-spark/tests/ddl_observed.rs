@@ -18,7 +18,7 @@ use smelt_dialect::BackendCapabilities;
 
 /// Helper: connect to Spark or skip.
 async fn spark_or_skip(url: &str) -> Option<SparkBackend> {
-    match SparkBackend::new(url, "spark_catalog", "default", None).await {
+    match SparkBackend::new(url, "spark_catalog", "default", None, true).await {
         Ok(b) => Some(b),
         Err(e) => {
             eprintln!("Skipping — could not connect to Spark: {}", e);

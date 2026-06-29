@@ -228,7 +228,7 @@ pub fn seed_source_table(
                     .to_str()
                     .expect("warehouse path must be valid UTF-8");
                 rt.block_on(async {
-                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh))
+                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
                         .await
                         .unwrap_or_else(|e| panic!("Spark connect failed for seed: {e}"));
                     backend
@@ -285,7 +285,7 @@ pub fn count_table_rows(
                     .to_str()
                     .expect("warehouse path must be valid UTF-8");
                 rt.block_on(async {
-                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh))
+                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
                         .await
                         .unwrap_or_else(|e| panic!("Spark connect failed for count: {e}"));
                     backend
@@ -340,7 +340,7 @@ fn execute_sql_on(
                     .to_str()
                     .expect("warehouse path must be valid UTF-8");
                 rt.block_on(async {
-                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh))
+                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
                         .await
                         .unwrap_or_else(|e| panic!("Spark connect for execute_sql_on: {e}"));
                     backend

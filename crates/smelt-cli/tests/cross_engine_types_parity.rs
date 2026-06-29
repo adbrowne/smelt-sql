@@ -229,3 +229,105 @@ fn timestamp_tz_roundtrips_spark_to_duckdb() {
          expected a value containing '2026-06-30' and '12:00:00' but got {val_str:?}"
     );
 }
+
+/// Stages a workspace with a TZ-aware TIMESTAMP model for the cross-engine round-trip test.
+fn stage_tz_aware_workspace(tmp: &TempDir, spark_schema: &str) -> PathBuf {
+    let root = tmp.path().join("tz_proj");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+
+    let url = spark_connect_url().unwrap_or_else(|| "sc://localhost:15002".to_string());
+    let wh_path = get_warehouse_path();
+    std::fs::create_dir_all(&wh_path).unwrap();
+    let wh = wh_path
+        .to_str()
+        .expect("warehouse path is valid UTF-8")
+        .to_string();
+
+    let yml = format!(
+        "name: tz_proj\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {spark_schema}\n    warehouse: {wh}\n    format: parquet\ndefault_materialization: table\n"
+    );
+    std::fs::write(root.join("smelt.yml"), yml).unwrap();
+
+    // Spark model: TZ-aware TIMESTAMP (stored UTC, isAdjustedToUTC=true in Parquet).
+    // Use a string literal with explicit UTC zone so Spark records it as a UTC instant.
+    // 2025-06-30 12:00:00 UTC = epoch 1751284800 s = 1751284800000000 µs.
+    std::fs::write(
+        root.join("models").join("spark_tz.sql"),
+        "---\ntarget: spark\nmaterialization: table\n---\n\
+         SELECT CAST('2025-06-30 12:00:00+00:00' AS TIMESTAMP) AS ts_tz\n",
+    )
+    .unwrap();
+
+    // DuckDB model: cross-engine read via read_parquet substitution.
+    std::fs::write(
+        root.join("models").join("duckdb_tz.sql"),
+        "SELECT ts_tz FROM smelt.spark_tz\n",
+    )
+    .unwrap();
+
+    root
+}
+
+/// TZ-aware TIMESTAMP round-trips through the Spark→DuckDB Parquet boundary as the same UTC instant.
+///
+/// Spark's `TIMESTAMP` (with timezone) stores as `TIMESTAMP_MICROS` with
+/// `isAdjustedToUTC=true` in Parquet.  DuckDB reads this as `TIMESTAMPTZ` preserving
+/// the UTC epoch.  The test uses a microsecond epoch value (1751284800000000 µs =
+/// 2025-06-30 12:00:00 UTC) to avoid any ambiguity from local-timezone conversion.
+///
+/// **Expected green** when the UTC epoch survives the Parquet boundary intact.
+/// **Red** if DuckDB applies a spurious TZ shift (e.g. reads it as local time).
+#[test]
+fn timestamp_tz_aware_roundtrips_spark_to_duckdb() {
+    if !cfg!(feature = "spark") {
+        eprintln!(
+            "spark feature not enabled — skipping timestamp_tz_aware_roundtrips_spark_to_duckdb"
+        );
+        return;
+    }
+    let Some(_url) = spark_connect_url() else {
+        eprintln!(
+            "SPARK_CONNECT_URL unset — skipping timestamp_tz_aware_roundtrips_spark_to_duckdb"
+        );
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let root = stage_tz_aware_workspace(&tmp, "smelt_types_tz_aware");
+    let db_path = root.join("target/dev.duckdb");
+
+    let (stdout, stderr, success) = smelt_run_dev(&root);
+    assert!(
+        success,
+        "smelt run failed for TZ-aware types workspace.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let val_str = rt.block_on(async {
+        use smelt_backend::Backend;
+        use smelt_backend_duckdb::DuckDbBackend;
+
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("DuckDB open failed");
+        // Cast to epoch microseconds to compare the UTC instant directly,
+        // avoiding display differences from DuckDB's local timezone setting.
+        let batches = backend
+            .execute_sql("SELECT EPOCH_US(ts_tz) AS epoch_us FROM main.duckdb_tz")
+            .await
+            .expect("query on duckdb_tz failed");
+
+        let batch = batches.first().expect("no batches returned");
+        let col = batch.column(0);
+        arrow::util::display::array_value_to_string(col, 0)
+            .unwrap_or_else(|_| "<display error>".to_string())
+    });
+
+    // 1751284800000000 µs = 2025-06-30 12:00:00 UTC — the exact epoch we encoded.
+    assert_eq!(
+        val_str, "1751284800000000",
+        "TZ-aware timestamp did not round-trip correctly: \
+         expected epoch_us=1751284800000000 but got {val_str:?}"
+    );
+}

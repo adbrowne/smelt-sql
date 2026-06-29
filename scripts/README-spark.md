@@ -14,7 +14,7 @@ See `docs/specs/multi_backend.md` for the parity contract and capability matrix.
 |-----------|---------|-------|
 | Spark server image | `apache/spark:4.0.0` | Pinned — see below |
 | Delta Lake | `io.delta:delta-spark_2.13:4.0.0` | Resolved on first `spark-up.sh` run via Ivy |
-| pyspark client | `4.1.1` | 4.1.x client is Connect-compatible with 4.0.0 server |
+| pyspark client | `4.0.0` | Must match server — pyspark 4.1.x uses config keys absent in Spark 4.0.0 (`localRelationChunkSizeRows`) |
 | Scala | 2.13 | Must match the `delta-spark` artifact suffix |
 
 **Why pinned to `apache/spark:4.0.0`:** `apache/spark:latest` (Spark 4.1.x) has
@@ -31,7 +31,7 @@ The host needs `pyspark[connect]` for the venv the PyO3 adapter imports.
 ```bash
 python3 -m venv --without-pip .smelt-spark-venv
 curl -sL https://bootstrap.pypa.io/get-pip.py | .smelt-spark-venv/bin/python
-.smelt-spark-venv/bin/pip install 'pyspark[connect]==4.1.1' pandas pyarrow grpcio grpcio-status protobuf
+.smelt-spark-venv/bin/pip install 'pyspark[connect]==4.0.0' pandas pyarrow grpcio grpcio-status protobuf
 ```
 
 (`.smelt-spark-venv/`, `.smelt-spark-warehouse/`, and `.smelt-spark-ivy/` are gitignored.)

@@ -44,6 +44,19 @@ mkdir -p "${WAREHOUSE}" "${IVY_CACHE}"
 # world-readable, so host-side DuckDB can read them for cross-engine Parquet.
 chmod 777 "${WAREHOUSE}"
 chmod 777 "${IVY_CACHE}"
+
+# Clean warehouse data from previous sessions.  The Spark server keeps an
+# in-memory catalog that is reset on restart; any warehouse directories from
+# the prior session are then orphaned (catalog no longer knows them) and cause
+# [LOCATION_ALREADY_EXISTS] on the next CREATE TABLE.  Because warehouse
+# sub-dirs are owned by the Spark container's uid (185), only a container
+# process can delete them — use a one-shot container that mounts the same path.
+if [ -n "$(ls -A "${WAREHOUSE}" 2>/dev/null)" ]; then
+  echo "Cleaning warehouse from previous session (orphaned catalog entries)..."
+  docker run --rm -v "${WAREHOUSE}":/opt/spark/work-dir/warehouse \
+    "${IMAGE}" bash -c "rm -rf /opt/spark/work-dir/warehouse/*" >/dev/null 2>&1 || true
+fi
+
 docker rm -f "${NAME}" >/dev/null 2>&1 || true
 
 echo "Starting Spark Connect (${IMAGE}) on :${PORT}, warehouse=${WAREHOUSE}"

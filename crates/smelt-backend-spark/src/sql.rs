@@ -20,9 +20,16 @@ pub fn drop_view(view_name: &str) -> String {
     format!("DROP VIEW IF EXISTS {}", view_name)
 }
 
-/// CREATE TABLE ... AS SELECT
-pub fn create_table_as(table_name: &str, query: &str) -> String {
-    format!("CREATE TABLE {} AS {}", table_name, query)
+/// CREATE TABLE [USING format] ... AS SELECT
+///
+/// When `using` is `Some("DELTA")`, emits `CREATE TABLE ... USING DELTA AS SELECT`
+/// which enables DELETE / MERGE / schema-evolution on Spark.
+/// When `None`, omits the USING clause (plain managed Parquet for cross-engine path).
+pub fn create_table_as(table_name: &str, query: &str, using: Option<&str>) -> String {
+    match using {
+        Some(fmt) => format!("CREATE TABLE {} USING {} AS {}", table_name, fmt, query),
+        None => format!("CREATE TABLE {} AS {}", table_name, query),
+    }
 }
 
 /// CREATE OR REPLACE VIEW ... AS SELECT

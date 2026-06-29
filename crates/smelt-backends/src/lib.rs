@@ -57,6 +57,7 @@ pub async fn create_backend(
             #[cfg(feature = "spark")]
             {
                 use smelt_backend_spark::SparkBackend;
+                use smelt_core::config::TableFormat;
 
                 let connect_url = target_config
                     .connect_url
@@ -70,12 +71,18 @@ pub async fn create_backend(
                 tracing::info!("Connect URL: {}", connect_url);
                 tracing::info!("Catalog: {}", catalog);
 
+                let use_delta = target_config
+                    .table_format()
+                    .map(|f| matches!(f, TableFormat::Delta))
+                    .unwrap_or(true);
+
                 Ok(Box::new(
                     SparkBackend::new(
                         connect_url,
                         catalog,
                         &target_config.schema,
                         target_config.warehouse.as_deref(),
+                        use_delta,
                     )
                     .await
                     .map_err(|e| {

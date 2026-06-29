@@ -236,7 +236,7 @@ mod tests {
         let caps = BackendCapabilities::spark_delta();
         assert!(caps.supports_struct_field_ddl);
         assert!(!caps.supports_alter_column_using);
-        assert!(!caps.supports_nested_array_ddl);
+        assert!(caps.supports_nested_array_ddl); // empirically verified true in W7·P2
         assert!(caps.supports_merge_schema_write);
         assert!(caps.supports_column_mapping);
     }

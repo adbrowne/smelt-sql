@@ -32,6 +32,10 @@ pub struct SparkBackend {
     schema: String,
     /// Base directory for Parquet output (from target config `warehouse` field).
     warehouse: Option<String>,
+    /// Whether to create managed tables as Delta (`USING DELTA`) or plain Parquet.
+    /// Delta is required for DELETE / MERGE / schema-evolution operations.
+    /// Parquet is used for the cross-engine read path (DuckDB reads raw Parquet).
+    use_delta: bool,
 }
 
 // Safety: Py<PyAny> is Send, and we only access it inside `Python::attach`
@@ -47,11 +51,16 @@ impl SparkBackend {
     /// * `catalog` - Catalog name (e.g., "spark_catalog")
     /// * `schema` - Schema name (e.g., "default")
     /// * `warehouse` - Optional base directory for Parquet output
+    /// * `use_delta` - If true, managed tables are created with `USING DELTA`
+    ///   (required for DELETE / MERGE / schema-evolution; default `true`).
+    ///   Set to `false` for the cross-engine Parquet path where DuckDB reads
+    ///   raw Parquet files via `read_parquet(...)`.
     pub async fn new(
         connect_url: &str,
         catalog: &str,
         schema: &str,
         warehouse: Option<&str>,
+        use_delta: bool,
     ) -> Result<Self, BackendError> {
         let connect_url = connect_url.to_string();
         let catalog = catalog.to_string();
@@ -97,6 +106,7 @@ impl SparkBackend {
             catalog,
             schema: schema.clone(),
             warehouse: warehouse.map(|s| s.to_string()),
+            use_delta,
         };
 
         // Create the schema before selecting it (spec: multi_backend.md §Semantics
@@ -233,11 +243,64 @@ impl Backend for SparkBackend {
         tracing::debug!("Spark CREATE TABLE {} AS ...", table_name);
 
         // Spark doesn't reliably support CREATE OR REPLACE TABLE,
-        // so we DROP IF EXISTS first, then CREATE TABLE ... AS SELECT
-        self.py_execute_no_result(&sql::drop_table(&table_name))
-            .await?;
-        self.py_execute_no_result(&sql::create_table_as(&table_name, sql))
-            .await
+        // so we DROP IF EXISTS first, then CREATE TABLE ... AS SELECT.
+        // If the previous run left a VIEW at this name (not a TABLE), Spark's
+        // DROP TABLE rejects it with [WRONG_COMMAND_FOR_OBJECT_TYPE]; fall
+        // back to DROP VIEW in that case so the CREATE TABLE can proceed.
+        let drop_result = self.py_execute_no_result(&sql::drop_table(&table_name)).await;
+        if let Err(ref e) = drop_result {
+            let msg = e.to_string();
+            if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
+                tracing::debug!(
+                    "DROP TABLE failed (object is a VIEW): {} — retrying with DROP VIEW",
+                    table_name
+                );
+                self.py_execute_no_result(&sql::drop_view(&table_name)).await?;
+            } else {
+                drop_result?;
+            }
+        }
+
+        // After a Spark server restart, DROP TABLE IF EXISTS is a catalog no-op
+        // (the table isn't in the new session's catalog) but the managed table's
+        // warehouse directory persists on the host-visible bind mount (owned by
+        // the Spark container's uid 185, not the host user).  Spark then refuses
+        // CREATE TABLE with [LOCATION_ALREADY_EXISTS].
+        //
+        // Best-effort host-side cleanup: works when test fixtures were written by
+        // the host process (e.g. seeds); silently skips when Spark owns the files.
+        // For Spark-owned warehouse dirs, spark-up.sh cleans on each server restart
+        // (the authoritative resolution — see scripts/spark-up.sh "Clean warehouse").
+        if let Some(path) = self.materialized_path(schema, name) {
+            if path.exists() {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => tracing::debug!(
+                        "Removed stale warehouse directory {:?} before CREATE TABLE",
+                        path
+                    ),
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        tracing::debug!(
+                            "Could not remove {:?} (owned by Spark uid): {:?}. \
+                             Relying on spark-up.sh warehouse clean on next restart.",
+                            path, e
+                        );
+                    }
+                    Err(e) => {
+                        return Err(BackendError::Other(anyhow::anyhow!(
+                            "Failed to remove stale warehouse directory {:?}: {}",
+                            path, e
+                        )));
+                    }
+                }
+            }
+        }
+
+        self.py_execute_no_result(&sql::create_table_as(
+            &table_name,
+            sql,
+            if self.use_delta { Some("DELTA") } else { None },
+        ))
+        .await
     }
 
     async fn create_view_as(
@@ -254,8 +317,18 @@ impl Backend for SparkBackend {
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::drop_table(&table_name))
-            .await
+        match self.py_execute_no_result(&sql::drop_table(&table_name)).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
+                    // The name is occupied by a VIEW from a previous run; drop it instead.
+                    self.py_execute_no_result(&sql::drop_view(&table_name)).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {

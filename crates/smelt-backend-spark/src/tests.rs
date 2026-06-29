@@ -40,8 +40,12 @@ fn sql_drop_view() {
 #[test]
 fn sql_create_table_as() {
     assert_eq!(
-        sql::create_table_as("cat.schema.tbl", "SELECT 1 AS id"),
+        sql::create_table_as("cat.schema.tbl", "SELECT 1 AS id", None),
         "CREATE TABLE cat.schema.tbl AS SELECT 1 AS id"
+    );
+    assert_eq!(
+        sql::create_table_as("cat.schema.tbl", "SELECT 1 AS id", Some("DELTA")),
+        "CREATE TABLE cat.schema.tbl USING DELTA AS SELECT 1 AS id"
     );
 }
 
@@ -256,7 +260,7 @@ mod integration {
     /// Helper to create a SparkBackend for integration tests.
     async fn create_test_backend() -> Option<crate::SparkBackend> {
         let url = spark_connect_url()?;
-        match crate::SparkBackend::new(&url, "spark_catalog", "default", None).await {
+        match crate::SparkBackend::new(&url, "spark_catalog", "default", None, true).await {
             Ok(backend) => Some(backend),
             Err(e) => {
                 eprintln!(
@@ -280,7 +284,7 @@ mod integration {
         let fresh_schema = "smelt_fresh_schema_w2p1";
 
         // Drop the schema first so it is genuinely absent (idempotent, uses default schema).
-        if let Ok(b) = crate::SparkBackend::new(&url, catalog, "default", None).await {
+        if let Ok(b) = crate::SparkBackend::new(&url, catalog, "default", None, true).await {
             let _ = b
                 .execute_sql(&format!(
                     "DROP DATABASE IF EXISTS {}.{} CASCADE",
@@ -291,7 +295,7 @@ mod integration {
 
         // Before fix: SparkBackend::new fails with [SCHEMA_NOT_FOUND].
         // After fix: the backend auto-creates the schema before setCurrentDatabase.
-        let backend = crate::SparkBackend::new(&url, catalog, fresh_schema, None)
+        let backend = crate::SparkBackend::new(&url, catalog, fresh_schema, None, true)
             .await
             .expect("SparkBackend::new must auto-create a fresh schema before selecting it");
 
