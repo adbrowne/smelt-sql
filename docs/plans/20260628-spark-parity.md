@@ -71,10 +71,17 @@ folds into **W5** (below), not a separate wave.
 - **W5 — broad CLI mirror / independent Spark coverage.** Parametrize the bulk of the ~50 DuckDB CLI
   integration tests over `{DuckDb, Spark}` via the W1 harness **and/or** add independent Spark
   integration tests — the goal is *robust Spark coverage*, not DuckDB-test-for-DuckDB-test
-  duplication. Fix each exec/state gap surfaced (incremental DELETE+INSERT, schema evolution, seeds,
-  MERGE on Delta). This is also where the implemented dialect lowerings get **executed on live
-  Spark**; if any lowering is rejected by a real server, fix it here (red dual-target test → printer
-  fix → green; oracle `multi_backend.md` §"Required lowerings").
+  duplication. Fix each exec/state gap surfaced (incremental DELETE+INSERT, schema evolution,
+  MERGE on Delta). Two named first-class items:
+  - **Seed / `load_table` parity on live Spark.** `Backend::load_table(...)` is smelt's only
+    backend-owned ingest path (`docs/specs/seeds.md`); it is what **BL-1** broke (host-temp Parquet
+    exchange invisible to a remote Connect JVM, "fixed" in W2·P2 by loading Arrow via Connect
+    `createDataFrame`). W5 must prove `smelt seed` / `smelt build` actually loads a CSV seed into a
+    live Spark backend end-to-end (red dual-target seed test → green), not just at the W3 harness
+    level. Sources are **out of scope** — smelt never loads them (`docs/specs/sources.md`).
+  - **Dialect lowerings executed on live Spark.** The six implemented lowerings are unit-tested with a
+    synthetic `spark_ctx()` but not yet run against a real server; if any is rejected, fix it here
+    (red dual-target test → printer fix → green; oracle `multi_backend.md` §"Required lowerings").
 - **W6 — capability conformance + cross-engine.** One conformance test per `BackendCapabilities`
   flag; assert the constructors match the `multi_backend.md` matrix; validate Spark→DuckDB
   Parquet type conformance (decimal precision, timestamp TZ).
@@ -83,12 +90,21 @@ folds into **W5** (below), not a separate wave.
   pages (incl. a backend-support note now that the UI runs Spark); retract the `multi_backend.md`
   "parity not yet verified" Known-Divergence once green.
 
-**Deferred product decision (not a wave yet).** W3 surfaced that smelt has **no source-
-materialization step in the run pipeline for any backend** — `smelt.sources.*` compiles to a table
-name but nothing creates the table; DuckDB examples seed sources manually in `run.sh`. W3 seeds at
-the *test* level to unblock parity. Whether smelt should grow a real source-load step (pipeline
-pre-load, or declarative per-source `path:`/`data:` with `read_parquet`/`spark.read` lowering) is a
-product decision to be taken separately, with a spec, before it becomes a wave.
+**Not a wave — "source materialization" was a misframing (struck 2026-06-29).** An earlier note
+here proposed a future wave to let smelt *materialize sources*. That contradicts `docs/specs/sources.md`,
+which is normative: a source is "an external table that already exists in the target database,
+populated by some pipeline outside smelt … it never runs `CREATE TABLE` or `INSERT` for the source."
+Smelt must **never** load a source — there is no product feature to design here. Untangling what W3
+conflated:
+- **Sources** — external, never materialized by smelt. Not work. (Spec already forbids it.)
+- **Seeds** — the *real* ingest path smelt owns: a CSV (+ optional sidecar) loaded into the backend
+  via `Backend::load_table(...)` on `smelt seed` / `smelt build` (`docs/specs/seeds.md`). Making this
+  work on Spark **is** genuine parity work — it is exactly the `load_table` path that **BL-1** broke
+  (host-temp Parquet exchange invisible to a remote Connect JVM). This belongs in **W5** (live
+  `load_table`/seed parity), not a separate "source-load" wave.
+- **Populating source tables for tests** — a pure test-harness concern. The dual-target smoke needs
+  the source *tables* to exist so models can run; W3's seed helper writes the same rows into both
+  `{DuckDb, Spark}` as a fixture. Done in W3; stays at the test level — not a product feature.
 
 ## Blocked phases (master-level triage ledger)
 
