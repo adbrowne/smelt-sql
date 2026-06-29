@@ -47,12 +47,13 @@ owners: [andrew]
   | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ |
   | `supports_trailing_commas` | ✓ | ✗ | ✗ |
   | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ |
-  | `supports_materialized_views` | ✗ (table fallback) | ✓ | ✓ |
+  | `supports_materialized_views` | ✗ (table fallback) | ✗ (table fallback) | ✗ (table fallback) |
   | `supports_struct_field_ddl` | ✓ | ✓ | ✗ |
   | `supports_alter_column_using` | ✓ | ✗ | ✗ |
   | `supports_nested_array_ddl` | ✓ | ✓ | ✗ |
   | `supports_merge_schema_write` | ✗ | ✓ | ✓ |
   | `supports_column_mapping` | ✗ | ✓ | ✗ |
+  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ |
   | `requires_schema_init` | ✓ | ✓ | ✓ |
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
@@ -85,7 +86,9 @@ suite is the executable list):
 - `supports_create_or_replace_table = false` → emulate via `DROP TABLE IF EXISTS` + `CREATE
   TABLE` (the Spark backend already does this).
 - `supports_insert_overwrite = false` → emulate via range `DELETE` + `INSERT` (DuckDB).
-- `supports_materialized_views = false` → fall back to `Table` materialization (DuckDB).
+- `supports_materialized_views = false` → fall back to `Table` materialization. No backend today
+  emits a native materialized view: DuckDB and both Spark profiles take the table fallback. (OSS
+  Spark SQL has no native materialized view; a real one would be a Databricks-only capability.)
 
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may
@@ -190,6 +193,13 @@ resolves nested widening to a table rewrite.
 - **Cross-engine type conformance at the Parquet boundary is unvalidated.** Decimal precision
   and timestamp-timezone round-tripping across Spark→DuckDB are not yet asserted by a test.
   Tracked in `docs/plans/20260628-spark-parity.md`.
+- **Two capability cells are provisional pending live-Spark verification.** For
+  `supports_struct_field_ddl` on Spark (Parquet) and `supports_nested_array_ddl` on Spark (Delta),
+  the matrix value above and the `BackendCapabilities` constructor currently disagree, and which is
+  correct is a question of real Spark/Delta DDL behavior that has not been exercised against a live
+  server. Both cells are resolved to the observed truth — matrix and constructor set together — by
+  the conformance work tracked in `docs/plans/20260628-spark-parity.md`. The capability-conformance
+  suite asserts every other cell today and adds these two once verified.
 - **Partition-pruned cross-engine reads.** The `read_parquet()` substitution reads the full
   Parquet glob on every downstream run; partition pruning at the exchange boundary is a
   performance gap, not a correctness one. Deferred.

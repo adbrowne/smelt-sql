@@ -54,6 +54,7 @@ sub-plan and add a NOT-`done` row here.
 | `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | done (2026-06-29) |
 | `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | done (2026-06-29) |
 | `docs/plans/20260629-spark-w5-broad-cli-mirror.md` | W5 — parametrize the high-value exec/state CLI integration tests over `{DuckDb, Spark}` and make them pass on a **live** server: seed `load_table` end-to-end, the six required dialect lowerings, incremental DELETE+INSERT, MERGE (Delta), schema evolution, materializations — fixing each gap a live run surfaces. Verification wave (no spec change). | done (2026-06-29) |
+| `docs/plans/20260630-spark-w6-conformance-cross-engine.md` | W6 — standing capability-conformance suite (constructors == matrix); resolve the MV flag/impl mismatch (→ table fallback) + two provisional DDL cells (empirical on live Spark); wire the cross-engine Spark→DuckDB `read_parquet` substitution end-to-end + validate decimal-precision / timestamp-TZ Parquet round-trip. Matrix spec diff landed alongside. | pending |
 
 ## Wave scaffolding queue
 
@@ -192,3 +193,16 @@ _(none yet)_
   decision was **struck** (not a wave) — sources are external; `docs/specs/sources.md`. **Prerequisite
   reminder:** W5 only delivers value with `SPARK_CONNECT_URL` live; run the loop with `spark-up.sh`
   up. Next after W5: **W6 (capability conformance + cross-engine)**.
+- **2026-06-30** — **W6 scaffolded** (`docs/plans/20260630-spark-w6-conformance-cross-engine.md`,
+  registry row added). Scoping the conformance suite surfaced **four** capability matrix-vs-code drifts;
+  the matrix spec diff was landed alongside the plan at the human gate: (a) `supports_materialized_views`
+  flipped to `✗ (table fallback)` for both Spark profiles (OSS Spark has no native MV — the W5·P6
+  finding; the backend already falls back to a table); (b) added the missing `supports_pipe_syntax` row
+  (all `✗`); (c) two cells — `supports_struct_field_ddl`/Parquet and `supports_nested_array_ddl`/Delta —
+  recorded as **provisional pending live-Spark verification** (matrix and constructor disagree; W6·P2
+  resolves both empirically). Four phases — P1 standing conformance suite (constructors == matrix, pure
+  Rust) + the MV code flip, P2 empirical DDL resolution on live Spark, P3 wire the cross-engine
+  `read_parquet` substitution end-to-end (W5's map found it unwired in `execute.rs` — only logged), P4
+  decimal-precision + timestamp-TZ Parquet round-trip. **User-decided at the gate:** MV → table
+  fallback; the two DDL cells → verify empirically. The remaining Known-Divergence retractions + the
+  gated CI job + docs are **W7**. Next after W6: **W7 (CI gate + docs)**.
