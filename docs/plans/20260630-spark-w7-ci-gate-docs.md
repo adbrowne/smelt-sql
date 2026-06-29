@@ -108,7 +108,7 @@ committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 | P2 | Resolve the blocked `supports_nested_array_ddl`/Delta cell on the Delta server | done | feat(spark-w7): P2 — nested_array_ddl/Delta cell resolved (true); conformance complete | 2026-06-30 |
 | P3 | Full live-Spark parity suite green on the Delta server (incl. W5 Delta path + timestamp-TZ) | done | feat(spark-w7): P3 — full live-Spark parity suite green on Delta server | 2026-06-30 |
 | P4 | Gated CI job: Delta server up → `cargo test --features spark` → down | done | feat(spark-w7): P4 — gated spark-parity CI job in compat.yml | 2026-06-30 |
-| P5 | Docs (`docs-site/` backend page + `CLAUDE.md`) + Known-Divergence retractions | pending | | |
+| P5 | Docs (`docs-site/` backend page + `CLAUDE.md`) + Known-Divergence retractions | done | feat(spark-w7): P5 — docs + CLAUDE.md Spark entry + Known-Divergence retractions | 2026-06-30 |
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 feature: multi_backend
 status: experimental
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 owners: [andrew]
 ---
 
@@ -180,15 +180,13 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **Parity is not yet verified end to end.** At `last_reviewed`, Spark backend code exists but
-  is largely unexercised: integration tests are gated on `SPARK_CONNECT_URL` and no Spark runs
-  in CI. The dual-target matrix, the conformance suite, and the gated CI job are being built;
-  tracked in `docs/plans/20260628-spark-parity.md`. Until that lands, the matrix above is the
-  *intended* contract, and specific lowerings (QUALIFY, date literals, `::` cast, array
-  literals) may emit invalid Spark SQL where the printer does not yet honor the flag.
-- **Cross-engine type conformance at the Parquet boundary is partly validated.** Decimal precision
-  and timezone-naive (`TIMESTAMP_NTZ`) round-tripping across Spark→DuckDB are asserted by a test.
-  Timezone-aware timestamp round-tripping is not yet asserted. Tracked in
+- **Parity is verified by a gated CI job.** The full dual-target matrix (DuckDB + Spark),
+  conformance suite, and the W1–W7 parity initiative are complete. The `spark-parity` CI job in
+  `.github/workflows/compat.yml` provisions a Delta-enabled Spark Connect server, runs
+  `cargo test --features smelt-cli/spark` (including MERGE, schema evolution, nested-array DDL,
+  decimal precision, and timezone-aware timestamp round-trips), and tears it down. Cross-engine
+  type conformance (decimal, `TIMESTAMP_NTZ`, and timezone-aware timestamps) is asserted end to
+  end. The matrix above is the verified contract, not just the intended one. Tracked in
   `docs/plans/20260628-spark-parity.md`.
 - **Partition-pruned cross-engine reads.** The `read_parquet()` substitution reads the full
   Parquet glob on every downstream run; partition pruning at the exchange boundary is a
