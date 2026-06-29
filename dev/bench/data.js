@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782720218019,
+  "lastUpdate": 1782720220083,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -27032,6 +27032,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.71605789897385,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "69921eb3021c2daa9897acb1d69fb5180fbf0202",
+          "message": "fix(ci): untrack .cargo/config.toml so it no longer forces mold on CI (#150)\n\nPR #149 added a checked-in .cargo/config.toml that unconditionally sets\n`rustflags = [\"-C\", \"link-arg=-fuse-ld=mold\"]` for x86_64-unknown-linux-gnu.\nThe file's own comment calls it \"local-only,\" but committing it applies it to\nevery build — including CI runners, which do not have mold installed. Every\nRust-compiling job on main (Tests, Parser Compatibility, Benchmarks, Dev\nRelease) failed at link time with `collect2: fatal error: cannot find 'ld'`.\n\nUntrack the file (it stays on disk for local use) and gitignore it so the\nbuild-speed config remains genuinely local and never reaches CI or other\ncontributors, where the chosen linker may be absent.\n\nCo-authored-by: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-29T18:01:08+10:00",
+          "tree_id": "ba397c77bb690a52668bf289984fba9ecc01b2ac",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/69921eb3021c2daa9897acb1d69fb5180fbf0202"
+        },
+        "date": 1782720219584,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.622551292825854,
             "unit": "MB/s"
           }
         ]
