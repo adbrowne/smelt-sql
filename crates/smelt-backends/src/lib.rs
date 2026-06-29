@@ -19,7 +19,7 @@ pub async fn create_backend(
     project_dir: &Path,
     database_override: Option<PathBuf>,
 ) -> Result<Box<dyn Backend>> {
-    match target_config.backend_type() {
+    match target_config.backend_type()? {
         BackendType::DuckDB => {
             #[cfg(feature = "duckdb")]
             {

@@ -244,11 +244,15 @@ pub struct Target {
 
 impl Target {
     /// Get the backend type from the target_type field.
-    pub fn backend_type(&self) -> BackendType {
+    ///
+    /// Returns an error for unrecognised `type:` strings rather than silently
+    /// defaulting — callers on the run path propagate this as a user-visible
+    /// diagnostic ("unknown backend type `<x>`").
+    pub fn backend_type(&self) -> anyhow::Result<BackendType> {
         match self.target_type.to_lowercase().as_str() {
-            "duckdb" => BackendType::DuckDB,
-            "spark" => BackendType::Spark,
-            _ => BackendType::DuckDB, // Default to DuckDB for backward compatibility
+            "duckdb" => Ok(BackendType::DuckDB),
+            "spark" => Ok(BackendType::Spark),
+            other => Err(anyhow::anyhow!("unknown backend type `{other}`")),
         }
     }
 
@@ -256,10 +260,12 @@ impl Target {
     ///
     /// Returns `None` for DuckDB targets (format is not applicable).
     /// For Spark targets, defaults to `Delta` if not specified.
+    /// Returns `None` for unrecognised backend types (the run path fails before
+    /// format is needed).
     pub fn table_format(&self) -> Option<TableFormat> {
         match self.backend_type() {
-            BackendType::DuckDB => None,
-            BackendType::Spark => Some(self.format.unwrap_or_default()),
+            Ok(BackendType::DuckDB) | Err(_) => None,
+            Ok(BackendType::Spark) => Some(self.format.unwrap_or_default()),
         }
     }
 }
@@ -742,7 +748,7 @@ impl Config {
         sql_metadata: Option<&ModelMetadata>,
         target: &Target,
     ) -> Option<TableFormat> {
-        if target.backend_type() == BackendType::DuckDB {
+        if !matches!(target.backend_type(), Ok(BackendType::Spark)) {
             return None;
         }
         if let Some(meta) = sql_metadata {

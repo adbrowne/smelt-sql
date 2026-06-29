@@ -692,7 +692,10 @@ impl UpstreamSchemas {
 
 impl SqlCompiler {
     pub(crate) fn new(config: Config, target: &Target) -> Self {
-        let (dialect, capabilities) = dialect_for_backend(target.backend_type());
+        let (dialect, capabilities) = match target.backend_type() {
+            Ok(bt) => dialect_for_backend(bt),
+            Err(_) => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        };
         Self {
             config,
             dialect,

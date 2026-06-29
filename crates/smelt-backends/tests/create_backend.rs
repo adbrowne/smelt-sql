@@ -1,6 +1,34 @@
 use smelt_backends::create_backend;
 use smelt_core::config::Target;
 
+fn unknown_type_target() -> Target {
+    Target {
+        target_type: "not_a_backend".to_string(),
+        database: Some("test.db".to_string()),
+        schema: "main".to_string(),
+        connect_url: None,
+        catalog: None,
+        warehouse: None,
+        format: None,
+        settings: None,
+    }
+}
+
+#[tokio::test]
+async fn unknown_backend_type_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = unknown_type_target();
+    let result = create_backend("unknown_test", &target, dir.path(), None).await;
+    let err = result
+        .err()
+        .expect("Expected unknown backend type to be rejected with an error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not_a_backend"),
+        "Expected error message to name the unknown type, got: {msg}"
+    );
+}
+
 fn duckdb_target(db_name: &str) -> Target {
     Target {
         target_type: "duckdb".to_string(),

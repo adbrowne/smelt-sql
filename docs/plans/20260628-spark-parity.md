@@ -52,7 +52,7 @@ sub-plan and add a NOT-`done` row here.
 | `docs/plans/20260628-spark-w1-runtime-harness.md` | W1 — Spark runtime scripts + dual-target test harness + smoke (`examples/multi_engine` on Spark) + **recorded empirical break list** that scopes W2+ | done (2026-06-28) |
 | `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
 | `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | done (2026-06-29) |
-| `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | pending |
+| `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | done (2026-06-29) |
 
 ## Wave scaffolding queue
 
@@ -174,3 +174,8 @@ _(none yet)_
   Spec diff landed in `architecture.md` §"Run pipeline parity rule (CLI ↔ UI)" (backend-selection
   contract + DO/DON'T bullets + the UI-DuckDB-only Mode-B incident). Dialect lowerings no longer a
   standalone wave; broad CLI mirror / independent Spark coverage renumbers to **W5**.
+- **2026-06-29** — **W4 fully done** (P1 smelt-backends crate + P2 UI delegation + P3 dual-consumer
+  guard + P4 fail-loud). `backend_type()` in `smelt-core/config.rs` now returns
+  `Result<BackendType, anyhow::Error>` — unknown `type:` values produce a clear error rather than
+  silently running on DuckDB. All verification gates green. Human should scaffold **W5 (broad CLI
+  mirror / independent Spark coverage)**.
