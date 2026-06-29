@@ -1,0 +1,26 @@
+[package]
+name = "smelt-backends"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+smelt-backend = { path = "../smelt-backend" }
+smelt-core = { path = "../smelt-core" }
+smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, default-features = false }
+smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = ["duckdb"]
+duckdb = ["smelt-backend-duckdb"]
+bundled-duckdb = ["smelt-backend-duckdb/bundled"]
+spark = ["smelt-backend-spark"]

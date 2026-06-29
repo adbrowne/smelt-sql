@@ -4084,6 +4084,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-backends"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "smelt-backend",
+ "smelt-backend-duckdb",
+ "smelt-backend-spark",
+ "smelt-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smelt-bench"
 version = "0.3.2"
 dependencies = [
@@ -4124,6 +4138,7 @@ dependencies = [
  "smelt-backend",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
+ "smelt-backends",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
