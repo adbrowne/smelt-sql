@@ -104,7 +104,7 @@ committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
-| P1 | Provision Delta Lake on the Spark Connect test server (`spark-up.sh`) | pending | | |
+| P1 | Provision Delta Lake on the Spark Connect test server (`spark-up.sh`) | done | feat(spark-w7): P1 — Delta-enabled spark-up.sh + delta_smoke green | 2026-06-30 |
 | P2 | Resolve the blocked `supports_nested_array_ddl`/Delta cell on the Delta server | pending | | |
 | P3 | Full live-Spark parity suite green on the Delta server (incl. W5 Delta path + timestamp-TZ) | pending | | |
 | P4 | Gated CI job: Delta server up → `cargo test --features spark` → down | pending | | |
