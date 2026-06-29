@@ -99,7 +99,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 |-------|-------|--------|--------|------|
 | P1 | Seed / `load_table` end-to-end parity on live Spark (+ reusable result-parity helper) | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P1 — seed load_table parity + fetch_rows/assert_table_parity helpers | 2026-06-29 |
 | P2 | The six required dialect lowerings executed on live Spark | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live. **ARRAY literal lowering** (`supports_array_literal`) not reachable via user SQL (smelt treats `ARRAY[...]` as a meta-language list; triggers `MetaListInScalarPosition`); covered by printer unit tests only — logged in §"Coverage gaps deferred". | feat(spark-w5): P2 — five dialect lowerings dual-target test (QUALIFY/DATE/cast/comma/CREATE OR REPLACE) | 2026-06-29 |
-| P3 | Incremental DELETE+INSERT parity on live Spark | pending | | |
+| P3 | Incremental DELETE+INSERT parity on live Spark | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P3 — incremental DELETE+INSERT idempotency dual-target test | 2026-06-29 |
 | P4 | MERGE / cumulative parity on live Spark (Delta) | pending | | |
 | P5 | Schema-evolution parity on live Spark | pending | | |
 | P6 | Materialization parity (view / materialized-view fallback) + coverage-gap log | pending | | |
