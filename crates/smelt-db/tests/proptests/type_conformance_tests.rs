@@ -102,7 +102,11 @@ fn check_conformance(
     // Build the cast-wrapped SQL
     let col_names: Vec<&str> = inferred.iter().map(|(name, _)| name.as_str()).collect();
     let col_types: Vec<DataType> = inferred.iter().map(|(_, dt)| dt.clone()).collect();
-    let cast_sql = wrap_with_type_casts(&backend_sql, &col_names, &col_types);
+    let dialect = match backend {
+        "spark" => SqlDialect::SparkSQL,
+        _ => SqlDialect::DuckDB,
+    };
+    let cast_sql = wrap_with_type_casts(&backend_sql, &col_names, &col_types, dialect);
 
     let actual_types = match oracle.query_types(&cast_sql) {
         Ok(types) => types,

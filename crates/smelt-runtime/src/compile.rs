@@ -1103,7 +1103,7 @@ impl SqlCompiler {
         let col_type_refs: Vec<DataType> =
             column_types.iter().map(|tc| tc.data_type.clone()).collect();
 
-        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs)
+        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs, self.dialect)
     }
 
     /// Compile a model with custom SQL (e.g., for transformed queries).

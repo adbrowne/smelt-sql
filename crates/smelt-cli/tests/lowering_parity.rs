@@ -65,8 +65,8 @@ fn stage_lowering_workspace(tmp: &TempDir) -> (PathBuf, PathBuf) {
         "name: lowering_proj\n\
          version: 1\n\
          paths:\n  - models\n\
-         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
-           spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  \
+         spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n\
          default_materialization: table\n"
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();

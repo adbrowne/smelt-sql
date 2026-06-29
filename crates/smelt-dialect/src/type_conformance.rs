@@ -4,6 +4,7 @@
 //! smelt-inferred type.  This guarantees that backend output types match
 //! smelt's type system exactly, regardless of backend-specific type rules.
 
+use crate::SqlDialect;
 use smelt_types::DataType;
 
 /// Wrap `sql` in a subquery that CASTs each column to its smelt-inferred type.
@@ -17,7 +18,15 @@ use smelt_types::DataType;
 /// ```
 ///
 /// Columns with `Unknown` or `Null` types are passed through without casting.
-pub fn wrap_with_type_casts(sql: &str, column_names: &[&str], column_types: &[DataType]) -> String {
+/// The `dialect` controls how string types are emitted:
+/// - DuckDB/PostgreSQL: `VARCHAR` (no length required)
+/// - SparkSQL: `STRING` (`VARCHAR` without length is rejected by Spark 4+)
+pub fn wrap_with_type_casts(
+    sql: &str,
+    column_names: &[&str],
+    column_types: &[DataType],
+    dialect: SqlDialect,
+) -> String {
     assert_eq!(
         column_names.len(),
         column_types.len(),
@@ -35,7 +44,7 @@ pub fn wrap_with_type_casts(sql: &str, column_names: &[&str], column_types: &[Da
                 select_items.push(name.to_string());
             }
             _ => {
-                let type_sql = dt.to_backend_sql();
+                let type_sql = type_cast_sql(dt, dialect);
                 select_items.push(format!("CAST({name} AS {type_sql}) AS {name}"));
             }
         }
@@ -48,6 +57,18 @@ pub fn wrap_with_type_casts(sql: &str, column_names: &[&str], column_types: &[Da
     )
 }
 
+/// Returns the SQL type string to use in a CAST expression for the given dialect.
+///
+/// Spark 4+ requires `VARCHAR` to carry a length; use `STRING` for bare string casts.
+fn type_cast_sql(dt: &DataType, dialect: SqlDialect) -> String {
+    match (dt, dialect) {
+        // Spark: VARCHAR without length → STRING
+        (DataType::Text, SqlDialect::SparkSQL)
+        | (DataType::Varchar { max_length: None }, SqlDialect::SparkSQL) => "STRING".to_string(),
+        _ => dt.to_backend_sql(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,7 +76,12 @@ mod tests {
     #[test]
     fn basic_wrapping() {
         let sql = "SELECT 1 AS a, 2 AS b FROM t";
-        let result = wrap_with_type_casts(sql, &["a", "b"], &[DataType::Integer, DataType::BigInt]);
+        let result = wrap_with_type_casts(
+            sql,
+            &["a", "b"],
+            &[DataType::Integer, DataType::BigInt],
+            SqlDialect::DuckDB,
+        );
         assert_eq!(
             result,
             "SELECT CAST(a AS INTEGER) AS a, CAST(b AS BIGINT) AS b FROM (\n  SELECT 1 AS a, 2 AS b FROM t\n) _smelt_typed"
@@ -63,11 +89,30 @@ mod tests {
     }
 
     #[test]
-    fn text_becomes_varchar() {
+    fn text_becomes_varchar_for_duckdb() {
         let sql = "SELECT UPPER(x) AS u FROM t";
-        let result = wrap_with_type_casts(sql, &["u"], &[DataType::Text]);
+        let result = wrap_with_type_casts(sql, &["u"], &[DataType::Text], SqlDialect::DuckDB);
         assert!(result.contains("CAST(u AS VARCHAR) AS u"));
         assert!(!result.contains("TEXT"));
+    }
+
+    #[test]
+    fn text_becomes_string_for_spark() {
+        let sql = "SELECT UPPER(x) AS u FROM t";
+        let result = wrap_with_type_casts(sql, &["u"], &[DataType::Text], SqlDialect::SparkSQL);
+        assert!(result.contains("CAST(u AS STRING) AS u"), "got: {result}");
+    }
+
+    #[test]
+    fn varchar_no_length_becomes_string_for_spark() {
+        let sql = "SELECT x AS s FROM t";
+        let result = wrap_with_type_casts(
+            sql,
+            &["s"],
+            &[DataType::Varchar { max_length: None }],
+            SqlDialect::SparkSQL,
+        );
+        assert!(result.contains("CAST(s AS STRING) AS s"), "got: {result}");
     }
 
     #[test]
@@ -80,6 +125,7 @@ mod tests {
                 DataType::Unknown(smelt_types::UnknownReason::Dynamic),
                 DataType::Integer,
             ],
+            SqlDialect::DuckDB,
         );
         assert!(result.contains("a, CAST(b AS INTEGER) AS b"));
     }
@@ -87,7 +133,7 @@ mod tests {
     #[test]
     fn empty_columns_returns_original() {
         let sql = "SELECT * FROM t";
-        let result = wrap_with_type_casts(sql, &[], &[]);
+        let result = wrap_with_type_casts(sql, &[], &[], SqlDialect::DuckDB);
         assert_eq!(result, sql);
     }
 
@@ -101,6 +147,7 @@ mod tests {
                 precision: 10,
                 scale: 2,
             }],
+            SqlDialect::DuckDB,
         );
         assert!(result.contains("CAST(d AS DECIMAL(10,2)) AS d"));
     }

@@ -19,16 +19,13 @@ use tempfile::TempDir;
 
 const SPARK_SCHEMA: &str = "smelt_merge_p4";
 
-/// SQL that produces the initial batch: two users with scores.
+/// The SELECT that produces the initial batch: two users with scores.
 ///
 /// Uses UNION ALL for cross-dialect compatibility (VALUES is DuckDB-idiomatic;
 /// UNION ALL works on both DuckDB and Spark SQL).
-fn initial_batch_sql(schema: &str) -> String {
-    format!(
-        "CREATE TABLE IF NOT EXISTS {schema}.merge_target AS \
-         SELECT 'A' AS user_id, CAST(100 AS BIGINT) AS total_score \
-         UNION ALL SELECT 'B', CAST(200 AS BIGINT)"
-    )
+fn initial_batch_select() -> &'static str {
+    "SELECT 'A' AS user_id, CAST(100 AS BIGINT) AS total_score \
+     UNION ALL SELECT 'B', CAST(200 AS BIGINT)"
 }
 
 /// The second batch to MERGE: update user A, insert new user C.
@@ -92,13 +89,9 @@ fn cumulative_merge_matches_across_backends() {
                         .await
                         .unwrap_or_else(|e| panic!("DuckDB open failed: {e}"));
 
-                    // Drop + create initial table.
+                    // create_table_as handles DROP + CREATE cleanly.
                     backend
-                        .drop_table_if_exists(schema, "merge_target")
-                        .await
-                        .unwrap();
-                    backend
-                        .execute_sql(&initial_batch_sql(schema))
+                        .create_table_as(schema, "merge_target", initial_batch_select())
                         .await
                         .unwrap_or_else(|e| panic!("DuckDB create merge_target failed: {e}"));
 
@@ -130,17 +123,14 @@ fn cumulative_merge_matches_across_backends() {
                         .expect("warehouse path must be valid UTF-8");
 
                     rt.block_on(async {
-                        let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
-                            .await
-                            .unwrap_or_else(|e| panic!("Spark connect failed: {e}"));
+                        let backend =
+                            SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
+                                .await
+                                .unwrap_or_else(|e| panic!("Spark connect failed: {e}"));
 
-                        // Drop + create initial table (Delta format from warehouse config).
+                        // create_table_as adds USING DELTA (use_delta=true) — required for MERGE.
                         backend
-                            .drop_table_if_exists(schema, "merge_target")
-                            .await
-                            .unwrap();
-                        backend
-                            .execute_sql(&initial_batch_sql(schema))
+                            .create_table_as(schema, "merge_target", initial_batch_select())
                             .await
                             .unwrap_or_else(|e| panic!("Spark create merge_target failed: {e}"));
 

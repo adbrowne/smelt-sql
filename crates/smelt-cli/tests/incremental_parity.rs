@@ -147,9 +147,10 @@ fn incremental_delete_insert_is_idempotent_on_both() {
                         .expect("warehouse path must be valid UTF-8");
 
                     rt.block_on(async {
-                        let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
-                            .await
-                            .unwrap_or_else(|e| panic!("Spark connect failed: {e}"));
+                        let backend =
+                            SparkBackend::new(&url, "spark_catalog", schema, Some(wh), true)
+                                .await
+                                .unwrap_or_else(|e| panic!("Spark connect failed: {e}"));
 
                         // Seed source table (DROP first for inter-run idempotency).
                         backend

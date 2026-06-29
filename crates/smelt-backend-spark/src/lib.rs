@@ -247,7 +247,9 @@ impl Backend for SparkBackend {
         // If the previous run left a VIEW at this name (not a TABLE), Spark's
         // DROP TABLE rejects it with [WRONG_COMMAND_FOR_OBJECT_TYPE]; fall
         // back to DROP VIEW in that case so the CREATE TABLE can proceed.
-        let drop_result = self.py_execute_no_result(&sql::drop_table(&table_name)).await;
+        let drop_result = self
+            .py_execute_no_result(&sql::drop_table(&table_name))
+            .await;
         if let Err(ref e) = drop_result {
             let msg = e.to_string();
             if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
@@ -255,7 +257,8 @@ impl Backend for SparkBackend {
                     "DROP TABLE failed (object is a VIEW): {} — retrying with DROP VIEW",
                     table_name
                 );
-                self.py_execute_no_result(&sql::drop_view(&table_name)).await?;
+                self.py_execute_no_result(&sql::drop_view(&table_name))
+                    .await?;
             } else {
                 drop_result?;
             }
@@ -282,13 +285,15 @@ impl Backend for SparkBackend {
                         tracing::debug!(
                             "Could not remove {:?} (owned by Spark uid): {:?}. \
                              Relying on spark-up.sh warehouse clean on next restart.",
-                            path, e
+                            path,
+                            e
                         );
                     }
                     Err(e) => {
                         return Err(BackendError::Other(anyhow::anyhow!(
                             "Failed to remove stale warehouse directory {:?}: {}",
-                            path, e
+                            path,
+                            e
                         )));
                     }
                 }
@@ -317,13 +322,17 @@ impl Backend for SparkBackend {
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        match self.py_execute_no_result(&sql::drop_table(&table_name)).await {
+        match self
+            .py_execute_no_result(&sql::drop_table(&table_name))
+            .await
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
                     // The name is occupied by a VIEW from a previous run; drop it instead.
-                    self.py_execute_no_result(&sql::drop_view(&table_name)).await
+                    self.py_execute_no_result(&sql::drop_view(&table_name))
+                        .await
                 } else {
                     Err(e)
                 }
