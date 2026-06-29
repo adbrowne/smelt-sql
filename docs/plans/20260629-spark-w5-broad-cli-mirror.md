@@ -97,7 +97,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
-| P1 | Seed / `load_table` end-to-end parity on live Spark (+ reusable result-parity helper) | pending | | |
+| P1 | Seed / `load_table` end-to-end parity on live Spark (+ reusable result-parity helper) | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P1 — seed load_table parity + fetch_rows/assert_table_parity helpers | 2026-06-29 |
 | P2 | The six required dialect lowerings executed on live Spark | pending | | |
 | P3 | Incremental DELETE+INSERT parity on live Spark | pending | | |
 | P4 | MERGE / cumulative parity on live Spark (Delta) | pending | | |

@@ -297,3 +297,111 @@ pub fn count_table_rows(
         }
     }
 }
+
+// ─── W5·P1: Result-parity helpers ───────────────────────────────────────────
+
+/// Execute a SQL query on the given target and return the raw Arrow batches.
+fn execute_sql_on(
+    target: &TargetKind,
+    db_path: &Path,
+    _warehouse: &Path,
+    schema: &str,
+    sql: &str,
+) -> Vec<RecordBatch> {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime for execute_sql_on");
+    match target {
+        TargetKind::DuckDb => {
+            #[cfg(not(feature = "duckdb"))]
+            panic!("DuckDB SQL requires --features duckdb");
+            #[cfg(feature = "duckdb")]
+            {
+                use smelt_backend::Backend;
+                use smelt_backend_duckdb::DuckDbBackend;
+                rt.block_on(async {
+                    let backend = DuckDbBackend::new(db_path, schema)
+                        .await
+                        .unwrap_or_else(|e| panic!("DuckDB open for execute_sql_on: {e}"));
+                    backend
+                        .execute_sql(sql)
+                        .await
+                        .unwrap_or_else(|e| panic!("DuckDB execute_sql failed: {e}"))
+                })
+            }
+        }
+        TargetKind::Spark => {
+            #[cfg(not(feature = "spark"))]
+            panic!("Spark SQL requires --features spark");
+            #[cfg(feature = "spark")]
+            {
+                use smelt_backend::Backend;
+                use smelt_backend_spark::SparkBackend;
+                let url = spark_connect_url().expect("SPARK_CONNECT_URL must be set for Spark SQL");
+                let wh = _warehouse
+                    .to_str()
+                    .expect("warehouse path must be valid UTF-8");
+                rt.block_on(async {
+                    let backend = SparkBackend::new(&url, "spark_catalog", schema, Some(wh))
+                        .await
+                        .unwrap_or_else(|e| panic!("Spark connect for execute_sql_on: {e}"));
+                    backend
+                        .execute_sql(sql)
+                        .await
+                        .unwrap_or_else(|e| panic!("Spark execute_sql failed: {e}"))
+                })
+            }
+        }
+    }
+}
+
+/// Convert `RecordBatch` results to a sorted list of string rows.
+///
+/// Each cell is stringified via `arrow::util::display::array_value_to_string`.
+/// Rows are sorted lexicographically so cross-backend comparisons are order-independent.
+fn batches_to_sorted_rows(batches: &[RecordBatch]) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        for row_idx in 0..batch.num_rows() {
+            let mut row = Vec::new();
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                let val = arrow::util::display::array_value_to_string(col, row_idx)
+                    .unwrap_or_else(|_| "NULL".to_string());
+                row.push(val);
+            }
+            rows.push(row);
+        }
+    }
+    rows.sort();
+    rows
+}
+
+/// Fetch all rows from `schema.table` on the given target, normalized and sorted.
+///
+/// This is the reusable result-parity helper that W5 phases use to compare
+/// query results across backends.  DuckDb opens `db_path`; Spark connects via
+/// `SPARK_CONNECT_URL` with `warehouse` as the Delta root.
+pub fn fetch_rows(
+    target: &TargetKind,
+    db_path: &Path,
+    warehouse: &Path,
+    schema: &str,
+    table: &str,
+) -> Vec<Vec<String>> {
+    let sql = format!("SELECT * FROM {schema}.{table}");
+    let batches = execute_sql_on(target, db_path, warehouse, schema, &sql);
+    batches_to_sorted_rows(&batches)
+}
+
+/// Assert that `actual` rows match `expected` rows (both sorted, all values as strings).
+///
+/// `label` names the target in the failure message.
+pub fn assert_table_parity(actual: &[Vec<String>], expected: &[Vec<String>], label: &str) {
+    let mut act = actual.to_vec();
+    let mut exp = expected.to_vec();
+    act.sort();
+    exp.sort();
+    assert_eq!(
+        act, exp,
+        "{label}: table rows mismatch.\n  expected: {exp:#?}\n  actual:   {act:#?}"
+    );
+}
