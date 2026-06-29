@@ -7,10 +7,12 @@
 //! **MV flag/behavior note (recorded for W6):**
 //! - DuckDB: `supports_materialized_views = false` → `MaterializedView` falls
 //!   back to a table via the `else` branch in `execute_model`.
+//!
 //! - Spark: `supports_materialized_views = true` → `MaterializedView` enters the
 //!   `if` branch, calls `create_materialized_view_as`, which the Spark backend
 //!   inherits as the default trait impl (calls `create_table_as` + `warn!`).
-//! Both produce a plain table.  The mismatch is Spark's capability flag claiming
+//!
+//! Both produce a plain table. The mismatch is Spark's capability flag claiming
 //! "yes" while the implementation creates a regular table — fixing the flag to
 //! `false` or implementing real Spark MV support is a **W6** conformance task.
 //!
@@ -114,10 +116,12 @@ fn run_smelt(project_dir: &std::path::Path, target: &str) -> std::process::Outpu
 /// queryable rows on both backends.
 ///
 /// For `materialized_view`:
+///
 /// - DuckDB (supports_materialized_views=false): falls back to a plain table.
 /// - Spark (supports_materialized_views=true): routes to create_materialized_view_as,
 ///   which falls back to create_table_as via the default trait impl.
-/// Both produce a queryable relation with the same rows.  The Spark flag/impl
+///
+/// Both produce a queryable relation with the same rows. The Spark flag/impl
 /// mismatch is a **W6** conformance fix.
 ///
 /// **DuckDB always green; Spark skips when `SPARK_CONNECT_URL` is unset.**

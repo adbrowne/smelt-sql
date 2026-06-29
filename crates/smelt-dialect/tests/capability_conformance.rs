@@ -4,10 +4,10 @@
 //! This is the standing drift gate required by the spec §Constraints. When a flag
 //! changes, this test and the spec table change in the **same commit**.
 //!
-//! Two cells are excluded from phase P1's assertions and marked PENDING:
-//!   - `supports_struct_field_ddl` / spark_parquet  (code=true,  matrix=✗ — unresolved)
-//!   - `supports_nested_array_ddl` / spark_delta    (code=false, matrix=✓ — unresolved)
-//! Both are verified empirically on live Spark in W6·P2.
+//! Two cells were excluded from P1's assertions pending live verification (W6·P2):
+//!   - `supports_struct_field_ddl` / spark_parquet  — RESOLVED: false (W6·P2 live test)
+//!   - `supports_nested_array_ddl` / spark_delta    — PENDING: Delta Lake not available on
+//!     test server; constructor=false, matrix=✓ still unresolved. See Blocked phases.
 
 use smelt_dialect::BackendCapabilities;
 
@@ -124,9 +124,9 @@ fn every_flag_matches_matrix() {
     // supports_struct_field_ddl
     cell!(duckdb, supports_struct_field_ddl, true, "DuckDB");
     cell!(delta, supports_struct_field_ddl, true, "Spark(Delta)");
-    // PENDING live-Spark verification — W6 P2
-    // code=true but matrix=✗; excluded until empirically resolved.
-    // cell!(parquet, supports_struct_field_ddl, false, "Spark(Parquet)");
+    // Empirically verified W6·P2 (Spark 4.1.x, Parquet): ALTER TABLE ADD COLUMNS with
+    // a qualified struct path is rejected; constructor and matrix both set to false.
+    cell!(parquet, supports_struct_field_ddl, false, "Spark(Parquet)");
 
     // supports_alter_column_using
     cell!(duckdb, supports_alter_column_using, true, "DuckDB");

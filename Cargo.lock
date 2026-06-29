@@ -4078,6 +4078,7 @@ dependencies = [
  "async-trait",
  "pyo3",
  "smelt-backend",
+ "smelt-dialect",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

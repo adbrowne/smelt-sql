@@ -115,7 +115,7 @@ committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
 | P1 | Capability-conformance suite (constructors == matrix) + MV flag → false | done | feat(spark-w6): P1 — capability conformance suite + MV flag false | 2026-06-30 |
-| P2 | Resolve the two provisional DDL cells empirically on live Spark | pending | | |
+| P2 | Resolve the two provisional DDL cells empirically on live Spark | blocked | feat(spark-w6): P2 — struct-field DDL false on Parquet (empirical); Delta blocked (no Delta Lake) | 2026-06-30 |
 | P3 | Wire the cross-engine Spark→DuckDB `read_parquet` substitution end-to-end | pending | | |
 | P4 | Cross-engine Parquet type conformance (decimal precision + timestamp TZ) | pending | | |
 
@@ -260,7 +260,27 @@ surfacing to a human to scaffold **W7 (CI gate + docs + Known-Divergence retract
 
 ## Blocked phases
 
-_(none yet)_
+### P2 — 2026-06-30
+
+**Partial progress landed.** `supports_struct_field_ddl` on Spark Parquet resolved empirically:
+- Live Spark 4.1.x rejects `ALTER TABLE … ADD COLUMNS (struct_col.field TYPE)` with
+  `[UNSUPPORTED_FEATURE.TABLE_OPERATION]`. Observed truth = **false**.
+- `dialect.rs:spark_parquet().supports_struct_field_ddl` updated `true → false` (now matches matrix `✗`).
+- Conformance test PENDING exclusion removed; `every_flag_matches_matrix` now asserts this cell.
+- New `crates/smelt-backend-spark/tests/ddl_observed.rs` with both tests committed.
+
+**Remaining blocker:** `supports_nested_array_ddl` on Spark Delta **cannot be verified** — the
+test server (`apache/spark:latest`) does not include Delta Lake. The `CREATE TABLE … USING DELTA`
+attempt fails with `[DATA_SOURCE_NOT_FOUND] DELTA`.
+
+**Current state (matrix vs code):**
+- `supports_struct_field_ddl` / Spark(Parquet): matrix=`✗`, code=`false` → RESOLVED ✓
+- `supports_nested_array_ddl` / Spark(Delta): matrix=`✓`, code=`false` → UNRESOLVED
+
+**Options for human:**
+1. **Preferred:** Add Delta Lake to the test server (`spark-up.sh` with `--packages io.delta:delta-spark_2.13:4.0.0`) and re-run P2 to empirically verify the Delta cell.
+2. **Accept code wins:** Set matrix to `✗` (matching code=false), since OSS Spark ALTER TABLE ADD COLUMNS for array-of-struct fails without Delta column-mapping (`mergeSchema` is the right path). Human must land the matrix edit in `multi_backend.md`.
+3. **Accept matrix wins:** Set code to `true` (meaning Delta IS supposed to support it), then verify with a Delta-enabled server.
 
 ---
 

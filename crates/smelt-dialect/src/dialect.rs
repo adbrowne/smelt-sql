@@ -177,8 +177,9 @@ impl BackendCapabilities {
             supports_insert_overwrite: true,
             // OSS Spark SQL has no native materialized view; falls back to table.
             supports_materialized_views: false,
-            // Schema evolution: Parquet has limited struct DDL (metastore only)
-            supports_struct_field_ddl: true,
+            // Empirically verified (W6·P2, Spark 4.1.x): ALTER TABLE … ADD COLUMNS
+            // with a qualified struct path is rejected — [UNSUPPORTED_FEATURE.TABLE_OPERATION].
+            supports_struct_field_ddl: false,
             supports_alter_column_using: false,
             supports_nested_array_ddl: false,
             supports_merge_schema_write: true,

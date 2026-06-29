@@ -30,3 +30,5 @@ tracing.workspace = true
 
 
 [dev-dependencies]
+smelt-dialect = { path = "../smelt-dialect" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
