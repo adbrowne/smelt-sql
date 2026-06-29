@@ -55,6 +55,7 @@ sub-plan and add a NOT-`done` row here.
 | `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | done (2026-06-29) |
 | `docs/plans/20260629-spark-w5-broad-cli-mirror.md` | W5 — parametrize the high-value exec/state CLI integration tests over `{DuckDb, Spark}` and make them pass on a **live** server: seed `load_table` end-to-end, the six required dialect lowerings, incremental DELETE+INSERT, MERGE (Delta), schema evolution, materializations — fixing each gap a live run surfaces. Verification wave (no spec change). | done (2026-06-29) |
 | `docs/plans/20260630-spark-w6-conformance-cross-engine.md` | W6 — standing capability-conformance suite (constructors == matrix); resolve the MV flag/impl mismatch (→ table fallback) + two provisional DDL cells (empirical on live Spark); wire the cross-engine Spark→DuckDB `read_parquet` substitution end-to-end + validate decimal-precision / timestamp-TZ Parquet round-trip. Matrix spec diff landed alongside. | done (2026-06-30) |
+| `docs/plans/20260630-spark-w7-ci-gate-docs.md` | W7 (final) — provision **Delta Lake** on the Spark test server (the W6·P2 blocker; Delta is the parity baseline); get the full live-Spark suite green on it (incl. W5's Delta-path tests that ran Spark-skipped + timezone-aware timestamp); add a **gated CI job** (Delta server up → `cargo test --features spark` → down); `docs-site/` backend page + `CLAUDE.md` Commands entry; retract the now-true `multi_backend.md` Known-Divergences. | pending |
 
 ## Wave scaffolding queue
 
@@ -194,6 +195,19 @@ _(none yet)_
   reminder:** W5 only delivers value with `SPARK_CONNECT_URL` live; run the loop with `spark-up.sh`
   up. Next after W5: **W6 (capability conformance + cross-engine)**.
 - **2026-06-30** — **W6 fully done** (P1 conformance suite + MV flip + P2 partial DDL empirical (struct_field_ddl=false confirmed; nested_array_ddl on Delta blocked — no Delta Lake on test server, recorded in W6 §Blocked phases) + P3 cross-engine `read_parquet` wired end-to-end + P4 decimal-precision + timestamp-NTZ Parquet round-trip green). `multi_backend.md` matrix and constructors now agree on all asserted flags. Human should scaffold **W7 (CI gate + docs + Known-Divergence retractions)**.
+- **2026-06-30** — **W7 scaffolded** (`docs/plans/20260630-spark-w7-ci-gate-docs.md`, registry row added)
+  — the **final** wave. W6·P2 surfaced the decisive gap: the test server (`apache/spark:latest`) **does
+  not bundle Delta Lake** (`CREATE TABLE … USING DELTA` → `[DATA_SOURCE_NOT_FOUND]`), and Delta is the
+  spec's parity baseline (MERGE / column mapping / schema evolution all need it) — so W5's Delta-path
+  tests, which ran **Spark-skipped**, have never executed live. W7 therefore is **provision Delta → get
+  green → gate in CI → document → retract**: P1 add Delta to `spark-up.sh`, P2 close the blocked
+  `nested_array_ddl`/Delta cell, P3 full live-Spark parity suite green on the Delta server (incl. W5
+  MERGE/schema-evolution + timezone-aware timestamp), P4 gated `spark-parity` CI job in `compat.yml`,
+  P5 `docs-site/` backend page + `CLAUDE.md` entry + Known-Divergence retractions. Spec diff partly
+  landed alongside (human gate): retracted the now-true "session init / Arrow loading" divergence,
+  narrowed "cross-engine type conformance" to "partly validated" (decimal + NTZ done; TZ open) and the
+  provisional cells to the single Delta cell. The "parity not verified" retraction lands in P5 once P3+P4
+  are green. After W7: the parity initiative is **complete**; no further waves remain to scaffold.
 - **2026-06-30** — **W6 scaffolded** (`docs/plans/20260630-spark-w6-conformance-cross-engine.md`,
   registry row added). Scoping the conformance suite surfaced **four** capability matrix-vs-code drifts;
   the matrix spec diff was landed alongside the plan at the human gate: (a) `supports_materialized_views`
