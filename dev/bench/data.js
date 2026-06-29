@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782608616846,
+  "lastUpdate": 1782720218019,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20585,6 +20585,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.583315,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "69921eb3021c2daa9897acb1d69fb5180fbf0202",
+          "message": "fix(ci): untrack .cargo/config.toml so it no longer forces mold on CI (#150)\n\nPR #149 added a checked-in .cargo/config.toml that unconditionally sets\n`rustflags = [\"-C\", \"link-arg=-fuse-ld=mold\"]` for x86_64-unknown-linux-gnu.\nThe file's own comment calls it \"local-only,\" but committing it applies it to\nevery build — including CI runners, which do not have mold installed. Every\nRust-compiling job on main (Tests, Parser Compatibility, Benchmarks, Dev\nRelease) failed at link time with `collect2: fatal error: cannot find 'ld'`.\n\nUntrack the file (it stays on disk for local use) and gitignore it so the\nbuild-speed config remains genuinely local and never reaches CI or other\ncontributors, where the chosen linker may be absent.\n\nCo-authored-by: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-29T18:01:08+10:00",
+          "tree_id": "ba397c77bb690a52668bf289984fba9ecc01b2ac",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/69921eb3021c2daa9897acb1d69fb5180fbf0202"
+        },
+        "date": 1782720216996,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 54.077486,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 51.975572,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.826731,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.621837,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.363803,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 707.6191429999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.3979269999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.1562669999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.15798,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.6993820000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 569.957557,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.23237,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.69876,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.634899,
             "unit": "ms"
           }
         ]
