@@ -147,7 +147,8 @@ impl BackendCapabilities {
             supports_double_colon_cast: false,
             supports_trailing_commas: false,
             supports_insert_overwrite: true,
-            supports_materialized_views: true,
+            // OSS Spark SQL has no native materialized view; falls back to table.
+            supports_materialized_views: false,
             // Schema evolution: Delta supports struct field DDL and column mapping
             supports_struct_field_ddl: true,
             supports_alter_column_using: false,
@@ -174,7 +175,8 @@ impl BackendCapabilities {
             supports_double_colon_cast: false,
             supports_trailing_commas: false,
             supports_insert_overwrite: true,
-            supports_materialized_views: true,
+            // OSS Spark SQL has no native materialized view; falls back to table.
+            supports_materialized_views: false,
             // Schema evolution: Parquet has limited struct DDL (metastore only)
             supports_struct_field_ddl: true,
             supports_alter_column_using: false,

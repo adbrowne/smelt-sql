@@ -114,7 +114,7 @@ committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 
 | Phase | Title | Status | Commit | Date |
 |-------|-------|--------|--------|------|
-| P1 | Capability-conformance suite (constructors == matrix) + MV flag → false | pending | | |
+| P1 | Capability-conformance suite (constructors == matrix) + MV flag → false | done | feat(spark-w6): P1 — capability conformance suite + MV flag false | 2026-06-30 |
 | P2 | Resolve the two provisional DDL cells empirically on live Spark | pending | | |
 | P3 | Wire the cross-engine Spark→DuckDB `read_parquet` substitution end-to-end | pending | | |
 | P4 | Cross-engine Parquet type conformance (decimal precision + timestamp TZ) | pending | | |
