@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn test_spark_parquet_schema_evolution_capabilities() {
         let caps = BackendCapabilities::spark_parquet();
-        assert!(caps.supports_struct_field_ddl);
+        assert!(!caps.supports_struct_field_ddl); // false: empirically verified in W6·P2
         assert!(!caps.supports_alter_column_using);
         assert!(!caps.supports_nested_array_ddl);
         assert!(caps.supports_merge_schema_write);

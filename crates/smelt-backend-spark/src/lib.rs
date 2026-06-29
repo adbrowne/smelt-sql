@@ -260,7 +260,22 @@ impl Backend for SparkBackend {
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let view_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::drop_view(&view_name)).await
+        match self.py_execute_no_result(&sql::drop_view(&view_name)).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Spark 4.x rejects DROP VIEW on a TABLE with WRONG_COMMAND_FOR_OBJECT_TYPE.
+                // Silently succeed: the name is occupied by a table (which will be cleaned
+                // up by the subsequent drop_table_if_exists call in execute_model).
+                let msg = e.to_string();
+                if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE")
+                    || msg.contains("DROP VIEW requires a VIEW")
+                {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
@@ -344,9 +359,12 @@ impl Backend for SparkBackend {
     }
 
     fn materialized_path(&self, schema: &str, name: &str) -> Option<std::path::PathBuf> {
+        // Spark stores managed tables under {warehouse}/{schema}.db/{table_name} —
+        // the ".db" suffix is the Hive metastore convention used by Spark SQL when
+        // spark.sql.warehouse.dir is set (empirically verified on Spark 4.1.x, W6·P3).
         self.warehouse
             .as_ref()
-            .map(|wh| std::path::PathBuf::from(format!("{}/{}/{}", wh, schema, name)))
+            .map(|wh| std::path::PathBuf::from(format!("{}/{}.db/{}", wh, schema, name)))
     }
 
     async fn delete_partitions(

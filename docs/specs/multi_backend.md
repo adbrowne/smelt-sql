@@ -116,9 +116,11 @@ When a model on backend A references a model pinned to backend B (a cross-backen
 by `DependencyGraph::find_cross_backend_edges()`), smelt resolves the reference to a
 file-format read against B's materialized output rather than a three-part table name. Today
 the only path is **Spark → DuckDB**: a DuckDB model referencing a Spark model compiles the
-reference to `read_parquet('{warehouse}/{schema}/{model}/**/*.parquet', hive_partitioning =
-true)`. This requires the referenced Spark model to be `materialization: table` and the Spark
-target to declare a `warehouse` path that is on a filesystem the DuckDB process can also read.
+reference to `read_parquet('{warehouse}/{schema}.db/{model}/**/*.parquet', hive_partitioning =
+true)`. The `.db` suffix reflects the Hive metastore directory convention that Spark SQL uses
+when `spark.sql.warehouse.dir` is set (empirically verified on Spark 4.1.x). This requires the
+referenced Spark model to be `materialization: table` and the Spark target to declare a
+`warehouse` path that is on a filesystem the DuckDB process can also read.
 No explicit copy step exists; Spark writes Parquet, DuckDB reads it natively.
 
 ### Incremental & schema evolution per backend

@@ -116,7 +116,7 @@ committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 |-------|-------|--------|--------|------|
 | P1 | Capability-conformance suite (constructors == matrix) + MV flag → false | done | feat(spark-w6): P1 — capability conformance suite + MV flag false | 2026-06-30 |
 | P2 | Resolve the two provisional DDL cells empirically on live Spark | blocked | feat(spark-w6): P2 — struct-field DDL false on Parquet (empirical); Delta blocked (no Delta Lake) | 2026-06-30 |
-| P3 | Wire the cross-engine Spark→DuckDB `read_parquet` substitution end-to-end | pending | | |
+| P3 | Wire the cross-engine Spark→DuckDB `read_parquet` substitution end-to-end | done | feat(spark-w6): P3 — wire cross-engine read_parquet substitution end-to-end | 2026-06-30 |
 | P4 | Cross-engine Parquet type conformance (decimal precision + timestamp TZ) | pending | | |
 
 ---
