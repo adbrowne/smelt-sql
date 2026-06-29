@@ -53,7 +53,7 @@ sub-plan and add a NOT-`done` row here.
 | `docs/plans/20260628-spark-w2-unblock-resmoke.md` | W2 — fix the two blocker-class breaks (BL-1 host-path seed load, BL-2 session schema-init ordering) + **re-smoke** to extend the break list that scopes W3 | done (2026-06-28) |
 | `docs/plans/20260628-spark-w3-source-seeding.md` | W3 — seed source data identically into both `{DuckDb, Spark}` in the dual-target smoke (resolves BL-3/BL-4, a test-harness fix — **not** a pipeline source-load feature) + **re-smoke** to surface the dialect breaks that scope W4 | done (2026-06-29) |
 | `docs/plans/20260629-spark-w4-shared-backend-factory.md` | W4 — extract one shared `smelt-backends` factory consumed by **both** CLI and UI (closes the CLI↔UI parity gap where the UI's factory was DuckDB-only → **UI gains Spark**), guard test against re-duplication, + fail-loud on unknown backend `type:` | done (2026-06-29) |
-| `docs/plans/20260629-spark-w5-broad-cli-mirror.md` | W5 — parametrize the high-value exec/state CLI integration tests over `{DuckDb, Spark}` and make them pass on a **live** server: seed `load_table` end-to-end, the six required dialect lowerings, incremental DELETE+INSERT, MERGE (Delta), schema evolution, materializations — fixing each gap a live run surfaces. Verification wave (no spec change). | pending |
+| `docs/plans/20260629-spark-w5-broad-cli-mirror.md` | W5 — parametrize the high-value exec/state CLI integration tests over `{DuckDb, Spark}` and make them pass on a **live** server: seed `load_table` end-to-end, the six required dialect lowerings, incremental DELETE+INSERT, MERGE (Delta), schema evolution, materializations — fixing each gap a live run surfaces. Verification wave (no spec change). | done (2026-06-29) |
 
 ## Wave scaffolding queue
 
@@ -180,6 +180,7 @@ _(none yet)_
   `Result<BackendType, anyhow::Error>` — unknown `type:` values produce a clear error rather than
   silently running on DuckDB. All verification gates green. Human should scaffold **W5 (broad CLI
   mirror / independent Spark coverage)**.
+- **2026-06-29** — **W5 fully done** (P1 seed load_table + P2 five dialect lowerings + P3 incremental DELETE+INSERT + P4 MERGE cumulative + P5 schema evolution + P6 materialization parity + coverage-gap log). All six phases pass on DuckDB; Spark path skips green (SPARK_CONNECT_URL unset — re-run with `scripts/spark-up.sh` live). MV flag/impl mismatch recorded for **W6** conformance. Human should scaffold **W6 (capability conformance + cross-engine)**.
 - **2026-06-29** — **W5 scaffolded** (`docs/plans/20260629-spark-w5-broad-cli-mirror.md`, registry row
   added). A **verification wave** (no spec change): it parametrizes the high-value exec/state CLI
   integration tests over `{DuckDb, Spark}` on the W1 harness (`crates/smelt-cli/tests/common/mod.rs`)

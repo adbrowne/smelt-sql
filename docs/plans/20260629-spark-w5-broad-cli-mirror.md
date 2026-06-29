@@ -102,7 +102,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 | P3 | Incremental DELETE+INSERT parity on live Spark | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P3 — incremental DELETE+INSERT idempotency dual-target test | 2026-06-29 |
 | P4 | MERGE / cumulative parity on live Spark (Delta) | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P4 — MERGE cumulative upsert dual-target test | 2026-06-29 |
 | P5 | Schema-evolution parity on live Spark | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live | feat(spark-w5): P5 — schema-evolution add-column dual-target test | 2026-06-29 |
-| P6 | Materialization parity (view / materialized-view fallback) + coverage-gap log | pending | | |
+| P6 | Materialization parity (view / materialized-view fallback) + coverage-gap log | done (2026-06-29) — Spark skipped (SPARK_CONNECT_URL unset); re-run with server live. **MV flag/impl mismatch** logged in §"Coverage gaps deferred" for W6. | feat(spark-w5): P6 — materialization parity (view/table/mv) dual-target test + coverage-gap log | 2026-06-29 |
 
 ---
 
@@ -291,7 +291,36 @@ function that generates array-valued SQL already exercises the lowering via the 
 a live-Spark execution test would only add value if a smelt function produces array-valued SQL that
 is passed to Spark, which is not yet a scenario in the codebase.
 
-_(P6 appends additional un-mirrored DuckDb integration areas here.)_
+**P6 finding — Spark `MaterializedView` flag/implementation mismatch:**
+`BackendCapabilities::spark()` sets `supports_materialized_views: true`, so a
+`materialized_view` model routes to `create_materialized_view_as`.  The Spark
+backend inherits the default trait impl, which calls `create_table_as` + emits a
+`warn!`.  The result is queryable and logically correct (a plain table), but the
+flag claims support while the implementation falls back.  Fixing this — either set
+the flag to `false` or implement a real Spark MV — is a **W6** conformance task.
+Verified in `tests/materialization_parity.rs` (`mv_model`): both DuckDB (flag=false
+→ else-branch table) and Spark (flag=true → default-impl table) produce the same rows.
+
+**P6 un-mirrored DuckDB integration areas (W5 coverage gaps):**
+The following DuckDB integration test areas were **not** mirrored to Spark in W5.
+W6/W7 or a follow-up can pick them up; they are logged here so the cap is explicit.
+
+- **Smelt function expansion on Spark** — `e2e/functions_e2e.rs`, `e2e/meta_*.rs`,
+  `e2e/combined_generators_e2e.rs`: smelt meta-language functions that generate SQL
+  have only been verified on DuckDB; function-expanded SQL has not run on live Spark.
+- **Analytical query patterns** — `e2e/cohort_count_acceptance.rs`,
+  `e2e/per_partition_equivalence.rs`: cohort counts and per-partition equivalence
+  queries not mirrored.
+- **Time-range backfill** — `e2e/backbuild_cumulative_e2e.rs`,
+  `e2e/web_analytics_backfill.rs`: full backfill plans (not just single-window
+  DELETE+INSERT) not mirrored.
+- **Selector expressions** — `e2e/selector_resolution.rs`: model selector syntax
+  works at planning layer, but selector + Spark execution not exercised.
+- **`smelt test` command** — `cli_unit/test_command*.rs` (if any): the built-in
+  test runner has not been exercised against a Spark target.
+- **Output-format / dry-run gates** — `e2e/show_plan.rs`, `e2e/dry_run_visibility.rs`,
+  `e2e/build_summary_visibility.rs`: these test CLI output format, not backend
+  execution — not Spark-relevant, but noted for completeness.
 
 ---
 
