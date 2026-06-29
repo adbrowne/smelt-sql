@@ -100,7 +100,7 @@ clean committed tree; commit + push; emit `<<PHASE_BLOCKED>>`. Conditions:
 |-------|-------|--------|--------|------|
 | P1 | `smelt-backends` aggregator crate; `smelt-cli` delegates its `BackendFactory` to it | done | feat(spark-w4): P1 — smelt-backends crate; smelt-cli delegates selection | 2026-06-29 |
 | P2 | `smelt-ui` consumes the shared factory (gains Spark); remove its DuckDB-only selection | done | feat(spark-w4): P2 — smelt-ui delegates BackendFactory to smelt-backends; gains Spark | 2026-06-29 |
-| P3 | Dual-consumer parity guard test (CLI & UI resolve identical backend) + delete dead duplication | pending | | |
+| P3 | Dual-consumer parity guard test (CLI & UI resolve identical backend) + delete dead duplication | done | feat(spark-w4): P3 — dual-consumer backend-selection parity guard test | 2026-06-29 |
 | P4 | Fail-loud on unknown backend `type:` (replace the silent `_ => DuckDB` fallback) | pending | | |
 
 ---
