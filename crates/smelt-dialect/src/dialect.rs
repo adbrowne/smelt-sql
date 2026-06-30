@@ -89,6 +89,14 @@ pub struct BackendCapabilities {
     /// so future backends (e.g. BigQuery, which has native pipe support) can opt
     /// in without code changes.
     pub supports_pipe_syntax: bool,
+
+    /// Backend requires explicit schema creation during session init.
+    ///
+    /// When `true`, the backend creates the target schema (via `ensure_schema`)
+    /// before selecting it as the current database. All current backends require
+    /// this — it is `true` universally and exists so the capability matrix stays
+    /// accurate and callers can assert the contract.
+    pub requires_schema_init: bool,
 }
 
 impl BackendCapabilities {
@@ -115,6 +123,7 @@ impl BackendCapabilities {
             supports_merge_schema_write: false,
             supports_column_mapping: false,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 
@@ -138,14 +147,16 @@ impl BackendCapabilities {
             supports_double_colon_cast: false,
             supports_trailing_commas: false,
             supports_insert_overwrite: true,
-            supports_materialized_views: true,
+            // OSS Spark SQL has no native materialized view; falls back to table.
+            supports_materialized_views: false,
             // Schema evolution: Delta supports struct field DDL and column mapping
             supports_struct_field_ddl: true,
             supports_alter_column_using: false,
-            supports_nested_array_ddl: false,
+            supports_nested_array_ddl: true,
             supports_merge_schema_write: true,
             supports_column_mapping: true,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 
@@ -164,14 +175,17 @@ impl BackendCapabilities {
             supports_double_colon_cast: false,
             supports_trailing_commas: false,
             supports_insert_overwrite: true,
-            supports_materialized_views: true,
-            // Schema evolution: Parquet has limited struct DDL (metastore only)
-            supports_struct_field_ddl: true,
+            // OSS Spark SQL has no native materialized view; falls back to table.
+            supports_materialized_views: false,
+            // Empirically verified (W6·P2, Spark 4.1.x): ALTER TABLE … ADD COLUMNS
+            // with a qualified struct path is rejected — [UNSUPPORTED_FEATURE.TABLE_OPERATION].
+            supports_struct_field_ddl: false,
             supports_alter_column_using: false,
             supports_nested_array_ddl: false,
             supports_merge_schema_write: true,
             supports_column_mapping: false,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 
@@ -198,6 +212,7 @@ impl BackendCapabilities {
             supports_merge_schema_write: false,
             supports_column_mapping: false,
             supports_pipe_syntax: false,
+            requires_schema_init: true,
         }
     }
 }
@@ -221,7 +236,7 @@ mod tests {
         let caps = BackendCapabilities::spark_delta();
         assert!(caps.supports_struct_field_ddl);
         assert!(!caps.supports_alter_column_using);
-        assert!(!caps.supports_nested_array_ddl);
+        assert!(caps.supports_nested_array_ddl); // empirically verified true in W7·P2
         assert!(caps.supports_merge_schema_write);
         assert!(caps.supports_column_mapping);
     }
@@ -229,7 +244,7 @@ mod tests {
     #[test]
     fn test_spark_parquet_schema_evolution_capabilities() {
         let caps = BackendCapabilities::spark_parquet();
-        assert!(caps.supports_struct_field_ddl);
+        assert!(!caps.supports_struct_field_ddl); // false: empirically verified in W6·P2
         assert!(!caps.supports_alter_column_using);
         assert!(!caps.supports_nested_array_ddl);
         assert!(caps.supports_merge_schema_write);

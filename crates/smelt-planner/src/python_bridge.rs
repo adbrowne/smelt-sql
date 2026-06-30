@@ -15,7 +15,7 @@ use crate::types::{ExecutionStep, Transformation};
 ///
 /// Calls `importlib.metadata.entry_points(group="smelt.planner_rules")`,
 /// loads each entry point, and instantiates the rule class.
-fn discover_python_rules(py: Python<'_>) -> PyResult<Vec<PyObject>> {
+fn discover_python_rules(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
     let locals = PyDict::new(py);
     py.run(
         pyo3::ffi::c_str!(
@@ -33,7 +33,7 @@ fn discover_python_rules(py: Python<'_>) -> PyResult<Vec<PyObject>> {
         Some(&locals),
     )?;
     let result = locals.get_item("rules")?.unwrap();
-    let list = result.downcast::<PyList>()?;
+    let list = result.cast::<PyList>()?;
     Ok(list
         .iter()
         .map(|item| item.into_pyobject(py).unwrap().into())
@@ -44,16 +44,19 @@ fn discover_python_rules(py: Python<'_>) -> PyResult<Vec<PyObject>> {
 fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'py, PyAny>> {
     let types = py.import("smelt_sdk.types")?;
 
-    let inc_config = match &model.incremental_config {
-        Some(cfg) => {
+    // Timeseries config provides the incremental config that Python sees.
+    // IncrementalConfig (Rust) only carries unique_key + safety_overrides;
+    // partition_column / event_time_column / granularity live in TimeseriesConfig.
+    let inc_config = match &model.timeseries_config {
+        Some(ts) => {
             let ic = types.getattr("IncrementalConfig")?;
-            let granularity_str = match &cfg.granularity {
+            let granularity_str = match &ts.granularity {
                 crate::types::Granularity::Hour => "hour".to_string(),
                 crate::types::Granularity::Day => "day".to_string(),
-                crate::types::Granularity::Week { week_start } => {
-                    format!(
+                crate::types::Granularity::Week => match &ts.week_start {
+                    Some(ws) => format!(
                         "week:{}",
-                        match week_start {
+                        match ws {
                             crate::types::Weekday::Monday => "monday",
                             crate::types::Weekday::Tuesday => "tuesday",
                             crate::types::Weekday::Wednesday => "wednesday",
@@ -62,15 +65,16 @@ fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'
                             crate::types::Weekday::Saturday => "saturday",
                             crate::types::Weekday::Sunday => "sunday",
                         }
-                    )
-                }
+                    ),
+                    None => "week".to_string(),
+                },
                 crate::types::Granularity::Month => "month".to_string(),
                 crate::types::Granularity::Quarter => "quarter".to_string(),
                 crate::types::Granularity::Year => "year".to_string(),
             };
             Some(ic.call1((
-                cfg.partition_column.as_str(),
-                cfg.event_time_column.as_str(),
+                ts.partition_column.as_str(),
+                ts.event_time_column.as_str(),
                 granularity_str,
             ))?)
         }
@@ -167,10 +171,26 @@ fn py_to_transformation(
         }
         Ok(Some(Transformation::ReplaceWithPlan { model, steps }))
     } else if obj.is_instance(&set_inc_cls)? {
+        let granularity_str: String = obj.getattr("granularity")?.extract()?;
+        let granularity = match granularity_str.as_str() {
+            "hour" => crate::types::Granularity::Hour,
+            "day" => crate::types::Granularity::Day,
+            "month" => crate::types::Granularity::Month,
+            "quarter" => crate::types::Granularity::Quarter,
+            "year" => crate::types::Granularity::Year,
+            s if s == "week" || s.starts_with("week:") => crate::types::Granularity::Week,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Unknown granularity from Python rule: {}",
+                    other
+                )))
+            }
+        };
         Ok(Some(Transformation::SetIncremental {
             model: obj.getattr("model")?.extract()?,
             event_time_column: obj.getattr("event_time_column")?.extract()?,
             partition_column: obj.getattr("partition_column")?.extract()?,
+            granularity,
         }))
     } else {
         Ok(None)
@@ -237,7 +257,7 @@ pub fn run_python_rules(models: &[&ModelInfo]) -> (Vec<Transformation>, Vec<Stri
 
                 // Call rewrite directly (skip detect for simplicity — rules
                 // that don't match return None from rewrite).
-                let py_analysis_arg: PyObject = match &py_analysis {
+                let py_analysis_arg: Py<PyAny> = match &py_analysis {
                     Some(a) => a.clone().into(),
                     None => py.None(),
                 };
@@ -303,15 +323,12 @@ pub fn run_python_rules(models: &[&ModelInfo]) -> (Vec<Transformation>, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::IncrementalConfig;
+    use crate::types::{IncrementalConfig, TimeseriesConfig};
 
     #[test]
     fn test_discover_rules_without_packages() {
-        // With no packages installed, should return empty
         Python::attach(|py| {
             let rules = discover_python_rules(py).unwrap();
-            // May or may not find rules depending on environment,
-            // but should not error.
             let _ = rules;
         });
     }
@@ -319,7 +336,6 @@ mod tests {
     #[test]
     fn test_model_info_roundtrip() {
         Python::attach(|py| {
-            // Ensure smelt_sdk is importable — skip test if not installed
             if py.import("smelt_sdk").is_err() {
                 return;
             }
@@ -328,11 +344,14 @@ mod tests {
                 name: "test_model".to_string(),
                 sql: "SELECT 1".to_string(),
                 refs: vec!["other".to_string()],
+                timeseries_config: Some(TimeseriesConfig {
+                    event_time_column: "event_time".to_string(),
+                    partition_column: "dt".to_string(),
+                    granularity: crate::types::Granularity::Day,
+                    week_start: None,
+                }),
                 incremental_config: Some(IncrementalConfig {
                     enabled: true,
-                    partition_column: "dt".to_string(),
-                    event_time_column: "event_time".to_string(),
-                    granularity: crate::types::Granularity::Day,
                     unique_key: vec![],
                     safety_overrides: crate::types::IncrementalSafetyOverrides::default(),
                 }),

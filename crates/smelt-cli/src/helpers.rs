@@ -5,16 +5,6 @@ use smelt_core::{Granularity, Weekday};
 use smelt_db::{ColumnSource, ModelSchema};
 use std::path::{Path, PathBuf};
 
-use tracing::info;
-
-use smelt_cli::BackendType;
-
-#[cfg(feature = "duckdb")]
-use smelt_backend_duckdb::DuckDbBackend;
-
-#[cfg(feature = "spark")]
-use smelt_backend_spark::SparkBackend;
-
 #[allow(dead_code)]
 pub fn granularity_label(g: &Granularity) -> &'static str {
     match g {
@@ -185,76 +175,12 @@ fn weekday_to_chrono(day: &Weekday) -> ChronoWeekday {
     }
 }
 
-#[allow(unreachable_code, unused_variables)]
 pub async fn create_backend(
     target_config: &smelt_cli::config::Target,
     project_dir: &Path,
     database_override: Option<PathBuf>,
 ) -> Result<Box<dyn Backend>> {
-    match target_config.backend_type() {
-        BackendType::DuckDB => {
-            #[cfg(feature = "duckdb")]
-            {
-                let database = target_config
-                    .database
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
-
-                let db_path = database_override.unwrap_or_else(|| project_dir.join(database));
-                info!("Backend: DuckDB");
-                info!("Database: {}", db_path.display());
-
-                Ok(Box::new(
-                    DuckDbBackend::new_with_settings(
-                        &db_path,
-                        &target_config.schema,
-                        target_config.settings.as_ref(),
-                    )
-                    .await
-                    .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
-                ))
-            }
-            #[cfg(not(feature = "duckdb"))]
-            {
-                Err(anyhow::anyhow!(
-                    "DuckDB backend not available. Rebuild with --features duckdb"
-                ))
-            }
-        }
-        BackendType::Spark => {
-            #[cfg(feature = "spark")]
-            {
-                let connect_url = target_config
-                    .connect_url
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Spark target requires 'connect_url' field"))?;
-
-                let default_catalog = "spark_catalog".to_string();
-                let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
-
-                info!("Backend: Spark");
-                info!("Connect URL: {}", connect_url);
-                info!("Catalog: {}", catalog);
-
-                Ok(Box::new(
-                    SparkBackend::new(
-                        connect_url,
-                        catalog,
-                        &target_config.schema,
-                        target_config.warehouse.as_deref(),
-                    )
-                    .await
-                    .with_context(|| format!("Failed to connect to Spark at {}", connect_url))?,
-                ))
-            }
-            #[cfg(not(feature = "spark"))]
-            {
-                Err(anyhow::anyhow!(
-                    "Spark backend not available. Rebuild with --features spark"
-                ))
-            }
-        }
-    }
+    smelt_backends::create_backend("", target_config, project_dir, database_override).await
 }
 
 pub fn print_table(schema: &ModelSchema, model_name: &str) {

@@ -122,6 +122,28 @@ cargo test --features smelt-cli/bundled-duckdb,smelt-ui/bundled-duckdb,smelt-db/
 cargo clippy --all-targets --features smelt-cli/bundled-duckdb,smelt-ui/bundled-duckdb
 ```
 
+### Spark parity tests (gated — needs Delta-enabled server)
+
+These tests require a Delta-enabled Spark Connect server. Trigger them locally with:
+
+```bash
+# 1. Start Delta-enabled Spark Connect server (downloads Delta jars on first run)
+bash scripts/spark-up.sh
+
+# 2. Export the Spark env vars (SPARK_CONNECT_URL, PYTHONPATH, PYSPARK_PYTHON, …)
+source scripts/spark-env.sh
+
+# 3. Run the full Spark parity suite (dual-target + backend-spark integration tests)
+cargo test -p smelt-backend-spark --quiet 2>&1 | tail -40
+cargo test -p smelt-cli --features smelt-cli/spark --quiet 2>&1 | tail -40
+
+# 4. Tear down the server
+bash scripts/spark-down.sh
+```
+
+In CI the `spark-parity` job in `.github/workflows/compat.yml` runs the same sequence. It is
+gated — triggered only on `schedule` or when the `run-docker-tests` label is added to a PR.
+
 ### VSCode Extension
 ```bash
 # Install and build the extension

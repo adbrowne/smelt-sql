@@ -4,8 +4,8 @@
 //! - `RunReporter` impl that forwards events to the UI's WebSocket broadcast
 //!   channel as `RunProgressEvent::*` and updates the atomic counters that
 //!   `GET /api/run/status` reads.
-//! - `BackendFactory` impl that creates DuckDB backends (Spark not yet
-//!   supported in UI mode).
+//! - `BackendFactory` impl that delegates to `smelt_backends::create_backend`,
+//!   giving the UI full backend parity with the CLI (including Spark).
 //!
 //! No execute logic lives here — that's the Run Pipeline Parity Rule's
 //! contract. See `docs/specs/architecture.md` → "Run pipeline parity rule
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -271,9 +271,8 @@ impl RunReporter for BroadcastReporter {
     }
 }
 
-/// Backend factory for the UI (DuckDB only at present; Spark in CLI mode
-/// only). Implements `smelt_runtime::BackendFactory` so the shared
-/// `execute_project` stays backend-agnostic.
+/// Backend factory for the UI. Delegates to `smelt_backends::create_backend`
+/// so the UI and CLI always use the same selection logic.
 struct UiBackendFactory;
 
 impl BackendFactory for UiBackendFactory {
@@ -291,38 +290,88 @@ impl BackendFactory for UiBackendFactory {
     }
 }
 
-#[allow(unreachable_code, unused_variables)]
 async fn create_backend_inner(
-    _target_name: &str,
+    target_name: &str,
     target_config: &smelt_core::config::Target,
     project_dir: &Path,
 ) -> Result<Box<dyn Backend>> {
-    use smelt_core::config::BackendType;
-    match target_config.backend_type() {
-        BackendType::DuckDB => {
-            #[cfg(feature = "duckdb")]
-            {
-                let database = target_config
-                    .database
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
-                let db_path = project_dir.join(database);
-                let backend = smelt_backend_duckdb::DuckDbBackend::new_with_settings(
-                    &db_path,
-                    &target_config.schema,
-                    target_config.settings.as_ref(),
-                )
-                .await
-                .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?;
-                Ok(Box::new(backend))
-            }
-            #[cfg(not(feature = "duckdb"))]
-            {
-                anyhow::bail!("DuckDB feature not enabled")
-            }
+    smelt_backends::create_backend(target_name, target_config, project_dir, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_backend_inner;
+    use smelt_core::config::Target;
+
+    fn duckdb_target(db: &str) -> Target {
+        Target {
+            target_type: "duckdb".to_string(),
+            database: Some(db.to_string()),
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
         }
-        BackendType::Spark => {
-            anyhow::bail!("Spark backend not yet supported in UI mode")
+    }
+
+    fn spark_target(url: Option<String>) -> Target {
+        Target {
+            target_type: "spark".to_string(),
+            database: None,
+            schema: "default".to_string(),
+            connect_url: url,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
         }
+    }
+
+    #[tokio::test]
+    async fn ui_factory_creates_duckdb_backend() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = duckdb_target("test.db");
+        let result = create_backend_inner("test", &target, dir.path()).await;
+        assert!(
+            result.is_ok(),
+            "DuckDB backend should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    // RED today: create_backend_inner bails "Spark backend not yet supported in UI mode".
+    // GREEN after delegation: smelt_backends returns a different error (feature-gated
+    // connection failure), never the old UI-specific stub message.
+    #[tokio::test]
+    async fn ui_factory_passes_spark_to_delegate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = spark_target(None); // no connect_url → smelt_backends fails w/ require msg
+        let err = match create_backend_inner("test", &target, dir.path()).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("Expected error for Spark target without connect_url"),
+        };
+        assert!(
+            !err.contains("not yet supported"),
+            "Spark should be delegated to smelt_backends, not hard-rejected: {err}"
+        );
+    }
+
+    #[cfg(feature = "spark")]
+    #[tokio::test]
+    async fn ui_factory_creates_spark_backend() {
+        let url = match std::env::var("SPARK_CONNECT_URL") {
+            Ok(u) => u,
+            Err(_) => return, // skip when no server available
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = spark_target(Some(url));
+        let result = create_backend_inner("test", &target, dir.path()).await;
+        assert!(
+            result.is_ok(),
+            "Spark backend should succeed: {}",
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
     }
 }

@@ -12,7 +12,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
 smelt-planner = { path = "../smelt-planner" }
 smelt-backend = { path = "../smelt-backend" }
-smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, default-features = false }
+smelt-backends = { path = "../smelt-backends" }
 smelt-state = { path = "../smelt-state" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-dialect = { path = "../smelt-dialect" }
@@ -54,8 +54,9 @@ tracing = "0.1"
 
 [features]
 default = ["duckdb"]
-duckdb = ["smelt-backend-duckdb"]
-bundled-duckdb = ["smelt-backend-duckdb/bundled"]
+duckdb = ["smelt-backends/duckdb"]
+spark = ["smelt-backends/spark"]
+bundled-duckdb = ["smelt-backends/bundled-duckdb"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

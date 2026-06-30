@@ -50,21 +50,30 @@
 # still resolve to a real file. The loop ignores it.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ACTIVE (2026-06-13): the spec-remediation implementation backlog. The
-# 2026-06-12/13 spec review resolved 58 decisions (docs/research/20260613-spec-remediation-decisions.md)
-# and committed them to 28 specs; this master sequences the code work into
-# dependency-ordered waves and is a PURE REMEDIATION backlog (no probe rows).
-# Only the current wave's sub-plan is registered at a time (just-in-time
-# scaffolding); when the loop reports <<MASTER_EXHAUSTED>> a human scaffolds the
-# next wave via /smelt:plan and adds its registry row.
-master_plan: docs/plans/20260613-spec-impl.md
-active_subplan: docs/plans/20260627-pipe_sql.md
+# ACTIVE (2026-06-28): the Spark → DuckDB parity backlog. Brings the existing-but-
+# largely-unverified Spark backend to verified parity with DuckDB via a dual-target
+# test matrix + a real local Spark Connect server. Design:
+# docs/research/20260628-spark-duckdb-parity.md; spec: docs/specs/multi_backend.md.
+# PURE FEATURE BACKLOG (no probe rows). Just-in-time wave scaffolding: only W1
+# (runtime + harness + smoke + break-list capture) is registered; when the loop
+# reports <<MASTER_EXHAUSTED>> a human scaffolds W2+ (the dialect/exec fixes) FROM
+# W1's recorded break list and adds the registry row.
+#
+# PREREQUISITE: a Spark Connect server must be live at SPARK_CONNECT_URL before the
+# loop runs Spark phases (the loop's stateless iterations do not stand Spark up).
+# Bring it up once with scripts/spark-up.sh (created in W1·P1) + export
+# SPARK_CONNECT_URL into the loop's env. When unset, Spark assertions skip (green).
+master_plan: docs/plans/20260628-spark-parity.md
+active_subplan: docs/plans/20260629-spark-w4-shared-backend-factory.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.
-in_repo_plan: docs/plans/20260613-spec-impl.md
-meta_plan: docs/plans/20260613-spec-impl.md
+in_repo_plan: docs/plans/20260628-spark-parity.md
+meta_plan: docs/plans/20260628-spark-parity.md
 
+# PAUSED: docs/plans/20260613-spec-impl.md (the spec-remediation backlog). All of
+# its registry sub-plans are `done` (the loop would emit <<MASTER_EXHAUSTED>>); the
+# 28 reviewed specs are clean. To resume that work, repoint master_plan back to it.
 # PAUSED: docs/plans/20260530-feature-sweep.md (the bug-hunting feature sweep).
 # Its registry sub-plans are all done; its probe rows D1–D8 are all done. To
 # resume probe scanning later, repoint master_plan back to it.

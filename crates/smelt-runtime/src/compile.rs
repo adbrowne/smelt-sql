@@ -692,7 +692,10 @@ impl UpstreamSchemas {
 
 impl SqlCompiler {
     pub(crate) fn new(config: Config, target: &Target) -> Self {
-        let (dialect, capabilities) = dialect_for_backend(target.backend_type());
+        let (dialect, capabilities) = match target.backend_type() {
+            Ok(bt) => dialect_for_backend(bt),
+            Err(_) => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        };
         Self {
             config,
             dialect,
@@ -1100,7 +1103,7 @@ impl SqlCompiler {
         let col_type_refs: Vec<DataType> =
             column_types.iter().map(|tc| tc.data_type.clone()).collect();
 
-        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs)
+        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs, self.dialect)
     }
 
     /// Compile a model with custom SQL (e.g., for transformed queries).

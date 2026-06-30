@@ -550,6 +550,41 @@ pub async fn execute_project(
         compilers.set_function_bodies_all(fn_bodies);
     }
 
+    // ── Cross-engine Parquet reference wiring ────────────────────────────
+    // For each cross-engine edge (consumer_model, producer_dep, consumer_target,
+    // producer_target), ask the producer backend for its materialized filesystem
+    // path and inject a read_parquet(...) substitution into the consumer target's
+    // compiler so smelt.ref(dep) resolves to read_parquet instead of a table name.
+    // Spec oracle: multi_backend.md §"Cross-engine data exchange".
+    if !cross_edges.is_empty() {
+        let mut refs_by_target: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for (_consumer, dep_name, consumer_target, producer_target) in &cross_edges {
+            if let Some(producer) = backends.get(producer_target.as_str()) {
+                let dep_schema = config
+                    .targets
+                    .get(producer_target)
+                    .map(|t| t.schema.as_str())
+                    .unwrap_or("");
+                // Compiler looks up cross-engine refs by the underscore form of the dep path
+                // (segs.join("_"), matching how smelt.<path> refs are resolved in compile.rs).
+                let dep_db_name = dep_name.replace('.', "_");
+                if let Some(path) = producer.materialized_path(dep_schema, &dep_db_name) {
+                    let parquet_expr = format!(
+                        "read_parquet('{}/**/*.parquet', hive_partitioning = true)",
+                        path.display()
+                    );
+                    refs_by_target
+                        .entry(consumer_target.clone())
+                        .or_default()
+                        .insert(dep_db_name, parquet_expr);
+                }
+            }
+        }
+        for (target_name, refs) in refs_by_target {
+            compilers.set_cross_engine_refs(&target_name, refs);
+        }
+    }
+
     let mut ephemeral_resolvers: HashMap<String, EphemeralResolver> = HashMap::new();
     for target_name in &needed_targets {
         let schema = &config.targets[target_name].schema;

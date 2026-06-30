@@ -28,9 +28,7 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
-# Parquet for Spark exchange (Arrow batches → temp file → Spark)
-parquet.workspace = true
-# Temp files for Parquet exchange
-tempfile = "3.8"
 
 [dev-dependencies]
+smelt-dialect = { path = "../smelt-dialect" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

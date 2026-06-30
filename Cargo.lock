@@ -4076,11 +4076,24 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
- "parquet",
  "pyo3",
  "smelt-backend",
- "tempfile",
+ "smelt-dialect",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "smelt-backends"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "smelt-backend",
+ "smelt-backend-duckdb",
+ "smelt-backend-spark",
+ "smelt-core",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -4126,6 +4139,7 @@ dependencies = [
  "smelt-backend",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
+ "smelt-backends",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
@@ -4323,6 +4337,7 @@ dependencies = [
  "serde_json",
  "smelt-backend",
  "smelt-backend-duckdb",
+ "smelt-backends",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
@@ -4377,7 +4392,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-backend",
- "smelt-backend-duckdb",
+ "smelt-backends",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
