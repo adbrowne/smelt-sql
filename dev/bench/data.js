@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782809051411,
+  "lastUpdate": 1782809054190,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -27155,6 +27155,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.622551292825854,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0a9fcc564c5010021f4553cf1920abff9433fade",
+          "message": "Merge pull request #148 from adbrowne/worktree-spark\n\nfeat(spark): verified Spark↔DuckDB parity — dual-target matrix, shared backend factory, Delta CI gate",
+          "timestamp": "2026-06-30T18:39:43+10:00",
+          "tree_id": "33626b4ab55b13e4dc0b4f5b9f8eecf7ff5269cf",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0a9fcc564c5010021f4553cf1920abff9433fade"
+        },
+        "date": 1782809053342,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.97196914575405,
             "unit": "MB/s"
           }
         ]
