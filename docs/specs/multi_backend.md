@@ -73,6 +73,23 @@ reject the model — the dialect printer **lowers** the logical construct to an 
 physical form the backend accepts. A capability flag set to `false` is an instruction to the
 printer to lower, never a reason to emit invalid SQL or to surface a user-facing error.
 
+### Output-schema type conformance
+Where a backend's native return type for an expression differs from smelt's inferred type, a
+model's **output columns** are reconciled to the inferred type: the compiled SQL is wrapped in an
+outer `SELECT CAST(col AS <inferred>) AS col, …` over the model body
+(`type_conformance.rs::wrap_with_type_casts`, applied to every backend at compile time —
+`smelt-runtime/src/compile.rs`). A model therefore writes the **same schema to every warehouse**,
+regardless of engine. This is the multi-backend instance of the canonical-return-type rule in
+`functions.md` §"Canonical return types are CAST-enforced"; the backend namespace
+(`spark.ceil(...)`, `postgres.sum(...)`) is the explicit per-call opt-out that inherits the
+engine-native type and marks the model non-portable.
+
+Expressions whose smelt-inferred (DuckDB-canonical) type diverges from Spark's native type, all
+reconciled at the output boundary by the cast wrap: `CEIL`/`FLOOR(Double)` (Spark native BigInt),
+`AVG(Decimal)` (Spark native Decimal), `SIGN(x)` (Spark native Double/Integer/BigInt/Decimal). The
+full registry is `crates/smelt-db/tests/prop_helpers/divergences.rs`; output conformance is
+asserted by `crates/smelt-db/tests/proptests/type_conformance_tests.rs`.
+
 Required lowerings when the corresponding flag is `false` (non-exhaustive; the conformance
 suite is the executable list):
 
@@ -188,6 +205,17 @@ resolves nested widening to a table rewrite.
   type conformance (decimal, `TIMESTAMP_NTZ`, and timezone-aware timestamps) is asserted end to
   end. The matrix above is the verified contract, not just the intended one. Tracked in
   `docs/plans/20260628-spark-parity.md`.
+- **Intermediate-expression types are not individually cast.** Output-schema conformance (see
+  §"Output-schema type conformance") guarantees a model's *written* schema matches the inferred
+  schema on every backend. It does not rewrite *nested* occurrences of a divergent expression: a
+  `CEIL(d)`, `SIGN(x)`, or `AVG(dec)` used inside a larger expression is evaluated with the
+  engine's native type mid-query on Spark (e.g. `CEIL(d)` as BigInt) before the outer column cast
+  applies. For the registered numeric divergences the *values* are preserved, but the intermediate
+  *type* can affect engine-native semantics (e.g. integer vs floating division on the
+  intermediate). Closing this would require backend-aware inference or a per-call emit-time cast on
+  the divergent built-ins; both are deferred. Registry:
+  `crates/smelt-db/tests/prop_helpers/divergences.rs` (`ceil_floor_double`, `avg_decimal`,
+  `sign_*`).
 - **Partition-pruned cross-engine reads.** The `read_parquet()` substitution reads the full
   Parquet glob on every downstream run; partition pruning at the exchange boundary is a
   performance gap, not a correctness one. Deferred.
