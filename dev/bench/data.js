@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782809054190,
+  "lastUpdate": 1782823139269,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20773,6 +20773,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.444114,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a28f1af9291dc860c547e5bd3ae855568df0d0cf",
+          "message": "docs(multi_backend): reconcile Spark numeric type divergences with CAST-enforcement\n\nOutput-schema type conformance is already enforced for all backends via\nwrap_with_type_casts (compile.rs), implementing functions.md §6's\ncanonical-return-type rule. The CEIL/FLOOR/SIGN/AVG entries in\ndivergences.rs are raw-expression divergences observed by the proptest\noracle, not unmodeled output gaps. Document the mechanism in the parity\ncontract and record the real residual gap (intermediate/nested\nsubexpressions are not individually cast) as a Known Divergence.\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>",
+          "timestamp": "2026-06-30T22:35:15+10:00",
+          "tree_id": "761c995b0c577d919f66fff255ddf4e94b02d907",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a28f1af9291dc860c547e5bd3ae855568df0d0cf"
+        },
+        "date": 1782823138090,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 55.187718,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 52.85863,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.018425,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.6306499999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.359282,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 705.54487,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.629831,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.409999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.285586,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.671527,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 567.575813,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.9487,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.295700000000004,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.648617,
             "unit": "ms"
           }
         ]
