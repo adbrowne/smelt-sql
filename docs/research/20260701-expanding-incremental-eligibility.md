@@ -128,6 +128,22 @@ gate. **Not** bypassed by `--allow-downgrade`.
   non-rejection like the two above: some join shapes are genuinely unsafe, so
   the missing gate is a latent soundness hole, not a conservative allowance.
   Worked in **Part 5**.
+- **Scalar subqueries over bounded sources** *(recorded 2026-07-02, not yet
+  worked)* — an uncorrelated scalar subquery reading a timeseries ref
+  (`SELECT …, (SELECT MAX(ts) FROM smelt.silver.events) AS hwm`) has no gate
+  (B4/E2 only look at the `FROM` clause), and because `inject_source_filters`
+  windows every `smelt.<path>` occurrence *textually* (§3.4), the ref inside the
+  subquery is silently time-windowed — turning a global aggregate into a
+  per-window one, the same silent-misfilter shape as the §5.2 join hazard.
+  (Correlated subqueries are separately caught by the unbounded-lookback →
+  `PerPartitionOnly` path above.)
+- **`GROUPING SETS` / `ROLLUP` / `CUBE`** *(recorded 2026-07-02, not yet
+  worked)* — super-aggregate rows carry `NULL` in the grouping columns, so a
+  `GROUP BY ROLLUP(partition_col, …)` passes a textual A4 (`partition_column`
+  appears in the `GROUP BY`) while emitting rows whose partition column is
+  `NULL` and whose value aggregates *all* windows — the P3 `NULL`-event-time
+  hazard (§2.5) in aggregate form, and the classical empty-grouping-set
+  pushdown caveat (see the PrestoDB reference).
 
 ---
 
@@ -536,16 +552,29 @@ So push-to-source is not a new idea in smelt — it already exists as the second
 layer. What is missing is that the two layers are derived **independently**: the
 outer clamp uses the widened *write* window (run window + derived lookback), while
 each source filter starts from the *un-widened* run window and re-derives its own
-`before_secs`/`after_secs`. Nothing guarantees the two windows agree. This is more
-than inelegance — it is a **latent correctness risk**: if a source's derived
-margin under-covers the outer write window (bound derivation is string-based on the
-outer SQL only, and can under-approximate a lookback the outer clamp accounts for),
-the scan is narrower than the rows the run intends to *write*, and the model can
-under-read. The outer clamp still bounds *output*, so nothing spurious is written,
-but rows that should have been recomputed can be missed. Deriving both windows
-from one downward walk (§4.5) removes the risk by construction; today the
-*correctness* filter is the one left at the outer level, dependent on the engine to
-prune.
+`before_secs`/`after_secs`. Nothing guarantees the two windows agree — and code
+inspection (2026-07-02) shows the problem is sharper than a possible
+under-approximation. The two lower bounds come from **two separate analyzers over
+the same SQL**: `compute_effective_window` (`analysis/temporal.rs`) feeds the
+write window's `filter_start = run_start − k` (`windowing.rs:179`–`186`), while
+`derive_model_bounds` (`analysis/source_bounds.rs`) feeds the scan's
+`before_secs`; for a model with one `INTERVAL 'k'` both independently derive
+≈ `k`. **Equal is not enough.** The DELETE+INSERT covers the widened write window
+`[run_start − k, run_end)` — the DELETE is deliberately matched to the INSERT's
+clamp for idempotency (`execute.rs:925`–`941`) — so every run *re-writes* the
+margin rows in `[run_start − k, run_start)`. Whenever the lookback reflects a
+genuinely cross-window reach (a cross-partition frame admitted via
+`allow_window_functions`, or a Form-B `WHERE`/join offset), those margin rows'
+own frames reach a further `k` back, to `run_start − 2k`; the scan stops at
+`run_start − k`, so the run recomputes them with clipped frames and **overwrites
+the previously-correct trailing `k` of the prior window with understated values**
+— the W2 under-read (§8.5), by construction, on every run. (For the B1-compliant
+intra-partition case the frame is truncated at the partition edge, so the rewrite
+is merely redundant, not wrong.) Covering the rewritten margin would need a scan
+margin of `2k`; the cleaner fix is the Part 8 exact-clamp design, which reads the
+margin but never re-writes it. Deriving both windows from one downward walk
+(§4.5) removes the mismatch by construction; today the *correctness* filter is
+the one left at the outer level, dependent on the engine to prune.
 
 ### 4.3 The unification: eligibility *is* maximal pushdown depth
 
@@ -750,7 +779,7 @@ event-time clock** and whether every other input is invariant to the window:
 | fact ⋈ **timeseries** dim used as lookup | fact | independently windowed source (bug) | **no** — the dim's own source filter drops rows the join needs | **hazard — silent today** |
 | fact ⋈ fact, joined on a **non-partition** key | one or both | independently windowed source | **no in general** — a fact row in window *W* may need a counterpart outside *W* | **hazard — silent today** |
 | fact ⋈ fact, joined **on the partition key** | both, aligned | co-windowed | yes — both sides share the window boundary | safe (narrow) |
-| fact ⋈ **fact**, equi-key **plus a bounded time band** (`child.ts BETWEEN parent.ts − k AND parent.ts`) | the child (driving) fact | second fact read only within a finite band | yes — **with a derived lookback `k`** | safe (interval join, see below) |
+| fact ⋈ **fact**, equi-key **plus a bounded time band** (`parent.ts BETWEEN child.ts − k AND child.ts`) | the child (driving) fact | second fact read only within a finite band | yes — **with a derived lookback `k`** | safe (interval join, see below) |
 | **dim-side** `event_time` | dimension | | ambiguous — a lookup's timestamp is not the stream clock | reject / at minimum loud |
 | **OneToMany** fan-out | fact | row-multiplying | needs care — fan-out interacts with `unique_key` MERGE | reject unless reconciled |
 
@@ -763,8 +792,9 @@ refuse — time-filter pushdown to the fact side only.
 **The interval/temporal join is a fourth, incrementalisable shape — and the one
 most likely to matter in practice.** Joining a child event to its *parent* on an
 equi-key **plus a bounded time band** — `parent_id` **and**
-`child.ts BETWEEN parent.ts − k AND parent.ts`, the "attach the most-recent parent
-state to each child event" pattern — is *not* the unbounded multi-clock hazard of
+`parent.ts BETWEEN child.ts − k AND child.ts` (equivalently `child.ts BETWEEN
+parent.ts AND parent.ts + k`), the "attach the most-recent parent state to each
+child event" pattern — is *not* the unbounded multi-clock hazard of
 J4. The band gives the second fact a **finite lookback `k`**: the child fact is
 the driving clock, and the parent fact need only be scanned over
 `[run_start − k, run_end)` rather than full or (unsoundly) windowed on its own
@@ -991,12 +1021,14 @@ the ClickHouse/Iceberg/Delta whitelists (§7.4):
 | `CAST(col AS DATE/TIMESTAMP)` | `CAST(event_ts AS DATE)` | non-decreasing (truncation) | `col` |
 | `date_bin` / `time_bucket` / `FLOOR(col to grid)` | `time_bucket('1 hour', ts)` | non-decreasing | `col` |
 | `col ± INTERVAL '<const>'` | `event_ts + INTERVAL '1 day'` | strictly increasing shift | `col`, offset folds into the bound |
-| `col AT TIME ZONE '<const>'` | `ts AT TIME ZONE 'UTC'` | non-decreasing (shift; DST plateaus but never decreases) | `col` |
+| `col AT TIME ZONE '<fixed-offset const>'` | `ts AT TIME ZONE 'UTC'`, `… '+05:30'` | strictly increasing constant shift | `col` |
 
 This whitelist is exactly why **the output `event_time` need not equal, nor even
 be named the same as, any input column.** The two transformations users most often
-reach for are already admitted: **UTC→local-time conversion** (`ts AT TIME ZONE
-'const'`, a monotone shift) and **granularity coarsening** (`DATE_TRUNC('month',
+reach for are already admitted: **fixed-offset time-zone conversion** (`ts AT
+TIME ZONE '+10:00'`, a monotone constant shift — named DST zones are *not*
+monotone; see the blacklist and watch-point (c) below) and **granularity
+coarsening** (`DATE_TRUNC('month',
 ts)` / `CAST(ts AS DATE)`, a monotone step). Both trace back to the source clock
 under a folded offset, so a model that emits `business_month AS event_time` from a
 daily `created_at` is `Traceable`, not a special case — the primitive handles a
@@ -1018,6 +1050,7 @@ The **non-monotone / order-breaking** forms, which must yield *not-traceable*:
 | constant / `NULL` literal | static seed, not a stream (§2.5 case 2) | `TIMESTAMP '2020-01-01'`, `NULL` |
 | run-nondeterministic clock | `NOW()`/`CURRENT_DATE` shift each run; not source-traceable | `NOW()` (also B5, `incremental.rs:288`) |
 | `CAST(col AS VARCHAR)` | lexical order ≠ temporal order in general | `CAST(ts AS VARCHAR)` |
+| `col AT TIME ZONE '<named DST zone>'` | instant→local wall clock goes **backward** at DST fall-back (…01:59 → 01:01…), so an interval's preimage is a union of two intervals | `ts AT TIME ZONE 'America/New_York'` |
 
 **Where engine semantics matter.** The whitelist is deliberately the intersection
 of what is monotone on *every* target backend, because smelt is multi-backend
@@ -1028,7 +1061,19 @@ whitelisted for date/timestamp target types — `CAST(ts AS VARCHAR)` is monoton
 month/year `INTERVAL` arithmetic has a non-uniform step but is still monotone
 non-decreasing, so it is admitted even though the offset cannot be folded to a
 fixed `Seconds` (it stays a symbolic offset — cf. `source_bounds` approximating
-`MONTH ≈ 30 days`, `source_bounds.rs:506`).
+`MONTH ≈ 30 days`, `source_bounds.rs:506`); (c) `AT TIME ZONE` is whitelisted
+**only for fixed-offset zones** (`'UTC'`, `'+05:30'`). For a named zone with DST
+the instant→local mapping *decreases* by an hour at fall-back — confirmed
+empirically on DuckDB v1.4.4 (`2024-11-03` `America/New_York`: instants one
+minute apart map to local `01:59` then `01:01`; harness
+`docs/research/harness/20260702-holistic_aggregate.sql`, property H2) — so the
+preimage of a local
+window is a union of two disjoint intervals, not an interval, and an earlier
+draft's "DST plateaus but never decreases" claim was simply wrong. A future
+relaxation could admit named zones via a ±1h-widened scan plus an exact output
+clamp (the Part 8 two-layer move applied to a piecewise-monotone transform,
+cf. ClickHouse's factor-transformation trick, §7.4), but as a plain whitelist
+entry it is unsound.
 
 Composition is closed under the whitelist: a composition of monotone
 non-decreasing functions is monotone non-decreasing, so `DATE_TRUNC('day',
@@ -1055,7 +1100,7 @@ escape hatch is unavoidable rather than a shortcut.
 The natural annotation home already exists and already has this exact "trust the
 declaration" shape:
 
-- **`FunctionProperties`** (`logical.rs`, near `:74`) already carries
+- **`FunctionProperties`** (`logical.rs:55`–`:64`) already carries
   `deterministic`, `idempotent`, `append_only` — declared, unverified booleans on
   a smelt function. A `monotone_event_time` (or per-argument `monotone`) property
   slots in beside them and lets a function-wrapped event-time expression be
@@ -1331,14 +1376,20 @@ Three observations fall out of the table:
    exactly smelt's line — bag-union distributes, distinct-union drags in a
    `DISTINCT` that does not. smelt's algebraic argument (§2.2) is the same fact
    these engines encode as a whitelist entry.
-2. **A rejection smelt's catalogue does not yet name: non-additive aggregates.**
+2. **An apparent gap that turned out not to transplant: non-additive aggregates.**
    Snowflake and BigQuery both explicitly exclude `MEDIAN`, `PERCENTILE_CONT/DISC`,
    and exact `COUNT(DISTINCT)` — they depend on *all* rows, not just the window's.
-   smelt covers `DISTINCT` (B6) but not non-additive aggregates as a class; this is
-   a candidate new condition (added to *Future conditions*). Corollary: `MIN`/`MAX`
-   are additive-enough that Snowflake *supports* them, but they are non-monotone
-   under *deletes* — smelt's append-only assumption makes them safe where a delta
-   engine (Flink) must keep retraction state.
+   smelt covers `DISTINCT` (B6) but names no such class, and a first pass treated
+   that as a candidate new condition. §9.2 works it and finds the exclusions are
+   artifacts of **delta-style partial-aggregate merging**, which smelt's
+   A4-aligned whole-partition rebuild never performs — in smelt's regime these
+   aggregates are safe, and the classification matters only for
+   `refresh: cumulative`. The general caution this yields: the table validates
+   the catalogue only where the refresh *mechanism* behind a published rule
+   matches smelt's. Corollary: `MIN`/`MAX` are additive-enough that Snowflake
+   *supports* them, but they are non-monotone under *deletes* — merging extrema
+   forward relies on append-only, where a delta engine (Flink) must keep
+   retraction state.
 3. **Eligibility vs. cost (from Enzyme).** Databricks decouples "is this
    incrementalizable?" from "*should* we" — even when incrementalizable, a cost
    model may still pick full recompute (e.g. large source deletes). This is the
@@ -1550,6 +1601,16 @@ property of the frame — not a data-dependent guess. That is the whole novelty 
 this cluster: smelt can **derive** the margin from the SQL where streaming
 engines make the user declare it (§8.6).
 
+**This two-layer design is a *change* from the shipping runtime, not a
+description of it.** Today the runtime widens **both** the outer clamp *and* the
+DELETE to `[run_start − k, run_end)` (§4.2) — it *re-writes* the margin rows
+rather than merely reading them, and because the scan is only widened by `k`,
+the re-written margin is recomputed from clipped frames (the confirmed §4.2
+under-read; a widened-write design would need a `2k` scan). Under the exact
+clamp proposed here, `k` suffices because the margin is read, never written —
+and writes become strictly partition-disjoint, which is what Part 11's
+parallelism claim rests on.
+
 ### 8.3 Frame taxonomy: only `RANGE`-with-`INTERVAL` yields a derivable time bound
 
 The dividing line is **what the frame counts**. SQL has three frame modes, and
@@ -1574,6 +1635,21 @@ single-row case of `ROWS`, which is why C1 already lands there. And a `LAG`/`LEA
 carrying **no** `n` beyond 1 is still a *row* offset, not a time offset: the C1
 rejection is correct, not merely conservative — a user with one event in the
 window has a predecessor arbitrarily far back (proven below, **W4**).
+
+**Forward (`FOLLOWING`) reach is the unworked mirror of this table.** Every row
+above treats backward reach only. A bounded `RANGE … INTERVAL 'a' FOLLOWING`
+frame (or `LEAD`, its row-offset cousin, which C1 already rejects for the same
+reason as `LAG`) reads rows *after* the current one, which changes the problem
+twice over: the scan must widen **forward** by `a` (the `after_secs` half of the
+source filter, `transformer.rs:83`–`84`, exists for exactly this — though
+`source_bounds` Form A currently parses `PRECEDING` frames only), and — sharper —
+window `W`'s output is not *settled* until the source is complete through
+`hi + a`: a window computed as soon as it closes will silently differ from a
+later full refresh once the following rows arrive. The two sound treatments are
+watermark-style delay (do not run `W` until `now ≥ hi + a`) or tail-rewrite
+(each run re-writes `[run_start − a, run_end)`, whose scan must then widen
+backward by `a` *plus* any preceding reach — the §4.2 composition trap again).
+Neither is analysed in this document yet; recorded as an open question.
 
 `UNBOUNDED PRECEDING` deserves the sharper statement §4.3 row 3 implied: it is
 per-partition-recomputable **only when B1 holds** (the partition is
@@ -1795,6 +1871,20 @@ substitution point; the value belongs with the run window the runtime already
 threads (`execute.rs`). Row-nondeterministic functions cannot be pinned (the value
 is intrinsically per-row) and stay rejected.
 
+**Invocation scope — the honest limit of pinning.** The pin is coherent *per
+invocation*. A backfill that processes many windows in one invocation shares one
+`T_full`, and incremental ≡ full holds against a full refresh evaluated at that
+same instant. An *ongoing schedule* is different: each day's run is its own
+invocation with its own pin, so the stored table becomes a patchwork of clocks
+that equals **no** single-instant full refresh — and no pinning scheme can fix
+that short of freezing time at the first run forever. That patchwork is usually
+exactly what users want from `NOW()` in a projection (`loaded_at`-style audit
+columns record the run that produced the row), but it must be named as a
+**contract change, not a preserved invariant**: pinning restores incremental ≡
+full *within one invocation*; across invocations, any column derived from the
+pinned clock is a documented divergence (or is excluded from the invariant
+outright).
+
 This mirrors the industry line in §7.2: Snowflake rejects non-deterministic
 functions *in the SELECT projection* but permits `CURRENT_*` in a `WHERE` (where it
 prunes rather than materialises); Databricks Enzyme's `EXPRESSION_NOT_DETERMINISTIC`
@@ -1806,70 +1896,75 @@ substitution.
 row-nondeterministic functions (`RANDOM`/`UUID`/…). Admit run-deterministic
 functions (`NOW`/`CURRENT_DATE`/`CURRENT_TIMESTAMP`/…) by default, implemented as
 compile-time pinning to a single run-shared constant, with the invariant test
-being: *the same pin feeds every incremental window and the full-refresh oracle.*
+being: *the same pin feeds every incremental window and the full-refresh oracle,
+within one invocation* (across scheduled invocations the pinned-clock columns are
+a documented divergence — see the invocation-scope caveat above).
 Retain `allow_nondeterministic` only as the escape hatch for the row-nondeterministic
 class. Emit an honest message naming *which* function is the problem, not
 "non-deterministic function" as a category.
 
-### 9.2 — Non-additive (holistic) aggregates: a rejection smelt does not yet name
+### 9.2 — Non-additive (holistic) aggregates: a delta-engine rejection that does not transplant
 
-**Why it is (not) rejected.** This is a gap, not a guard. §7.2 obs. 2 surfaced it
+**Why it looked like a gap — and why it is not one.** §7.2 obs. 2 surfaced this
 from the industry comparison: Snowflake Dynamic Tables and BigQuery MVs both
 explicitly exclude `MEDIAN`, `PERCENTILE_CONT`/`PERCENTILE_DISC`, and exact
-`COUNT(DISTINCT)` from incremental refresh. smelt's catalogue covers `DISTINCT`
-(B6) but has **no** condition naming non-additive aggregates as a class. Today a
-partition-aligned aggregate model computing `MEDIAN(latency)` per day would pass
-every existing check and silently produce per-window medians that do not equal the
-full-refresh median.
+`COUNT(DISTINCT)` from incremental refresh, and smelt's catalogue has no
+condition naming non-additive aggregates as a class. The first draft of this
+section proposed a new **B7** gate mirroring those whitelists. **On closer
+inspection the transplant is wrong: in smelt's refresh regime these aggregates
+are safe.** (Corrected 2026-07-02.)
 
-**Correctness law or mechanical limit.** A correctness law, and a clean one. An
-aggregate is safe under window-forward incrementalisation iff its per-window value
-can be combined into the full-range value *without re-reading other windows* — i.e.
-it is **decomposable** (has a bounded-size partial-aggregate that a merge function
-combines). Split the aggregates:
+**Why the industry rejection does not apply here.** Snowflake, BigQuery and
+Enzyme are *delta* engines (§7.1): they maintain a view by **merging partial
+aggregates** — this refresh's partial state combined with previously-stored
+state. Decomposability (a bounded partial plus an associative merge) is
+precisely the property *merging* needs, and holistic aggregates lack it. smelt's
+window-forward DELETE+INSERT never merges partials: A4 (§9.4) requires the
+`GROUP BY` key ⊇ `partition_column`, so **every group lives entirely inside one
+window and is recomputed from scratch, in full, by the one run that writes its
+partition**. There is no cross-window combination step for decomposability to
+matter to. A per-day `MEDIAN(latency)` with `GROUP BY day` is computed over
+exactly the rows a full refresh would give that group; the values are identical
+— including under late-data reprocessing (a re-run rewrites the whole partition
+from the whole group) and the Part 10 open-partition rule (the open partition is
+recomputed entire each run). The only way to break it is the `g_run < g_part`
+misconfiguration of §10.2 — which breaks `SUM` identically, so it is Part 10's
+gate, not an aggregate-class gate.
 
-- **Additive / decomposable — window-local, safe.** `SUM`, `COUNT`, `MIN`, `MAX`,
-  and `AVG` computed as `SUM/COUNT`. Each window's contribution is a bounded partial
-  (a running sum, a running count, a running extremum) and the merge is associative.
-  When the `GROUP BY` key ⊇ `partition_column` (§3.2 row 3), each group lives
-  entirely inside one window, so even the merge is trivial — there is nothing to
-  combine across windows.
-- **Holistic — depends on the whole population, unsafe.** `MEDIAN`,
-  `PERCENTILE_CONT`/`PERCENTILE_DISC`, `MODE`, exact `COUNT(DISTINCT)`. Their value
-  is a function of *all* rows in the group; there is no bounded partial that a later
-  window can merge in. A per-window median is not a building block for the
-  full-range median. These cannot be incrementalised window-forward and must be
-  rejected (or, as the delta engines do, fall back to full recompute).
+Empirically (DuckDB v1.4.4, harness
+`docs/research/harness/20260702-holistic_aggregate.sql`): a partition-aligned
+`MEDIAN` over two adjacent windows vs. a full refresh — **0** violating rows,
+under the same `|(L EXCEPT ALL R) ⊎ (R EXCEPT ALL L)|` test as every other
+harness property.
 
-This is exactly the monotone/decomposable frontier Part 7 grounds in theory (§7.3,
-the linear-vs-bilinear split of DBSP) and in practice (§7.2, the Snowflake/BigQuery
-whitelists).
+**Where decomposability *does* bite (the analysis is not wasted).** The
+classification becomes load-bearing exactly where a **partial-merge regime**
+exists:
 
-**The append-only corollary.** `MIN`/`MAX` sit on the safe side *only because of
-smelt's append-only, window-forward assumption* (§7.1). A new row can only lower a
-`MIN` or raise a `MAX` — never retract the current extremum — so a monotonically
-growing source keeps them decomposable. A delete-aware delta engine (Flink, §7.2
-obs. 2) must keep retraction state to recompute the extremum when the current holder
-is deleted; smelt does not, because it does not model deletes into settled windows.
-This is the same "append-only makes a construct safe that a retraction engine must
-work harder for" observation §7.2 draws — worth stating explicitly so the safety of
-`MIN`/`MAX` is understood as *contingent on the append-only contract*, not
-unconditional.
+- **`refresh: cumulative`** (D3, [`cumulative_aggregate.md`](../specs/cumulative_aggregate.md))
+  maintains running state via `merge_into`. A running `SUM`/`COUNT`/`MIN`/`MAX`
+  is a bounded partial; a running `MEDIAN` is not. The decomposability whitelist
+  (`SUM`/`COUNT`/`MIN`/`MAX`/`AVG`-as-`SUM`÷`COUNT` decomposable;
+  `MEDIAN`/`PERCENTILE_*`/`MODE`/exact `COUNT(DISTINCT)` holistic; unrecognised
+  heads fail closed to holistic, §6.6) belongs in the **cumulative** spec's
+  eligibility rules, not in the incremental catalogue.
+- **Cross-window groups**, if group alignment (A4) is ever relaxed — a group
+  spanning windows would need partial-merge to avoid re-reading other windows.
+- **The `MIN`/`MAX` append-only corollary lives there too.** Within the aligned
+  full-rewrite regime `MIN`/`MAX` need no append-only caveat (the whole group is
+  recomputed every time). It is *merging* an extremum forward that relies on
+  no-deletes: a delta engine (Flink, §7.2 obs. 2) must keep retraction state to
+  recompute a `MIN` whose holder is deleted; a cumulative smelt model would
+  inherit the same caveat.
 
-**Scope note.** This condition only bites once **partition-aligned aggregation** is
-actually reachable — i.e. alongside the §3.2-row-3 / A4 story (aggregation whose
-`GROUP BY` key ⊇ `partition_column`). For a flat non-aggregate model the aggregate
-never appears. So this gate is a companion to whatever lands group-aligned
-aggregation, not a standalone.
-
-**Recommendation.** Add a new condition — call it **B7, non-additive aggregate** —
-that classifies each aggregate function in the SELECT list against a decomposability
-whitelist (`SUM`/`COUNT`/`MIN`/`MAX`/`AVG`-as-`SUM`÷`COUNT` safe;
-`MEDIAN`/`PERCENTILE_*`/`MODE`/exact `COUNT(DISTINCT)` rejected). Fail closed: an
-unrecognised aggregate head is treated as holistic (reject), matching the Part 6 /
-§6.6 conservative posture. The rejection message names the offending aggregate and
-the append-only caveat for `MIN`/`MAX`. Land it together with group-aligned
-aggregation support, since neither is reachable without the other.
+**Recommendation.** **No B7 gate for the incremental regime** — a
+partition-aligned holistic aggregate is safe and must not be rejected. Instead:
+(a) carry the decomposability classification into the cumulative-aggregate spec,
+where merging makes it a genuine eligibility law; and (b) treat this as a
+methodological caution for §7.2: the industry comparison validates the catalogue
+only where the *refresh mechanism* behind each published rule matches smelt's —
+copying a delta-engine whitelist entry into a whole-partition-rebuild regime
+would have produced a spurious rejection.
 
 ### 9.3 — B2 `HAVING` / B6 `DISTINCT` / B3 `LIMIT`
 
@@ -1897,7 +1992,7 @@ governing fact is whether the construct commutes with the injected window predic
   safe — `DISTINCT` where the dedup key ⊇ `partition_column`, so duplicates can only
   ever fall in the same window — is the exact `DISTINCT`-as-degenerate-`GROUP BY`
   mirror of §3.2 row 3, and if pursued should be handled by the same group-aligned
-  machinery as A4/§9.2, not by relaxing B6 wholesale. Absent that, keep gated.
+  machinery as A4/§9.4, not by relaxing B6 wholesale. Absent that, keep gated.
 - **`HAVING` (B2) — has a genuine group-aligned safe slice.** `HAVING` is a filter
   on aggregated groups. When the `GROUP BY` key ⊇ `partition_column` (the
   §3.2-row-3 condition again), every group is window-local, so the `HAVING`
@@ -1914,7 +2009,7 @@ governing fact is whether the construct commutes with the injected window predic
   and even the override is a "user accepts divergence" signal, not a correctness
   claim.
 - **B6 `DISTINCT`** — keep gated by default; treat the `DISTINCT`-key ⊇
-  `partition_column` case as part of the group-aligned aggregation work (§9.2 / A4),
+  `partition_column` case as part of the group-aligned aggregation work (§9.4 / A4),
   not a standalone relaxation.
 - **B2 `HAVING`** — relax to safe-by-default **when** `GROUP BY` key ⊇
   `partition_column` (window-local groups), rejecting otherwise. This rides on the
@@ -1965,9 +2060,10 @@ exception, §9.3). It is therefore the load-bearing one to get right.
 and §3.6 (per-body) refactors, make A4 a **scoped** check: it takes a SELECT context
 (a branch, a subquery body, or the flat outer query) and verifies partition
 alignment *within that scope*. Expose its verdict ("this scope's groups are
-partition-local") as a reusable signal, since §9.2 (`MIN`/`MAX` group-local safety)
-and §9.3 (`HAVING` safe slice, `DISTINCT` exception) all condition on exactly it.
-One partition-alignment predicate, evaluated at the right scope, four dependents.
+partition-local") as a reusable signal, since §9.3's `HAVING` safe slice and
+`DISTINCT` exception condition on exactly it — and §9.2's withdrawal of B7 rests
+on it too (partition-local groups are *why* holistic aggregates are safe). One
+partition-alignment predicate, evaluated at the right scope, several dependents.
 
 ---
 
@@ -2017,8 +2113,15 @@ silently discarding the other 29 days. The invariant breaks not because
 harmlessly-but-wastefully: partition by day, run monthly — each run rewrites 30
 day-partitions, which is *correct* (whole partitions) but simply a coarser cadence.
 
-So the rule is directional: **`g_run` ≥ `g_part`.** A monthly partition demands a
-monthly-or-coarser run window, or the incomplete month must be handled by recompute.
+So the rule is directional — but coarseness alone is not enough: **each run's
+window must cover whole partitions**, which requires *both* `g_run` a whole
+multiple of `g_part` *and* the run boundaries aligned to partition boundaries. A
+month-long run window starting mid-month is `g_run = g_part` yet spans two
+partial months and fails the same way as the daily run. (And when a derived
+lookback widens the *write* window backward, §4.2, the alignment requirement
+applies to the widened window's lower edge too.) A monthly partition therefore
+demands month-aligned, monthly-or-coarser run windows, or the incomplete month
+must be handled by recompute.
 
 ### 10.3 The incomplete-final-partition corollary
 
@@ -2042,8 +2145,17 @@ of one alignment story**:
 - **§10.2 aligns runs → partitions.** Each *run* must rewrite whole partitions (so
   a partition is never left half-computed).
 
-A4 is checked today; the run↔partition constraint is **not** — nothing stops a user
-declaring a monthly `partition_column` and running daily. Both are preconditions
+A4 is checked today; the run↔partition constraint is only **half-built**. A
+boundary-alignment validator exists — `validate_run_window_alignment`
+(`smelt-runtime/src/windowing.rs:205`) checks that a run window's boundaries land
+on the declared `timeseries.granularity` grid (Monday for weeks, the 1st for
+months, …) — but it is not called from the live incremental path
+(`compute_incremental_windows`, `windowing.rs:63`, never invokes it), and smelt
+has a *single* declared granularity, so nothing cross-checks the
+partition-column *transform's* unit (`DATE_TRUNC('month', …)`) against that
+declaration or the run cadence. A user can declare `granularity: day`, partition
+by `DATE_TRUNC('month', …)`, and run daily — the mismatch is invisible. Both
+alignment laws are preconditions
 for partition-scoped DELETE+INSERT to equal a full refresh; A4 covers the
 *group* side, §10.2 the *cadence* side. A complete eligibility model owes a check
 for the second, most naturally as a validation that the configured/derived run
@@ -2058,7 +2170,9 @@ runtime threads).
   eligible; what needs checking is a *configuration* invariant: `g_run` ≥ `g_part`.
   Derive `g_part` from the partition-column transform unit (`DATE_TRUNC('month', …)`
   → month) via the Part 6 primitive, compare against the run cadence, and reject
-  (or auto-coarsen the run window to `g_part`) when the run is finer.
+  (or auto-coarsen the run window to `g_part`) when the run is finer — and wire
+  the dormant `validate_run_window_alignment` boundary check (§10.4) into the
+  live run path while at it.
 - **Handle the open partition by recompute-of-touched-partition**, the same
   `PerPartitionOnly` mechanism §8.3 already uses for `UNBOUNDED` frames — the open
   month is recomputed entire on each run until it closes.
@@ -2100,10 +2214,11 @@ run out of order.
 
 ### 11.2 The whole safe slice of this document is window-independent
 
-A key structural fact ties this back to Part 4: **lookback widens the source
-*scan*, never the output *write*.** The output clamp restricts what a run *writes*
-to `[run_start, run_end)` (§4.2), while any lookback margin `k` (Part 8 frames, the
-§5.3 interval-join band) only widens what it *reads* from the source. So:
+A key structural fact ties this back to Part 4 — with one load-bearing premise:
+**lookback must widen the source *scan*, never the output *write*.** Under the
+Part 8 exact-clamp design, the output clamp restricts what a run *writes* to
+`[run_start, run_end)`, while any lookback margin `k` (Part 8 frames, the §5.3
+interval-join band) only widens what it *reads* from the source. Then:
 
 - **Writes are always partition-disjoint.** No run ever writes outside its own
   window, so two concurrent runs touch disjoint partitions — the DELETE+INSERT /
@@ -2112,14 +2227,27 @@ to `[run_start, run_end)` (§4.2), while any lookback margin `k` (Part 8 frames,
   scans overlap, but a read-read overlap on the immutable source imposes no
   ordering.
 
+**Today's runtime does not yet satisfy the premise.** Both the outer clamp and
+the DELETE currently use the *widened* write window `[run_start − k, run_end)`
+(§4.2), so whenever a lookback is derived, adjacent windows' write ranges overlap
+by `k` — two concurrent adjacent runs would DELETE+INSERT overlapping
+partitions. Window-independence therefore holds unconditionally only for
+zero-lookback models today, and extends to lookback models once the exact-clamp
+design lands (or with `k`-separated scheduling in the interim). The same caveat
+attaches permanently to any **declared source-lateness margin** (§8.6 axis (b)):
+its whole purpose is to *re-write* earlier partitions on later runs, so
+late-data reprocessing makes adjacent runs' writes overlap *by design* — a model
+using it trades out-of-order freedom for lateness tolerance exactly where the
+margin applies.
+
 Consequently **every relaxation worked in this document — transparent
 subquery/CTE (Part 3), `UNION ALL` streams (Part 2), fact ⋈ lookup and the
 bounded interval join (Part 5), and the bounded-`RANGE` window (Part 8) — is
-window-independent.** Each reads only source rows (its window ± a source-side
-margin) and writes only its own partitions. All of them may be run out of order and
-in parallel. This is not a coincidence: it is the same monotone/linear frontier
-(§7.3) — the operators that commute with the delta are exactly the ones whose
-per-window output does not depend on other windows.
+window-independent, given exact output clamps.** Each reads only source rows (its
+window ± a source-side margin) and writes only its own partitions. All of them
+may be run out of order and in parallel. This is not a coincidence: it is the
+same monotone/linear frontier (§7.3) — the operators that commute with the delta
+are exactly the ones whose per-window output does not depend on other windows.
 
 ### 11.3 What forces sequential execution
 
@@ -2231,6 +2359,12 @@ The split is externally load-bearing, not merely theoretical:
   window and the per-source bound (`execute.rs:895` vs `:913`) into a single
   per-source derivation — worth doing as part of this work, or a follow-on
   refactor once the classifier lands?
+- **Migrating to exact output clamps (§4.2 / §8.2 / §11.2):** today's runtime
+  widens both the clamp *and* the DELETE by the derived lookback, which
+  re-writes margin rows from clipped scans (the confirmed §4.2 under-read) and
+  makes adjacent runs' writes overlap (§11.2). Is the exact-clamp design adopted
+  wholesale — and what then carries the late-data use case, whose *point* is to
+  re-write earlier partitions (§8.6 axis (b))?
 - **Join hazard as a design constraint (Part 5):** the timeseries-dimension-as-
   lookup misfilter (§5.2, J3, 400 violating rows) is not treated as a live
   incident to patch (smelt is early-stage) but as a **constraint the eligibility
@@ -2261,6 +2395,21 @@ The split is externally load-bearing, not merely theoretical:
   property (§11.3a) must be derived and enforced (no parallel backfill); if a
   non-goal, the self-edge should be a named rejection rather than a silently
   mis-parallelised build.
+- **`FOLLOWING` frames / forward reach (Part 8, §8.3):** a bounded
+  `RANGE … INTERVAL 'a' FOLLOWING` frame has a derivable forward reach in
+  principle, but the settledness problem is new — window `W` differs from a
+  later full refresh until the source is complete through `hi + a`. Watermark-
+  style delay, or tail-rewrite (with its §4.2 composition trap)? Also
+  `source_bounds` Form A currently parses `PRECEDING` frames only.
+- **Scalar subqueries over bounded sources (Part 1 addendum):** gate them with
+  an E2-style rejection that names the construct, or teach
+  `inject_source_filters` to leave refs inside scalar subqueries un-windowed
+  (they are window-invariant lookups by construction, like the §5.4 non-driving
+  join inputs)?
+- **`GROUPING SETS`/`ROLLUP`/`CUBE` (Part 1 addendum):** reject super-aggregate
+  grouping outright for incremental models, or admit exactly the grouping sets
+  in which *every* set contains `partition_column` (the others produce the
+  `NULL`-partition cross-window rows)?
 - **Property tests vs. single DuckDB examples (validation methodology):** each
   deep-dive is currently backed by a hand-written DuckDB harness with a fixed
   fixture (§2.3/§3.5/§5.5/§8.5). Should the incremental ≡ full invariant instead be
@@ -2277,8 +2426,11 @@ The split is externally load-bearing, not merely theoretical:
 
 ## Conditions worked (formerly "future stubs")
 
-The original rejection catalogue (Part 1) is now fully worked. Each entry below is
-its own Part-2-style deep-dive — *why rejected → correctness law or mechanical
+The original rejection catalogue (Part 1) is now fully worked. Three smaller
+items recorded since remain unworked: the two Part 1 non-rejection addenda of
+2026-07-02 (scalar subqueries over bounded sources; `GROUPING SETS`/`ROLLUP`/
+`CUBE`) and the `FOLLOWING`-frame mirror (§8.3) — each has an Open-questions
+entry. Each entry below is its own Part-2-style deep-dive — *why rejected → correctness law or mechanical
 limit → safe relaxation → recommendation* — and points at the Part that resolves
 it. The next step is not more analysis but implementation: turning the settled
 Parts into specs and plans (the monotonicity primitive is the shared first phase —
@@ -2318,12 +2470,14 @@ see the Plan link in the header).
   and per-body (§3.6) scopes and exposing its verdict as the shared
   partition-alignment signal §9.2/§9.3 depend on. Likely lands *first* as shared
   infrastructure.
-- ~~**Non-additive aggregates — a rejection smelt does not yet name**~~ —
-  **worked in §9.2** (proposed as **B7**). Snowflake/BigQuery both exclude
-  `MEDIAN`/`PERCENTILE_*`/exact `COUNT(DISTINCT)` (§7.2). Decomposable
-  (`SUM`/`COUNT`/`MIN`/`MAX`/`AVG`-as-`SUM`÷`COUNT`) is window-local and safe;
-  holistic is not. `MIN`/`MAX` safe only under the append-only assumption. Lands
-  with group-aligned aggregation.
+- ~~**Non-additive aggregates — an apparent missing rejection**~~ — **worked in
+  §9.2; the proposed B7 gate is withdrawn (2026-07-02)**. Snowflake/BigQuery
+  exclude `MEDIAN`/`PERCENTILE_*`/exact `COUNT(DISTINCT)` because their delta
+  engines merge partial aggregates; smelt's A4-aligned whole-partition rebuild
+  recomputes every group in full, so holistic aggregates are safe here
+  (confirmed empirically, 0 violations, §9.2). The decomposability whitelist
+  migrates to the cumulative-aggregate spec, where merging makes it
+  load-bearing.
 
 ---
 
