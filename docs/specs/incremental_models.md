@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-01
 owners: [andrew]
 ---
 
@@ -271,6 +271,63 @@ Cross-link: `planner_integration.md` §"Optimization boundary: transparent vs bl
 
 Partition-column projection is owned by `timeseries.md` §"Constraints & Invariants" rule 1 (Partition column projection): `partition_column` must appear in the model's output `SELECT` list (and in the `GROUP BY` when grouping is present), else `MalformedTimeseries`. The incremental rule consumes that guarantee — a model whose SELECT does not project `partition_column` is rejected before execution by that check, not by a separate one defined here.
 
+### Event-time monotonicity trace
+
+Every relaxation that lets the injected time filter reach *below* the outermost SELECT — pushing it onto a source scan, into a `UNION` branch, or onto one side of a join — rests on a single analysis: does the model's projected `event_time` value trace back, **monotonically**, to a real source partition column, and if so to *which* column, on *which* source, under *what* constant offset? The runtime uses `event_time` in two places (Execution model steps 2–3): the outer output-clamp filters output rows on the projected expression directly, and per-source pushdown filters each source on its own `partition_column`. These two filters are equivalent — and the source filter may therefore be relocated below the projection — **only** when the projection is a monotone image of the source clock.
+
+**The exact property required — interval-preimage-is-an-interval.** Let a source `S` carry partition column `p`, and let the model project `event_time` as `e = f(…)` over `S`'s columns. Relocating the window predicate from `e` onto `p` is sound iff, for every window `[lo, hi)` on `e`, the set of source rows with `f(p) ∈ [lo, hi)` is exactly the set with `p ∈ [a, b)` for some thresholds `a, b` — i.e. the preimage of a half-line is a half-line. Equivalently, `f` is **monotone non-decreasing**.
+
+- **Non-decreasing suffices; strict monotonicity is not required.** `DATE_TRUNC` and `CAST(ts AS DATE)` are many-to-one (a whole day of timestamps collapses to one date) yet still push cleanly, because the model's window boundaries are themselves granularity-aligned (`partition_column` is `DATE_TRUNC('day', e)` in the canonical model). A plateau of `f` never straddles a window boundary, so the half-line preimage stays exact. Requiring strict monotonicity would reject the single most common shape.
+- **Window-preserving, not value-preserving.** The outer output-clamp filters on `e` verbatim and is trivially correct whenever `e` is projected. Monotonicity is the *additional* fact that licenses **relocating** that filter onto `p` at the source — it is a prerequisite for the pushdown, never for the bare outer-clamp injection.
+
+**Verdict — the trace.** The analysis returns not a boolean but a trace, so that its result simultaneously answers the eligibility question and names the deepest source column the filter may be written at:
+
+```
+EventTimeTrace =
+  | Traceable   { source, source_column, offset }   -- monotone non-decreasing image of source_column
+                                                     --   on source, shifted by a constant offset;
+                                                     --   licenses source-level pushdown (offset folds into the bound)
+  | StaticSeed  { reason }                           -- constant / NULL-injecting: a static seed, not a
+                                                     --   partitionable stream (lands in one partition forever,
+                                                     --   or never passes `e >= start`)
+  | NotTraceable { reason }                          -- cannot prove monotone traceability; the consumer must
+                                                     --   stay at the outer clamp (or reject) — never push
+```
+
+`source_column` is the derived `BoundResult::Bounded.source_partition_col`; `offset` folds a constant `± INTERVAL` shift into the derived bound (`Seconds`, or a symbolic month/year offset).
+
+**Static monotone whitelist.** The projected `event_time` expression is classified by walking it from the projected column toward the leaves. The following forms are provably non-decreasing on every target backend and yield `Traceable`:
+
+| Form | Example | Traces to |
+|---|---|---|
+| transparent alias / bare column | `created_at AS event_time` | the column, offset 0 |
+| qualified column | `f.event_ts AS event_time` | column on the qualified input |
+| `DATE_TRUNC(unit, col)` | `DATE_TRUNC('day', event_ts)` | `col` |
+| `CAST(col AS DATE/TIMESTAMP)` | `CAST(event_ts AS DATE)` | `col` |
+| `date_bin` / `time_bucket` / `FLOOR(col to grid)` | `time_bucket('1 hour', ts)` | `col` |
+| `col ± INTERVAL '<const>'` | `event_ts + INTERVAL '1 day'` | `col`; offset folds into the bound |
+| `col AT TIME ZONE '<const>'` | `ts AT TIME ZONE 'UTC'` | `col` (DST plateaus but never decreases) |
+
+Composition is closed: a composition of monotone non-decreasing forms is monotone non-decreasing, so `DATE_TRUNC('day', CAST(event_ts AS TIMESTAMP) + INTERVAL '2 hours')` traces through all three layers to `event_ts` with a `+2h` offset. The classifier recurses on the single column-bearing argument at each layer and **fails closed** the moment a layer has two column-bearing arguments or an unrecognised head.
+
+**Non-monotone / order-breaking blacklist** — these must yield `NotTraceable` (or `StaticSeed` where noted):
+
+| Form | Why it breaks | Verdict |
+|---|---|---|
+| arithmetic on two columns (`end_ts - start_ts`) | not monotone in either alone; multi-source | `NotTraceable` |
+| `MOD` / `EXTRACT(HOUR/DOW/…)` | periodic — preimage of an interval is a union of intervals | `NotTraceable` |
+| `CASE WHEN …` | piecewise; generally neither monotone nor total | `NotTraceable` |
+| `COALESCE(col, <const>)` | injects a constant for `NULL` rows | `StaticSeed` |
+| `GREATEST/LEAST(col, <const>)` | clamps to a plateau that can straddle a boundary | `NotTraceable` |
+| unknown scalar UDF | monotonicity unknowable from the call site | `NotTraceable` |
+| constant / `NULL` literal | static seed, not a stream | `StaticSeed` |
+| run-nondeterministic clock (`NOW()`, `CURRENT_DATE`) | shifts each run; not source-traceable | `NotTraceable` |
+| `CAST(col AS VARCHAR)` | lexical order ≠ temporal order in general | `NotTraceable` |
+
+`CAST` is whitelisted only for date/timestamp target types. The whitelist is deliberately the **intersection** of what is monotone on every target backend (smelt is multi-backend): a per-engine monotonicity table would make eligibility a function of the backend rather than of the plan.
+
+**Declared escape hatch.** Where static classification runs out — an opaque scalar UDF, a `smelt.functions.*` body too large to re-derive, or a genuinely data-dependent monotonicity the SQL does not prove — the modeller may supply the guarantee. The natural home is a declared property on the smelt function alongside the existing `deterministic` / `idempotent` / `append_only` (`FunctionProperties`, `crates/smelt-logical/src/logical.rs`), or a per-model assertion on the `timeseries:` block for a model-specific projection. The governing rule: **a declaration may only *widen* eligibility.** The conservative static default, when no declaration is present, is *reject-the-push* (stay at the outer clamp), never *assume-monotone*.
+
 ### State ownership
 
 smelt does not track watermarks, offsets, or run history for incremental models. The backend owns computational state:
@@ -297,6 +354,8 @@ This section captures the load-bearing rationale behind the incremental model su
 
 **Per-source bounds, not a single per-model lookback.** A model can read multiple sources with independent time dependencies — one with a 1-day lookback, one with no lookback, one a non-timeseries lookup. *A single per-model `lookback_days` value* was rejected because it forces over-reading the sources that don't need lookback to satisfy the source that does, and silently mis-handles cross-column rebasing (UTC source → user-local partition column). The per-source `(before, after)` shape generalises cleanly: same-column lookback, cross-column rebasing, range-joins, and unbounded cumulatives all collapse into the same machinery. Different sources on the same model get independent pushdown.
 
+**Event-time monotonicity is one primitive, inferred where possible, declared where necessary.** The eligibility of every below-the-outer-SELECT relaxation reduces to one question — is the projected `event_time` a monotone image of a source clock? — so the analysis is a single shared primitive (Semantics §"Event-time monotonicity trace"), not a per-construct check. *Growing a private copy of the analysis inside each relaxation* was rejected: it re-introduces the class of syntax-vs-semantics inconsistency where one spelling of the same query is gated and another is not. The verdict is a **trace** (`source, source_column, offset`) rather than a boolean because the same fact that proves eligibility also names the deepest column the filter may be pushed to — eligibility and maximal-pushdown-depth are one computation (the classical `σ∘Q = Q∘σ` predicate-pushdown law). *Returning a bare boolean* was rejected for this reason; the closest production analog, ClickHouse's `getMonotonicityForRange`, likewise returns a verdict struct. The primitive is **sound in one direction only**: it may return `NotTraceable` for a form that is in fact safe (a missed optimisation — the consumer stays at the correct-but-unpushed outer clamp), but it must **never** return `Traceable` for a non-monotone form (an unsound relocated filter). This mirrors the codebase's existing fail-closed discipline (`cardinality_from_str` maps any unknown string to the conservative `OneToMany`). Finally, the primitive *proves* monotonicity where it can and falls back to a *declaration* where it cannot: monotonicity of an arbitrary expression is undecidable (Rice's theorem in general; Richardson's theorem already for elementary real expressions), so a sound static analysis is necessarily a sufficient-condition whitelist plus a declared hatch. Every comparable window-forward engine (Spark, Flink, dbt microbatch, SQLMesh, cube.dev) takes the monotone-event-time column purely as a *declaration* and never proves it; smelt's novelty is to prove it over the whitelist and lean on declaration only where it must. Full derivation and prior-art survey: `docs/research/20260701-expanding-incremental-eligibility.md` (Part 6, and §7 for external validation).
+
 ## Constraints & Invariants
 
 1. **Logical model is pure SQL.** No `is_incremental()`, no `{{ ... }}` macros, no conditional branches. The same SQL describes both the full-build and the incremental-build behavior; the framework injects the time filter.
@@ -310,6 +369,7 @@ This section captures the load-bearing rationale behind the incremental model su
 9. **Safety check overrides are explicit.** A safety override must name the specific check it bypasses. There is no global "disable all safety checks" switch.
 10. **No silent downgrade to full-refresh.** A model that the safety classifier rejects or whose bound derivation produces `NotDerivable` is refused at planning time with an explanatory diagnostic; it does not silently fall back to full-table execution.
 11. **`event_time_column` must be accessible at the outermost SELECT.** The time-filter injection (`inject_time_filter`) applies a `WHERE event_time_column >= start AND event_time_column < end` clause at the outermost SELECT level. If the outermost query is a set operation (UNION/INTERSECT/EXCEPT), the filter would apply to the first branch only, producing incorrect results. If the outermost FROM clause is a subquery that does not project `event_time_column`, the injected filter references an inaccessible column. Both cases are rejected with `EventTimeColumnNotVisibleAtOuterSelect` (Error) at the diagnostic gate before execution begins.
+12. **The monotonicity trace is sound in one direction.** The event-time monotonicity primitive (Semantics §"Event-time monotonicity trace") may under-approximate — returning `NotTraceable` for a form that is in fact safe, costing an optimisation — but must never over-approximate: it must never return `Traceable` for a projection that is not a monotone non-decreasing image of a source partition column. Every unrecognised expression head, every multi-column argument, and every unknown UDF fails closed to `NotTraceable`. A declared monotonicity guarantee may widen what is admitted; the static default without a declaration is always reject-the-push.
 
 ## Known Divergences / Open Questions
 
@@ -323,6 +383,12 @@ This section captures the load-bearing rationale behind the incremental model su
 - **Schema evolution is unspecified.** A `partition_column` rename or an output schema change has no defined handling today.
 - **`event_time_column` visibility check does not yet detect CTE-only references.** Constraint 11 is enforced for direct-subquery FROM clauses and set operations. If the outermost FROM references a CTE name (a `WITH …` alias) that does not project `event_time_column`, the `EventTimeColumnNotVisibleAtOuterSelect` diagnostic is not emitted — the CTE case requires resolving the `WITH` clause body, which is deferred. A model in this shape fails at DuckDB execution time with a "column not found" error. Tracked in `docs/plans/20260616-smelt-feedback-fixes.md`.
 - **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for incremental models that consume metrics.
+- **Event-time monotonicity trace is specified but not yet emitted.** The monotonicity primitive (Semantics §"Event-time monotonicity trace"; Constraint 12) is normative but no producer computes it today. The `EventTimeTrace` verdict is not yet returned by any analysis in `smelt-logical`, so the three consumers that depend on it — `UNION`-branch partitionability, subquery/CTE pushdown conservatism, and join driving-fact resolution — are not yet unblocked, and the injected time filter continues to sit only at the outer clamp. Landing the primitive (a pure `crates/smelt-logical/src/analysis/monotonicity.rs` module) is the prerequisite first step. Tracked in [`docs/plans/20260701-monotonicity-primitive.md`](../plans/20260701-monotonicity-primitive.md); design in `docs/research/20260701-expanding-incremental-eligibility.md` (Part 6).
+- **Column nullability is not visible at the `smelt-logical` layer.** The primitive catches *syntactic* NULL-injecting forms (a `NULL` literal, `COALESCE(col, <const>)`) and routes them to `StaticSeed`, but a merely *nullable* source column that produces `NULL` `event_time` rows is not decidable in `smelt-logical` (nullability is inferred in `smelt-db`). Open question: thread a nullability signal down (widening what the primitive can prove), accept the residual risk as the modeller's (today's behaviour — the outer clamp already lets nullable event-times through), or reject any event-time whose leaf column is not provably non-null.
+- **Offset folding vs. symbolic offsets.** `col + INTERVAL '1 day'` folds cleanly into a `Seconds` offset that merges with the existing Form-B bound derivation. Month/year intervals are monotone but non-uniform. Open question: carry them as a symbolic offset the runtime rewrites per-engine, or refuse to push them (outer-clamp only)?
+- **Static-vs-declared boundary.** How much of the monotone whitelist ships as static classification before leaning on a declared property on `FunctionProperties` / `timeseries:`? Because a monotonicity declaration is trusted *for correctness* (not merely optimisation, as declared join cardinality is), does it warrant a stricter opt-in than the existing property booleans — e.g. a workspace-level `unstable_`-style flag?
+- **Verdict-struct vs. three-way enum.** The prior-art analog (ClickHouse) returns a four-field verdict (`is_monotonic`, direction, `is_always_monotonic`, `is_strict`). For a forward-only event-time only the non-decreasing case is ever needed, so the `Traceable`/`StaticSeed`/`NotTraceable` enum likely suffices — open whether to carry direction/strictness fields now to keep the door open for descending clocks and exact endpoint handling.
+- **`analyze_select` retains only raw text.** `SelectAnalysis` (`crates/smelt-logical/src/analysis/mod.rs`) currently keeps each select item as raw `text` and discards the parsed `Expr` node, which the monotonicity classifier needs. Open question: extend `analyze_select` to retain the node (one change, many future analyses benefit) or have the primitive re-parse the event-time expression text in isolation (cheaper to land, but re-parses).
 - **Diagnostic code ownership.** This spec owns the *semantics* of the diagnostic codes it lists — when each fires and what it anchors to. [`diagnostics.md`](diagnostics.md) is the cross-feature catalogue that indexes every code's severity and canonical trigger; the two must agree, with the owning feature spec governing semantics and `diagnostics.md` governing the catalogue row.
 - **Generator-emitted incremental models are landed.** A `ModelDef` value emitted by a generator file (per `meta_language.md` §"Multi-model production") may carry `materialization: 'incremental'`, and the emitted model is subject to every rule in this spec on equal terms with a hand-authored incremental model — batch-safety classification, per-source filter injection, DELETE+INSERT execution, the first-run-and-backfill path. The `incremental:` block is inherited from the generator file's file-wide frontmatter (`EmittedModelDef.incremental_config`); per-`ModelDef` overrides of `incremental.partition_column`, `incremental.granularity`, etc. are not part of the closed `ModelDef` field set in v1 (a future spec edit may add them). A single generator emits a single `incremental:` configuration shared by every emitted incremental model; users who need divergent per-emission incremental settings split the generator into multiple files. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
@@ -345,9 +411,11 @@ This section captures the load-bearing rationale behind the incremental model su
 - **Plans (history)**:
   - [`docs/plans/20260322-incremental-model-support.md`](../plans/20260322-incremental-model-support.md) — comprehensive plan; many phases still open
   - [`docs/plans/20260325-materialization-types.md`](../plans/20260325-materialization-types.md)
+  - [`docs/plans/20260701-monotonicity-primitive.md`](../plans/20260701-monotonicity-primitive.md) — event-time monotonicity trace primitive (prerequisite for below-outer-SELECT filter relocation)
 - **Research**:
   - [`docs/research/2026-05-20-incremental-gaps-from-web-analytics.md`](../research/2026-05-20-incremental-gaps-from-web-analytics.md) — gaps catalogued during web_analytics conversion
   - [`docs/research/20260521-incremental-as-planner-rule.md`](../research/20260521-incremental-as-planner-rule.md) — design direction this spec absorbs
+  - [`docs/research/20260701-expanding-incremental-eligibility.md`](../research/20260701-expanding-incremental-eligibility.md) — eligibility audit; Part 6 derives the event-time monotonicity trace, Part 7 validates it against academic theory and production engines
 - **Related specs**:
   - [`timeseries.md`](timeseries.md) — declares `event_time_column`, `partition_column`, `granularity` (the time-dimension surface this spec consumes)
   - [`expansion.md`](expansion.md) — function expansion pass; runs before every analysis stage in this spec
