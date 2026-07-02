@@ -14,11 +14,14 @@
 //!   `RefSchemaProvider` trait and `StaticRefSchemaProvider`
 //! - `check_types` — per-model column-type diagnostics
 //! - `loader` — `smelt.config.load_yaml` / `load_json` / `load_toml` resolution
+//! - `monotonicity` — nullability gate composing `smelt_logical::trace_event_time`
+//!   with smelt-db's inferred schema
 
 pub mod check_types;
 pub mod function_diagnostics;
 pub mod functions;
 pub mod loader;
+pub mod monotonicity;
 pub mod parse;
 pub mod project;
 pub mod schema;

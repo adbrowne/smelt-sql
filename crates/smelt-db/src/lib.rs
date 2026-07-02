@@ -271,6 +271,7 @@ pub use queries::loader::{
     loader_resolved_value_with_overlay, parse_smelt_type_from_field_annotation,
     smelt_record_declarations, LoaderCallSiteId, LoaderResolvedValue,
 };
+pub use queries::monotonicity::{gate_nullable_leaf, trace_event_time_checked};
 pub use queries::parse::{
     model_path_refs, model_sources, parse_file, parse_model, PathRefLocation,
 };
