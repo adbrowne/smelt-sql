@@ -111,9 +111,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # stop-autonomy.sh; it is removed automatically when the loop acts on it.
 STOP_FLAG="${STOP_FLAG:-${SCRIPT_DIR}/../autonomy.stop}"
 
-# Currently active: the Spark → DuckDB parity backlog
-# (docs/plans/20260628-spark-parity.md via .claude/active-plan).
-LOG_DIR="${HOME}/.claude/logs/spark-parity"
+# Currently active: the incremental-model eligibility expansion backlog
+# (docs/plans/20260702-incremental-eligibility-expansion.md via .claude/active-plan).
+LOG_DIR="${HOME}/.claude/logs/incremental-eligibility"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).

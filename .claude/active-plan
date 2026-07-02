@@ -63,13 +63,21 @@
 # loop runs Spark phases (the loop's stateless iterations do not stand Spark up).
 # Bring it up once with scripts/spark-up.sh (created in W1·P1) + export
 # SPARK_CONNECT_URL into the loop's env. When unset, Spark assertions skip (green).
-master_plan: docs/plans/20260628-spark-parity.md
-active_subplan: docs/plans/20260629-spark-w4-shared-backend-factory.md
+# ACTIVE (2026-07-02): the incremental-model eligibility expansion. Lands and
+# exhaustively tests the shared event-time monotonicity trace primitive (audit
+# Part 6) before any consumer is wired. Master:
+# docs/plans/20260702-incremental-eligibility-expansion.md (registry-driven, no
+# probe rows); design: docs/research/20260701-expanding-incremental-eligibility.md;
+# spec: docs/specs/incremental_models.md. PREREQUISITE for the property suite:
+# DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env (unset → DuckDB
+# property tests skip green).
+master_plan: docs/plans/20260702-incremental-eligibility-expansion.md
+active_subplan: docs/plans/20260702-monotonicity-primitive-tested.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.
-in_repo_plan: docs/plans/20260628-spark-parity.md
-meta_plan: docs/plans/20260628-spark-parity.md
+in_repo_plan: docs/plans/20260702-incremental-eligibility-expansion.md
+meta_plan: docs/plans/20260702-incremental-eligibility-expansion.md
 
 # PAUSED: docs/plans/20260613-spec-impl.md (the spec-remediation backlog). All of
 # its registry sub-plans are `done` (the loop would emit <<MASTER_EXHAUSTED>>); the

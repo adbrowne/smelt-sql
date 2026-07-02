@@ -5,7 +5,7 @@
 **Owners:** andrew
 **Related:**
 - Spec: [`docs/specs/incremental_models.md`](../specs/incremental_models.md)
-- Plan: [`docs/plans/20260701-monotonicity-primitive.md`](../plans/20260701-monotonicity-primitive.md) (implements Part 6)
+- Plan: [`docs/plans/20260702-monotonicity-primitive-tested.md`](../plans/20260702-monotonicity-primitive-tested.md) (implements Part 6; supersedes the 2026-07-01 draft)
 - [`docs/research/2026-05-20-incremental-gaps-from-web-analytics.md`](2026-05-20-incremental-gaps-from-web-analytics.md)
 - [`docs/research/20260521-incremental-as-planner-rule.md`](20260521-incremental-as-planner-rule.md)
 
@@ -1260,39 +1260,57 @@ pub fn trace_event_time(
 
 ### 6.7 Open questions this raises
 
-- **Column nullability at this layer.** The syntactic NULL forms are catchable, but
-  a nullable source column that produces `NULL` `event_time` rows is not visible in
-  `smelt-logical` (nullability is inferred in `smelt-db`). Do we thread a
-  nullability signal down into the primitive (widening what it can prove), accept
-  the residual risk as the modeller's, or reject any event-time whose leaf column
-  is not provably non-null?
-- **Offset folding vs. symbolic offsets.** `col + INTERVAL '1 day'` folds cleanly
-  into a `Seconds` offset that merges with `source_bounds` Form B
-  (`source_bounds.rs:359`). Month/year intervals are monotone but non-uniform —
-  carry them as a `Symbolic` offset the runtime rewrites per-engine, or refuse to
-  push them (outer-clamp only)?
-- **Static vs. declared boundary.** How much of the whitelist (6.2) do we ship as
-  static classification before leaning on a declared `monotone` property on
-  `FunctionProperties` / `timeseries:` (6.3)? Given the §20E precedent, does
-  trusting a declaration *for correctness* (not just optimisation) warrant a
-  stricter opt-in (e.g. an `unstable_`-style workspace flag, as `provenance:`
-  already requires per `logical.rs:70`–`73`)?
-- **Reusing the trace as the Part 4 injection point.** The trace's
-  `(source, source_column, offset)` is designed to be the "deepest safe injection
-  point." Can `inject_source_filters` / bound derivation consume it directly, or
-  does the operator-by-operator pushdown walk (Part 4 open questions) still need a
-  separate pass for the intervening operators the primitive skipped over?
-- **`analyze_select` retaining the `Expr` tree.** The primitive needs the parsed
-  event-time expression, but `SelectAnalysis` currently keeps only raw `text`
-  (`analysis/mod.rs:9`). Extend `analyze_select` to retain the node (one change,
-  many future analyses benefit), or have the primitive re-parse the expression text
-  in isolation (cheaper to land, but re-parses)?
-- **Adopt a ClickHouse-style verdict struct?** The prior art (§7.4) returns a
-  four-field verdict (`is_monotonic`, `is_positive`/direction, `is_always_monotonic`,
-  `is_strict`) rather than the three-way enum above. For a *forward-only*
-  event-time we likely only ever need the non-decreasing case, so the enum may
-  suffice — but do we want the direction/strictness fields now to keep the door
-  open for descending clocks and exact endpoint handling?
+**Resolved 2026-07-02** (owner decisions; implementation planned in
+[`docs/plans/20260702-monotonicity-primitive-tested.md`](../plans/20260702-monotonicity-primitive-tested.md),
+which builds and exhaustively tests the primitive *before* the spec's Open
+Questions are formally resolved). The decisions:
+
+- **Column nullability at this layer — RESOLVED: reject nullable leaf columns.** The
+  pure structural trace stays in `smelt-logical` (below `smelt-db`, no type info); a
+  thin **`smelt-db`** query then resolves the traced leaf column's nullability from
+  its own inferred schema and **downgrades `Traceable → NotTraceable` when the leaf
+  is nullable-or-unknown**. The "layer on top" needed to see nullability already
+  exists — it is `smelt-db` (it depends on `smelt-logical` and owns type
+  inference), so no new crate is required. Syntactic NULL forms (`NULL` literal,
+  `COALESCE(col,const)`) remain `StaticSeed` in the pure layer; the gate closes the
+  *semantic* nullable-column gap.
+- **Offset folding vs. symbolic offsets — RESOLVED: carry both.** `col + INTERVAL
+  '<const seconds/days>'` folds into `Offset::Seconds` (merges with Form-B bound
+  derivation); month/year intervals stay `Offset::Symbolic` for the runtime to
+  rewrite per-engine, never silently coerced to `Seconds`.
+- **Static vs. declared boundary — RESOLVED: full static whitelist ships; declared
+  guarantees only *widen*.** The whole 6.2 whitelist is static classification;
+  because a declared monotonicity guarantee is trusted *for correctness* (not merely
+  optimisation, as join cardinality is), it warrants a stricter opt-in than the
+  existing `FunctionProperties` booleans — the exact gate (e.g. an `unstable_`-style
+  flag) is fixed when the first declared consumer lands. **Per-backend** validation
+  is a standing property suite (the whitelist is the intersection of what is
+  monotone on every target backend, verified against DuckDB now and structured to
+  add Spark/Postgres).
+- **Reusing the trace as the Part 4 injection point — RESOLVED: annotate the tree,
+  do not track a source location.** The trace's `(source, source_column, offset)` is
+  a **semantic** target, not a text span. The injection consumers must **annotate
+  the logical/physical tree** with that target and let the printer emit SQL
+  (`smelt-planner`'s `plan_printer.rs`); they must never compute how to *edit source
+  text*. This retires the framing of "trace back to a source location and rewrite
+  the source." Replacing the current textual `inject_time_filter` /
+  `inject_source_filters` (`transformer.rs:65`,`:272`) with annotation-injection is a
+  deferred redesign (roadmap); this primitive only guarantees its output is
+  expressed semantically so that redesign can consume it directly.
+- **`analyze_select` retaining the `Expr` tree — RESOLVED: retain the node.** The
+  primitive must not re-parse; `analyze_select` retains the parsed `Expr` on each
+  select item (one change, many future analyses benefit). Other analyses that still
+  re-scan raw text (clause string-scanning, `source_bounds.rs` textual `INTERVAL`/
+  `RANGE` recognition, `rules/incremental.rs` `Frontmatter::strip`+re-scan,
+  `temporal.rs` re-parse) are a roadmap cleanup sweep.
+- **ClickHouse-style verdict struct — RESOLVED: adopt the full 4-field verdict
+  now.** The traced chain carries `Monotonicity { is_monotonic, is_positive,
+  is_always_monotonic, is_strict }` up front (alongside the three-way
+  `Traceable`/`StaticSeed`/`NotTraceable` classification the consumers branch on).
+  Forward-only consumers read only `is_monotonic && is_positive` today, but a
+  named-DST-zone (`is_always_monotonic = false`) or descending clock
+  (`is_positive = false`) becomes a *data* difference rather than a later type
+  change.
 
 ---
 

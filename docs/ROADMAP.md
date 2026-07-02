@@ -807,6 +807,14 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - `smelt test` silently skips `materialization: test` files with a boolean-`SELECT` body — no "discovered but skipped" diagnostic (`20260509-meta-language-G.md`).
 - `smelt seed` command fate undecided (repurpose as `list`/`describe` vs remove; seed type-inference + caching open) (`20260406-seed-schema.md`).
 
+**Incremental eligibility — monotonicity primitive follow-ons** (`20260702-monotonicity-primitive-tested.md`)
+- **Consumers of the trace, unwired today** — `UNION`-branch partitionability (§2.5/E1), subquery/CTE pushdown conservatism (§4.6/B4/E2), and join driving-fact resolution (§5.4). Each is a separate gated plan; the primitive's output type is designed for all three.
+- **Tree-annotation injection redesign** — replace the *textual* `inject_time_filter` / `inject_source_filters` (`transformer.rs:65`,`:272`) with logical/physical-tree annotation consumed by `smelt-planner`'s `plan_printer.rs`. The trace names a *semantic* `(source, source_column, offset)` target; consumers annotate the tree and the printer emits SQL — no consumer ever computes source-text edits (research §6.7, decision 2026-07-02).
+- **Retain-parsed-AST cleanup sweep** — Phase 0 retains the parsed `Expr` on `analyze_select` items; other analyses still re-scan raw text and should retain what's parsed instead: `analysis/mod.rs` clause string-scanning, `source_bounds.rs` textual `INTERVAL`/`RANGE BETWEEN` recognition, `rules/incremental.rs` `Frontmatter::strip`+re-scan, and the `temporal.rs` re-parse sites.
+
+**smelt-logical / smelt-planner extraction**
+- **Consolidate the duplicated analysis modules.** `smelt-planner/src/` still carries a parallel copy of nearly every `smelt-logical` module — `analysis/{mod,source_bounds,temporal}.rs`, `rules/{incremental,cumulative,rule_diagnostics,cube_split}.rs`, `logical.rs`, `graph.rs`, `types.rs`, `lowering/as_struct.rs` — from the recent (incomplete) extraction into `smelt-logical`. Finish the extraction so each analysis lives once (in `smelt-logical`, consumed by both `smelt-db` and `smelt-planner`), leaving `smelt-planner` only its planner-only pieces (`logical_plan_rules.rs`, `plan_printer.rs`, `python_bridge.rs`). Prerequisite context for where any future type-aware analysis moves.
+
 **Datagen / incremental**
 - Foreign-key resolution inside `JsonObject`/`entity.columns` always resolves to id 1 (`20260517-web-analytics-1-datagen-json-object.md`).
 - Cumulative reprocessing detection has no watermark store — refuses via a heuristic pending a state-tracking spec (`20260523-cumulative-aggregate.md`).

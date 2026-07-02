@@ -1,5 +1,7 @@
 # Plan: Event-time monotonicity trace primitive
 
+> **Superseded (2026-07-02) by [`20260702-monotonicity-primitive-tested.md`](20260702-monotonicity-primitive-tested.md).** Same primitive, reordered to build-and-test-first (spec Open Questions resolved only after the tests validate them) and revised for four owner decisions: ClickHouse 4-field verdict struct, reject-nullable-leaf (gated in `smelt-db`), tree-annotation (not source-rewrite) injection, retain-parsed-`Expr`. Kept for history; execute the superseding plan.
+
 **Date:** 2026-07-01
 **Spec:** `docs/specs/incremental_models.md` — Semantics §"Event-time monotonicity trace", Design ("Event-time monotonicity is one primitive, inferred where possible, declared where necessary"), Constraints §12, and the associated Known Divergences / Open Questions entries.
 **Spec diff:** Adds the normative `EventTimeTrace` primitive — the interval-preimage-is-an-interval / monotone-non-decreasing property, the static monotone whitelist + non-monotone blacklist, the `Traceable`/`StaticSeed`/`NotTraceable` verdict, the one-directional soundness contract (Constraint 12), and the declared escape hatch ("a declaration may only widen eligibility"). Marks the primitive as specified-but-not-yet-emitted under Known Divergences.
