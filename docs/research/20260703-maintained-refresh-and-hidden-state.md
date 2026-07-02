@@ -6,7 +6,7 @@
 **Related:**
 - Spec: [`docs/specs/cumulative_aggregate.md`](../specs/cumulative_aggregate.md) — the `{direct, smelt-maintained}` corner of the design space this doc opens up.
 - Spec: [`docs/specs/incremental_models.md`](../specs/incremental_models.md) — the window-forward sibling; the *other* maintenance camp.
-- Spec: [`docs/specs/multi_backend.md`](../specs/multi_backend.md) — the capability matrix this doc extends with `has_native_ivm` / `has_retraction`.
+- Spec: [`docs/specs/multi_backend.md`](../specs/multi_backend.md) — the capability matrix this doc extends with `supports_native_ivm` / `supports_retraction`.
 - Spec: [`docs/specs/models.md`](../specs/models.md) §"Refresh axis" — where `cumulative`, and any generalization of it, lives.
 - Research: [`docs/research/20260701-expanding-incremental-eligibility.md`](20260701-expanding-incremental-eligibility.md) — the audit of the window-forward camp; §7.1 (two camps), §7.2 (external validation), §7.3 (monotone/linear theory), §11.3 (ordered / self-referential).
 - Research: [`docs/research/20260522-cumulative-as-its-own-rule.md`](20260522-cumulative-as-its-own-rule.md) — why cumulative is its own rule; the sibling-rule sketches (`scd2`, `latest_value`, `accumulating_snapshot`).
@@ -22,10 +22,12 @@ variations of one mechanism — they are the two camps the whole field splits in
 - **Window-forward over a monotone event-time** — smelt's `incremental`. Read the
   next time window, assume the source is append-only so earlier windows are
   settled, `DELETE+INSERT` that window's partitions. Simple, needs no
-  change-tracking metadata, but pays the monotonicity-primitive price and only
-  covers the monotone/linear operator slice.
+  change-tracking metadata, but pays the monotonicity-primitive price
+  ([`incremental_models.md`](../specs/incremental_models.md) §"Event-time
+  monotonicity trace") and only covers the monotone/linear operator slice.
 - **Change-tracking / delta-diffing** — Databricks Enzyme, Snowflake Dynamic
-  Tables, Materialize, Feldera/DBSP. Detect *which rows changed* and propagate the
+  Tables, BigQuery MVs, Feldera/DBSP (and, beyond the warehouses, Materialize
+  and Flink). Detect *which rows changed* and propagate the
   delta into maintained state. No monotone column needed; covers joins, `DISTINCT`,
   non-additive aggregates — far more of SQL — but needs a **stateful runtime that
   keeps maintenance state the user never selects**.
@@ -91,15 +93,15 @@ presentation  CREATE VIEW … SELECT device_id, user_id,
   the engine keep the hidden state *and* the presentation. smelt supplies the
   logical specification; the engine's differential runtime does the maintenance.
   Only available on backends whose capability matrix advertises it. Note
-  `models.md` §"Refresh axis" already reserves a `materialized_view` **storage**
-  mode described as a "backend-managed materialized view" — the natural physical
-  home for this maintainer.
+  `models.md` already carries a `materialized_view` mode on the **storage**
+  (materialization) axis, described as a "backend-managed persistent view" — the
+  natural physical home for this maintainer.
 
 ### The matrix
 
 |  | **smelt-driven** | **engine-native IVM** |
 |---|---|---|
-| **direct state** | `cumulative` *today* — `SUM/MIN/MAX/BOOL_*/BIT_*` | native MV over an additive aggregate (redundant with smelt-driven, but free) |
+| **direct state** | `cumulative` *today* — `SUM/COUNT/MIN/MAX/BOOL_*/BIT_*` | native MV over an additive aggregate (redundant with smelt-driven, but free) |
 | **hidden, append-only (monoid)** | `AVG`, variance, HLL-approx-distinct via `(state table + view)` | native MV; engine keeps the sketch |
 | **hidden, retraction (group)** | reversible aggregates + delete/reprocess via a stored, invertible delta | the full delta camp: joins, `DISTINCT`, non-additive aggregates — anything the engine can maintain |
 
@@ -133,7 +135,8 @@ order. Generalizing changes only two words:
 
 This reframes the whole design space as **one contract, four physical
 realizations** — the textbook logical/physical split smelt is built on
-(`architecture.md`). It also means the contract does *not* mention monotone
+(stated most crisply in [`multi_backend.md`](../specs/multi_backend.md) §Design;
+`architecture.md` gives the compiler pipeline that realizes it). It also means the contract does *not* mention monotone
 event-time: the maintained-relation camp sidesteps camp-1's monotonicity price
 entirely (see §5), because it tracks *what changed* rather than *assuming what is
 settled*.
@@ -184,7 +187,9 @@ cumulative's order-independence contract; identity is the empty partition.
 - **Direct monoid** (stored value presentable as-is): `SUM (+, 0)`, `COUNT (+, 0)`,
   `MIN (min, +∞)`, `MAX (max, −∞)`, `BOOL_AND/OR`, `BIT_AND/OR/XOR`. This is
   today's allowlist — and it is exactly the closed set of *directly presentable*
-  commutative monoids over scalar columns.
+  commutative monoids over scalar columns. (The spec itself asserts only
+  commutativity + associativity of the combiner; the identity element — the empty
+  partition — is implicit there and made explicit here.)
 - **Decomposed monoid** (needs a presentation map `π`): the *state* is a monoid
   element in a richer space; the user value is `π(state)`.
   - `AVG` → state `(sum, count)` under componentwise `+`; `π = sum/count`.
@@ -256,32 +261,37 @@ clean logical view. Same logical object, two maintainers. This is why the same
 model or the equivalence contract (§2):
 
 - **DuckDB / plain Spark** — smelt maintains: state table + `merge_into` loop +
-  presentation view. Capability required: `merge_into` + views (both already
-  present).
+  presentation view. Capability required: the `merge_into` primitive
+  (`supports_merge`) + views (both already present).
 - **Databricks** — the engine maintains: `CREATE MATERIALIZED VIEW …` and Enzyme's
-  runtime keeps state + presentation. Capability required: `has_native_ivm`.
+  runtime keeps state + presentation. Capability required: `supports_native_ivm`.
 
 ### 5.2 Capability model
 
 This slots into the existing `multi_backend.md` capability matrix, which already
-carries a "native materialized view" notion (§Surface: "DuckDB and both Spark
-profiles take the table fallback … a real one would be a Databricks-only
-capability"). Two flags express the space:
+carries a "native materialized view" notion (§Semantics "Required lowerings": "No
+backend today emits a native materialized view: DuckDB and both Spark profiles
+take the table fallback … a real one would be a Databricks-only capability").
+Two flags — named after the matrix's existing `supports_*` convention — express
+the space:
 
-- **`has_native_ivm`** — the backend can maintain a declared query as a native
-  incremental view. `true` → delegate; `false` → smelt-driven `(state table +
-  view)` fallback. This is the standard `multi_backend.md` **lower-don't-reject**
-  posture ([§"Constraints & Invariants"](../specs/multi_backend.md)): a missing
-  capability is a lowering obligation, not a user-facing error.
-- **`has_retraction`** — whether the maintainer can invert contributions (delete /
-  reprocess). smelt-driven sets this `true` **only for the group subset** (§4.2);
-  native IVM sets it `true` generally. Drives whether a reprocess is accepted or
-  refused-with-`--full-refresh` (cumulative's current v1 policy).
+- **`supports_native_ivm`** — the backend can maintain a declared query as a
+  native incremental view. `true` → delegate; `false` → smelt-driven `(state
+  table + view)` fallback. This is the standard `multi_backend.md`
+  **lower-don't-reject** posture ([§Design "Lower, don't
+  reject"](../specs/multi_backend.md)): a missing capability is a lowering
+  obligation, not a user-facing error.
+- **`supports_retraction`** — whether the maintainer can invert contributions
+  (delete / reprocess). smelt-driven sets this `true` **only for the group
+  subset** (§4.2); native IVM sets it `true` generally. Drives whether a
+  reprocess is accepted or refused-with-`--full-refresh` (cumulative's current
+  v1 policy).
 
 The user-facing surface stays a single `refresh:` declaration; direct vs
 decomposed vs native is **derived** (SQL shape + capability), never declared — the
-derive-don't-declare posture cumulative already takes
-([`cumulative_aggregate.md`](../specs/cumulative_aggregate.md) §Design) and the one
+derive-don't-declare posture cumulative already takes for `unique_key` and
+aggregators ([`cumulative_aggregate.md`](../specs/cumulative_aggregate.md)
+§Design), extended here to state representation, and the one
 [eligibility §11.3a](20260701-expanding-incremental-eligibility.md) argues for
 ordering. `AVG` in the SQL ⟹ decomposed; `has_native_ivm` ⟹ delegate; otherwise
 smelt-driven.
@@ -520,10 +530,13 @@ processed-input-equivalent            — (conceptual umbrella; §9.1)
 ```
 
 One caveat keeps this honest and stops it hardening into a rigid two-level selector:
-window-independence is a **derived, cross-cutting** property
-([eligibility §11.3a](20260701-expanding-incremental-eligibility.md), derive-don't-
-declare), and it *leaks* — a **self-referential incremental** model is
-stateful-ordered yet still uses partition `DELETE+INSERT`, not `merge_into`. So
+window-independence is a **derived** property, not a declared one
+([eligibility §11.3a](20260701-expanding-incremental-eligibility.md)), and it
+*leaks* across the split — a **self-referential incremental** model is
+stateful-ordered yet still executes as partition `DELETE+INSERT`, not `merge_into`
+(the contrast [eligibility §11.3](20260701-expanding-incremental-eligibility.md)
+draws for cumulative; the self-referential shape is named there as its
+"incremental cousin"). So
 statefulness explains the *split* but must not *become* the selector; users still
 write `incremental:` / `refresh: cumulative`, and ordering stays derived.
 
@@ -547,9 +560,10 @@ write `incremental:` / `refresh: cumulative`, and ordering stays derived.
 
 ## References
 
-- **Specs**: `cumulative_aggregate.md`, `incremental_models.md`, `multi_backend.md`,
-  `models.md` (§"Refresh axis", `materialized_view` storage mode),
-  `architecture.md` (logical/physical split; backend primitives).
+- **Specs**: `cumulative_aggregate.md`, `incremental_models.md`, `multi_backend.md`
+  (§Design "Lower, don't reject"; capability matrix), `models.md` (§"Refresh
+  axis"; `materialized_view` on the storage axis), `architecture.md` (compiler
+  pipeline; backend primitives).
 - **Research**: `20260701-expanding-incremental-eligibility.md` (§7.1 two camps,
   §7.2 external validation, §7.3 monotone/linear theory, §11.3 ordered slice,
   §Open questions "Cumulative vs. incremental boundary");
