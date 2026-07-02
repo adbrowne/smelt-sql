@@ -8,11 +8,32 @@ use smelt_types::SqlFunction;
 #[derive(Debug, Clone, Serialize)]
 pub enum SelectItemKind {
     /// COUNT(DISTINCT expr) with alias
-    CountDistinct { argument: String, alias: String },
+    CountDistinct {
+        argument: String,
+        alias: String,
+        /// The parsed argument expression, retained so downstream analyses
+        /// (e.g. the event-time monotonicity trace) never re-parse.
+        #[serde(skip)]
+        expr: smelt_parser::Expr,
+    },
     /// Other aggregate function (COUNT(*), SUM, AVG, etc.) with alias
-    OtherAggregate { text: String, alias: String },
+    OtherAggregate {
+        text: String,
+        alias: String,
+        /// The parsed select-item expression, retained so downstream
+        /// analyses never re-parse.
+        #[serde(skip)]
+        expr: smelt_parser::Expr,
+    },
     /// Non-aggregate expression (GROUP BY key) with alias
-    GroupByKey { text: String, alias: String },
+    GroupByKey {
+        text: String,
+        alias: String,
+        /// The parsed select-item expression, retained so downstream
+        /// analyses (e.g. the event-time monotonicity trace) never re-parse.
+        #[serde(skip)]
+        expr: smelt_parser::Expr,
+    },
 }
 
 /// Analyzed structure of a SELECT statement.
@@ -60,6 +81,7 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
                 items.push(SelectItemKind::CountDistinct {
                     argument: arg,
                     alias,
+                    expr: expr.clone(),
                 });
                 continue;
             }
@@ -68,6 +90,7 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
                 items.push(SelectItemKind::OtherAggregate {
                     text: expr_text,
                     alias,
+                    expr: expr.clone(),
                 });
                 continue;
             }
@@ -76,6 +99,7 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
         items.push(SelectItemKind::GroupByKey {
             text: expr_text,
             alias,
+            expr: expr.clone(),
         });
     }
 
@@ -310,6 +334,16 @@ mod tests {
             matches!(&analysis.items[1], SelectItemKind::CountDistinct { argument, alias, .. } if argument == "user_id" && alias == "unique_users")
         );
         assert_eq!(analysis.group_by_exprs, vec!["country"]);
+    }
+
+    #[test]
+    fn analyze_select_retains_expr_for_group_key() {
+        let sql = "SELECT DATE_TRUNC('day', ts) AS d, COUNT(*) as cnt FROM events GROUP BY 1";
+        let analysis = analyze_select(sql).unwrap();
+        let SelectItemKind::GroupByKey { text, expr, .. } = &analysis.items[0] else {
+            panic!("expected GroupByKey item");
+        };
+        assert_eq!(expr.text().trim(), text.as_str());
     }
 
     #[test]

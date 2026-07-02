@@ -250,7 +250,9 @@ pub fn classify_cumulative(
     for group_expr in &analysis.group_by_exprs {
         // Find the matching projection by expression text.
         let matched = analysis.items.iter().find_map(|item| match item {
-            SelectItemKind::GroupByKey { text, alias } if text == group_expr => Some(alias.clone()),
+            SelectItemKind::GroupByKey { text, alias, .. } if text == group_expr => {
+                Some(alias.clone())
+            }
             _ => None,
         });
         if let Some(alias) = matched {
@@ -268,7 +270,7 @@ pub fn classify_cumulative(
     let mut aggregator_columns: Vec<AggregatorColumn> = Vec::new();
     for item in &analysis.items {
         match item {
-            SelectItemKind::GroupByKey { text, alias } => {
+            SelectItemKind::GroupByKey { text, alias, .. } => {
                 // A "GroupByKey" item is the analyser's classification for
                 // any non-aggregate expression. If the projection's text
                 // appears in the GROUP BY, it is genuinely a key column.
@@ -292,7 +294,7 @@ pub fn classify_cumulative(
                     offending: "COUNT(DISTINCT)".to_string(),
                 });
             }
-            SelectItemKind::OtherAggregate { text, alias } => {
+            SelectItemKind::OtherAggregate { text, alias, .. } => {
                 // Extract the outer function name. The projection text is
                 // something like `COUNT(*)` or `MIN(event_ts)`; we want the
                 // identifier before the first `(`.

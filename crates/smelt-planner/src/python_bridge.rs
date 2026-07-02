@@ -98,15 +98,17 @@ fn analysis_to_py<'py>(py: Python<'py>, analysis: &SelectAnalysis) -> PyResult<B
     let items = PyList::empty(py);
     for item in &analysis.items {
         let py_item = match item {
-            SelectItemKind::CountDistinct { argument, alias } => {
+            SelectItemKind::CountDistinct {
+                argument, alias, ..
+            } => {
                 let cls = types.getattr("CountDistinct")?;
                 cls.call1((argument.as_str(), alias.as_str()))?
             }
-            SelectItemKind::OtherAggregate { text, alias } => {
+            SelectItemKind::OtherAggregate { text, alias, .. } => {
                 let cls = types.getattr("OtherAggregate")?;
                 cls.call1((text.as_str(), alias.as_str()))?
             }
-            SelectItemKind::GroupByKey { text, alias } => {
+            SelectItemKind::GroupByKey { text, alias, .. } => {
                 let cls = types.getattr("GroupByKey")?;
                 cls.call1((text.as_str(), alias.as_str()))?
             }
