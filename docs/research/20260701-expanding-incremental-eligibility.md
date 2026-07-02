@@ -1919,8 +1919,12 @@ resolved, and only one half actually breaks the invariant:
 - **Row-nondeterministic** — `RANDOM()`, `UUID()`, `GEN_RANDOM_UUID()`. A fresh
   value *per row, per evaluation*. Re-running any window re-rolls the value, so the
   stored partition after an incremental run differs from a full refresh of the same
-  range. These genuinely violate incremental ≡ full and must stay rejected. (They
-  are also the reason `unique_key` MERGE on a random column is meaningless.)
+  range. These genuinely violate incremental ≡ full **under the bit-identical
+  contract** and stay rejected *by default* — but §9.1a lifts the rejection when the
+  value is confined to an opted-in payload column, because a full refresh does not
+  reproduce it either. (They are also the reason `unique_key` MERGE on a random
+  column is meaningless — which is exactly why `unique_key` is one of the roles
+  §9.1a keeps deterministic.)
 - **Run-deterministic** — `NOW()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`,
   `CURRENT_USER`. Resolved *once per statement execution* and identical for every
   row in that run. These do not vary within a run; they vary *between* runs.
@@ -1985,6 +1989,100 @@ a documented divergence — see the invocation-scope caveat above).
 Retain `allow_nondeterministic` only as the escape hatch for the row-nondeterministic
 class. Emit an honest message naming *which* function is the problem, not
 "non-deterministic function" as a category.
+
+### 9.1a — Opt-in non-determinism: equivalence up to full-refresh variation
+
+§9.1 draws the row-vs-run line under the *implicit* contract that an incremental
+sequence must reproduce a full refresh **bit-for-bit**. But that is stricter than
+the invariant users actually need, and relaxing it to the real one turns the
+row-nondeterministic rejection from a law into a default. The motivating case: an
+`inserted_at = NOW()` / `loaded_at` audit stamp, or a `batch_id = UUID()` surrogate
+— a column the modeller is *content* to see differ, exactly as it would differ
+between two full refreshes.
+
+**The sharpened contract — two clauses.**
+
+1. A sequence of incremental runs must produce the same output as a full refresh.
+2. Non-determinism that already differs between two different full refreshes is
+   permitted to differ across incremental runs.
+
+Equivalently: split the output columns into a **deterministic skeleton** and a
+**non-deterministic payload**. On the skeleton, incremental output is bit-identical
+to a full refresh; on the payload, it need only be a *plausible full-refresh draw*.
+A full refresh run twice already yields two different payloads, so an incremental
+sequence yielding a third is inside the envelope — there is nothing to preserve.
+
+**What must stay in the skeleton (never payload).** A column may be payload only if
+its non-determinism changes *a stored value*, never *the shape* of the result.
+Three roles are structurally excluded, and the exclusion is a requirement of the
+DELETE+INSERT mechanism, not a policy choice:
+
+- **`event_time` / `partition_column`** — decide *which window scans a row* and
+  *which partition it is written to*. A non-deterministic clock could place a row in
+  a different partition on rebuild; the partition-scoped DELETE+INSERT cannot
+  reconcile that, so incremental ≠ full for *every* full refresh, not merely up to
+  payload variation. This is the user's "no non-determinism around `event_time`,"
+  and the same run-vs-row exclusion §6.6 draws for the monotonicity primitive (a
+  run-nondeterministic clock is `NotTraceable`).
+- **`unique_key`** — decides *dedup identity*. A non-deterministic key means a
+  window re-run cannot overwrite the rows it wrote last time (they now carry new
+  keys), so idempotency — the property the whole DELETE+INSERT contract rests on —
+  is lost.
+- **row-set membership and grouping** — `WHERE` / `HAVING` / `JOIN … ON` /
+  `DISTINCT` / `GROUP BY` keys / window `PARTITION BY`·`ORDER BY`·frame.
+  Non-determinism here changes *which rows exist* or *how they aggregate*, not a
+  stored value. Two full refreshes would differ here too, but the per-window-frozen
+  membership of an incremental build is a categorically harder object to reconcile
+  than a payload value, so it is **out of scope** for this relaxation (Open
+  questions).
+
+Everything else — a projected `inserted_at = NOW()`, a `batch_id = UUID()`
+surrogate, a random tie-breaker stored only for audit — is payload: its value is
+written once per window and never consulted to place, filter, group, or dedup a row.
+
+**The relaxation.** A non-deterministic function (either class, **including** the
+row-nondeterministic `RANDOM`/`UUID` §9.1 rejects outright) is admitted when its
+value provably flows **only** into output columns the model has *opted in* as
+non-deterministic, and into none of the excluded roles. The opt-in is a per-column
+frontmatter declaration — `incremental.nondeterministic_columns: [inserted_at,
+batch_id]` — and listing `event_time_column`, `partition_column`, or a `unique_key`
+column in it is a configuration error, since those can never be payload.
+
+**Why per-column opt-in, not a blunt flag.** The existing
+`safety_overrides.allow_nondeterministic` disables the B5 check wholesale, dropping
+the skeleton guardrail with it — a random `partition_column` then sails through. The
+per-column opt-in *keeps* the guardrail: the modeller names exactly the payload
+columns they accept variation on, and the analyzer still **proves** the
+non-determinism did not leak into the skeleton. Non-determinism *tolerance* is
+inherently a declaration — only the author knows a column is audit-only, not
+load-bearing — the same way `deterministic`/`idempotent` are declared
+`FunctionProperties`; there is nothing in the SQL to derive it from. (This is the
+one place the derive-don't-declare default correctly yields to a declaration: the
+fact being declared is a *value judgement about acceptable variation*, not a
+property of the computation.)
+
+**Enforcement is a taint check.** The B5 detector (`incremental.rs:288`) already
+finds non-deterministic calls; the relaxation makes it *position-aware*: every such
+call must sit only on the RHS of a top-level projection aliased to a listed column.
+A call anywhere in the skeleton (or in a non-listed projection) is rejected, naming
+the offending position — not "non-deterministic function" as a blanket category.
+
+**Composition with §9.1 pinning.** The two mechanisms are independent axes. Pinning
+keeps a *run-deterministic* clock deterministic (bit-identical within an invocation)
+with no opt-in; the payload opt-in *lifts* the determinism requirement for a named
+column, covering the row-nondeterministic values pinning cannot touch. A
+run-deterministic clock feeding a non-listed column is still pinned; the same clock
+feeding a listed column may simply be left to vary. §7.2's industry line
+(Snowflake/Enzyme reject non-determinism in the projection) is the blunt version;
+smelt's payload opt-in is the scoped one, cheap because smelt owns the compile-time
+flow analysis.
+
+**Recommendation.** Add `incremental.nondeterministic_columns` and gate the B5
+relaxation on the taint check above; keep the blanket `allow_nondeterministic` as
+the discouraged escape hatch. The membership/grouping case (a non-deterministic
+`WHERE` / `GROUP BY`) goes to Open questions — the sharpened contract would *permit*
+it distributionally, but reconciling frozen-per-window membership against an
+all-at-once full refresh needs its own argument before it is admitted.
 
 ### 9.2 — Non-additive (holistic) aggregates: a delta-engine rejection that does not transplant
 
@@ -2489,6 +2587,15 @@ The split is externally load-bearing, not merely theoretical:
   `inject_source_filters` to leave refs inside scalar subqueries un-windowed
   (they are window-invariant lookups by construction, like the §5.4 non-driving
   join inputs)?
+- **Membership/grouping non-determinism (§9.1a):** the payload opt-in admits
+  non-determinism confined to stored output values. A non-deterministic *predicate*
+  or *grouping key* (`WHERE RANDOM() < 0.5`, `GROUP BY` on a random bucket) changes
+  which rows exist or how they aggregate — which two full refreshes would also vary,
+  so the sharpened contract (clause 2) would *permit* it. But an incremental build
+  freezes each window's membership at run time, and reconciling that against an
+  all-at-once full refresh is a harder object than a payload value. Admit it (the
+  contract allows it), or keep it rejected as out-of-envelope for the DELETE+INSERT
+  mechanism? Needs its own argument before the opt-in is widened past projections.
 - **`GROUPING SETS`/`ROLLUP`/`CUBE` (Part 1 addendum):** reject super-aggregate
   grouping outright for incremental models, or admit exactly the grouping sets
   in which *every* set contains `partition_column` (the others produce the
