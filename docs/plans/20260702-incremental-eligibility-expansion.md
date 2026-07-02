@@ -46,7 +46,7 @@ sub-plan and add a NOT-`done` row here.
 
 | Sub-plan | Wave / what it delivers | Status |
 |----------|-------------------------|--------|
-| `docs/plans/20260702-monotonicity-primitive-tested.md` | W1 — the pure event-time monotonicity trace primitive (`smelt-logical`), then a **generative smelt-sql soundness oracle** (`smelt-db`) that compiles generated models through smelt's own backend codegen and searches input data for any `Traceable` verdict that breaks the commutation contract (DuckDB now, Spark seam), nullability-gated in `smelt-db`, then the spec's open questions resolved from what the tests proved. **Unwired** into any user-visible gate. | pending |
+| `docs/plans/20260702-monotonicity-primitive-tested.md` | W1 — the pure event-time monotonicity trace primitive (`smelt-logical`), then a **generative smelt-sql soundness oracle** (`smelt-db`) that compiles generated models through smelt's own backend codegen and searches input data for any `Traceable` verdict that breaks the commutation contract (DuckDB now, Spark seam), nullability-gated in `smelt-db`, then the spec's open questions resolved from what the tests proved. **Unwired** into any user-visible gate. | done (2026-07-02) |
 
 ## Wave scaffolding queue (human-gated — NOT registered until scaffolded)
 
