@@ -445,6 +445,106 @@ word cannot absorb without becoming a misnomer.
 
 ---
 
+## Part 9 — Does the umbrella reach up to `incremental`?
+
+Part 7 recommends a `maintained` umbrella over `cumulative` and its siblings. The
+natural follow-on: should there be a *higher* umbrella spanning `maintained` **and**
+`incremental`? The answer splits on what "umbrella" means — a conceptual/contract
+lid is a small win; a structural selector is a re-introduction of the dbt footgun.
+
+### 9.1 The shared parent contract is real
+
+Incremental and the maintained family share one contract, worth stating once:
+
+> **Processed-input equivalence.** A non-`full` refresh produces the same result as
+> a full refresh restricted to the inputs it has processed.
+
+Incremental's **per-partition equivalence**
+([`incremental_models.md`](../specs/incremental_models.md)) and maintained's
+**end-state equivalence** (§2) are two *specializations*: one slices the output by
+`partition_column`, the other asserts equality of the whole keyed end-state. Beneath
+the contract they also share machinery — `--event-time` run windows (cumulative
+already reuses incremental's flags,
+[`cumulative_aggregate.md`](../specs/cumulative_aggregate.md) §CLI), `--auto`
+staleness, the derive-from-SQL posture, and `multi_backend` capability lowering.
+Naming the parent contract and the shared machinery once, with two clearly-distinct
+children beneath it, is a clean documentation improvement.
+
+It also resolves a genuine terminology collision. **The industry calls the
+*maintained* camp "incremental view maintenance."** So smelt's `incremental`
+(window-forward) and "incremental" in the Enzyme/Snowflake/Materialize literature
+name *opposite* camps. A parent term lets the docs say "both are incremental in the
+broad sense; here are the two shapes," defusing a confusion a flat taxonomy would
+otherwise inherit.
+
+### 9.2 A structural umbrella re-creates the dbt footgun
+
+If the umbrella instead means making `incremental` and the maintained family
+**siblings under one selector with a strategy knob** (`refresh: incremental` +
+`strategy: window | merge`), it walks directly back into what the cumulative spec
+already rejected, verbatim:
+
+> *"dbt conflates the two under `materialized='incremental'` and dispatches by
+> `incremental_strategy`. This is the single most common source of confusion in dbt
+> because the `strategy:` knob silently changes the equivalence contract — same
+> frontmatter, different invariants."* —
+> [`cumulative_aggregate.md`](../specs/cumulative_aggregate.md) §Design
+
+The two children differ in exactly the things that are *not* knobs:
+
+| | `incremental` | maintained (`cumulative`, …) |
+|---|---|---|
+| output shape | partitioned, **has** `partition_column` | keyed lookup, **no** partition column |
+| equivalence | per-partition slice | end-state |
+| execution | window-independent (parallel, §11.2) | ordered (sequential, reads own state, §11.3) |
+| camp (§7.1) | window-forward; needs monotone event-time | change-tracking; sidesteps monotonicity |
+
+A selector that makes those feel like variants of one strategy **subordinates the
+single most load-bearing line in the space** — stateless/window-independent vs
+stateful/ordered — which
+[eligibility §11](20260701-expanding-incremental-eligibility.md) was careful to keep
+sharp. That is a strictly worse taxonomy even though it looks tidier.
+
+### 9.3 The actual improvement: statefulness as the spine, not the selector
+
+The upgrade the question surfaces is not the lid — it is promoting **statelessness
+to the *named reason* the children differ**, rather than presenting `incremental`
+and `cumulative` as two arbitrary peers on a flat enum. The refresh axis reads
+better as:
+
+```
+full                                  — recompute everything
+processed-input-equivalent            — (conceptual umbrella; §9.1)
+  ├─ stateless / window-independent    → incremental  (per-partition, partitioned, parallel)
+  └─ stateful  / maintained            → cumulative + siblings (end-state, lookup, ordered)
+```
+
+One caveat keeps this honest and stops it hardening into a rigid two-level selector:
+window-independence is a **derived, cross-cutting** property
+([eligibility §11.3a](20260701-expanding-incremental-eligibility.md), derive-don't-
+declare), and it *leaks* — a **self-referential incremental** model is
+stateful-ordered yet still uses partition `DELETE+INSERT`, not `merge_into`. So
+statefulness explains the *split* but must not *become* the selector; users still
+write `incremental:` / `refresh: cumulative`, and ordering stays derived.
+
+### 9.4 Recommendation
+
+- **Adopt the conceptual umbrella.** State **processed-input equivalence** as the
+  shared parent contract, specialized to per-partition (incremental) and end-state
+  (maintained); note the shared machinery; and call out the "incremental" ↔ IVM
+  terminology collision explicitly so the docs resolve it rather than inherit it.
+- **Reject any structural/selector umbrella.** No `refresh: incremental` +
+  `strategy:` knob, no single refresh value spanning both — it silently varies the
+  equivalence contract, the precise dbt failure the cumulative spec was built to
+  avoid.
+- **`models.md` §"Refresh axis" phrasing nudge.** Present `incremental` and
+  `cumulative` as *processed-input-equivalent children distinguished by
+  statefulness*, not as flat peers of each other and of `full`. The value is ~90%
+  in naming the shared contract and fixing the terminology, and actively negative in
+  any shared selector.
+
+---
+
 ## References
 
 - **Specs**: `cumulative_aggregate.md`, `incremental_models.md`, `multi_backend.md`,
