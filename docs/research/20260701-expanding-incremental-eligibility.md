@@ -818,7 +818,13 @@ A join is incrementalisable exactly when:
 1. **One input is the driving fact** — it carries the model's `event_time`,
    which traces monotonically back to that source's partition column (the same
    "independently partitionable / monotone event-time" primitive §2.5 and §4.6
-   require, and which does not yet exist in `smelt-logical`); and
+   require). That primitive now exists in `smelt-logical` (§6.8), **but with a
+   join-specific prerequisite gap**: its leaf-column resolution is name-based, so
+   when two joined inputs share a partition-column name it returns the
+   ambiguous-match `NotTraceable` rather than naming the driving side. The join
+   consumer must add **alias-scoped resolution against the model's `FROM`** — the
+   "trace against every join input, exactly-one `Traceable` = driving fact"
+   dispatch — on top of the primitive; and
 2. **Every other input is a window-invariant lookup** — its contribution to any
    output row is independent of which window is being built. A declared 1:1 (or
    1:N-lookup) dimension with no timeseries clock qualifies; a second timeseries
@@ -1075,6 +1081,15 @@ clamp (the Part 8 two-layer move applied to a piecewise-monotone transform,
 cf. ClickHouse's factor-transformation trick, §7.4), but as a plain whitelist
 entry it is unsound.
 
+**Implementation note (2026-07-02): `AT TIME ZONE` is not yet reachable.**
+`smelt-parser` does not currently parse `AT TIME ZONE` syntax at all, so *neither*
+the fixed-offset whitelist row *nor* the named-DST blacklist row is exercised by
+the shipped classifier — such an expression either fails to become a
+`SelectAnalysis` item or falls through to the unrecognised-head arm, both of which
+yield `NotTraceable`. The outcome is sound (fail-closed), but the whitelist row is
+*aspirational*: it documents the intended verdict once the parser supports the
+syntax, not current behaviour. Recorded in the spec's Known Divergences.
+
 Composition is closed under the whitelist: a composition of monotone
 non-decreasing functions is monotone non-decreasing, so `DATE_TRUNC('day',
 CAST(event_ts AS TIMESTAMP) + INTERVAL '2 hours')` traces through all three
@@ -1311,6 +1326,56 @@ Questions are formally resolved). The decisions:
   named-DST-zone (`is_always_monotonic = false`) or descending clock
   (`is_positive = false`) becomes a *data* difference rather than a later type
   change.
+
+### 6.8 What building the primitive taught us (2026-07-02)
+
+The primitive was implemented and exhaustively tested ahead of any consumer
+(`crates/smelt-logical/src/analysis/monotonicity.rs`; nullability gate in
+`crates/smelt-db/src/queries/monotonicity.rs`; generative oracle in
+`crates/smelt-db/tests/monotonicity_soundness_tests.rs`, plan
+[`20260702-monotonicity-primitive-tested.md`](../plans/20260702-monotonicity-primitive-tested.md)).
+Three facts surfaced in the build that the design above did not anticipate; each
+tightens a downstream open question rather than reopening a settled one.
+
+- **Leaf-column resolution is name-based; no FROM/alias resolution exists at this
+  layer.** The pure trace resolves its leaf column by matching the *name* (ignoring
+  qualifier) against `BoundContext.source_partition_cols`; a name that matches
+  **zero** sources, or **more than one**, is `NotTraceable` (fail closed —
+  `resolve_against_ctx`). There is deliberately no FROM-clause/alias machinery yet.
+  This is sound today, but it is a concrete **prerequisite gap for the join
+  consumer (C, §5.4)**: "which input carries the driving clock?" cannot be answered
+  by name-matching when two joined sources share a partition-column name (`f.ts` vs
+  `d.ts`) — the current primitive returns the ambiguous-match `NotTraceable`, not a
+  driving-fact identification. Alias-scoped resolution against the model's `FROM`
+  is a **new prerequisite** the join consumer must build; it is not a property the
+  primitive already supplies. The `UNION`-branch and single-source subquery
+  consumers are unaffected (each branch/body has one source scope).
+
+- **`AT TIME ZONE` is currently unreachable (§6.2 implementation note).** The
+  parser does not parse the syntax, so the whitelist's fixed-offset row is
+  aspirational and every `AT TIME ZONE` form fails closed to `NotTraceable`. Sound,
+  but the eligibility surface is *narrower than the whitelist reads* until the
+  parser is extended.
+
+- **Per-backend validation is mechanically checked on DuckDB only.** Phase 2's
+  generative oracle compiles generated smelt models through smelt's *own* backend
+  codegen and searches input data for a `Traceable` verdict that breaks the
+  output-clamp ≡ source-filter commutation identity — zero counterexamples across
+  the whitelist, and a planted-unsound arm is caught and shrunk (so the oracle
+  provably falsifies, not passes vacuously). But `SparkOracle` today supports only
+  type introspection, not row-level execution, so the **intersection rule** (§6.2:
+  the whitelist is what is monotone on *every* backend) is currently *asserted by
+  reasoning* for non-DuckDB engines and *mechanically verified* only on DuckDB. The
+  oracle is structured for the Spark row-exec seam to drop in; until it does, a
+  whitelist entry monotone on DuckDB but not on another backend would not be caught
+  automatically.
+
+The methodology question this document repeatedly raised — *property test over
+generated models, or a curated DuckDB fixture per deep-dive?* — is answered by this
+build: the generative oracle is the property-test form, it is the reusable asset the
+consumer plans (W2–W5 injection) build on, and the hand-written harnesses
+(`docs/research/harness/20260701-*.sql`) are retained as fast deterministic **seed
+cases** folded into its corpus.
 
 ---
 
@@ -2428,14 +2493,16 @@ The split is externally load-bearing, not merely theoretical:
   grouping outright for incremental models, or admit exactly the grouping sets
   in which *every* set contains `partition_column` (the others produce the
   `NULL`-partition cross-window rows)?
-- **Property tests vs. single DuckDB examples (validation methodology):** each
-  deep-dive is currently backed by a hand-written DuckDB harness with a fixed
-  fixture (§2.3/§3.5/§5.5/§8.5). Should the incremental ≡ full invariant instead be
-  a *property test* over generated models/data (the shape of the existing
-  `type_property_tests` / `nullability_property_tests` oracles), so the safe slice
-  is checked against many random inputs rather than one curated dataset — and is
-  that worth building *before* the monotonicity primitive lands, as the oracle its
-  red-green tests run against?
+- **Property tests vs. single DuckDB examples (validation methodology) —
+  RESOLVED 2026-07-02.** Built as a *generative* oracle: the monotonicity
+  primitive's soundness is checked by generating smelt models, compiling them
+  through smelt's own backend codegen, and searching input data for any
+  `Traceable` verdict that breaks the pushdown commutation identity
+  (`crates/smelt-db/tests/monotonicity_soundness_tests.rs`, §6.8). It was built
+  *before* the primitive's consumers, is the reusable oracle the injection plans
+  (W2–W5) run their red-green tests against, and the hand-written harnesses are
+  retained as deterministic seed cases. Mechanically verified on DuckDB today;
+  the Spark row-exec seam is pending (§6.8).
 
 ## Non-goals
 
