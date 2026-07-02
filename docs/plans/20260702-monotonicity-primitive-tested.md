@@ -118,32 +118,45 @@ Whitelist entries set `is_monotonic = true`, `is_positive = true`, `is_always_mo
 
 ---
 
-## Phase 2 — Property-test the primitive against the DuckDB harness (per-backend structure)
+## Phase 2 — Generative smelt-sql soundness oracle (falsify the one-way contract)
 
-**Files:** new test module under `crates/smelt-logical/tests/`, reusing the harness SQL at `docs/research/harness/20260701-{union,subquery,join}_incremental.sql`.
+**Files:** new property-test module under `crates/smelt-db/tests/` (execution lives where DuckDB/Spark backends are reachable — *above* smelt-logical); a new **smelt-sql** generator `crates/smelt-db/tests/prop_helpers/monotonicity_gen.rs`. Keep the hand-written harness SQL (`docs/research/harness/20260701-*.sql`) as fast deterministic **seed cases**, not as the whole test.
 
-**Why:** The harness already reproduces exactly the hazards the primitive must catch — P3 (`UNION` NULL/constant seed), Q5 (non-commuting subquery body), J3–J5 (timeseries-dim-as-lookup, multi-clock fact join, fan-out). Wiring them as the oracle proves the verdict lines up with the *empirically measured* incremental ≡ full boundary, not just hand-written expectations. The owner asked for **per-backend** validation of the static-vs-declared boundary, so the oracle trait is structured to add Spark/Postgres targets later (the existing `duckdb_oracle.rs` trait pattern), running DuckDB now.
+**Why:** Fixture assertions only prove the primitive classifies the ~15 *known* scenarios correctly. The contract that actually matters is **Constraint 12**: for *every* expression the primitive admits as `Traceable`, **no input data** can break the rule. That is only provable by *generating* many expressions and *searching* input data for a counterexample. A pass over generated (expression × data) pairs that never finds a `Traceable` verdict violating the commutation identity is the real soundness evidence; any counterexample is either a false-`Traceable` (a primitive bug → the missing blacklist entry) or a genuine finding.
 
-**Change:**
-- For each harness scenario assert the primitive's verdict on that scenario's event-time projection matches the measured outcome: safe rows (P1/P2, Q1–Q4, J1/J2 → 0 violations) → `Traceable`; hazard rows (P3, Q5a/Q5b, J3/J4/J5 → non-zero violations) → `StaticSeed` / `NotTraceable`.
-- Where a scenario is a pushdown-commutation fact rather than a pure-expression fact (Q5, J-cases), assert the *conservative* verdict (does not push) — the primitive's job is the expression-level trace; the consumer applies commutation.
-- Structure the oracle behind the trait so a `#[cfg(feature = "spark")]` (or Postgres) target can assert the same whitelist is monotone there too, validating the "intersection of all backends" rule empirically per-backend.
+**Generate smelt-sql, not backend SQL (owner correction 2026-07-02).** The generator emits a **smelt model** — `SELECT <generated event_time expr> AS event_time, … FROM smelt.source.<s>` plus the source's `timeseries:` config — and the executable SQL is produced by **smelt's own compiler / backend codegen** (`smelt-runtime` `execute_project` / the `smelt-backends` factory), *not* hand-assembled per engine. The DB-specific generators in `prop_helpers/` (`generators.rs`, `duckdb_oracle.rs`, `spark_oracle.rs`) exist to find where *backends diverge* on raw SQL — a different purpose; reuse only their DuckDB/Spark *execution* plumbing and `null_data.rs` (NULL-bearing data), not their SQL generation. Testing through smelt's compiler exercises the real path: generate one smelt-sql expression, let each backend's codegen lower it, and the property must hold on whatever SQL that backend emits. This is also how the **per-backend** guarantee is delivered — the same generated model is compiled and run on DuckDB now (Spark behind the existing gated seam), so a whitelist entry that is monotone on DuckDB but not on another backend surfaces as a counterexample there.
+
+**The property (primitive-scoped commutation — no injection consumer needed):**
+For a generated model `M` projecting `event_time = f(source.col)`, let `v = trace_event_time(M)`.
+- If `v = Traceable{ source_column, offset, .. }`: compile `M` to backend SQL `S` via smelt; populate the source with generated data `D` (including NULL-bearing and boundary-straddling rows from `null_data.rs`); for random windows `[lo, hi)`,
+  ```
+  full   = { r ∈ exec(S, D)                                   | r.event_time ∈ [lo, hi) }
+  pushed =   exec(S, { d ∈ D | d.source_column ∈ [lo−offset, hi−offset) })
+  assert  multiset(full) == multiset(pushed)          // the exact licence the trace claims
+  ```
+  This is the incremental≡full invariant reduced to the one fact the primitive is responsible for (output-clamp on `e` ≡ source-filter on `p`). A failure means the verdict was unsound.
+- If `v = StaticSeed` / `NotTraceable`: **no soundness assertion** (the primitive claims nothing), but assert it does not crash and the `reason` is populated. Missed-optimisation false negatives are allowed by Constraint 12; only false positives fail the suite.
+
+**The end-to-end adjacent-window `incremental ≡ full` test** (rebuild `[t₀,t₁) ⊎ [t₁,t₂)` = full via the *real* injection machinery) is a **consumer** property — it needs the W2–W5 injection that this plan defers — so it lives with those plans. Phase 2 proves the primitive's own claim; W2–W5 prove the wired pipeline. The generator built here is the reusable asset both use.
 
 **Tests (red-green):**
-- `harness_union_null_branch_is_static_seed` (P3).
-- `harness_subquery_limit_and_frame_not_traceable` (Q5a/Q5b) via the event-time projection through the non-transparent body.
-- `harness_join_ts_dim_and_multiclock_not_pushable` (J3/J4).
+- `gen_traceable_commutes_on_duckdb`: the proptest above over generated smelt-sql; `PROPTEST_CASES` for depth (mirrors `type_property_tests.rs`). Must find **zero** counterexamples.
+- `gen_never_false_positive_on_seed_hazards`: seed the generator's corpus with the known hazards (P3 NULL seed, Q5 non-commuting body, J3/J4) and assert none is ever `Traceable` (regression seeds fold the old fixtures in).
+- `gen_shrinks_report_expression`: a deliberately-injected unsound whitelist arm (behind a test cfg) is *caught* and shrinks to a minimal offending expression — proves the oracle actually falsifies, not just passes vacuously.
 
 **Implementer checklist:**
-- [ ] Property tests gated behind the DuckDB dev-dependency the other property tests already use; `DUCKDB_LIB_DIR` respected.
-- [ ] Deterministic — no wall-clock/RNG in the oracle.
-- [ ] Oracle trait leaves a documented seam for Spark/Postgres targets (per-backend rule).
+- [ ] Executable SQL comes from smelt's compiler/backend codegen — the test never hand-writes backend SQL (owner correction).
+- [ ] Generator emits smelt-sql (model + `timeseries:`), covering whitelist heads ∪ blacklist heads ∪ random/unknown heads ∪ compositions.
+- [ ] Reuses `null_data.rs` + the DuckDB (and gated Spark) execution oracles for data + exec only; not `generators.rs` SQL generation.
+- [ ] `DUCKDB_LIB_DIR` respected; DuckDB-gated like the other property suites; deterministic seed via `PROPTEST_CASES`/`proptest` RNG (no wall-clock).
 
 **Reviewer checklist:**
-- [ ] Each asserted verdict matches the research §2.3/§3.5/§5.5 violation counts.
-- [ ] No hazard scenario is asserted `Traceable` (one-way soundness contract).
+- [ ] The asserted identity is the trace's actual claim (output-clamp on `e` ≡ source-filter on `source_column` shifted by `offset`), over arbitrary data — not a weaker fixture check.
+- [ ] `gen_shrinks_report_expression` demonstrates the oracle fails on a planted-unsound arm (the test can actually find bugs).
+- [ ] Spark seam present so the per-backend rule is exercised when the gated backend is available.
+- [ ] No hazard is ever asserted `Traceable`; false negatives are permitted, false positives fail.
 
-**Commit:** `test(smelt-logical): property-test monotonicity trace against DuckDB harness`
+**Commit:** `test(smelt-db): generative smelt-sql soundness oracle for the monotonicity trace`
 
 ---
 
@@ -217,9 +230,9 @@ Listed so the primitive's output type stays designed for them; **not** landed he
 
 ## Verification gates
 
-- `cargo test -p smelt-logical 2>&1 | tail -40`
-- `cargo test -p smelt-logical --test '*monoton*' 2>&1 | tail -40` (property suite)
-- `cargo test -p smelt-db 2>&1 | tail -40` (Phase 3 nullability gate)
+- `cargo test -p smelt-logical 2>&1 | tail -40` (Phase 1 pure unit tests)
+- `cargo test -p smelt-db 2>&1 | tail -40` (Phase 2 generative soundness oracle + Phase 3 nullability gate)
+- `PROPTEST_CASES=1000 cargo test -p smelt-db --test '*monoton*' 2>&1 | tail -40` (deeper generative soundness search, local)
 - `cargo test -p smelt-core --test hardening_budget 2>&1 | tail -20` (no new unwrap/expect/println regressions)
 - `cargo tree -p smelt-db -i smelt-planner` unchanged (Layered single-ownership)
 - `cargo fmt --all`; `cargo clippy --all-targets 2>&1 | tail -30`
@@ -231,7 +244,7 @@ Listed so the primitive's output type stays designed for them; **not** landed he
 |-------|--------|
 | 0 — `analyze_select` retains `Expr` node | done |
 | 1 — pure `monotonicity.rs` (`trace_event_time`, 4-field verdict) | pending |
-| 2 — property-test against DuckDB harness (per-backend seam) | pending |
+| 2 — generative smelt-sql soundness oracle (`smelt-db`; compile-via-backend, DuckDB now + Spark seam) | pending |
 | 3 — nullability gate in `smelt-db` (reject nullable leaf) | pending |
 | 4 — resolve spec open questions from tested primitive *(spec increment — pre-authorized)* | pending |
 | A/B/C + injection redesign + cleanups | deferred to follow-on plans |
