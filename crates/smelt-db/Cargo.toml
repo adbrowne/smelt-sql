@@ -26,6 +26,7 @@ duckdb = { workspace = true }
 arrow = { workspace = true }
 proptest = { workspace = true }
 smelt-dialect = { path = "../smelt-dialect" }
+smelt-runtime = { path = "../smelt-runtime" }
 tempfile = "3"
 
 [features]

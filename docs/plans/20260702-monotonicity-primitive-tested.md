@@ -234,7 +234,7 @@ Listed so the primitive's output type stays designed for them; **not** landed he
 - `cargo test -p smelt-db 2>&1 | tail -40` (Phase 2 generative soundness oracle + Phase 3 nullability gate)
 - `PROPTEST_CASES=1000 cargo test -p smelt-db --test '*monoton*' 2>&1 | tail -40` (deeper generative soundness search, local)
 - `cargo test -p smelt-core --test hardening_budget 2>&1 | tail -20` (no new unwrap/expect/println regressions)
-- `cargo tree -p smelt-db -i smelt-planner` unchanged (Layered single-ownership)
+- `cargo tree -p smelt-db -i smelt-planner -e normal` unchanged (Layered single-ownership; Phase 2 added a **dev-only** `smelt-runtime` dependency on `smelt-db` for compile-via-backend testing, which reintroduces a *dev-dependency-only* cycle back through `smelt-planner` — the plain `cargo tree -p smelt-db -i smelt-planner` now prints that dev edge, so the gate command needs `-e normal` to check the invariant that actually matters: no **production** dependency)
 - `cargo fmt --all`; `cargo clippy --all-targets 2>&1 | tail -30`
 - `cargo test -p smelt-cli --test example_diagnostics 2>&1 | tail -20` (primitive unwired → must stay green with zero behaviour change)
 
@@ -244,7 +244,7 @@ Listed so the primitive's output type stays designed for them; **not** landed he
 |-------|--------|
 | 0 — `analyze_select` retains `Expr` node | done |
 | 1 — pure `monotonicity.rs` (`trace_event_time`, 4-field verdict) | done (2026-07-02) |
-| 2 — generative smelt-sql soundness oracle (`smelt-db`; compile-via-backend, DuckDB now + Spark seam) | pending |
+| 2 — generative smelt-sql soundness oracle (`smelt-db`; compile-via-backend, DuckDB now + Spark seam) | done (2026-07-02) |
 | 3 — nullability gate in `smelt-db` (reject nullable leaf) | pending |
 | 4 — resolve spec open questions from tested primitive *(spec increment — pre-authorized)* | pending |
 | A/B/C + injection redesign + cleanups | deferred to follow-on plans |

@@ -4220,6 +4220,7 @@ dependencies = [
  "smelt-dialect",
  "smelt-logical",
  "smelt-parser",
+ "smelt-runtime",
  "smelt-types",
  "tempfile",
  "walkdir",
