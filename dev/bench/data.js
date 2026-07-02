@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782981937244,
+  "lastUpdate": 1782981939563,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -27401,6 +27401,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.59780357233264,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5000ad2864ed1fae301ea873693aa39dbb233d79",
+          "message": "fix(spark): recursively chmod ivy cache/warehouse for uid-185 container writes\n\nCI's spark-parity job restores .smelt-spark-ivy from actions/cache; the\nrestored subdirectories keep the restrictive mode (e.g. 755) Ivy gave them on\na prior save. chmod 777 on the parent alone doesn't recurse, so the\napache/spark container (uid 185) hits \"Permission denied\" writing\nresolved-*.xml into cache/ on every run after the first cache save.\nReproduced locally with docker run -u 185 against a simulated cache-restored\ntree; chmod -R fixes it.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-02T18:41:42+10:00",
+          "tree_id": "f9952e0daa7a7ea51fc824cc9d5c60ed8006c777",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5000ad2864ed1fae301ea873693aa39dbb233d79"
+        },
+        "date": 1782981938959,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.78987464102877,
             "unit": "MB/s"
           }
         ]
