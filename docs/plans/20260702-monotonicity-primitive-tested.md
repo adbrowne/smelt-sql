@@ -243,7 +243,7 @@ Listed so the primitive's output type stays designed for them; **not** landed he
 | Phase | Status |
 |-------|--------|
 | 0 — `analyze_select` retains `Expr` node | done |
-| 1 — pure `monotonicity.rs` (`trace_event_time`, 4-field verdict) | pending |
+| 1 — pure `monotonicity.rs` (`trace_event_time`, 4-field verdict) | done (2026-07-02) |
 | 2 — generative smelt-sql soundness oracle (`smelt-db`; compile-via-backend, DuckDB now + Spark seam) | pending |
 | 3 — nullability gate in `smelt-db` (reject nullable leaf) | pending |
 | 4 — resolve spec open questions from tested primitive *(spec increment — pre-authorized)* | pending |

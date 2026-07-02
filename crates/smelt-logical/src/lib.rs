@@ -6,6 +6,7 @@ pub mod plan_builder;
 pub mod rules;
 pub mod types;
 
+pub use analysis::monotonicity::{trace_event_time, EventTimeTrace, Monotonicity, Offset};
 pub use analysis::source_bounds::{BoundContext, BoundResult, Seconds};
 pub use analysis::temporal::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days,
