@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782823141607,
+  "lastUpdate": 1782981937244,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20867,6 +20867,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.648617,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5000ad2864ed1fae301ea873693aa39dbb233d79",
+          "message": "fix(spark): recursively chmod ivy cache/warehouse for uid-185 container writes\n\nCI's spark-parity job restores .smelt-spark-ivy from actions/cache; the\nrestored subdirectories keep the restrictive mode (e.g. 755) Ivy gave them on\na prior save. chmod 777 on the parent alone doesn't recurse, so the\napache/spark container (uid 185) hits \"Permission denied\" writing\nresolved-*.xml into cache/ on every run after the first cache save.\nReproduced locally with docker run -u 185 against a simulated cache-restored\ntree; chmod -R fixes it.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-02T18:41:42+10:00",
+          "tree_id": "f9952e0daa7a7ea51fc824cc9d5c60ed8006c777",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5000ad2864ed1fae301ea873693aa39dbb233d79"
+        },
+        "date": 1782981935906,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 53.962179,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 51.882741,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.8340230000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.625343,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.32594,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 696.109284,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.062131,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.611525,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.642062,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.643676,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 560.383112,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.5714,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.1261,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.542868,
             "unit": "ms"
           }
         ]
