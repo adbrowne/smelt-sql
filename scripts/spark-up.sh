@@ -42,8 +42,12 @@ mkdir -p "${WAREHOUSE}" "${IVY_CACHE}"
 # warehouse is owned by the host user. Make it group/other-writable so the
 # container can create managed-table dirs in it. Files Spark writes stay
 # world-readable, so host-side DuckDB can read them for cross-engine Parquet.
-chmod 777 "${WAREHOUSE}"
-chmod 777 "${IVY_CACHE}"
+# Recursive: IVY_CACHE is restored from actions/cache in CI, which preserves
+# the restrictive mode (e.g. 755) Ivy gave its own subdirectories on save —
+# a non-recursive chmod on the parent alone leaves those unwritable to uid 185
+# and Ivy dies with "Permission denied" writing resolved-*.xml into cache/.
+chmod -R 777 "${WAREHOUSE}"
+chmod -R 777 "${IVY_CACHE}"
 
 # Clean warehouse data from previous sessions.  The Spark server keeps an
 # in-memory catalog that is reset on restart; any warehouse directories from
