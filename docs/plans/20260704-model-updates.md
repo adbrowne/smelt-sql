@@ -22,8 +22,13 @@
 mode `incremental → batched` (surface + `batched:` block), (b) reworked `models.md` §"Refresh axis"
 into a peer enum split by output shape (partitioned vs keyed), (c) removed `materialized_view` from
 the storage axis and re-homed it to `refresh: materialized_view`, (d) added the Part-14 algebraic
-ladder to `cumulative_aggregate.md`, (e) added the three keyed-mode specs, and (f) added the two IVM
-capability flags. The implementation currently lags all six; this plan closes the gap.
+ladder to `cumulative_aggregate.md`, (e) added the three keyed-mode specs, (f) added the two IVM
+capability flags, and (g) the Part-19 follow-through on the keyed-mode specs: input consumption is
+**derived from the source's shape** (window-forward over a `timeseries:` source, exactly as
+`cumulative` consumes its driving source, vs snapshot-diff for a mutable snapshot source), the
+`timeseries:` forbid is scoped to the model itself (output partitioning, not event-time-aware
+consumption), and `latest_value`'s "definition of latest" carries the ordering-column preferred
+direction (research §19.4). The implementation currently lags all of these; this plan closes the gap.
 
 **Tracking branch**: `worktree-incremental`.
 
@@ -78,7 +83,10 @@ mechanism) for the smelt-driven modes and on A4 for `materialized_view`.
 ### In scope
 Everything in `docs/research/20260703-model-updates.md` that the 2026-07-04 spec edits made
 normative: the batched rename, the refresh-axis reshape, the batched eligibility relaxations
-(Parts 3, 5–11), self-referential batched models (Part 11 — **confirmed in scope**), the algebraic
+(Parts 3, 5–11), self-referential batched models (Part 11 — **confirmed in scope**, reinforced by
+research §19.6: the composition alternative — cumulative upstream + batched snapshot downstream — is
+blocked by the non-replayable-input cell, so the ordered self-referential shape is the only correct
+realization of "maintained trajectory" short of a new peer mode), the algebraic
 maintenance ladder rungs 2–4 (Part 14), the two new smelt-driven keyed modes (`versioned`,
 `latest_value`), and a **minimal** `materialized_view` mode.
 
@@ -95,6 +103,13 @@ maintenance ladder rungs 2–4 (Part 14), the two new smelt-driven keyed modes (
 - **Mode-migration mechanism** (research §18.3): detecting a changed `refresh:` against existing
   physical state and refusing/offering a migration. Recorded as an Open Question below; not a phase
   until the enum is fully built out.
+- **The two §19.6 hybrid cells** (research Part 19): no new refresh values and no combo modes — the
+  litmus rule (§19.7) resolves every surveyed combination to an existing cell, a derived behaviour,
+  or DAG composition. The two residual hybrids stay out of scope: a *maintained-trajectory* peer
+  (cumulative-with-history) is demand-gated, and the *observation-series* shape ("snapshot X daily",
+  a non-replayable input under a partitioned output) should eventually get a **named rejection** —
+  but that rejection needs the source mutation-profile declaration (§17.6), which does not exist
+  yet, so it is deferred with it rather than phased here.
 
 ## Phase detail
 
@@ -287,18 +302,34 @@ spec oracle, the key edits, the red-green test, and the acceptance gate.
 ### Group D — New keyed modes
 
 #### D1 — `refresh: latest_value` (SCD Type 1)
-- **Goal.** Classifier (natural key + attributes, no partition column) + upsert-overwrite execution via
-  `merge_into`; "latest" derived from a source ordering column where present, else last-processed. Per
-  `latest_value_models.md`.
+- **Goal.** Classifier (natural key + attributes, no partition column on the model itself) +
+  upsert-overwrite execution via `merge_into`. Two Part-19 requirements:
+  - **"Latest" prefers an ordering column derived from the SQL** (research §19.4): with an
+    ordering column the combiner is max-by-ordering-key — a commutative monoid — so merges are
+    order-independent (out-of-order/parallel backfill is licensed). Last-processed is the fallback
+    and *derives ordered execution* (strictly sequential windows), never a declaration.
+  - **Input consumption is derived from the source** (`latest_value_models.md` §Semantics): a
+    `timeseries:` source is consumed window-forward via the same `--event-time` driving-source
+    machinery as cumulative; a mutable snapshot source is re-scanned and upserted whole. Whether the
+    windowed path *shares* cumulative's executor or keeps a per-rule copy is decided in the sub-plan
+    (research §19.8 open question).
 - **Depends on.** C1 (keyed-mode `merge_into` + view plumbing).
 - **Test.** One row per key, always the most-recent value; changing an attribute overwrites in place.
-- **Acceptance.** `cargo test`; end-state equivalence harness for `latest_value`.
+  With an ordering column, replaying an old run window does **not** clobber newer values (the §19.4
+  footgun test); a windowed source reads only the covered partitions.
+- **Acceptance.** `cargo test`; end-state equivalence harness for `latest_value`, including an
+  out-of-order-merge case for the ordering-column form.
 
 #### D2 — `refresh: versioned` (SCD Type 2)
 - **Goal.** Classifier + version maintenance (compare incoming to stored current per key; close the prior
   version and open a new one on a tracked-attribute change) + smelt-managed validity columns
-  (`valid_from`/`valid_to`/`is_current`). Settle the Open Questions in `versioned_models.md` (validity
-  column shape, tracked-attribute selection, deletions) in the sub-plan.
+  (`valid_from`/`valid_to`/`is_current`). Input consumption is derived from the source
+  (`versioned_models.md` §Semantics, research Part 19): a `timeseries:` source (update-events / CDC
+  feed) is consumed window-forward with windows applied in temporal order (close/open is inherently
+  ordered) and validity intervals stamped from the **source's event time**, not the run clock, so
+  end-state equivalence survives replays; a mutable snapshot source is re-scanned and compared. Settle
+  the Open Questions in `versioned_models.md` (validity column shape, tracked-attribute selection,
+  deletions) in the sub-plan.
 - **Depends on.** C1.
 - **Spec increment (pre-authorised).** Promote the settled validity-column + change-tracking surface from
   `versioned_models.md` Open Questions into §Surface as it is decided.
@@ -343,6 +374,14 @@ spec oracle, the key edits, the red-green test, and the acceptance gate.
 - **Mode-migration mechanism (§18.3).** What `smelt build` does when a model's `refresh:` changes against
   existing physical state (refuse until `--full-refresh`, or offer a migration). Not a phase here; needs
   its own research increment once the enum is fully built.
+- **Shared executor vs per-rule copies for windowed keyed consumption (D1/D2, research §19.8).** The
+  windowed input path (driving source + per-partition step) now has three members (`cumulative`,
+  `latest_value`, `versioned`). One shared executor under the umbrella, or per-rule copies per the
+  narrow-composable-rules posture? The D1 sub-plan decides and D2 follows it.
+- **Snapshot-diff mechanics for keyed modes (D1/D2, research §19.8).** What the `--event-time` flags
+  mean for a snapshot-diff run (there is no window), and how `--auto` staleness fires for a source
+  with no monotone clock. The sub-plans may ship snapshot-diff as always-full-rescan first and defer
+  the staleness question.
 
 ## References
 
