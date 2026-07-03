@@ -639,6 +639,251 @@ write `incremental:` / `refresh: cumulative`, and ordering stays derived.
 
 ---
 
+## Part 10 — The surface: explicit materialization modes
+
+Parts 7 and 9 settled the *conceptual* ontology — a `maintained` umbrella, a
+`processed-input-equivalence` parent contract, and a stateless/stateful spine. This
+part settles the **user surface**: what a person actually writes in a model's
+frontmatter or `smelt.yml`. It also reverses one default the earlier parts leaned on,
+and it fixes the naming of the window-forward mode.
+
+### 10.1 The materialization mode is *declared*, not derived
+
+The rest of this design — and the eligibility research — leans hard on
+**derive-don't-declare**: eligibility, lookback, monotonicity, and the algebraic rung
+are all read *from the SQL*, never restated in YAML where they can drift. The
+materialization mode is the deliberate exception, for a concrete reason:
+
+> **The mode is a physical commitment that is not cheaply reversible.** Moving a model
+> `full → batched → cumulative → native-IVM` rebuilds hidden state, changes what
+> downstream may assume (a partitioned table vs a keyed lookup), and re-plumbs
+> freshness ownership. It is a migration, not a recompile.
+
+Choosing that silently for the user would be as wrong as silently repartitioning a
+table under them. So the division of labour is:
+
+| | Declared (user) | Derived (smelt) |
+|---|---|---|
+| **what** | the materialization mode (one word per model) | the algebraic rung (§4) the SQL lands on |
+| **why** | not cheaply reversible; the user owns the physical commitment | mechanically true of the SQL; restating it invites drift |
+| **when wrong** | smelt picks a mode → silent, costly migration | user restates algebra → drifts from the query |
+
+The derive-work does not disappear — §10.6 shows it changes *job*, from **chooser** to
+**validator**.
+
+### 10.2 A flat enum of peers is *not* the dbt footgun
+
+[§9.2](#92-a-structural-umbrella-re-creates-the-dbt-footgun) rejected a
+selector-with-a-strategy-knob (`refresh: incremental` + `strategy: window | merge`)
+because the sub-knob silently swaps the equivalence contract under one name. A flat
+enum of **distinct named peers, each naming one contract**, is the *opposite* of that,
+and is exactly the "two clearly-distinct children beneath the parent contract"
+[§9.4](#94-recommendation) endorsed — extended here to the full family. Name↔contract
+fit ([`models.md`](../specs/models.md) §"Refresh axis") is intact: each value means one
+thing.
+
+The distinction that keeps this honest is **declare-as-selector vs declare-as-assertion**:
+
+- *declare-as-selector* (the footgun) — the declaration **changes what runs** under a
+  shared name. `strategy: merge` silently changes invariants. Rejected.
+- *declare-as-assertion* — the declaration **names a distinct contract** (or is checked
+  against derived truth and errors on mismatch), and never silently varies invariants.
+  The peer enum is this. So is the optional ceiling guardrail in §10.6.
+
+### 10.3 The modes
+
+```yaml
+---
+refresh: full            # recompute everything each run
+---
+---
+refresh: batched         # process new data in batches, forward along a monotone
+partition_column: event_date   #   partition_column (a timestamp — or a monotone integer)
+---
+---
+refresh: cumulative      # maintained running aggregate — keyed lookup, smelt owns freshness
+---
+---
+refresh: versioned       # SCD Type 2 — keep every version of a key with a validity interval
+---
+---
+refresh: latest_value    # SCD Type 1 — keep only the current row per key
+---
+---
+refresh: materialized_view   # maintained — engine owns freshness (native IVM); see §10.8
+---
+```
+
+| `refresh:` | correctness contract | output shape | freshness owner | hidden state | camp (§7.1) |
+|---|---|---|---|---|---|
+| `full` | trivial (recompute) | table | smelt (per run) | none | — |
+| `batched` | per-partition slice | partitioned, `partition_column` | smelt (per run) | none | window-forward |
+| `cumulative` | end-state | keyed lookup | **smelt** (per run) | O(keys) | maintained |
+| `versioned` | end-state (interval-keyed) | key + validity interval | smelt (per run) | O(keys, open) | maintained |
+| `latest_value` | end-state | keyed lookup | smelt (per run) | O(keys) | maintained |
+| `materialized_view` | end-state | keyed lookup | **engine** (continuous) | engine-managed | maintained |
+
+Project-level default with per-model override (following the existing `smelt.yml`
+model-config cascade — per-directory default, model frontmatter wins):
+
+```yaml
+# smelt.yml
+models:
+  refresh: full          # project default
+  marts:
+    refresh: cumulative  # everything under marts/ is maintained unless a model overrides
+```
+
+### 10.4 Naming rationale
+
+**`batched`** (renaming the mode Parts 1–9 call `incremental`). Three names were
+considered and rejected before landing here:
+
+- **`incremental`** is *overloaded*. `cumulative`, `versioned`, and
+  `materialized_view` are all "incremental" in the broad,
+  incremental-view-maintenance sense — the [§9.1](#91-the-shared-parent-contract-is-real)
+  terminology collision. Retiring `incremental` as a *value* frees it to be the
+  **family word** in prose ("`batched`, `cumulative`, and `materialized_view` are all
+  incremental approaches — here is how they differ"), which resolves the collision
+  instead of inheriting it.
+- **`partitioned`** fails to distinguish: *every* mode's table can be physically
+  partitioned (a `full` or `cumulative` table just as much). It names a storage
+  property the modes share, not what makes this one different.
+- **`time_partitioned`** re-inherits that storage conflation *and* adds a lie — the
+  partition key need not be time (see below), so a monotone-integer model would be
+  confusingly "time"-partitioned.
+- **`batched`** names the axis that actually distinguishes the mode. `batched` and
+  `full` retain the *same contents* (a plain complete table) and differ only in
+  **build method** — recompute-everything vs process-the-new-tail-in-batches. So
+  `full ↔ batched` is both legible and structurally true. Accepted wart: `batched` is
+  conceptually adjacent to dbt's `microbatch`; the word is distinct and the trade was
+  taken for legibility.
+
+The **partition key must be monotone** (a timestamp *or* an ever-increasing integer —
+sequence id, offset, watermark). That "clock-like" requirement — what licenses "earlier
+partitions are settled" — lives as a property of the **key** (`partition_column`,
+validated against the monotonicity primitive,
+[eligibility §6](20260701-expanding-incremental-eligibility.md)), *not* as a word baked
+into the enum. This is why the mode name deliberately says nothing about time.
+
+**`versioned` / `latest_value`** (the SCD2 / SCD1 patterns, named without the vendor
+"SCD" jargon). The pair is deliberately symmetric — `latest_value` (overwrite, keep
+current) reads against `versioned` (keep every version with validity intervals) as
+exactly the SCD1↔SCD2 contrast, without either name mentioning "slowly-changing
+dimension." Both are maintained siblings of `cumulative`
+([§7](#part-7--ontology-recommendation);
+[20260522 §"Sibling rules"](20260522-cumulative-as-its-own-rule.md)).
+
+### 10.5 Freshness owner distinguishes `cumulative` from `materialized_view`
+
+`cumulative` and `materialized_view` share the *correctness* contract (end-state
+equivalence, §2) — [§5.1](#51-state-table--view-on-duckdb-is-what-enzyme-does-natively)
+shows `(state table + view)` on DuckDB *is* native IVM by another maintainer. What
+earns them **peer names** is a different *operational* contract — **who owns freshness**:
+
+| | `cumulative` | `materialized_view` |
+|---|---|---|
+| freshness model | **pull** — correct as of the last `smelt build` | **push** — engine keeps it current continuously |
+| cadence owner | smelt | the engine |
+| "is it up to date?" | after the last run | between runs too |
+
+That is a genuinely different commitment (a different answer to "is this table fresh,
+and who is responsible"), which is why it is a peer value rather than a hidden physical
+detail.
+
+### 10.6 The derive-work becomes a *validator*, not a chooser
+
+Because the mode is declared, the algebraic ladder (§4) stops *choosing* and starts
+*validating the declared mode*:
+
+> A model with `refresh: cumulative` over a `MEDIAN`: smelt derives that `MEDIAN` is
+> holistic → not monoid-maintainable → **emits a diagnostic** ("`MEDIAN` is not
+> maintainable at the additive rung; declare a `bounded_domain` to maintain it exactly
+> (§4.4), or use `refresh: full`"). It does **not** silently downgrade to `full` or
+> switch modes.
+
+So the rung is **output, not input** — surfaced in `explain`/plan and diagnostics
+("maintains at the retraction rung, keeping O(keys) state"), never hand-picked. The
+eligibility boundary is:
+
+> **rung = f( source mutation profile , aggregate algebra )**
+> — the algebra half is derived from the SQL; the **source mutation profile**
+> (append-only vs mutable/restatable) is the one world-fact smelt *cannot* derive
+> (it cannot know if an upstream table is updated in place), so it is the honest thing
+> to *declare* — on the source, shared by every consumer. The §4.4 bounded-domain
+> opt-in is the same category of world-fact.
+
+Users may additionally assert a **ceiling guardrail** (declare-as-assertion, §10.2):
+"error if this model cannot be maintained append-only / without a full refresh." It
+never changes execution; it pins cost intent and fails loudly on drift.
+
+### 10.7 `materialized_view` has no silent fallback
+
+Because the modes are **peers** and smelt does not choose for the user (§10.1),
+`materialized_view` cannot silently degrade:
+
+1. **Engine has no native IVM** (e.g. DuckDB) → `refresh: materialized_view` is a
+   **hard error**: *"materialized_view requires native IVM; this engine has none — use
+   `cumulative` for smelt-driven maintenance."* Smelt does not quietly substitute
+   `cumulative` — that would swap the declared mode.
+2. **Engine has IVM but rejects the query** (Enzyme's
+   `MATERIALIZED_VIEW_NOT_INCREMENTALIZABLE`, [§8](#part-8--open-questions-and-boundaries))
+   → also a hard error, carrying the engine's reason.
+
+`cumulative` and `materialized_view` gate on the *same* algebraic ladder; `materialized_view`
+simply carries the **extra** eligibility constraint of engine-incrementalizability. The
+inability to rescue the user into a different mode is the honest price of peer status —
+and the reason the enum stays coherent.
+
+### 10.8 Open — peer vs. modifier, reopened by `versioned`
+
+`versioned` exposes a seam in the peer enum. The maintained family actually has **two
+independent axes**:
+
+- **pattern** — `cumulative` / `versioned` / `latest_value` / `accumulating_snapshot`
+  (what the relation *is*);
+- **freshness owner** — smelt-pull vs engine-push/native-IVM (who maintains it).
+
+`materialized_view` is a value on the *second* axis while the others are values on the
+*first*. Under strict peers, **"a `versioned` dimension maintained as a native
+materialized view" has no home**, and the axes multiply (`cumulative`-pull/push,
+`versioned`-pull/push, …). Two resolutions:
+
+- **A — freshness owner as a modifier (leaning).** Patterns are the peers
+  (`full | batched | cumulative | versioned | latest_value`); freshness owner is a
+  separate optional axis, `maintained_by: smelt | native` (default derived via
+  `multi_backend`). Then native-IVM SCD2 is `refresh: versioned` + `maintained_by: native`;
+  no combinatorial blow-up, every pattern composes with either maintainer. Cost:
+  `materialized_view` stops being a standalone value.
+- **B — keep `materialized_view` a peer.** Simplest for the aggregate case; native-IVM
+  for the non-aggregate patterns (`versioned`, `latest_value`) is simply out-of-scope
+  surface until someone needs it.
+
+This is the same peer-vs-modifier fork as the `materialized_view` question, now with a
+concrete forcing case. The lean is **A** (freshness owner is orthogonal to pattern, and
+§5.1 already says the maintainer is a lowering choice) — but it is left open; settling
+it is the first job of the umbrella's own spec ([§8](#part-8--open-questions-and-boundaries),
+last bullet).
+
+### 10.9 Recommendation
+
+- **Adopt the explicit-mode surface.** The materialization mode is user-declared and
+  stable; smelt never chooses it. The value enum:
+  `full | batched | cumulative | versioned | latest_value | materialized_view`.
+- **Rename the window-forward mode `batched`** (retiring `incremental` as a value,
+  keeping it as the family word); require `partition_column` to be monotone.
+- **Name the SCD patterns `versioned` (Type 2) and `latest_value` (Type 1).**
+- **The algebra validates, never chooses** — a mode the SQL cannot satisfy is a
+  diagnostic, and `materialized_view` never silently falls back.
+- **`models.md` §"Refresh axis" phrasing.** Present the values as peers each naming one
+  contract, grouped by the stateless (`batched`) / maintained (`cumulative`,
+  `versioned`, `latest_value`, `materialized_view`) spine — not as a flat enum, and not
+  under a strategy sub-knob.
+- **Resolve peer-vs-modifier (§10.8) in the umbrella spec**, leaning toward
+  `maintained_by:` as an orthogonal maintainer axis.
+
+---
+
 ## References
 
 - **Specs**: `cumulative_aggregate.md`, `incremental_models.md`, `multi_backend.md`
