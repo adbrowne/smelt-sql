@@ -835,35 +835,35 @@ simply carries the **extra** eligibility constraint of engine-incrementalizabili
 inability to rescue the user into a different mode is the honest price of peer status —
 and the reason the enum stays coherent.
 
-### 10.8 Open — peer vs. modifier, reopened by `versioned`
+### 10.8 Resolved — `materialized_view` stays a peer
 
-`versioned` exposes a seam in the peer enum. The maintained family actually has **two
-independent axes**:
+`versioned` *looked* like it exposed a seam — the maintained family seemed to have two
+independent axes (*pattern*: `cumulative` / `versioned` / `latest_value`; *freshness
+owner*: smelt-pull vs engine-push) that a peer enum cannot factor, threatening a
+combinatorial blow-up (`versioned`-pull, `versioned`-push, …). It dissolves once the
+**asymmetry between the two maintainers** is made explicit:
 
-- **pattern** — `cumulative` / `versioned` / `latest_value` / `accumulating_snapshot`
-  (what the relation *is*);
-- **freshness owner** — smelt-pull vs engine-push/native-IVM (who maintains it).
+- **smelt-driven maintenance requires a *named pattern*.** smelt can only maintain a
+  relation itself if it owns the combiner — hence `cumulative`, `versioned`,
+  `latest_value` are specific, recognised patterns.
+- **engine-driven maintenance requires *no* named pattern.** `materialized_view` hands
+  the SQL to the engine's native IVM, which incrementalises arbitrary eligible SQL. To
+  get an engine-maintained SCD2 you **write the SCD2 logic in SQL and declare
+  `refresh: materialized_view`** — there is no `versioned + native` cell to fill,
+  because native maintenance never needed the pattern name.
 
-`materialized_view` is a value on the *second* axis while the others are values on the
-*first*. Under strict peers, **"a `versioned` dimension maintained as a native
-materialized view" has no home**, and the axes multiply (`cumulative`-pull/push,
-`versioned`-pull/push, …). Two resolutions:
+So the axes do not multiply, and no `maintained_by:` modifier is required.
+**Decision: keep `materialized_view` as a peer.** `versioned` / `latest_value` are the
+*smelt-maintained* SCD patterns (smelt owns the combiner); their engine-maintained
+counterpart is not a variant of them but the generic `materialized_view` over
+hand-written SQL.
 
-- **A — freshness owner as a modifier (leaning).** Patterns are the peers
-  (`full | batched | cumulative | versioned | latest_value`); freshness owner is a
-  separate optional axis, `maintained_by: smelt | native` (default derived via
-  `multi_backend`). Then native-IVM SCD2 is `refresh: versioned` + `maintained_by: native`;
-  no combinatorial blow-up, every pattern composes with either maintainer. Cost:
-  `materialized_view` stops being a standalone value.
-- **B — keep `materialized_view` a peer.** Simplest for the aggregate case; native-IVM
-  for the non-aggregate patterns (`versioned`, `latest_value`) is simply out-of-scope
-  surface until someone needs it.
-
-This is the same peer-vs-modifier fork as the `materialized_view` question, now with a
-concrete forcing case. The lean is **A** (freshness owner is orthogonal to pattern, and
-§5.1 already says the maintainer is a lowering choice) — but it is left open; settling
-it is the first job of the umbrella's own spec ([§8](#part-8--open-questions-and-boundaries),
-last bullet).
+**A future modifier is a *different* concern.** If a single engine exposes *multiple
+native IVM implementations* of the same view (distinct refresh algorithms / incremental
+strategies), smelt would pick a sensible **per-engine default and let the user override
+it** — a physical-strategy override scoped *inside* `materialized_view`, engine-specific
+and defaulted. That is not a logical-mode selector, so it does not reintroduce the
+strategy footgun (§9.2, §10.2). Deferred until an engine actually presents the choice.
 
 ### 10.9 Recommendation
 
@@ -879,8 +879,9 @@ last bullet).
   contract, grouped by the stateless (`batched`) / maintained (`cumulative`,
   `versioned`, `latest_value`, `materialized_view`) spine — not as a flat enum, and not
   under a strategy sub-knob.
-- **Resolve peer-vs-modifier (§10.8) in the umbrella spec**, leaning toward
-  `maintained_by:` as an orthogonal maintainer axis.
+- **Keep `materialized_view` a peer (§10.8).** Engine-maintained non-aggregate shapes
+  are expressed as SQL under `materialized_view`, not as `pattern + native`; defer any
+  physical-strategy modifier until an engine exposes multiple native IVM implementations.
 
 ---
 
