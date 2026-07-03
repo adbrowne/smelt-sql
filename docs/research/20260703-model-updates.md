@@ -206,6 +206,7 @@ shared contract and fixing the terminology, and actively negative in any
 shared selector.
 
 ---
+
 ## Part 2 — Batched refresh: mechanism and the rejection catalogue
 
 ### 2.1 The mechanism, in brief
@@ -346,6 +347,7 @@ turning the settled Parts into specs and plans; the shared first phase, the
 monotonicity primitive, is already built and tested (§4.8).
 
 ---
+
 ## Part 3 — Filter placement: eligibility is pushdown depth
 
 This part is not about one condition. It applies to every relaxation in this
@@ -549,6 +551,7 @@ The general rule: a pre-existing event-time range predicate is always *safe*
 fails to push and stays above the scan.
 
 ---
+
 ## Part 4 — The monotonicity primitive
 
 The condition deep-dives of Parts 5–8 converge on **one shared analysis**:
@@ -1007,6 +1010,7 @@ harnesses (`docs/research/harness/20260701-*.sql`) are retained as fast
 deterministic **seed cases** folded into its corpus.
 
 ---
+
 ## Part 5 — Condition deep-dive: set operations at the base (E1)
 
 ### 5.1 Why it is rejected
@@ -1359,6 +1363,7 @@ derived tables and CTE bodies. The syntactic paren-test is retired. Where the
 proven-safe filter should then be *injected* is the Part 3 placement question.
 
 ---
+
 ## Part 7 — Condition deep-dive: joins (the un-gated construct)
 
 Every condition worked so far is a **rejection** the audit asks us to relax.
@@ -1576,6 +1581,7 @@ new mechanism but the join-shaped instance of the same commutation walk, blocked
 on the same monotonicity primitive.
 
 ---
+
 ## Part 8 — Condition deep-dive: window functions, `LAG`/`LEAD`, and the two-layer lookback (B1 / C1)
 
 Three catalogue entries are really **one phenomenon** seen from three angles,
@@ -1863,6 +1869,7 @@ blocked on the same monotonicity primitive plus one extra returned scalar: the
 lookback margin.
 
 ---
+
 ## Part 9 — Shorter conditions
 
 Four of the catalogue's rejections do not warrant a full deep-dive: their
@@ -2464,6 +2471,7 @@ The split is externally load-bearing, not merely theoretical:
   constraint — the same legibility posture as the join and window rejections.
 
 ---
+
 ## Part 12 — Prior art and external validation
 
 The batched-camp audit reasons from first principles plus an empirical DuckDB
@@ -2660,6 +2668,7 @@ general), so the honest design is *prove-where-you-can, declare-where-you-must*
 keeping the declared escape hatch they rely on entirely.
 
 ---
+
 ## Part 13 — Maintained refresh: the two axes, the contract, and hidden state
 
 Parts 2–12 audit the window-forward camp. This and the next three parts work
@@ -3060,6 +3069,7 @@ maintained relations (the siblings) and a physical maintainer axis — two thing
 word cannot absorb without becoming a misnomer.
 
 ---
+
 ## Part 17 — The user surface: explicit materialization modes
 
 Parts 1 and 16 settled the *conceptual* ontology — a `maintained` umbrella, a
@@ -3303,6 +3313,7 @@ strategy footgun (§1.3, §17.2). Deferred until an engine actually presents the
   physical-strategy modifier until an engine exposes multiple native IVM implementations.
 
 ---
+
 ## Part 18 — Open questions
 
 Combining the two camps and the surface into one document changes the
@@ -3527,6 +3538,7 @@ a few new ones (§18.3).
   (§5.5 case 3) — that is a JOIN, not a set operation.
 
 ---
+
 ## References
 
 External prior art cited in Parts 4, 12, and 13–16. Grouped by theme; every
