@@ -1,7 +1,7 @@
 Resume the smelt autonomy loop with fresh context. Each iteration does exactly ONE unit of work and emits exactly one sentinel. You choose the work by a fixed PRIORITY: ready remediation first, scanning only when no remediation is ready.
 
 SETUP (every iteration):
-1. Read `.claude/active-plan` for the `master_plan` path (currently docs/plans/20260613-spec-impl.md — a pure remediation backlog with no probe rows; when no registry sub-plan is READY, go straight to MASTER_EXHAUSTED).
+1. Read `.claude/active-plan` for the `master_plan` path (currently docs/plans/20260704-model-updates.md — a pure feature backlog with no probe rows; when no registry sub-plan is READY, go straight to MASTER_EXHAUSTED so a human can scaffold the next group's sub-plan). Always trust the path in `.claude/active-plan`, not this parenthetical.
 2. Read the master plan's "## Spawned sub-plans (remediation)" registry table.
 
 PRIORITY 1 — READY REMEDIATION (do this before any scanning):

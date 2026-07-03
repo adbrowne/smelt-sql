@@ -68,17 +68,32 @@
 # Part 6) before any consumer is wired. Master:
 # docs/plans/20260702-incremental-eligibility-expansion.md (registry-driven, no
 # probe rows); design: docs/research/20260701-expanding-incremental-eligibility.md;
-# spec: docs/specs/incremental_models.md. PREREQUISITE for the property suite:
-# DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env (unset → DuckDB
-# property tests skip green).
-master_plan: docs/plans/20260702-incremental-eligibility-expansion.md
-active_subplan: docs/plans/20260702-monotonicity-primitive-tested.md
+# spec: docs/specs/incremental_models.md.
+#
+# ACTIVE (2026-07-04): the model-updates master — batched rename + refresh-axis
+# reshape, batched eligibility relaxations, keyed-mode maintenance rungs, and the
+# new keyed refresh modes. Master (registry-driven, no probe rows):
+# docs/plans/20260704-model-updates.md; design:
+# docs/research/20260703-model-updates.md; specs: models.md, batched_models.md,
+# cumulative_aggregate.md, versioned_models.md, latest_value_models.md,
+# materialized_view.md, multi_backend.md. It CONSOLIDATES and supersedes the
+# 20260702 predecessor below (its W1 monotonicity primitive is done and consumed,
+# NOT re-run — do not run both masters against this branch). First registered
+# sub-plan: Group A (docs/plans/20260704-model-updates-group-a.md). When the loop
+# reports <<MASTER_EXHAUSTED>>, a human scaffolds Group B/C/D's sub-plan.
+# PREREQUISITE for the property/equivalence suites: DUCKDB_LIB_DIR +
+# LD_LIBRARY_PATH exported into the loop env (unset → DuckDB tests skip green).
+master_plan: docs/plans/20260704-model-updates.md
+active_subplan: docs/plans/20260704-model-updates-group-a.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.
-in_repo_plan: docs/plans/20260702-incremental-eligibility-expansion.md
-meta_plan: docs/plans/20260702-incremental-eligibility-expansion.md
+in_repo_plan: docs/plans/20260704-model-updates.md
+meta_plan: docs/plans/20260704-model-updates.md
 
+# PAUSED (2026-07-04): docs/plans/20260702-incremental-eligibility-expansion.md —
+# the predecessor incremental-eligibility master. Its queued waves W2–W7 are
+# re-homed into the 20260704 master's Group B; do NOT run it against this branch.
 # PAUSED: docs/plans/20260613-spec-impl.md (the spec-remediation backlog). All of
 # its registry sub-plans are `done` (the loop would emit <<MASTER_EXHAUSTED>>); the
 # 28 reviewed specs are clean. To resume that work, repoint master_plan back to it.

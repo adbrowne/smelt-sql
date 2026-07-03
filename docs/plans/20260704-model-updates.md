@@ -53,6 +53,49 @@ surface references. Group B (batched relaxations) and Group C (keyed rungs) are 
 other and may proceed in parallel after A. Group D (new keyed modes) depends on C1 (the presentation-view
 mechanism) for the smelt-driven modes and on A4 for `materialized_view`.
 
+## Autonomy-loop routine (per iteration)
+
+The loop runs in UNIFIED PRIORITY mode (`.claude/sweep-loop-prompt.txt`). Each iteration:
+
+1. Read `.claude/active-plan` for the `master_plan` path (this file).
+2. Read the "## Spawned sub-plans" registry below, top-to-bottom. A sub-plan is **READY** when its
+   registry Status is **not** `done` **and** its own Progress-tracking table has at least one `pending`
+   row. The first READY sub-plan is this iteration's target.
+3. Execute the next `pending` phase of that sub-plan following its own per-phase routine
+   (pre-flight → spec increment only if the phase row lists one → `/smelt:implement` red-green with
+   implementer + reviewer, spec as oracle → verification gates → set the row `done` → commit + push).
+   If that was the sub-plan's last `pending` phase, also flip its registry Status to `done (<today>)`.
+   Emit `<<PHASE_COMPLETE>>` (or `<<PHASE_BLOCKED>>` per the block rule).
+4. If **no** sub-plan is READY, emit `<<MASTER_EXHAUSTED>>` with a one-line summary — a human then
+   scaffolds the next group's sub-plan (via `/smelt:plan` against the cited spec) and adds its registry
+   row. **The loop never scaffolds a sub-plan or authors a spec autonomously.**
+
+The "## Progress tracking" table below is the human-facing group backlog (which phases belong to which
+group and what they depend on); it is **not** what the loop executes — the loop only runs phases of the
+sub-plans registered below. To queue a group, scaffold its sub-plan and add a NOT-`done` registry row.
+
+## Spawned sub-plans
+
+**This registry table is the loop's source of "ready" work.** Each iteration scans it top-to-bottom;
+the first sub-plan whose Status is **not** `done` and that still has a `pending` phase is executed. To
+queue the next group, scaffold its sub-plan (own spec-diff + docs-site update) and add a NOT-`done` row.
+
+| Sub-plan | Group / what it delivers | Status |
+|----------|--------------------------|--------|
+| [`docs/plans/20260704-model-updates-group-a.md`](20260704-model-updates-group-a.md) | **Group A** — rename & ontology landing (A1 `refresh: batched` selector + `batched:` block, hard-cutting the `incremental:` block; A2 `Incremental→Batched` diagnostic/config rename + downstream doc sweep; A3 remove `materialized_view` from the storage axis; A4 IVM capability flags + `refresh: materialized_view` hard error). | pending |
+
+### Group scaffolding queue (human-gated — NOT registered until scaffolded)
+
+Scaffold each as its own sub-plan (via `/smelt:plan` against the cited spec) and add a registry row
+when ready. The loop reports `<<MASTER_EXHAUSTED>>` when no registered sub-plan has pending work.
+
+- **Group B** — batched eligibility relaxations (B0–B8). Depends on Group A (A1 surface). B0 first
+  (unified bound derivation), then the monotonicity-primitive consumers and per-relaxation phases.
+- **Group C** — keyed-mode maintenance rungs (C1–C4). Depends on A1. C1 (presentation-view mechanism)
+  first; C2/C4 depend on C1.
+- **Group D** — new keyed modes (D1 `latest_value`, D2 `versioned`, D3 `materialized_view` emit).
+  D1/D2 depend on C1; D3 depends on A4.
+
 ## Progress tracking
 
 | # | Phase | Group | Depends on | Spec anchor | Status |
