@@ -153,7 +153,7 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 | `provenance` | structured map (shape TBD) | absent | Declared column-provenance map. Gated behind `smelt.yml: unstable_schema: true`. |
 | `backends.<name>.emit` | string | declared name | (`smelt.extern` only) Backend-specific emitted name. |
 
-Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
+Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `batched_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
 
 ### Diagnostic codes
 
@@ -293,7 +293,7 @@ This section captures the load-bearing rationale behind the surface and semantic
   - `docs/specs/scoping.md` — body-scope name resolution (parameters-first, no-overlap, splice contexts)
   - `docs/specs/gradual_typing.md` — Tier 1/2/3 checking model and error-tracing contract
   - `docs/specs/planner_integration.md` — how frontmatter properties feed planner rules
-  - `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
+  - `docs/specs/batched_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
 
 ### Research
 

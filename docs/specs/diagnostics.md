@@ -109,7 +109,7 @@ Owned by `docs/specs/timeseries.md`.
 
 ### Incremental
 
-Owned by `docs/specs/incremental_models.md`.
+Owned by `docs/specs/batched_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|

@@ -184,5 +184,5 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
   - `seeds.md` — shares the YAML grammar; the load-side complement of this spec.
   - `smelt_yml.md` — `paths:` key the discovery layer consumes.
   - `timeseries.md` — declares the `timeseries:` block grammar this spec hosts on external sources.
-  - `incremental_models.md` — primary consumer of `timeseries:` on sources, via source-filter pushdown.
+  - `batched_models.md` — primary consumer of `timeseries:` on sources, via source-filter pushdown.
   - `types.md` — `DataType` vocabulary used by `columns[].type`.

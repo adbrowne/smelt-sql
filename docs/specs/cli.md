@@ -365,7 +365,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `model_selection.md` — `--select` / `--exclude` semantics
   - `models.md` — materialization modes
-  - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
+  - `batched_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
   - `functions.md` — `smelt build` plans function expansion as part of the build lifecycle.
   - `schema_evolution.md` — `smelt diff` change classification
   - `testing.md` — `smelt test` execution

@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Timeseries
 
-> **What this is.** A normative spec for the `timeseries:` frontmatter block — the declaration of a time dimension on a model's or source's output. Out of scope: incremental execution (see `incremental_models.md`), source YAML grammar beyond the timeseries block (see `sources.md`), full model frontmatter schema (see `models.md`).
+> **What this is.** A normative spec for the `timeseries:` frontmatter block — the declaration of a time dimension on a model's or source's output. Out of scope: incremental execution (see `batched_models.md`), source YAML grammar beyond the timeseries block (see `sources.md`), full model frontmatter schema (see `models.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -99,7 +99,7 @@ A model or source **without** `timeseries:` is non-timeseries — it has no decl
 
 ### Interaction with `incremental:`
 
-A model that declares `incremental:` (per `incremental_models.md`) must also declare `timeseries:`. The two blocks have independent surfaces — `timeseries:` declares the time dimension, `incremental:` opts the model into incremental execution and carries strategy-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `incremental:` without `timeseries:` is `TimeseriesRequiredForIncremental`.
+A model that declares `incremental:` (per `batched_models.md`) must also declare `timeseries:`. The two blocks have independent surfaces — `timeseries:` declares the time dimension, `incremental:` opts the model into incremental execution and carries strategy-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `incremental:` without `timeseries:` is `TimeseriesRequiredForIncremental`.
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
@@ -109,7 +109,7 @@ A source declaring `timeseries:` opts in to being a pushdown target for downstre
 2. **Event-time column projection.** For a model, `event_time_column` must appear in the model's output. For a source, it must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 3. **Type constraint on event_time_column.** Must be a date, timestamp, or timestamp-with-timezone type per `types.md`. Violation produces `MalformedTimeseries`.
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.
-5. **Granularity closure.** Must be one of the enumerated values. Unknown values produce `MalformedTimeseries`. Custom granularity is reserved for a future plugin surface (see `incremental_models.md` § "Granularity values").
+5. **Granularity closure.** Must be one of the enumerated values. Unknown values produce `MalformedTimeseries`. Custom granularity is reserved for a future plugin surface (see `batched_models.md` § "Granularity values").
 6. **`week_start` requires `granularity: week` and must be `monday` or `sunday`.** Setting `week_start` on any other granularity, or setting it to a weekday other than `monday` or `sunday`, is `MalformedTimeseries`.
 7. **Partition / pruning columns must be NOT NULL.** `partition_column` must be NOT NULL on the model's output (or declared `nullable: false` on the source's columns). When `event_time_column` drives pruning (it differs from `partition_column` and is the column a downstream rule filters on), it must be NOT NULL too. A NULL partition value silently escapes the half-open `>= start AND < end` pruning window — it is never deleted or re-inserted — which is a correctness hole for incremental execution. A nullable partition/pruning column is `MalformedTimeseries`.
 8. **Sub-day granularity requires a timestamp-resolution partition type.** When `granularity` is `hour` (a sub-day unit), `partition_column` must be a timestamp-resolution type (timestamp or timestamp-with-timezone), not a plain `date` — a `DATE` cannot represent hour boundaries, so hour-granularity pruning against a `DATE` partition silently coarsens to whole days. A sub-day granularity paired with a `date` (or otherwise day-resolution) partition type is `MalformedTimeseries`.
@@ -168,7 +168,7 @@ This section captures the load-bearing rationale.
 - **Plans (history)**:
   - `docs/research/20260521-incremental-as-planner-rule.md` — research doc that proposed factoring `timeseries:` out of `incremental:`
 - **Related specs**:
-  - `incremental_models.md` — consumes `timeseries:`; carries incremental-rule-specific keys
+  - `batched_models.md` — consumes `timeseries:`; carries incremental-rule-specific keys
   - `sources.md` — host for `timeseries:` on external sources
   - `models.md` — host for `timeseries:` on model frontmatter; lists the key in the frontmatter table
   - `types.md` — the date/timestamp/integer type vocabulary used for type constraints

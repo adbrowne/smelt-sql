@@ -1,13 +1,13 @@
 ---
 feature: cumulative_aggregate
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-04
 owners: [andrew]
 ---
 
-# Cumulative Aggregate Refresh Strategy
+# Cumulative Aggregate Refresh Mode
 
-> **What this is.** A normative spec for the `refresh: cumulative` strategy — a stateful-merge planner rule that collapses a timeseries source into one row per key, where each row reflects state across all processed source partitions. Cumulative is a member of the **refresh axis** (`models.md` §"Refresh axis"), a sibling of `incremental` on a stored `table`. Covers the frontmatter selector, the classifier, the per-partition delta-SELECT shape, the cross-partition combine semantics, the equivalence contract, and the rules around what may be expressed. Out of scope: incremental DELETE+INSERT (`incremental_models.md`), the `timeseries:` declaration this rule consumes from its source (`timeseries.md`), full model frontmatter schema (`models.md`), the backend `merge_into` primitive (described in `architecture.md` §"Backend primitives" — the cumulative rule is one caller).
+> **What this is.** A normative spec for the `refresh: cumulative` mode — a stateful-merge planner rule that collapses a timeseries source into one row per key, where each row reflects state across all processed source partitions. Cumulative is a **keyed-output** value of the **refresh axis** (`models.md` §"Refresh axis") on a stored `table`: the stateful counterpart of the partitioned-output `batched` mode, and one of the keyed modes alongside `versioned`, `latest_value`, and `materialized_view`. Covers the frontmatter selector, the classifier, the per-partition delta-SELECT shape, the cross-partition combine semantics, the equivalence contract, the algebraic maintenance boundary, and the rules around what may be expressed. Out of scope: batched DELETE+INSERT (`batched_models.md`), the `timeseries:` declaration this rule consumes from its source (`timeseries.md`), full model frontmatter schema (`models.md`), the backend `merge_into` primitive (described in `architecture.md` §"Backend primitives" — the cumulative rule is one caller).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -19,7 +19,6 @@ owners: [andrew]
 
 ```sql
 ---
-materialization: table
 refresh: cumulative
 ---
 
@@ -34,24 +33,23 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-`refresh: cumulative` on a stored `table` is the entire opt-in. Cumulative is one value of the refresh axis (`models.md` §"Refresh axis"), a sibling of `incremental`. No other frontmatter key is read or required by the rule.
+`refresh: cumulative` is the entire opt-in; it implies a stored `table` (`models.md` §Design — the modeller does not restate `materialization: table`). No other frontmatter key is read or required by the rule.
 
-`refresh: cumulative` **forbids** a `timeseries:` block on the model — the output has no partition column (Semantics §"Output shape"). It **forbids** an `incremental:` block — the two are different refresh strategies with different equivalence contracts (`incremental_models.md`).
+`refresh: cumulative` **forbids** a `timeseries:` block on the model — the output has no partition column (Semantics §"Output shape"). It **forbids** a `batched:` block — cumulative and `batched` are different refresh modes with different equivalence contracts (`batched_models.md`).
 
 ### `smelt.yml` (project-level overrides)
 
 ```yaml
 models:
   device_user_edges:
-    materialization: table
     refresh: cumulative
 ```
 
-Frontmatter wins over `smelt.yml` when both set `refresh`. The same forbid-`timeseries:` / forbid-`incremental:` constraints apply.
+Frontmatter wins over `smelt.yml` when both set `refresh`. The same forbid-`timeseries:` / forbid-`batched:` constraints apply.
 
 ### CLI
 
-A `refresh: cumulative` model consumes the same `--event-time-start`/`--event-time-end` flags as incremental execution — the run window names the source partitions that will be merged in. Format and alignment rules follow `incremental_models.md` §"CLI". The flags apply to the driving source's `partition_column` / `granularity` (Semantics §"Driving source"), not to any column on the cumulative output.
+A `refresh: cumulative` model consumes the same `--event-time-start`/`--event-time-end` flags as batched execution — the run window names the source partitions that will be merged in. Format and alignment rules follow `batched_models.md` §"CLI". The flags apply to the driving source's `partition_column` / `granularity` (Semantics §"Driving source"), not to any column on the cumulative output.
 
 ```
 smelt run --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]
@@ -82,9 +80,9 @@ Any other aggregate function, or any non-aggregate non-key expression, in the pr
 |---|---|---|
 | `CumulativeRequiresGroupBy` | Error | The model SELECT has no `GROUP BY` — there is no unique key to derive. |
 | `CumulativeForbidsTimeseries` | Error | The model declares both `refresh: cumulative` and a `timeseries:` block. |
-| `CumulativeForbidsIncremental` | Error | The model declares both `refresh: cumulative` and an `incremental:` block. |
+| `CumulativeForbidsBatched` | Error | The model declares both `refresh: cumulative` and a `batched:` block. |
 | `CumulativeUnknownAggregator` | Error | A non-key projection is not a direct call to an aggregator in the allowlist. The diagnostic names the offending aggregator and points at the projection. |
-| `CumulativeGroupByContainsPartitionColumn` | Error | The `GROUP BY` list contains the driving source's `partition_column`. The diagnostic suggests switching to `incremental:` + `timeseries:` instead. |
+| `CumulativeGroupByContainsPartitionColumn` | Error | The `GROUP BY` list contains the driving source's `partition_column`. The diagnostic suggests switching to `refresh: batched` + `timeseries:` instead. |
 | `CumulativeForbidsWindowFunctions` | Error | The outer SELECT body uses `OVER (...)`. The cumulative state *is* the window; window functions in cumulative SQL are nonsensical. |
 | `CumulativeNoDrivingSource` | Error | No `smelt.<path>` reference in the FROM clause has a `timeseries:` declaration on the resolved target. |
 | `CumulativeMultipleDrivingSources` | Error | More than one timeseries-tagged source appears in the FROM clause. The diagnostic lists the candidate sources. |
@@ -116,7 +114,7 @@ A cumulative aggregate model's output has:
 - Per-key columns whose values reflect the cross-partition combine of every processed source partition's contribution.
 - **No** `partition_column`. **No** `event_time_column`. **No** `timeseries:` declaration on the model itself.
 
-Downstream consumers see the cumulative output as a lookup table — there is no partition information to push down. Downstream models join to it and read it in full each run, identical to the treatment of any non-timeseries source (`incremental_models.md` §"Source-filter pushdown").
+Downstream consumers see the cumulative output as a lookup table — there is no partition information to push down. Downstream models join to it and read it in full each run, identical to the treatment of any non-timeseries source (`batched_models.md` §"Source-filter pushdown").
 
 ### Driving source
 
@@ -138,13 +136,13 @@ A `refresh: cumulative` model is rejected at planning time if any of these hold 
 
 1. **No `GROUP BY` clause** — `CumulativeRequiresGroupBy`.
 2. **Non-key projection is not an allowlisted aggregator call** — `CumulativeUnknownAggregator`. Each projection that is not in the `GROUP BY` must be a direct call to one of the Surface §"Aggregator allowlist" functions, optionally with `AS <output_name>`. Composite expressions over aggregates (`SUM(x) + 1`, `MIN(x) / MAX(y)`) are rejected; authors must add columns for the underlying aggregates and compute derived values downstream.
-3. **`GROUP BY` contains the driving source's `partition_column`** — `CumulativeGroupByContainsPartitionColumn`. Including the partition column in the key produces the per-partition shape, not the cumulative shape; the diagnostic suggests switching to `incremental:` + `timeseries:`.
+3. **`GROUP BY` contains the driving source's `partition_column`** — `CumulativeGroupByContainsPartitionColumn`. Including the partition column in the key produces the per-partition shape, not the cumulative shape; the diagnostic suggests switching to `refresh: batched` + `timeseries:`.
 4. **Window functions in the outer body** — `CumulativeForbidsWindowFunctions`. Any `OVER (...)` clause on a projection in the outermost SELECT.
 5. **Non-deterministic functions in the outer body** — `CumulativeForbidsNondeterministic`. `NOW()`, `CURRENT_TIMESTAMP`, `RANDOM()`, etc.
 
-Additionally, the `Surface §"Diagnostic codes"` rejections for `CumulativeForbidsTimeseries`, `CumulativeForbidsIncremental`, `CumulativeNoDrivingSource`, and `CumulativeMultipleDrivingSources` fire at workspace load or planning time as named.
+Additionally, the `Surface §"Diagnostic codes"` rejections for `CumulativeForbidsTimeseries`, `CumulativeForbidsBatched`, `CumulativeNoDrivingSource`, and `CumulativeMultipleDrivingSources` fire at workspace load or planning time as named.
 
-There is no `safety_overrides:` block for the cumulative rule. The rejected constructs cannot be bypassed because they break the cross-partition equivalence contract, not just the per-partition equivalence contract — there is no partial-correctness escape hatch the way `incremental:` has one for `allow_window_functions`.
+There is no `safety_overrides:` block for the cumulative rule. The rejected constructs cannot be bypassed because they break the cross-partition equivalence contract, not just the per-partition equivalence contract — there is no partial-correctness escape hatch the way the `batched:` block has one for `allow_window_functions`.
 
 ### Cross-partition equivalence
 
@@ -156,7 +154,21 @@ cumulative_aggregate_run(model, π(S))  ==  full_refresh(model, source.where(par
 
 The output state depends only on the *set* of processed source partitions, not on the order they were processed in. This is the load-bearing property the classifier upholds: every allowlisted aggregator has a commutative and associative combiner, and `GROUP BY` produces a stable key, so reordering merges does not change the final state.
 
-This contract is **structurally different** from incremental's per-partition equivalence (`incremental_models.md` §"Per-partition equivalence"). Incremental promises that slicing the output by `partition_column = p` matches a full refresh's slice; cumulative has no `partition_column` to slice by, so it promises end-state equality after processing a set of source partitions.
+This contract is **structurally different** from batched's per-partition equivalence (`batched_models.md` §"Per-partition equivalence"). Batched promises that slicing the output by `partition_column = p` matches a full refresh's slice; cumulative has no `partition_column` to slice by, so it promises end-state equality after processing a set of source partitions.
+
+### The maintenance boundary (algebraic ladder)
+
+What a `refresh: cumulative` model can maintain is decided by the **algebra of its combiners**, not by any backend feature. Every combiner is an operation on stored state; its algebraic structure is exactly what fixes whether — and how cheaply — smelt can keep the value current. The ladder has four rungs, three of which need no user opt-in:
+
+1. **Direct monoid — implemented.** The stored column *is* the answer, and the combiner is a commutative monoid (associative, commutative, with an identity = the empty partition). The Surface §"Aggregator allowlist" is exactly the closed set of directly-presentable commutative monoids over scalar columns: `SUM`/`COUNT` (`+`, 0), `MIN`/`MAX` (min/max, ±∞), `BOOL_*`, `BIT_AND`/`BIT_OR`/`BIT_XOR`. This is the whole of what the rule maintains today.
+
+2. **Decomposed monoid — future.** The user value is `π(state)` where `state` is a monoid element in a richer space and `π` a *presentation map*. `AVG` is state `(sum, count)` under componentwise `+`, presented `sum/count`; variance is a Welford triple; approximate `COUNT(DISTINCT)` is an HLL register vector under register-wise `max`. smelt keeps the intermediate in an ordinary state table and exposes the user value through a presentation view — the same hidden-state trick native engines use, kept portably. This is the enabling mechanism behind the deferred `AVG` rewrite (Known Divergences).
+
+3. **Group — future.** When inputs can change (late corrections, a reprocessed partition, a true delete) the combiner must be *invertible*: a commutative group. `SUM`, `COUNT`, `BIT_XOR` are groups (`x ⊕ y ⊖ y = x`) — these are precisely the reversible aggregators whose subtract-then-add reprocessing is the deferred delta-history mechanism (Semantics §"Reprocessing semantics"). `MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR` are monoids but **not** groups — you cannot un-see a maximum without the underlying multiset — which is exactly why reprocessing them requires a full refresh today.
+
+4. **Opt-in multiset (bounded-domain) — future, opt-in.** The holistic single-column aggregates that need *all rows* to compute — exact `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`, `DISTINCT`-modified aggregates — are maintainable by storing the per-key **value→count multiset** (merged by componentwise count addition; a bounded-domain Z-set). One multiset state serves any distribution functional through its own `π`, and its signed form makes retraction free even for `MIN`/`MAX`. This rung is **opt-in and fail-loud** because its state is `O(active domain)`, unbounded for a high-cardinality column: by default the classifier refuses an unbounded-state aggregate and suggests either the bounded *approximate* form (a t-digest/HLL decomposed monoid at rung 2) or `refresh: full`; the user opts in with a bounded-domain space-budget assertion, and the runtime caps the multiset with a full-refresh fallback. The opt-in is a space assertion, never a strategy knob that changes the contract — the SQL still just says `MEDIAN`.
+
+The **maintained-relation equivalence contract (Cross-partition equivalence, above) holds unconditionally for every rung** — what changes across rungs is the state representation and its size, never the fidelity of the user-visible value. Rungs 1–4 are exactly what smelt can maintain itself (a `merge_into` loop, optionally with a presentation view). The part beyond — general-operator retraction over joins, `DISTINCT`, and non-additive aggregates whose state is unbounded in a dimension the user cannot cap — is not smelt-driven-maintainable; that is delegated to the engine's native incremental-view maintenance via `refresh: materialized_view` (`materialized_view.md`). Full derivation: `docs/research/20260703-model-updates.md` (Part 14).
 
 ### Reprocessing semantics
 
@@ -182,7 +194,7 @@ on the source reference in the inlined SELECT, where `D` ranges over the source 
 
 For **non-driving timeseries sources** (forbidden by the v1 multiple-driving-source rule), no pushdown happens — but the configuration is rejected before pushdown runs.
 
-For **non-timeseries sources** (lookups), no pushdown happens — they are read in full on each partition step. This mirrors `incremental_models.md` §"Source-filter pushdown" — `timeseries:` on a source is the universal opt-in for being a pushdown target.
+For **non-timeseries sources** (lookups), no pushdown happens — they are read in full on each partition step. This mirrors `batched_models.md` §"Source-filter pushdown" — `timeseries:` on a source is the universal opt-in for being a pushdown target.
 
 ### Functions inside cumulative bodies
 
@@ -205,11 +217,11 @@ The rule derives `unique_key` from the `GROUP BY` column list. The column names 
 
 This section captures the load-bearing rationale.
 
-**Cumulative is a separate refresh strategy from incremental, not a sub-knob of one.** dbt conflates the two under `materialized='incremental'` and dispatches by `incremental_strategy`. This is the single most common source of confusion in dbt because the `strategy:` knob silently changes the equivalence contract — same frontmatter, different invariants. smelt picks the opposite shape: each refresh strategy is its own named value with its own contract. `incremental` is per-partition-equivalent with a partitioned output; `refresh: cumulative` is cross-partition-equivalent with a per-key output. The two are different strategies because they uphold different contracts on different output shapes — siblings on the refresh axis (`models.md` §"Refresh axis"), not one nested under the other. Deeper rationale: `docs/research/20260522-cumulative-as-its-own-rule.md` §"Why per-partition equivalence is the wrong frame for cumulative".
+**Cumulative is a separate refresh mode from batched, not a sub-knob of one.** dbt conflates the two under `materialized='incremental'` and dispatches by `incremental_strategy`. This is the single most common source of confusion in dbt because the `strategy:` knob silently changes the equivalence contract — same frontmatter, different invariants. smelt picks the opposite shape: each refresh mode is its own named value with its own contract. `batched` is per-partition-equivalent with a partitioned output; `refresh: cumulative` is cross-partition-equivalent with a per-key output. The two are different modes because they uphold different contracts on different output shapes — peers on the refresh axis (`models.md` §"Refresh axis"), not one nested under the other. Deeper rationale: `docs/research/20260522-cumulative-as-its-own-rule.md` §"Why per-partition equivalence is the wrong frame for cumulative".
 
-**Derive `unique_key` and aggregators from the SQL, not from frontmatter.** The `GROUP BY` already names the key. Each non-key projection already names its per-partition aggregator. The cross-partition combiner is a fixed lookup table off the per-partition aggregator (`COUNT → SUM`, `MIN → MIN`, etc.). There is no information the rule needs that isn't already in the SELECT. *A `cumulative:` config block with `unique_key:` and `aggregators:` keys* was rejected because it re-introduces the metadata-vs-SQL drift problem the predecessor incremental work explicitly removed (`docs/research/20260521-incremental-as-planner-rule.md`, "derive lookback from the SQL"). The same principle applies here: if a thing is in the SQL, do not also put it in YAML. The opt-in collapses to `materialization: table` + `refresh: cumulative`, with no rule-specific config block.
+**Derive `unique_key` and aggregators from the SQL, not from frontmatter.** The `GROUP BY` already names the key. Each non-key projection already names its per-partition aggregator. The cross-partition combiner is a fixed lookup table off the per-partition aggregator (`COUNT → SUM`, `MIN → MIN`, etc.). There is no information the rule needs that isn't already in the SELECT. *A `cumulative:` config block with `unique_key:` and `aggregators:` keys* was rejected because it re-introduces the metadata-vs-SQL drift problem the predecessor batched work explicitly removed (`docs/research/20260521-incremental-as-planner-rule.md`, "derive lookback from the SQL"). The same principle applies here: if a thing is in the SQL, do not also put it in YAML. The opt-in collapses to a single `refresh: cumulative` line (storage implied `table`), with no rule-specific config block.
 
-**Cumulative output is not itself a timeseries.** The output has a unique key and aggregated columns, but no `partition_column` and no `granularity` — it has collapsed all source partitions into a single per-key row. The model therefore does not declare `timeseries:`; the rule reads the partition shape from the driving source's `timeseries:` declaration. Downstream consumers see the cumulative table as a lookup. *Allowing a `timeseries:` block on a `refresh: cumulative` model and letting it produce a per-partition output* was rejected because that shape is already what `incremental` produces — there is no new behaviour, only ambiguity. The forbid-`timeseries:` rule (`CumulativeForbidsTimeseries`) makes the boundary structural.
+**Cumulative output is not itself a timeseries.** The output has a unique key and aggregated columns, but no `partition_column` and no `granularity` — it has collapsed all source partitions into a single per-key row. The model therefore does not declare `timeseries:`; the rule reads the partition shape from the driving source's `timeseries:` declaration. Downstream consumers see the cumulative table as a lookup. *Allowing a `timeseries:` block on a `refresh: cumulative` model and letting it produce a per-partition output* was rejected because that shape is already what `batched` produces — there is no new behaviour, only ambiguity. The forbid-`timeseries:` rule (`CumulativeForbidsTimeseries`) makes the boundary structural.
 
 **Fixed aggregator allowlist, not a registry.** v1 ships exactly the SQL aggregators that are provably commutative and associative under standard semantics (`COUNT`, `SUM`, `MIN`, `MAX`, `BIT_*`, `BOOL_*`). *Letting authors register custom combiners* was rejected for v1 because (a) the v1 web_analytics motivating example needs only the standard allowlist, (b) custom combiners would need a workspace-level registry surface that is out of scope here, and (c) extending the allowlist is additive and can be done without a spec change. `AVG`, `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `APPROX_COUNT_DISTINCT` are intentionally out — `AVG` is rewritable to `SUM/COUNT` at read time but the rule does not perform that rewrite in v1.
 
@@ -217,14 +229,14 @@ This section captures the load-bearing rationale.
 
 **Refuse reprocessing in v1, not subtract-then-add.** The simplest correctness contract is "merging a partition twice is undefined". Reprocessing requires either delta history (a side table per cumulative model) or a cascade rebuild from the changed partition forward. Both are more code than v1 should ship. *Silently double-counting reprocessed partitions* is the dbt-merge-strategy footgun and was rejected outright. The rule refuses to merge a partition that was already merged, with a diagnostic that points the author at `--full-refresh`.
 
-**No `safety_overrides:` block.** Incremental's classifier offers per-check overrides (`allow_window_functions`, `allow_having`, etc.) because some rejected constructs only break *full-refresh equivalence*, and authors can knowingly accept partial-correctness. Cumulative's rejected constructs break the cross-partition equivalence contract itself — there is no partial-correctness fallback. A `safety_overrides:` knob would be a footgun: bypassing `CumulativeUnknownAggregator` for `STRING_AGG` would produce silently order-dependent output that is impossible to debug. The classifier is strict by design.
+**No `safety_overrides:` block.** The batched classifier offers per-check overrides (`allow_window_functions`, `allow_having`, etc.) because some rejected constructs only break *full-refresh equivalence*, and authors can knowingly accept partial-correctness. Cumulative's rejected constructs break the cross-partition equivalence contract itself — there is no partial-correctness fallback. A `safety_overrides:` knob would be a footgun: bypassing `CumulativeUnknownAggregator` for `STRING_AGG` would produce silently order-dependent output that is impossible to debug. The classifier is strict by design.
 
-**`refresh: cumulative` lives alongside `incremental` on the refresh axis, not as a `materialization` value.** Cumulative does not add a variant to the `Materialization` (storage) enum — that enum stays `View | Table | MaterializedView | Ephemeral`. Cumulative is a refresh-axis value on a stored `table`, the sibling of incremental (`models.md` §"Refresh axis", "Why `cumulative` joins `incremental` on the refresh axis"). Modelling it as a storage-enum variant was rejected because it would split two members of one family (cumulative and incremental) across two different axes. The DuckDB `merge_into` backend primitive stays; it is the cumulative rule's physical strategy. The trait method, the implementation, and its tests do not move.
+**`refresh: cumulative` lives on the refresh axis, not the `materialization` (storage) axis.** Cumulative does not add a variant to the storage enum (`View | Table | Ephemeral`); it is a refresh-axis value on an implied stored `table`, a peer of `batched` and the other keyed modes (`models.md` §"Refresh axis"). Modelling it as a storage value was rejected because it would put a refresh concern on the storage axis — the same conflation that motivated moving `materialized_view` off the storage axis (`models.md` §Design). The DuckDB `merge_into` backend primitive stays; it is the cumulative rule's physical strategy. The trait method, the implementation, and its tests do not move.
 
 ## Constraints & Invariants
 
-1. **Opt-in is `materialization: table` + `refresh: cumulative` alone.** A cumulative model declares those two keys and nothing else specific to this rule. There is no `cumulative:` configuration block.
-2. **`timeseries:` and `incremental:` are forbidden on cumulative models.** Diagnostics: `CumulativeForbidsTimeseries`, `CumulativeForbidsIncremental`.
+1. **Opt-in is `refresh: cumulative` alone** (storage implied `table`). A cumulative model declares that one key and nothing else specific to this rule. There is no `cumulative:` configuration block.
+2. **`timeseries:` and a `batched:` block are forbidden on cumulative models.** Diagnostics: `CumulativeForbidsTimeseries`, `CumulativeForbidsBatched`.
 3. **`unique_key` is derived from `GROUP BY`.** A cumulative model without `GROUP BY` is rejected (`CumulativeRequiresGroupBy`).
 4. **Per-column cross-partition combiner is a fixed lookup off the per-partition aggregator.** Authors do not declare combiners; the rule looks them up from the allowlist table.
 5. **Allowlist is closed.** Aggregators outside the table are rejected. Composite expressions over aggregates are rejected. No `safety_overrides:` bypass.
@@ -232,25 +244,27 @@ This section captures the load-bearing rationale.
 7. **Cross-partition equivalence holds for any ordering.** Reordering merges across source partitions does not change the final cumulative state.
 8. **No `partition_column` on the cumulative output.** Downstream consumers treat the cumulative table as a lookup.
 9. **Reprocessing is refused in v1.** A run window that overlaps already-merged source partitions is rejected with a diagnostic; `--full-refresh` is the v1 mitigation.
-10. **No silent downgrade.** A classifier rejection refuses the model at planning time. No fallback to full-refresh, no fallback to incremental, no warning-then-continue.
+10. **No silent downgrade.** A classifier rejection refuses the model at planning time. No fallback to full-refresh, no fallback to batched, no warning-then-continue.
 
 ## Known Divergences / Open Questions
 
-- **`AVG` rewrite.** Out of scope for v1. The classifier refuses `AVG(...)`. A future plan may rewrite it at planning time to `SUM/COUNT` and surface the average as a derived column.
+- **Diagnostic and config spelling still says `incremental` in code.** This spec's normative surface names the forbidden sibling block `batched:` and the diagnostic `CumulativeForbidsBatched`; the implementation still emits `CumulativeForbidsIncremental` and validates against an `incremental:` block. Aligned by the rename phase of `docs/plans/20260704-model-updates.md`.
+- **Only the direct-monoid rung is implemented.** The maintenance boundary (Semantics §"The maintenance boundary") describes four rungs; only rung 1 (direct commutative monoids — the current allowlist) is built. Rungs 2–4 (decomposed monoid with a presentation view, group retraction, opt-in bounded-domain multiset) are specified ahead of implementation; each is delivered by a phase of `docs/plans/20260704-model-updates.md`. The three deferred features below — `AVG` rewrite, reprocessing via delta history, `--auto` staleness fidelity — are the same hidden-state mechanism (rungs 2–3) seen three times.
+- **`AVG` rewrite (rung 2).** Out of scope today. The classifier refuses `AVG(...)`. A future phase stores `(sum, count)` state and presents `sum/count` through a presentation view (the decomposed-monoid rung), rather than a planning-time `SUM/COUNT` rewrite.
 - **Multi-source disambiguation (`driven_by:`).** A cumulative model reading multiple timeseries-tagged sources is rejected in v1 (`CumulativeMultipleDrivingSources`). A future plan may add an explicit `driven_by: smelt.<source>` field on the frontmatter to pick among same-granularity candidates. Different-granularity sources are deferred indefinitely.
 - **Self-referential cumulative.** A SELECT that joins to its own cumulative target (e.g., `cumulative_state += sum(new_partition) - decay`) reads "prior cumulative value" and is recursive. Rejected in v1 by the general "exactly one driving source" rule when the target itself is in the FROM clause. A future plan may admit this pattern with explicit input/state distinction.
 - **Reprocessing via delta history.** A future plan may store per-partition deltas for cumulative models with reversible aggregators (`SUM`, `COUNT`, `BIT_XOR`), enabling subtract-then-add for reprocessing. The model's frontmatter does not declare reversibility; the classifier infers it from the projection list.
 - **`--auto` staleness fidelity.** v1's staleness response for a cumulative model is conservative ("any partition ≥ the earliest stale"); the per-projection fidelity ("exactly the stale partitions for fully-reversible models") needs the delta-history mechanism above.
 - **Schema evolution.** Adding a new non-key column to a cumulative table requires backfilling the new aggregator over the entire processed source history. v1 does not support this; the model must be rebuilt. Tracked under `schema_evolution.md` future work.
-- **Sibling rules (`scd2`, `latest_value`, `accumulating_snapshot`).** These follow the same derive-from-SQL principle but uphold different contracts. None are speced today; `cumulative_aggregate` is the first member of this family. See `docs/research/20260522-cumulative-as-its-own-rule.md` §"Sibling rules beyond cumulative_aggregate".
+- **Sibling keyed modes.** `versioned` (SCD Type 2) and `latest_value` (SCD Type 1) are peers of cumulative on the refresh axis — keyed-output, smelt-maintained, derive-from-SQL — with their own specs (`versioned_models.md`, `latest_value_models.md`) and their own classifiers, not variants of this rule. Neither is implemented yet. The engine-maintained counterpart of any of them is hand-written SQL under `refresh: materialized_view` (`materialized_view.md`), not a maintainer flag on cumulative. Design of the sibling shapes: `docs/research/20260522-cumulative-as-its-own-rule.md` §"Sibling rules beyond cumulative_aggregate".
 - **External sources without `timeseries:`.** A cumulative model whose only source is a non-timeseries external table has no partition shape to step over and is refused (`CumulativeNoDrivingSource`). The diagnostic suggests declaring `timeseries:` on the source.
 - **Granularity restricted to `day` and `week`.** The v1 per-partition step loop accepts only `day` and `week` as the driving source's granularity. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `cumulative_aggregate v1 supports day and week granularity; got <Granularity>`. This is a not-yet-supported limitation of the step loop arithmetic, not a permanent design boundary. Tracked in `docs/plans/20260611-docs-gap-remediation.md`.
 
 ## References
 
 - **Code**:
-  - `crates/smelt-core/src/config.rs` — `Materialization` (storage) enum stays `View | Table | MaterializedView | Ephemeral`; the refresh strategy (`full` / `cumulative`) is a separate `refresh` axis; `IncrementalStrategy::Merge` (variant to drop)
-  - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, validation that `timeseries:` / `incremental:` are absent when `refresh: cumulative`
+  - `crates/smelt-core/src/config.rs` — the `Materialization` (storage) enum is `View | Table | Ephemeral` (target; `MaterializedView` is relocated to the refresh axis by the rename phase of `docs/plans/20260704-model-updates.md`); the refresh mode (`full` / `cumulative` / …) is a separate `refresh` axis; `IncrementalStrategy::Merge` (variant to drop)
+  - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, validation that `timeseries:` / a `batched:` block are absent when `refresh: cumulative`
   - `crates/smelt-logical/src/rules/cumulative.rs` — the cumulative classifier (pure rule-data, in `smelt-logical`; `smelt-planner` re-exports — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
   - `crates/smelt-planner/src/rules/` — host for the per-partition step loop (rule *application*)
   - `crates/smelt-backend/src/lib.rs` — `merge_into` trait method (physical primitive the rule calls)
@@ -258,7 +272,7 @@ This section captures the load-bearing rationale.
 - **Tests**:
   - `crates/smelt-backend-duckdb/src/lib.rs::test_merge_into_upsert`, `test_merge_into_insert_only` — backend primitive coverage
   - Cumulative classifier unit tests and per-partition equivalence tests (to be added alongside the implementation plan)
-- **User docs**: `docs-site/docs/guide/materializations.md` (to be updated to document `refresh: cumulative` on the refresh axis, alongside `incremental`)
+- **User docs**: `docs-site/docs/guide/materializations.md` (to be updated to document `refresh: cumulative` on the refresh axis, alongside `batched`)
 - **Plans (history)**:
   - `docs/plans/20260523-cumulative-aggregate.md` — implementation plan derived from this spec
 - **Research**:
@@ -266,8 +280,9 @@ This section captures the load-bearing rationale.
   - `docs/research/20260521-incremental-as-planner-rule.md` — sibling research; the "derive from SQL, not YAML" principle this spec inherits
   - `docs/research/2026-05-20-incremental-gaps-from-web-analytics.md` — Gap #5, the original motivation
 - **Related specs**:
-  - `incremental_models.md` — the sibling rule with per-partition equivalence and timeseries output
+  - `batched_models.md` — the partitioned-output peer (per-partition equivalence, timeseries output)
+  - `versioned_models.md`, `latest_value_models.md`, `materialized_view.md` — the other keyed-output refresh modes
   - `timeseries.md` — the source-side declaration this rule consumes
-  - `models.md` — the three axes (kind / storage / refresh); `Materialization` (storage) enum host; frontmatter table
+  - `models.md` — the three axes (kind / storage / refresh); refresh-axis and storage-enum host; frontmatter table
   - `expansion.md` — function expansion pass; runs before the classifier
   - `architecture.md` — `smelt.<path>` addressing; backend primitive contract

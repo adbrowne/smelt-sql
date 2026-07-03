@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-04
 owners: [andrew]
 ---
 
@@ -52,7 +52,7 @@ Each section delimiter must follow the exact form `--- name: <model_name> ---` (
 
 ### Query body forms
 
-A model's SQL body may be written either as a standard `SELECT` statement or as a **pipe query** — the FROM-first `FROM t |> WHERE … |> AGGREGATE …` form. A body that begins with a bare `FROM` (no leading `SELECT`) followed by `|>` stages is a pipe query and is lowered to standard SQL during code generation; all frontmatter (`materialization`, `refresh`, `incremental`, `tags`, …) applies identically regardless of body form. See `pipe_sql.md` for the pipe operator set, scoping rules, and lowering.
+A model's SQL body may be written either as a standard `SELECT` statement or as a **pipe query** — the FROM-first `FROM t |> WHERE … |> AGGREGATE …` form. A body that begins with a bare `FROM` (no leading `SELECT`) followed by `|>` stages is a pipe query and is lowered to standard SQL during code generation; all frontmatter (`materialization`, `refresh`, `batched`, `tags`, …) applies identically regardless of body form. See `pipe_sql.md` for the pipe operator set, scoping rules, and lowering.
 
 ### Model naming
 
@@ -71,9 +71,9 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 |-----|------|---------|-------------|
 | `name` | string | — | Accepted but ignored in single-model files; overridden by delimiter in multi-model files |
 | `materialization` | enum | project default (`view`) | How to store the model's output (the storage axis). See Materialization (storage) modes. |
-| `refresh` | enum | `full` | How stored output is recomputed across runs (the refresh axis). `full` (default) or `cumulative`. See Refresh axis. |
-| `timeseries` | object | — | Time-dimension declaration (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Required when `incremental:` is declared. |
-| `incremental` | object | — | Incremental configuration (the refresh axis's incremental strategy). See `incremental_models.md`. Requires `timeseries:` to be present. |
+| `refresh` | enum | `full` | How stored output is recomputed across runs (the refresh axis). See Refresh axis. |
+| `timeseries` | object | — | Time-dimension declaration (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Required when `refresh: batched`. |
+| `batched` | object | — | Batched-refresh configuration (`unique_key`, `nondeterministic_columns`, `safety_overrides`). See `batched_models.md`. Only valid with `refresh: batched`, which requires `timeseries:`. |
 | `target` | string | — | Override execution target for this model (overrides `smelt.yml` and `--target`). Not valid on `ephemeral` models. |
 | `tags` | string[] | `[]` | Organization labels. Merged with `smelt.yml` model config tags (union, deduplicated). |
 | `owner` | string | — | Responsible team or person. Informational; surfaced in data catalog. |
@@ -90,10 +90,10 @@ A model is described by three independent questions, each with its own surface:
 | Axis | Question | Surface | Values |
 |------|----------|---------|--------|
 | **Kind** | What kind of node is this? | file format / `smelt.<noun>` keyword | `model` · `test` · `function` · `extern` · `seed` · `source` (see `architecture.md`) |
-| **Storage** | How is a model's output stored? | `materialization:` | `view` · `table` · `materialized_view` · `ephemeral` |
-| **Refresh** | How is stored output recomputed across runs? | `refresh:` / `incremental:` | `full` (default) · `incremental` · `cumulative` |
+| **Storage** | How is a model's output stored? | `materialization:` | `view` · `table` · `ephemeral` |
+| **Refresh** | How is stored output recomputed across runs? | `refresh:` | `full` (default) · `batched` · `cumulative` · `versioned` · `latest_value` · `materialized_view` |
 
-`materialization` answers **only** the storage question. Kind is determined elsewhere — a unit test is a `smelt.test` declaration (`testing.md`), not a `materialization` value. Refresh is a separate axis — a cumulative aggregate is `materialization: table` + `refresh: cumulative` (`cumulative_aggregate.md`), and incremental is `materialization: table` + an `incremental:` block (`incremental_models.md`).
+`materialization` answers **only** the storage question: does the output persist data (`table`), re-evaluate on read (`view`), or inline (`ephemeral`)? Kind is determined elsewhere — a unit test is a `smelt.test` declaration (`testing.md`), not a `materialization` value. Refresh is a separate axis governing *how a stored table is kept current*: a batched model is `refresh: batched` + a `timeseries:` block (`batched_models.md`); a cumulative aggregate is `refresh: cumulative` (`cumulative_aggregate.md`); an engine-maintained view is `refresh: materialized_view` (`materialized_view.md`). Every refresh mode other than `full` implies a stored `table` — the modeller never restates `materialization: table` for them.
 
 ### Materialization (storage) modes
 
@@ -102,19 +102,34 @@ A model is described by three independent questions, each with its own surface:
 | `view` | Creates a SQL view. No data stored; query re-evaluated on each read. Default if unset. |
 | `table` | Persists the query result as a physical table. |
 | `ephemeral` | Not materialized. SQL is inlined as a CTE into every downstream model that references it. |
-| `materialized_view` | Backend-managed persistent view; the backend controls refresh scheduling. |
+
+An engine-maintained materialized view is **not** a storage value — it is `refresh: materialized_view` over an implied `table` (Refresh axis below). Storage answers only "does this persist data"; "who keeps it current, and how" is the refresh axis. The backend may physically emit `CREATE MATERIALIZED VIEW` to realize `refresh: materialized_view`, but that is a lowering choice (`multi_backend.md`), not a distinct storage mode the user selects.
 
 ### Refresh axis
 
-A stored output (`materialization: table` or `materialized_view`) is recomputed across runs according to the **refresh** axis. `full` — the default, rebuild from scratch — needs no key. The two stateful strategies are members of the same axis, each with its own detailed surface:
+A stored `table` is recomputed across runs according to the **refresh** axis. Every non-`full` mode upholds the same underlying guarantee — its result equals a full refresh restricted to the inputs it has processed so far — but each names a **distinct contract with its own spec**. The values are peers, never a single value with a `strategy:` sub-knob that silently swaps invariants (Design §"Refresh modes are peers").
 
-| Strategy | Surface | Spec |
-|----------|---------|------|
-| `full` | *(default; no key)* | — |
-| `incremental` | `incremental:` block + `timeseries:` source | `incremental_models.md` |
-| `cumulative` | `refresh: cumulative` | `cumulative_aggregate.md` |
+Two observable properties separate the modes: the **output shape** they produce, and who owns keeping them current.
 
-`refresh` and a refresh strategy only apply to stored outputs: `refresh` on a `view`, `ephemeral`, or `materialized_view` model is a warning (the config is ignored), mirroring the existing `incremental` treatment in the Constraint violations table.
+**Partitioned output** — a plain complete table with a `partition_column`, built by processing new data forward in batches. Same *contents* as a `full` table; differs only in *build method*.
+
+| `refresh:` | Surface | Contract | Output shape | Freshness owner | Spec |
+|----------|---------|----------|--------------|-----------------|------|
+| `full` | *(default; no key)* | trivial (recompute) | table | smelt (per run) | — |
+| `batched` | `refresh: batched` + `timeseries:` (+ optional `batched:` block) | per-partition slice | partitioned | smelt (per run) | `batched_models.md` |
+
+**Keyed output** — one row per key, no partition column; downstream treats it as a lookup. Each row reflects state across all processed inputs (order-independent end-state), kept behind the user-visible relation.
+
+| `refresh:` | Surface | Contract | Output shape | Freshness owner | Spec |
+|----------|---------|----------|--------------|-----------------|------|
+| `cumulative` | `refresh: cumulative` | end-state | keyed (one row per key) | smelt (per run) | `cumulative_aggregate.md` |
+| `versioned` | `refresh: versioned` | end-state (interval-keyed) | keyed + validity interval | smelt (per run) | `versioned_models.md` |
+| `latest_value` | `refresh: latest_value` | end-state | keyed (current row per key) | smelt (per run) | `latest_value_models.md` |
+| `materialized_view` | `refresh: materialized_view` | end-state | keyed | **engine** (continuous) | `materialized_view.md` |
+
+`cumulative` and `materialized_view` produce the same-shaped result but differ in **freshness owner** — smelt-pull (correct as of the last `smelt build`) vs engine-push (kept current continuously by the backend's native incremental-view maintenance). That different operational commitment is why they are peers rather than one mode with a hidden maintainer flag. `versioned` keeps every version of a key with a validity interval; `latest_value` keeps only the current row per key (the SCD Type-2 / Type-1 patterns, named without the vendor jargon).
+
+`refresh` applies only to stored tables: `refresh` on a `view` or `ephemeral` model is a warning (the config is ignored). `refresh: materialized_view` on a backend without native incremental-view maintenance is a **hard error**, not a silent fallback (`materialized_view.md`).
 
 ### Materialization precedence (highest to lowest)
 
@@ -132,7 +147,7 @@ Under `columns:`, each key is a column name. Each value is an object with the ke
 |-----|------|-------------|-------------|
 | `description` | string | Human-readable column description. Rendered in the data catalog. | `data_catalog.md` |
 | `tests` | list | Column-level test constraints (`not_null`, `unique`, `{accepted_values: [...]}`, etc.). | `testing.md` |
-| `data_latency` | object | Late-arrival configuration consumed by incremental batch-safety analysis. | `incremental_models.md` |
+| `data_latency` | object | Late-arrival configuration consumed by batched-refresh batch-safety analysis. | `batched_models.md` |
 | `default` | string | SQL literal used as the DEFAULT expression when adding a NOT NULL column under schema evolution. | `schema_evolution.md` |
 | `backfill` | string | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. | `schema_evolution.md` |
 
@@ -163,16 +178,16 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 
 | Combination | Result |
 |-------------|--------|
-| `ephemeral` + `incremental` | Hard error |
-| `ephemeral` + `refresh: cumulative` | Hard error |
+| `ephemeral` + any non-`full` `refresh:` | Hard error |
+| `ephemeral` + `batched:` block | Hard error |
 | `ephemeral` + `timeseries` | Hard error (see `timeseries.md`) |
 | `ephemeral` + `target` override | Hard error |
-| `incremental` without `timeseries` | Hard error (`TimeseriesRequiredForIncremental`) |
-| `refresh: cumulative` + `timeseries` | Hard error (`CumulativeForbidsTimeseries`; see `cumulative_aggregate.md`) |
-| `refresh: cumulative` + `incremental` | Hard error (`CumulativeForbidsIncremental`) |
-| `view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
-| `view` + `refresh: cumulative` | Warning (stderr); refresh config ignored |
-| `materialized_view` + `incremental.enabled: true` | Warning (stderr); incremental config ignored |
+| `refresh: batched` without `timeseries` | Hard error (`TimeseriesRequiredForBatched`) |
+| `batched:` block without `refresh: batched` | Hard error |
+| `refresh: cumulative` \| `versioned` \| `latest_value` \| `materialized_view` + `timeseries` | Hard error (keyed-output modes have no partition column) |
+| `refresh: cumulative` (or any keyed-output mode) + `batched:` block | Hard error (different refresh contracts) |
+| `view` + non-`full` `refresh:` | Warning (stderr); refresh config ignored |
+| `refresh: materialized_view` on a backend without native IVM | Hard error (`materialized_view.md`) |
 | Unknown frontmatter key | Hard error (`deny_unknown_fields`) |
 
 ## Semantics
@@ -213,9 +228,11 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 **Multi-model files.** The `--- name: model_name ---` syntax allows logically-related models to live in one file without requiring a directory hierarchy. This is useful for staging + mart pairs or small pipelines that belong together conceptually. The name must be in the delimiter (not just YAML body) so the file can be scanned without full YAML parsing.
 
-**`materialization` is the storage axis only.** dbt's `materialized` value conflates three questions — what kind of node this is (`test`), how output is stored (`table`/`view`), and how it is refreshed (`incremental`). smelt keeps these on three orthogonal axes (see "Three orthogonal axes"). `materialization` answers only "how is output stored", with four storage modes: `view`, `table`, the backend-managed `materialized_view`, and `ephemeral` (inlined, no stored object). This matches the backend's own storage-only notion of materialization. A unit test is a different *kind* of node — it produces no output and nothing depends on it — so it is a `smelt.test` declaration on the kind axis (`testing.md`), not a `materialization` value. A stateful refresh strategy (cumulative, incremental) is a different *axis* — `materialization: table` + `refresh:`/`incremental:` — because two models can share a storage mode while differing in how they are recomputed.
+**`materialization` is the storage axis only.** dbt's `materialized` value conflates three questions — what kind of node this is (`test`), how output is stored (`table`/`view`), and how it is refreshed (`incremental`, `materialized_view`). smelt keeps these on three orthogonal axes (see "Three orthogonal axes"). `materialization` answers only "how is output stored", with three storage modes: `view` (no data, recompute on read), `table` (persisted), and `ephemeral` (inlined, no stored object). This matches the backend's own storage-only notion of materialization. A unit test is a different *kind* of node — it produces no output and nothing depends on it — so it is a `smelt.test` declaration on the kind axis (`testing.md`), not a `materialization` value. A refresh mode (`batched`, `cumulative`, `versioned`, `latest_value`, `materialized_view`) is a different *axis* — `materialization: table` (implied) + `refresh:` — because two models can share a storage mode while differing in how they are recomputed.
 
-**Why `cumulative` joins `incremental` on the refresh axis, not `materialization`.** Cumulative aggregate and incremental are siblings: both keep a stored table and recompute it statefully across runs, differing only in their equivalence contract (`cumulative_aggregate.md`, `incremental_models.md`). Modelling one as a `materialization` value and the other as a config block on a `table` would put two members of one family on two different axes. Placing both on the refresh axis keeps the family together and keeps `materialization` purely about storage.
+**`materialized_view` is a refresh mode, not a storage mode.** A backend-managed materialized view persists data (so its *storage* is `table`) and is kept current *by the engine* (so its distinguishing property is on the *refresh* axis, the engine-owned peer of the smelt-owned `cumulative`). Making it a fourth `materialization` value — as an earlier design did — repeated exactly the dbt conflation this axis split exists to avoid: it put "who owns freshness" on the storage axis. Relocating it to `refresh: materialized_view` (implied `table` storage) keeps `materialization` answering only "does this persist data" and keeps the freshness-owner question on the refresh axis where `cumulative` already lives. The physical `CREATE MATERIALIZED VIEW` DDL a backend may emit is a lowering detail (`multi_backend.md`), not a user-selected storage kind.
+
+**Refresh modes are peers, grouped by statefulness — never a strategy sub-knob.** The refresh values are distinct named peers, each naming exactly one equivalence contract (Surface §"Refresh axis"). A single `refresh:` value with a `strategy:` sub-knob (dbt's `materialized='incremental'` + `incremental_strategy`) was rejected: the sub-knob silently swaps the equivalence contract under one name, the single most common source of dbt confusion. The peers divide by two observable properties — output shape and freshness owner (Surface §"Refresh axis"): `batched` produces a partitioned table built forward in batches; `cumulative`/`versioned`/`latest_value`/`materialized_view` produce a keyed lookup whose rows carry state across all processed inputs. `cumulative` and `batched` are not variants of one strategy — they differ in output shape (keyed vs partitioned), equivalence (end-state vs per-partition), and execution (ordered vs window-independent). Each keyed mode has its own spec (`cumulative_aggregate.md`, `versioned_models.md`, `latest_value_models.md`, `materialized_view.md`); deeper rationale in `docs/research/20260703-model-updates.md` (Parts 1, 16, 17).
 
 **Tag union, not override.** Tags accumulate across config layers rather than overriding. This lets a project-level `smelt.yml` add organization-wide tags (e.g., `pii`, `sla`) to specific models without preventing model authors from adding their own. Override semantics would require model authors to re-declare all project-level tags whenever they add their own.
 
@@ -225,7 +242,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 ## Constraints & Invariants
 
-1. **Every model file is pure SQL.** No Jinja, no conditionals, no `is_incremental()`. The framework injects time filters and other execution-time rewrites; the logical SQL is static.
+1. **Every model file is pure SQL.** No Jinja, no conditionals, no `is_incremental()`-style build-mode branching. The framework injects time filters and other execution-time rewrites; the logical SQL is static.
 2. **Ephemeral models have no database object.** They produce no `CREATE TABLE`, `CREATE VIEW`, or DDL of any kind. Their SQL exists only as text substituted into downstream models.
 3. **Tests are not models and have no database object.** A unit test is a `smelt.test` declaration (`testing.md`), not a model and not a `materialization` value. Tests are executed in-memory against a mock dataset; they never produce persistent state.
 4. **Canonical addresses are unique within a project.** The discovery pass must not yield two `ModelFile` entries with the same canonical `smelt.<path>` address. Uniqueness is keyed on the full canonical address, not the bare leaf model name — `models/users.sql` (address `users`) and `models/archive/users.sql` (address `archive.users`) are distinct and legal.
@@ -237,6 +254,8 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
+- **Keyed refresh modes beyond `cumulative` are not yet implemented.** The refresh axis names `versioned`, `latest_value`, and `materialized_view` as normative peers (each with its own spec), but only `full`, `batched`, and `cumulative` are built today. Declaring `versioned` / `latest_value` / `materialized_view` currently produces an unknown-refresh-value error; each is delivered by a phase of `docs/plans/20260704-model-updates.md`.
+- **Config keys and diagnostics still spell the batched mode `incremental` internally.** The user-facing surface is `refresh: batched` + the `batched:` block; the underlying config field, diagnostic codes (`TimeseriesRequiredForIncremental`, …), and CLI plumbing retain the `incremental` spelling until the rename phase of `docs/plans/20260704-model-updates.md` lands. See `batched_models.md` §Known Divergences.
 
 ## References
 
@@ -254,8 +273,11 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **Related specs**:
   - `architecture.md` — `smelt.<path>` addressing scheme and identity-from-structure principle
   - `timeseries.md` — `timeseries:` frontmatter block
-  - `incremental_models.md` — incremental frontmatter keys (the refresh axis's incremental strategy)
-  - `cumulative_aggregate.md` — the `refresh: cumulative` strategy
+  - `batched_models.md` — the `refresh: batched` mode and the `batched:` frontmatter block
+  - `cumulative_aggregate.md` — the `refresh: cumulative` mode
+  - `versioned_models.md` — the `refresh: versioned` mode (SCD Type 2)
+  - `latest_value_models.md` — the `refresh: latest_value` mode (SCD Type 1)
+  - `materialized_view.md` — the `refresh: materialized_view` mode (engine-owned incremental-view maintenance)
   - `testing.md` — the `smelt.test` declaration kind
   - `schema_evolution.md` — `schema_evolution:` and `columns.default/backfill` frontmatter keys (forthcoming)
   - `pipe_sql.md` — the FROM-first pipe-query body form a model may use

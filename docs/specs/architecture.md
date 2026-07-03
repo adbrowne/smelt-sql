@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Architecture
 
-> **What this is.** The system-level spec for smelt as a SQL-to-SQL compiler and orchestrator. Defines the compilation pipeline, crate boundaries, and the architectural invariants that all feature specs depend on. Feature specs (e.g., `incremental_models.md`, `lsp.md`) sit on top of this one.
+> **What this is.** The system-level spec for smelt as a SQL-to-SQL compiler and orchestrator. Defines the compilation pipeline, crate boundaries, and the architectural invariants that all feature specs depend on. Feature specs (e.g., `batched_models.md`, `lsp.md`) sit on top of this one.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -162,7 +162,7 @@ The frontmatter parser is shared across all four declaration kinds; the parsing 
 
 - **Function and extern keys** (`deterministic`, `idempotent`, `append_only`, `backends`, gated `joins` / `provenance`): see `functions.md`.
 - **Time-dimension keys** (`timeseries`): see `timeseries.md`.
-- **Model materialization keys** (`materialization`, `incremental`, …): see `incremental_models.md`.
+- **Model materialization keys** (`materialization`, `incremental`, …): see `batched_models.md`.
 
 This spec does not duplicate those catalogues; it only fixes the attachment rule and the parser-sharing invariant.
 
@@ -436,7 +436,7 @@ This section captures the load-bearing rationale behind the pipeline, the crate 
 
 A consequence worth naming: multi-team or multi-domain workspaces can co-locate everything for a domain — sources, seeds, tests, and models — under a single directory tree (`payments/`, `inventory/`, `support/`), with the namespace falling out of the path automatically. The kind-axis and the domain-axis stay independent. A kind-by-directory rule would have collapsed them, forcing every team to scatter their entities across `models/payments/`, `seeds/payments/`, `tests/payments/` instead of holding `payments/` together.
 
-**Unified frontmatter attaches to the immediately following declaration.** Visually, a YAML block "introduces" what comes after it; that is the natural binding for human readers and for editors annotating it. The alternative — file-level frontmatter only — falls apart the moment a file mixes multiple bare-SELECT models with multiple `smelt.define`s, because per-declaration metadata (a model's `materialization: table`, one function's `deterministic: true`, another function's `backends: [duckdb]`) has nowhere to live. Per-declaration attachment with a shared parser keeps the grammar uniform across all three declaration kinds (model, `smelt.define`, `smelt.extern`) while letting feature specs catalogue their own keys (`functions.md`, `incremental_models.md`). Research §16 #22.
+**Unified frontmatter attaches to the immediately following declaration.** Visually, a YAML block "introduces" what comes after it; that is the natural binding for human readers and for editors annotating it. The alternative — file-level frontmatter only — falls apart the moment a file mixes multiple bare-SELECT models with multiple `smelt.define`s, because per-declaration metadata (a model's `materialization: table`, one function's `deterministic: true`, another function's `backends: [duckdb]`) has nowhere to live. Per-declaration attachment with a shared parser keeps the grammar uniform across all three declaration kinds (model, `smelt.define`, `smelt.extern`) while letting feature specs catalogue their own keys (`functions.md`, `batched_models.md`). Research §16 #22.
 
 **Bare-model naming: lone-anonymous OR all-named, never mixed.** Two simpler-looking rules were rejected. *Always-fall-back-to-filename* (use frontmatter `name:` when present, filename otherwise) lets one file mix anonymous-named-by-filename and named-by-frontmatter SELECTs, so a reader has to scan each declaration's YAML to know what it is called. *Always-frontmatter-when-present* has the same failure mode in reverse. The all-or-nothing rule pays a one-line YAML key in multi-model files for a structural unambiguity: the *presence* of `name:` on a bare SELECT is the signal that the file is multi-model and the filename is a container; its absence is the signal that the filename is the canonical name. Multi-model files exist because some helpers (a small staging variant, a debug projection) deserve to live next to the model they serve without earning a separate file — but they must declare themselves to do so.
 
@@ -475,7 +475,7 @@ Update as part of any plan that touches architecture.
 - **Planner cost estimation is future work.** Current rules are deterministic detectors with no statistics input.
 - **User-authored planner rules cannot yet be registered.** Today every planner rule is built into the binary; there is no mechanism for a project to register its own rule. When that lands it uses the same rule → diagnostics interface (§"Planner scope"), so user rules inherit Diagnostic-parity coverage by construction — this is a missing *extensibility* feature, not a gap in the parity contract.
 - **Python model discovery** is specified in `python_models.md` and implemented in `smelt-runtime` (`python.rs`, `combined_loop.rs`). The PyO3 vs subprocess behavior parity (both execution paths should produce identical results) is not systematically tested — edge cases in SDK path resolution may differ.
-- **Multi-backend execution model not specified beyond trait surface.** Capability negotiation (incremental support, MERGE support, ALTER COLUMN support), cross-engine reference resolution rules (when does `read_parquet()` substitution apply?), and target precedence will land in `multi_backend.md` (or an expansion of §"Backend trait surface"). Today, capability claims are scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, and `smelt_yml.md`.
+- **Multi-backend execution model not specified beyond trait surface.** Capability negotiation (incremental support, MERGE support, ALTER COLUMN support), cross-engine reference resolution rules (when does `read_parquet()` substitution apply?), and target precedence will land in `multi_backend.md` (or an expansion of §"Backend trait surface"). Today, capability claims are scattered across `batched_models.md`, `schema_evolution.md`, `testing.md`, and `smelt_yml.md`.
 - **User journey integrity matrix open.** The cross-product of testing × incremental × schema-evolution × multi-backend is not pinned end-to-end. Pinning depends on `run_state.md` and the multi-backend spec landing first.
 - **dbt comparison and migration story not specified.** Expected home: a `migration_from_dbt.md` spec or a dedicated docs-site/ guide. Until authored, the gap is a known limitation for adopters migrating from dbt.
 - **Schema-inference subsystem still uses leaf names for column-origin tracking.** `RowExtension.ref_name` and `InputConstraint.ref_name` in `smelt-db` carry the leaf segment of an upstream model (the file stem) rather than the canonical `smelt.<path>` tuple. As a result, the LSP's column-goto-definition (via `smelt_db::resolve_ref_leaf`) and `smelt-db`'s own schema inference resolve upstreams by leaf name. This is structurally invisible to users today — leaf collisions across layers do not occur in the column subsystem because every column lookup is already scoped to a single project — but it preserves a leaf-only resolution path inside the schema layer that is not shared by the canonical-path resolver (`resolve_ref_path`). Migrating to canonical paths requires changing the column-origin schema types (`RowExtension`, `InputConstraint`) and threading the full path tuple through schema inference; this is a separate refactor tracked in `docs/plans/20260527-canonical-addressing-and-scope.md`.
@@ -486,7 +486,7 @@ Update as part of any plan that touches architecture.
 
 The spec set has explicit gaps that the following entries claim space for. Each names the in-scope future spec and which existing specs will pull content out of it:
 
-- **Multi-backend execution model** — likely an expansion of §"Backend trait surface" or a dedicated `multi_backend.md`. Today scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, `smelt_yml.md`.
+- **Multi-backend execution model** — likely an expansion of §"Backend trait surface" or a dedicated `multi_backend.md`. Today scattered across `batched_models.md`, `schema_evolution.md`, `testing.md`, `smelt_yml.md`.
 - **`planner_api.md`** — owns the user-authored planner-rule surface. Working design at `docs/planner_rule_api_design.md`; needs review against the 2026-05-01 universal-addressing rework before becoming normative.
 - **`migration_from_dbt.md`** *(or docs-site guide)* — owns the dbt analogue mapping and migration story. No content today.
 
@@ -506,6 +506,6 @@ Each in-spec Known Divergence cross-references this anchor.
 - **Tests**: dialect printer identity tests under `crates/smelt-dialect/tests/`; parse-level pg_query / Spark equivalence tests in `crates/smelt-parser-compat/tests/`; pure-function tests in `crates/smelt-db/tests/type_property_tests.rs`
 - **User docs**: `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/developing/architecture.md`
 - **Plans (history)**: see `docs/plans/` for area-specific implementation work
-- **Related specs**: feature specs under `docs/specs/` extend this one — `functions.md` (the function half of the models-as-functions equivalence), `timeseries.md` (time-dimension declaration), `incremental_models.md` (model materialization keys), `types.md` (type vocabulary), `planner_integration.md` (planner consumption of frontmatter properties), `diagnostics.md` (diagnostic-code catalogue and fail-loud discipline), `pipe_sql.md` (FROM-first pipe-query body form and its lowering at the dialect-printer seam)
+- **Related specs**: feature specs under `docs/specs/` extend this one — `functions.md` (the function half of the models-as-functions equivalence), `timeseries.md` (time-dimension declaration), `batched_models.md` (model materialization keys), `types.md` (type vocabulary), `planner_integration.md` (planner consumption of frontmatter properties), `diagnostics.md` (diagnostic-code catalogue and fail-loud discipline), `pipe_sql.md` (FROM-first pipe-query body form and its lowering at the dialect-printer seam)
 - **Research**: `docs/research/20260413-smelt-functions.md` §4 (the unified-model framing)
 - **Legacy reference (will thin out)**: `docs/architecture_overview.md` — superseded by this spec

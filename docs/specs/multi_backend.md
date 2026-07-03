@@ -12,7 +12,7 @@ owners: [andrew]
 > them: the `BackendCapabilities` matrix, how the dialect printer lowers logical SQL to each
 > backend's valid physical SQL, and the cross-engine data-exchange rules. Out of scope: the
 > `Backend` trait method surface itself (see `architecture.md` §"Backend trait surface"); how
-> incremental strategies are *chosen* (see `incremental_models.md`); how schema changes are
+> the batched-refresh strategy is *chosen* (see `batched_models.md`); how schema changes are
 > *classified* (see `schema_evolution.md`); target YAML shape (see `smelt_yml.md`). This spec
 > owns the **parity contract** that ties those together.
 >
@@ -47,7 +47,8 @@ owners: [andrew]
   | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ |
   | `supports_trailing_commas` | ✓ | ✗ | ✗ |
   | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ |
-  | `supports_materialized_views` | ✗ (table fallback) | ✗ (table fallback) | ✗ (table fallback) |
+  | `supports_native_ivm` | ✗ | ✗ | ✗ |
+  | `supports_retraction` | ✗ | ✗ | ✗ |
   | `supports_struct_field_ddl` | ✓ | ✓ | ✗ |
   | `supports_alter_column_using` | ✓ | ✗ | ✗ |
   | `supports_nested_array_ddl` | ✓ | ✓ | ✗ |
@@ -103,9 +104,20 @@ suite is the executable list):
 - `supports_create_or_replace_table = false` → emulate via `DROP TABLE IF EXISTS` + `CREATE
   TABLE` (the Spark backend already does this).
 - `supports_insert_overwrite = false` → emulate via range `DELETE` + `INSERT` (DuckDB).
-- `supports_materialized_views = false` → fall back to `Table` materialization. No backend today
-  emits a native materialized view: DuckDB and both Spark profiles take the table fallback. (OSS
-  Spark SQL has no native materialized view; a real one would be a Databricks-only capability.)
+- `supports_native_ivm = false` → `refresh: materialized_view` is a **hard error**, *not* a lowering.
+  This is the one carve-out from lower-don't-reject: `refresh: materialized_view` is a declared
+  commitment to engine-owned freshness (`materialized_view.md`), so substituting a smelt-driven or
+  full-refresh table would swap the declared contract. Every other refresh mode (`batched`,
+  `cumulative`, `versioned`, `latest_value`) is smelt-driven and needs no backend IVM. No backend
+  today advertises native IVM — DuckDB and both Spark profiles set the flag `false`, so
+  `refresh: materialized_view` currently always errors; native IVM would be a Databricks-only
+  capability (Enzyme).
+
+### Incremental-view-maintenance capabilities
+Two flags describe a backend's participation in maintaining a keyed refresh mode's state; both are `false` on every backend today.
+
+- **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. It is *not* consulted for the smelt-driven keyed modes (`cumulative`, `versioned`, `latest_value`), which maintain their own state with `merge_into` + views on any backend.
+- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `cumulative` model can retract is a *per-model* property of its aggregator algebra (the group rung, `cumulative_aggregate.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
 
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may
@@ -141,7 +153,7 @@ referenced Spark model to be `materialization: table` and the Spark target to de
 No explicit copy step exists; Spark writes Parquet, DuckDB reads it natively.
 
 ### Incremental & schema evolution per backend
-Strategy *resolution* (`incremental_models.md`) and change *classification*
+Strategy *resolution* (`batched_models.md`) and change *classification*
 (`schema_evolution.md`) consult the capability matrix but are specified in those documents.
 This spec only requires that the resolved strategy and migration plan are expressible in the
 target backend's physical SQL via the lowering rules above — e.g. a backend without native
@@ -221,6 +233,7 @@ resolves nested widening to a table rewrite.
   performance gap, not a correctness one. Deferred.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
+- **`supports_native_ivm` / `supports_retraction` are specified but unwired; the old flag is not yet renamed.** The matrix lists both as normative flags (all `false`), and `refresh: materialized_view` gates on `supports_native_ivm` (§"Incremental-view-maintenance capabilities"). The code today has neither flag; it still carries `supports_materialized_views` (which gated a now-removed storage-axis `materialized_view` via a `Table` fallback). Renaming `supports_materialized_views` → `supports_native_ivm`, adding `supports_retraction`, and wiring the `refresh: materialized_view` hard error are a phase of `docs/plans/20260704-model-updates.md`. No backend advertises native IVM, so the mode is inert until a Databricks/Enzyme backend lands.
 
 ## References
 
@@ -237,5 +250,5 @@ resolves nested widening to a table rewrite.
 - **Plans (history)**: `docs/plans/20260328-multi-engine-example.md`,
   `docs/plans/20260628-spark-parity.md`.
 - **Related specs**: `architecture.md` (§"Backend trait surface"), `smelt_yml.md`
-  (§"Target shape"), `incremental_models.md`, `schema_evolution.md`, `testing.md`,
+  (§"Target shape"), `batched_models.md`, `schema_evolution.md`, `testing.md`,
   `types.md`.

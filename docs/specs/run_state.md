@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Run State
 
-> **What this is.** A normative spec for smelt's on-disk run state — the `.smelt/` directory layout, the run-manifest format, run IDs, the interval ledger, deployed-schema snapshots, and (for virtual environments) the fingerprint-keyed snapshot and environment→table map. It defines what smelt persists, when, and how a stateless project avoids persisting anything. Out of scope: the equivalence judgement that keys snapshots (see `output_fingerprint.md`); the environment orchestration that consumes them (see `virtual_environments.md`); incremental interval *semantics* (see `incremental_models.md`); deployed-schema *change classification* (see `schema_evolution.md`). This spec owns the **storage**; those specs own the **meaning**.
+> **What this is.** A normative spec for smelt's on-disk run state — the `.smelt/` directory layout, the run-manifest format, run IDs, the interval ledger, deployed-schema snapshots, and (for virtual environments) the fingerprint-keyed snapshot and environment→table map. It defines what smelt persists, when, and how a stateless project avoids persisting anything. Out of scope: the equivalence judgement that keys snapshots (see `output_fingerprint.md`); the environment orchestration that consumes them (see `virtual_environments.md`); incremental interval *semantics* (see `batched_models.md`); deployed-schema *change classification* (see `schema_evolution.md`). This spec owns the **storage**; those specs own the **meaning**.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -56,7 +56,7 @@ A run ID is `<UTC-timestamp>-<hex-suffix>`, formatted `%Y%m%d-%H%M%S-<6 hex>` (e
 
 ### Interval ledger (`intervals.json`)
 
-Cumulative per-model interval coverage as string date keys (`"2026-01-01"`, half-open `[start, end)`). Interval arithmetic (merge, gap detection) operates on calendar dates. Consumed by incremental backfill and gap detection (`incremental_models.md`).
+Cumulative per-model interval coverage as string date keys (`"2026-01-01"`, half-open `[start, end)`). Interval arithmetic (merge, gap detection) operates on calendar dates. Consumed by incremental backfill and gap detection (`batched_models.md`).
 
 ### Snapshot and environment store (virtual environments)
 
@@ -66,13 +66,13 @@ Under `state.mode: environments`, run state additionally records, per model: the
 
 - **Stateless writes nothing.** Under `state.mode: stateless` (the default), no manifest, interval, snapshot, or environment record is written; `.smelt/` need not exist. State is created only when a higher posture is opted into.
 - **A manifest is written per run.** `started_at` and `run_id` are set at run start; `completed_at` is set on successful completion. A manifest with `completed_at: null` denotes an interrupted run.
-- **Recovery is idempotent re-run.** smelt does not checkpoint mid-run; recovery is re-running the same selection/range, which converges because each committed unit is idempotent (`incremental_models.md` §"Failure mode"). The interval ledger lets a re-run skip already-covered ranges and surface gaps.
+- **Recovery is idempotent re-run.** smelt does not checkpoint mid-run; recovery is re-running the same selection/range, which converges because each committed unit is idempotent (`batched_models.md` §"Failure mode"). The interval ledger lets a re-run skip already-covered ranges and surface gaps.
 - **Manifest evolution is backward-compatible.** Readers must tolerate historical manifests: every new field is `Option`al or `#[serde(default)]`. A required new field is a breaking change to stored state and is not permitted.
 - **Snapshot reuse is keyed by fresh fingerprints, not stored hashes.** The persisted artifact for reuse is the **expanded logical SQL**, not its fingerprint. Equivalence is decided by fingerprinting the stored SQL and the current SQL with the *current* compiler at decision time (`output_fingerprint.md` §Design). The stored fingerprint, if recorded, is a cache/diagnostic, never the source of truth.
 
 ## Design
 
-**Opt-in, file-based, gitignored.** State is a posture a project opts into (`virtual_environments.md` §`state.mode`), not a baseline requirement. Storing it as plain JSON files under `.smelt/` (rather than a required embedded database) keeps a stateless project zero-cost and keeps state human-inspectable and easy to delete — a half-broken state store must never be harder to recover from than dropping a directory. Rationale: `incremental_models.md` §Design "smelt does not own state"; research §6.
+**Opt-in, file-based, gitignored.** State is a posture a project opts into (`virtual_environments.md` §`state.mode`), not a baseline requirement. Storing it as plain JSON files under `.smelt/` (rather than a required embedded database) keeps a stateless project zero-cost and keeps state human-inspectable and easy to delete — a half-broken state store must never be harder to recover from than dropping a directory. Rationale: `batched_models.md` §Design "smelt does not own state"; research §6.
 
 **Persist the SQL, treat the fingerprint as ephemeral.** Storing the expanded logical SQL that built each table — and recomputing fingerprints fresh on both sides at decision time — makes the fingerprint algorithm free to change between releases with no migration code and no version-stable-form contract. A stored hash would force a versioned normal form and golden cross-version tests; storing the SQL makes the comparison apples-to-apples by construction. Rationale: `output_fingerprint.md` §Design; research §5.6, Open Question 15.
 
@@ -87,7 +87,7 @@ Under `state.mode: environments`, run state additionally records, per model: the
 
 ## Known Divergences / Open Questions
 
-- **Interval-ledger key granularity is date-only, pending the incremental rewrite.** The interval ledger (§"Interval ledger") keys coverage by calendar-date string (`"2026-01-01"`), but incremental models routinely filter on sub-day (hourly/second) event-time boundaries. Whether the ledger keys move to RFC3339 instants (sub-day capable) is **coordinated with the incremental_models rewrite** rather than changed here, so the ledger granularity and the incremental cadence model land together. Tracked in `docs/plans/20260322-incremental-model-support.md` (`incremental_models.md`).
+- **Interval-ledger key granularity is date-only, pending the incremental rewrite.** The interval ledger (§"Interval ledger") keys coverage by calendar-date string (`"2026-01-01"`), but incremental models routinely filter on sub-day (hourly/second) event-time boundaries. Whether the ledger keys move to RFC3339 instants (sub-day capable) is **coordinated with the incremental_models rewrite** rather than changed here, so the ledger granularity and the incremental cadence model land together. Tracked in `docs/plans/20260322-incremental-model-support.md` (`batched_models.md`).
 - **Snapshot / environment store is unbuilt.** Today `smelt-state` persists run manifests, the interval ledger, and deployed schemas. The expanded-logical-SQL snapshot, the recorded output fingerprint, and the `(environment, model) → table` map are **specified here but not implemented**; they arrive with the virtual-environments orchestration layer. Tracking: `docs/research/20260601-virtual-environments.md` §8.
 - **JSON files vs. embedded store.** Research §8 sketched an embedded `.smelt/state.db`; the implementation uses JSON files (`runs/*.json`, `intervals.json`, `schemas/*.json`). The current normative layout is the JSON form; whether to move to an embedded store as the snapshot/environment map grows is open.
 - **Concurrency / parallelism.** Run IDs and the file layout assume a single smelt process at a time; concurrent runs against one `.smelt/` are not specified. Parallel *model* execution within one run is owned by `smelt-runtime`, not by this layout.
@@ -99,4 +99,4 @@ Under `state.mode: environments`, run state additionally records, per model: the
 - **Tests**: `crates/smelt-state/tests/`
 - **User docs**: none yet (CLI surfaces `smelt status` / `smelt history` over this state — see `cli.md`)
 - **Plans (history)**: none yet — predecessor research is `docs/research/20260601-virtual-environments.md`
-- **Related specs**: `incremental_models.md` (interval semantics, idempotent recovery), `schema_evolution.md` (deployed-schema snapshots and migration), `virtual_environments.md` (the snapshot/environment consumers), `output_fingerprint.md` (the equivalence key), `architecture.md` (`state.mode` surface, `smelt-state` crate)
+- **Related specs**: `batched_models.md` (interval semantics, idempotent recovery), `schema_evolution.md` (deployed-schema snapshots and migration), `virtual_environments.md` (the snapshot/environment consumers), `output_fingerprint.md` (the equivalence key), `architecture.md` (`state.mode` surface, `smelt-state` crate)
