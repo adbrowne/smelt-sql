@@ -83,6 +83,7 @@ queue the next group, scaffold its sub-plan (own spec-diff + docs-site update) a
 | Sub-plan | Group / what it delivers | Status |
 |----------|--------------------------|--------|
 | [`docs/plans/20260704-model-updates-group-a.md`](20260704-model-updates-group-a.md) | **Group A** — rename & ontology landing (A1 `refresh: batched` selector + `batched:` block, hard-cutting the `incremental:` block; A2 `Incremental→Batched` diagnostic/config rename + downstream doc sweep; A3 remove `materialized_view` from the storage axis; A4 IVM capability flags + `refresh: materialized_view` hard error). | pending |
+| [`docs/plans/20260704-model-updates-group-b.md`](20260704-model-updates-group-b.md) | **Group B** — batched eligibility relaxations (B0 filter-placement classifier + unified bound derivation; B1 monotonicity-primitive consumers UNION/subquery-CTE/joins; B2 bounded-`RANGE`+`LAG`/`LEAD`; B3 non-determinism run-pinning + payload opt-in; B4 `HAVING`/`DISTINCT` group-aligned; B5 run-window↔partition-granularity alignment; B6 self-referential ordered execution; B7 monotone-integer partition keys; B8 per-source clamp observability). Depends on Group A. | pending |
 
 ### Group scaffolding queue (human-gated — NOT registered until scaffolded)
 
