@@ -223,11 +223,13 @@ combiner must be **invertible**: a commutative **group** (a monoid with an inver
   while Flink keeps *retraction state* for them (a non-group needs the raw multiset
   to handle a delete). Same fact, now named.
 
-So the state-representation axis has **three** rungs, not two:
+So the state-representation axis has **four** rungs — three that need no user
+opt-in, and one that does (§4.4):
 
 ```
-direct monoid ⊂ decomposed monoid (append-only) ⊂ group (retraction)
-   SUM,MIN…        + AVG, variance, HLL              + delete/reprocess for the invertible ones
+direct monoid ⊂ decomposed monoid (append-only) ⊂ group (retraction) ⊂ explicit multiset (opt-in)
+   SUM,MIN…        + AVG, variance, HLL              + delete/reprocess       + MEDIAN, exact distinct,
+                                                       for invertible ones      MODE, quantiles (§4.4)
 ```
 
 ### 4.3 The boundary is where smelt-driven stops and native IVM begins
@@ -245,7 +247,77 @@ non-additive aggregates like `MEDIAN`/`PERCENTILE` (all-rows state). Those are
 maintainable, but only by a runtime that keeps per-operator differential state —
 which is what native IVM *is*. That is the honest boundary between the two
 maintainer columns: **smelt emulates the monoid/group aggregate slice; native IVM
-adds the general-operator slice smelt cannot keep state for.**
+adds the general-operator slice smelt cannot keep state for.** That boundary is not
+fixed, though: for single-column holistic aggregates it *moves* once the user
+accepts unbounded state — the opt-in fourth rung of §4.4.
+
+### 4.4 The opt-in fourth rung: explicit multiset state (bounded-domain Z-set)
+
+The operators §4.3 hands to native IVM purely for *state-size* reasons — the
+holistic single-column aggregates `MEDIAN`, `PERCENTILE`, `MODE`, exact
+`COUNT(DISTINCT)`, and the `DISTINCT`-modified aggregates — are recoverable by
+smelt-driven maintenance if the user accepts state that is unbounded *in general*.
+This is a **space** trade, not a correctness one: the maintained-relation
+equivalence contract (§2) holds unconditionally for every operator below. What is
+unbounded is the number of rows in the state, never the fidelity of `π(state)`.
+
+The state is the **value-frequency multiset** — for each key group, the map
+`value ↦ count` over that column's active domain. Merging partitions is
+componentwise count addition, so the multiset is the free commutative *monoid* over
+the domain; allow signed counts and it is the free abelian *group* — which is
+exactly the **Z-set retraction model** (Feldera/DBSP, §4.3 and References)
+restricted to a single column. "Store distinct values and counts" is therefore not
+an ad-hoc trick; it is opting one aggregate into a bounded-domain Z-set.
+
+**One state, many presentations.** Because `π` is any pure function of the
+empirical distribution, a single multiset state serves:
+
+- `MEDIAN`, any `PERCENTILE_CONT/DISC`, and arbitrary quantiles;
+- `MODE`, entropy, gini — any functional of the distribution;
+- exact `COUNT(DISTINCT)` (keys with count > 0) and the `DISTINCT`-modified
+  aggregates `SUM(DISTINCT)` / `AVG(DISTINCT)` (needing only the key *set*, a
+  cheaper sub-state than the full histogram);
+- exact top-K / heavy hitters (the largest counts).
+
+And because the signed version is a *group*, retraction is free for all of them —
+**including `MIN`/`MAX`**, the monoid-not-group cases §4.2 could add but not un-see.
+The full multiset is precisely the retraction state the doc already noted Flink
+keeps for `MIN`/`MAX` (§4.2;
+[eligibility §7.2 obs. 2](20260701-expanding-incremental-eligibility.md)): keeping
+the whole distribution is what lets you delete the current maximum and recover the
+previous one.
+
+**Exact vs. approximate is the real axis.** Most of these holistic aggregates also
+have a *bounded* decomposed-monoid realization needing no opt-in — the same
+relationship §4.1 draws between exact distinct and the HLL sketch:
+
+| aggregate | bounded, decomposed monoid (§4.1, no opt-in) | unbounded exact (opt-in multiset) |
+|---|---|---|
+| distinct count | HLL / sketch register vector | exact key set |
+| quantiles / median | t-digest / KLL sketch | exact histogram |
+| top-K / heavy hitters | Space-Saving / Misra-Gries | exact histogram |
+| mode, entropy, DISTINCT-aggs | — (need the distribution) | exact histogram |
+| ordered `ARRAY_AGG`/`STRING_AGG` | — | multiset of `(sort_key, value)`; `π` re-sorts |
+
+So `MEDIAN` needs the opt-in rung only when *exact*; approximate `MEDIAN` is a
+t-digest decomposed monoid that belongs beside HLL in §4.1 — bounded state, no
+opt-in.
+
+**Why it must be opt-in and fail-loud.** State size is `O(active domain)`,
+unbounded for a high-cardinality column, so it cannot be the default — that would
+silently build state proportional to input size. The fitting posture is fail-loud +
+lower-don't-reject ([`multi_backend.md`](../specs/multi_backend.md) §Design "Lower,
+don't reject"): by default the classifier refuses an unbounded-state aggregate and
+suggests either the bounded approximate form or full-refresh; the user opts in by
+asserting the domain is bounded, and the runtime keeps a cap that falls back to
+full-refresh if the multiset exceeds it. This keeps derive-don't-declare intact —
+the SQL still just says `MEDIAN`; the opt-in is a *space-budget assertion*, not a
+strategy knob that changes the contract.
+
+The part that stays firmly native-IVM-only is the genuinely multi-relation delta
+camp: incremental **joins** (bilinear), and operators whose state is unbounded in a
+dimension the user cannot cap. The fourth rung moves the boundary for *single-column
+holistic aggregates*, not for the general-operator slice.
 
 ---
 
@@ -419,6 +491,15 @@ word cannot absorb without becoming a misnomer.
   hard-coded rewrite table (like the current combiner lookup), or an extensible
   registry? The closed-table answer matches cumulative's "fixed allowlist, not a
   registry" stance; revisit only when a concrete sketch motivator appears.
+
+- **What is the opt-in surface for unbounded-exact state (§4.4)?** Exact
+  `MEDIAN`/`MODE`/quantiles/`DISTINCT`-aggregates are maintainable via the
+  value-multiset at `O(active-domain)` state. How does the user assert the domain is
+  bounded — a per-model annotation, a domain-size hint, or a runtime cap with
+  full-refresh fallback? And is the exact-vs-approximate choice (multiset vs.
+  t-digest/HLL) derived from a fidelity request or declared? The SQL (`MEDIAN`)
+  should stay the operator source of truth; the opt-in should be a space-budget
+  assertion, not a contract-changing strategy knob.
 
 - **Presentation-view purity.** §5.3 requires `π` to be a pure function of a single
   state row. Is that guaranteed by construction from the decomposition rewrite, or
