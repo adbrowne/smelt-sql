@@ -51,7 +51,12 @@ that whole topic — *model updates* — covering three connected bodies of work
    acting as *validator*, never as a silent chooser.
 
 Part 18 collects the open questions — including which of them the combined
-scope settles and which it newly creates.
+scope settles and which it newly creates. **Part 19**, added after the ledger,
+asks whether the Part 17 modes *combine* (e.g. a latest-value output consumed
+day by day with batched's operational features) and answers by naming the
+second, mostly-derived axis the enum deliberately does not encode — how new
+input is discovered — plus the two genuinely hybrid cells the taxonomy should
+decide explicitly.
 
 **A note on names.** Part 17 recommends renaming the window-forward mode from
 `incremental` to **`batched`**, freeing "incremental" to be the *family* word
@@ -3449,7 +3454,9 @@ a few new ones (§18.3).
   executes as partition DELETE+INSERT. If in scope, the *ordered* execution
   property (§11.4) must be derived and enforced (no parallel backfill); if a
   non-goal, the self-edge should be a named rejection rather than a silently
-  mis-parallelised build.
+  mis-parallelised build. (Sharpened further in §19.6: this is one of the two
+  genuinely hybrid cells, and the composition escape route runs through the
+  other one.)
 
 **Maintained camp:**
 
@@ -3529,6 +3536,235 @@ a few new ones (§18.3).
   entirely. Does the orchestrator consume one unified execution-planning signal
   (parallelisable / ordered / engine-owned), and how do `--auto` staleness and
   DAG scheduling treat a model whose freshness smelt does not own?
+
+---
+
+## Part 19 — Combining modes: the input-consumption axis
+
+*(Added after the Part 18 ledger was drawn up; §19.8 records what it settles
+there and what it newly adds.)*
+
+The Part 17 enum invites an immediate follow-on question: do the modes
+**combine**? The motivating case: a stream of per-key update events (a CDC
+feed, an ingest table of customer updates) from which the modeller wants *only
+the current row per key* — `latest_value`'s contract — but consumed **day by
+day**, with `batched`'s operational features: `--event-time` run windows,
+bounded backfill, `--auto` staleness, read-only-the-new-tail. Is that a new
+refresh value (`batched_latest_value`?), a sub-setting on one of the two modes,
+or evidence that the flat enum was the wrong shape all along?
+
+None of the three. The wanted "batched features" are not properties of the
+`batched` *mode* — they are properties of a second axis this document uses
+throughout but never names as an axis: **how new input is discovered and
+consumed**.
+
+### 19.1 The hidden second axis: input-delta discovery
+
+Every non-`full` mode must answer *"which input rows are new since the last
+run?"* before its maintenance contract ever touches them. The field has
+exactly three answers (§1.1 drew the two camps using the first and third):
+
+- **Window-forward** — the source carries a monotone clock; read the next
+  window(s). Cheap (no change-tracking metadata), pays the monotonicity price
+  (Part 4).
+- **Snapshot-diff** — re-scan the source and compare against stored state.
+  Needs no clock; pays a full source read per run.
+- **Change feed** — the source itself reports what changed (CDC, engine
+  change-tracking). The native-IVM maintainer's territory (§13.2). On the
+  smelt-driven side, an update-events *table* is a change feed reified as a
+  window-forward source — which is why the motivating example is expressible
+  at all.
+
+The Part 17 enum names the **output contract** — output shape, equivalence
+contract, freshness owner (§17.3's table). Input-delta discovery is a
+different kind of fact: it changes *what is scanned*, never *what the stored
+relation means*. That is precisely the category this document already derives
+everywhere else — direct vs decomposed vs native state (§15.2), ordered vs
+window-independent execution (§11.4) — and deliberately keeps out of the mode
+word.
+
+### 19.2 Cumulative is the existing proof of separability
+
+The combination the motivating example asks for already ships, in one cell:
+**`cumulative` is a keyed maintained mode that consumes its input
+window-forward.** It takes the same `--event-time-start/-end` flags as batched
+execution, applies them to the *driving source's* `partition_column` — "not to
+any column on the cumulative output"
+([`cumulative_aggregate.md`](../specs/cumulative_aggregate.md) §CLI) — steps
+over the covered source partitions in temporal order, and merges each
+partition's delta into keyed state. Windowed consumption on the input;
+end-state contract on the output; no `timeseries:` on the model itself.
+
+Nothing about that machinery is aggregate-specific. The delta-SELECT +
+per-window merge loop is indifferent to whether the per-key combiner is `⊕`
+(cumulative), last-writer-wins (`latest_value`), or close-old/open-new
+(`versioned`). So "latest value at ingest, processed day by day" is not a
+missing mode: it is `latest_value` occupying the input-consumption cell
+`cumulative` already occupies.
+
+### 19.3 The grid, and the rule it yields
+
+Placing the smelt-pull modes as cells (`materialized_view` delegates the whole
+input axis to the engine and does not appear):
+
+| output contract ↓ / input discovery → | window-forward | snapshot-diff |
+|---|---|---|
+| partition rebuild (per-partition contract) | `batched` | ✗ — unsatisfiable contract (§19.6, cell 2) |
+| ⊕-merge keyed | `cumulative` *(today)* | ✗ for non-idempotent combiners — re-merging a full scan double-counts (`cumulative_aggregate.md` §Reprocessing) |
+| last-writer keyed | **the motivating example** | `latest_value`'s own spec example (mutable snapshot source) |
+| close/open keyed (interval) | CDC feed → history | `versioned`'s own spec example (dbt-snapshot style) |
+
+The load-bearing observation: **moving horizontally never changes the
+equivalence contract or the output shape.** A `latest_value` model over a
+mutable snapshot table and one over an append-only update stream uphold the
+same end-state contract; only the delta-discovery mechanics differ. Vertical
+moves change the contract; horizontal moves change the scan. Therefore:
+
+- **Vertical is declared** — the `refresh:` mode, Part 17's irreversible
+  physical commitment (§17.1).
+- **Horizontal is derived** — from the *source's* shape: a source carrying a
+  `timeseries:` declaration (a monotone clock, Part 4-traceable) is consumed
+  window-forward; a mutable snapshot source is re-scanned and diffed. The one
+  non-derivable world-fact on this axis is the source's **mutation profile**,
+  which §17.6 already routes to a declaration *on the source*, shared by every
+  consumer — exactly where this axis's declaration burden lands too. No
+  per-model knob, and certainly no `strategy:` selector, which would be §1.3
+  verbatim.
+
+One phrasing consequence for the keyed-mode specs. `latest_value_models.md`
+and `versioned_models.md` say the mode "**forbids** a `timeseries:` block" —
+right in intent (no *output* partition column) but stated on the wrong axis.
+`cumulative_aggregate.md` already has the correct spelling: no `timeseries:`
+*on the model itself*, while the run window applies to the driving source's
+clock. The sibling specs should adopt that spelling so windowed consumption is
+visibly in-bounds rather than accidentally excluded.
+
+### 19.4 The ordering-column dividend: windowed `latest_value` is a monoid
+
+`latest_value` leaves "what does *latest* mean" open — an ordering column
+(`updated_at`) vs last-processed. The windowed-consumption cell turns that
+from a taste question into an algebraic one, on Part 14's ladder:
+
+- **With an ordering column** the SQL projects: the per-key combiner is
+  `MAX_BY(row, updated_at)` — associative, commutative (given a deterministic
+  tiebreak), identity = absent key. A **commutative monoid** (a decomposed one:
+  the ordering key rides along as state). Merge order is irrelevant, so run
+  windows may be processed out of order, backfilled in slices, or parallelised
+  — the same order-independence cumulative's contract already licenses.
+- **Last-processed**: order-*dependent* — not a monoid. Windows must be
+  applied strictly sequentially, and a backfill that replays an old window
+  silently clobbers newer values — a footgun with no counterpart in the
+  ordering-column form.
+
+So the open question has an algebraically preferred answer: **derive "latest"
+from an ordering column visible in the SQL wherever one exists**
+(derive-don't-declare, as the spec already leans), and treat last-processed as
+the degraded fallback whose consequence is *derived ordered execution*
+(§11.4), not a new declaration. `versioned` gets the mirror-image note: the
+close-old/open-new combiner consumes versions in event order, so its windowed
+form is ordered regardless — with validity intervals stamped from the
+source's event time, not the run clock, so that end-state equivalence survives
+replays.
+
+### 19.5 The common ETL patterns, walked through the grid
+
+Testing the taxonomy against the patterns users actually build:
+
+| pattern | where it lands | verdict |
+|---|---|---|
+| update/CDC stream → current table per key | `latest_value`, window-forward input (§19.2) | fits — derived, no surface change |
+| update/CDC stream → full history per key | `versioned`, window-forward input | fits — same move |
+| late-arriving facts; rolling-window aggregates; intraday-refresh-then-settle | `batched` + lookback (Part 8), granularity alignment (Part 10), incomplete-final-partition (§10.3) | fits — sub-behaviours already worked |
+| deduplication at ingest | bounded-time dupes → `batched` + lookback; global dedup key → it is secretly `latest_value` keyed on the event id | fits — two existing cells |
+| batched fact enriched from a keyed dimension | **DAG composition**, not a mode combo; the keyed mode's lookup output is exactly the non-driving join input Part 7 wants full-scanned | fits — composition is the third resolution mechanism |
+| accumulating snapshot (order lifecycle: milestone columns filled in as events arrive) | keyed output, per-column `COALESCE`/`GREATEST` combiner — a commutative monoid; the already-sketched sibling rule ([20260522](20260522-cumulative-as-its-own-rule.md)) | future **peer** when demand arrives — a new contract, not a combo |
+| running totals *with history* (one row per key per day, each cumulative-to-date) | neither camp owns it | genuine hybrid — §19.6 cell 1 |
+| "snapshot the current state of X every day" | looks `batched`, but the input is not replayable | genuine hybrid — §19.6 cell 2 |
+
+Every perceived combination but the last two resolves to one of: an existing
+cell, a derived sub-behaviour, a DAG composition, or an already-sketched
+future peer.
+
+### 19.6 The two genuinely hybrid cells
+
+Two cells survive the walk-through as real taxonomy pressure, and they are
+adjacent:
+
+1. **Stateful time-partitioned output.** A model whose *output* is a time
+   series but whose build reads its own prior state: running totals with
+   history, sessionization with unbounded gaps, the self-referential batched
+   shape. This is `batched`'s output shape with `maintained`'s statefulness —
+   the leak §1.4 already admits and §18.2 leaves open. The combination
+   question sharpens it: this is the one place a user legitimately wants "a
+   cumulative that keeps its trajectory," and neither camp owns it. Whatever
+   the decision, it must **not** be a flag on either existing mode — it
+   changes both the contract (ordered, stateful) and the shape (partitioned) —
+   so the options are (a) a named rejection steering to `cumulative`, or (b) a
+   future peer in `accumulating_snapshot`'s neighbourhood.
+2. **Non-replayable input under a partitioned output.** "Snapshot the current
+   state of X daily." The output looks `batched`, but per-partition
+   equivalence is *unsatisfiable*: a full refresh cannot recompute yesterday's
+   partition because yesterday's source state is gone. That is not a `batched`
+   variant; it is an honestly weaker contract — *append-only observations,
+   never rebuildable*. If ever supported it is a new peer with that contract
+   stated; until then it deserves a **named rejection**, so nobody builds it
+   as `batched` and discovers at backfill time that the oracle lies. (Note
+   dbt's "snapshots" are the `versioned` pattern, not this cell; this cell is
+   the observation-series shape.)
+
+The adjacency is the sting: the obvious composition escape for cell 1 —
+`cumulative` upstream, a daily `batched` model snapshotting it downstream — is
+exactly cell 2 (the cumulative model's past states are not replayable). So
+composition does *not* discharge cell 1; the correct realizations are the
+ordered self-referential batched shape (§11.3, if ruled in scope) or a future
+peer. This is the strongest new argument that §18.2's self-reference question
+needs a deliberate answer rather than a default.
+
+### 19.7 The litmus rule
+
+The general rule the walk-through applies, worth stating once because it keeps
+the enum honest against every future "can these combine?":
+
+- Changes the **equivalence contract or output shape** → a new **peer**
+  refresh value (accumulating snapshot; the observation-series shape).
+- Changes only **how deltas are discovered or how much is scanned** →
+  **derived** from the source (windowed vs rescan, direct vs decomposed,
+  emulated vs native), surfaced in `explain`, never declared per-model.
+- Wants **two contracts at two grains** → **compose two models** in the DAG.
+
+This is the same three-way split the document already applies piecemeal —
+declare-as-assertion (§17.2), derived maintainer (§15.2), no
+pattern-×-maintainer blow-up (§17.8) — stated as one rule.
+
+### 19.8 What this Part settles and what it opens
+
+**Settled / adjusted:**
+
+- **The taxonomy holds.** The combinable-feeling features live on a second,
+  derived axis (input-delta discovery); the enum correctly names the axis that
+  must be declared. The motivating combination is in-taxonomy today's way:
+  keyed modes consume windowed input exactly as `cumulative` does. No new
+  modes, no sub-knobs.
+- **`latest_value`'s "definition of latest"** (its spec's Open Question) gains
+  an algebraically preferred answer: ordering-column, derived from the SQL,
+  with last-processed as the order-dependent fallback (§19.4).
+- **Keyed-spec phrasing:** forbid output partitioning (`timeseries:` on the
+  model itself), not event-time-aware consumption (§19.3).
+
+**Newly opened (additions to the §18 ledger):**
+
+- **Snapshot-diff mechanics for keyed modes.** What do the `--event-time`
+  flags mean for a snapshot-diff run (there is no window)? Is the diff
+  bounded, and how does `--auto` staleness fire for a source with no clock?
+- **Shared executor vs per-rule copies.** Does windowed consumption for
+  `latest_value`/`versioned` reuse cumulative's driving-source + per-partition
+  step machinery (one shared executor under the umbrella), or does each
+  sibling rule keep its own copy per the narrow-composable-rules posture? The
+  same question §18.2 already asks of the umbrella, now with three members
+  instead of one.
+- **Is "maintained trajectory" worth a peer?** Cell 1 of §19.6 — demand-gated,
+  but the composition route being blocked (the cell-1/cell-2 adjacency) means
+  it cannot be quietly deferred to "just build two models."
 
 ---
 

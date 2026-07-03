@@ -31,7 +31,7 @@ SELECT
 FROM smelt.customers_snapshot
 ```
 
-`refresh: versioned` is the entire opt-in; it implies a stored `table` (`models.md` §Design). It **forbids** a `timeseries:` block and a `batched:` block — the output is a keyed lookup, not a partitioned table (`models.md` §"Constraint violations").
+`refresh: versioned` is the entire opt-in; it implies a stored `table` (`models.md` §Design). It **forbids** a `timeseries:` block and a `batched:` block *on the model itself* — the output is a keyed lookup, not a partitioned table (`models.md` §"Constraint violations"). This forbids output partitioning, not event-time-aware consumption: like `cumulative`, a versioned model over a source that carries a `timeseries:` declaration (e.g. an update-events / CDC feed) consumes that source window-forward (see §Semantics).
 
 The model's SELECT projects the **natural key** and the tracked attribute columns as they are *now*. smelt maintains the version history: each `smelt build` compares the incoming rows against the stored current version per key and, where a tracked attribute changed, closes the prior version and opens a new one.
 
@@ -44,6 +44,13 @@ The stored table carries the projected columns plus smelt-managed validity colum
 ### End-state equivalence (interval-keyed)
 
 `refresh: versioned` upholds the keyed end-state contract (`cumulative_aggregate.md` §"Cross-partition equivalence"), specialised to intervals: the user-visible set of `(key, version, validity interval)` rows equals what a full rebuild would compute from the same sequence of processed snapshots, independent of the order in which non-overlapping snapshots were merged. smelt owns freshness (pull) — the history is correct as of the last `smelt build`.
+
+### Input consumption is derived from the source
+
+How new input is discovered is never declared on the model; it follows from the source's shape (`docs/research/20260703-model-updates.md` Part 19):
+
+- **Window-forward** — a source carrying a `timeseries:` declaration (an update-events / CDC feed) is consumed in `--event-time` run windows applied to the *source's* `partition_column`, exactly as `cumulative` consumes its driving source (`cumulative_aggregate.md` §CLI). Only the new tail is read. Because the close-old/open-new combiner consumes versions in event order, windows are applied in temporal order (derived ordered execution), and validity intervals are stamped from the source's event time — not the run clock — so end-state equivalence survives replays.
+- **Snapshot-diff** — a mutable snapshot source (no monotone clock) is re-scanned each run and compared against the stored current versions; the end-state contract is identical, only the scan cost differs.
 
 ### Change detection
 
@@ -60,7 +67,7 @@ A new version is opened for a key only when a **tracked attribute** changes betw
 ## Constraints & Invariants
 
 1. **`refresh: versioned` implies `table` storage.** No `materialization:` restatement.
-2. **No `timeseries:` and no `batched:` block.** Keyed + interval output; not a partitioned batched build.
+2. **No `timeseries:` and no `batched:` block on the model itself.** Keyed + interval output; not a partitioned batched build. Window-forward consumption of a `timeseries:` *source* is derived and in-bounds (§Semantics).
 3. **Validity intervals are non-overlapping per key.** At most one open (`is_current`) version per key at any time.
 4. **End-state equivalent and order-independent.** Merging non-overlapping snapshots in any order converges to the same version history.
 
@@ -80,7 +87,7 @@ A new version is opened for a key only when a **tracked attribute** changes betw
   - [`cumulative_aggregate.md`](cumulative_aggregate.md) — the running-aggregate keyed mode; source of the keyed end-state contract and `merge_into` execution model
   - [`materialized_view.md`](materialized_view.md) — engine-owned maintenance (where hand-written SCD2 SQL goes instead)
 - **Research**:
-  - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — Part 17 (the user surface; naming)
+  - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — Part 17 (the user surface; naming); Part 19 (the input-consumption axis)
   - [`docs/research/20260522-cumulative-as-its-own-rule.md`](../research/20260522-cumulative-as-its-own-rule.md) — the sibling-rule sketches (`scd2`, `latest_value`, `accumulating_snapshot`)
 - **Plans (history)**:
   - [`docs/plans/20260704-model-updates.md`](../plans/20260704-model-updates.md) — implements the model-updates research
