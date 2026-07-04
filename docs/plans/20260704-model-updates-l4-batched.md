@@ -187,7 +187,7 @@ keys**, and **per-source clamp observability**.
 | BL1 | F1, F13, Group A (A1) | `batched_models.md` §"Composition", §"Batch safety classification", §"Execution model", §"Event-time outer-visibility" | done |
 | BL2 | BL1 | `batched_models.md` §"First-run and backfill"; `model_transforms.md` §"Transforms that stay in a mode spec" | done |
 | BL3 | F3, Group A (A1) | `batched_models.md` §"Non-determinism and the payload rule", Constraint 12; `model_transforms.md` "Compile-time pinning" | done |
-| BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | pending |
+| BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | done |
 | BL5 | F1, Group A (A1) | `batched_models.md` §"Run window vs partition granularity"; `timeseries.md` §"Granularity arithmetic" | pending |
 | BL6 | F1 | `batched_models.md` §Surface (monotone integer `partition_column`), §"Observing the per-source clamp" | pending |
 | BL7 | F10, BL2 | `batched_models.md` §"Window independence and self-referential models" | pending |
@@ -457,6 +457,17 @@ No alignment logic is authored here — this is a consumer of F5.
 - [ ] Edits timeless.
 
 **Commit.** `feat(logical): admit group-aligned HAVING/DISTINCT in batched via the scoped partition-alignment signal`
+
+**Verification note (2026-07-05).** Already shipped pre-re-cut (commit `8241900b`, before this plan's L1/L2
+consolidation) — `check_having_alignment_all_scopes`/`check_distinct_alignment_all_scopes` in
+`crates/smelt-logical/src/rules/incremental.rs` already consume F5's per-scope `scope_group_by_alignment` /
+`scope_distinct_alignment` (`analysis/mod.rs`), `LIMIT` stays unconditionally rejected, and the equivalence
+fixture (`crates/smelt-cli/tests/incremental/having_distinct_alignment.rs`) plus the fail-closed reject unit
+tests already exist. `batched_models.md` §"Safety checks" and `docs-site/docs/guide/incremental-models.md`
+already document the superset rule. Re-verified green (`cargo test -p smelt-logical --lib incremental::` — 64
+passed; `cargo test -p smelt-cli --test incremental` — 46 passed, including
+`having_distinct_alignment::test_group_aligned_having_matches_full_refresh_per_partition`). No code/doc change
+made; row flipped to `done` as a verification-only phase.
 
 ---
 
