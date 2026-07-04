@@ -84,29 +84,36 @@ queue the next group, scaffold its sub-plan (own spec-diff + docs-site update) a
 |----------|--------------------------|--------|
 | [`docs/plans/20260704-model-updates-fundamentals.md`](20260704-model-updates-fundamentals.md) | **Fundamentals (L1+L2)** — derived proofs + transforms (F1–F3 consolidate the six code duplications; F4–F10 the new proof classifiers: algebraic discriminants, scoped partition-alignment, join-contribution/fan-out, presentation-map purity, additive-only diff, input-delta discovery, window-independence; F11–F15 the transforms: windowed-keyed-maintenance driver, decomposed-state+view, two-layer widened-scan/exact-clamp redesign, targeted column backfill, dimension-driven horizon MERGE). Runs **first** — the fundamentals-first re-cut (`docs/research/20260704-maintenance-fundamentals.md` §"Target plan architecture") that Groups B/C/D later compose. Does not cover L3 declaration surfaces or L4 mode compositions. | pending |
 | [`docs/plans/20260704-model-updates-group-a.md`](20260704-model-updates-group-a.md) | **Group A** — rename & ontology landing (A1 `refresh: batched` selector + `batched:` block, hard-cutting the `incremental:` block; A2 `Incremental→Batched` diagnostic/config rename + downstream doc sweep; A3 remove `materialized_view` from the storage axis; A4 IVM capability flags + `refresh: materialized_view` hard error). | done (2026-07-04) |
-| [`docs/plans/20260704-model-updates-group-b.md`](20260704-model-updates-group-b.md) | **Group B** — batched eligibility relaxations (B0 filter-placement classifier + unified bound derivation; B1 monotonicity-primitive consumers UNION/subquery-CTE/joins; B2 bounded-`RANGE`+`LAG`/`LEAD`; B3 non-determinism run-pinning + payload opt-in; B4 `HAVING`/`DISTINCT` group-aligned; B5 run-window↔partition-granularity alignment; B6 self-referential ordered execution; B7 monotone-integer partition keys; B8 per-source clamp observability). Depends on Group A. | pending |
-| [`docs/plans/20260704-model-updates-group-c.md`](20260704-model-updates-group-c.md) | **Group C** — keyed-mode maintenance rungs (C1 decomposed-monoid `AVG → (sum,count)` state table + presentation view — the enabling mechanism; C2 variance/stddev + approximate-distinct; C3 group-rung retraction + delta history + `--auto` fidelity; C4 opt-in bounded-domain multiset for exact holistic aggregates). C1 depends on Group A (A1); C2/C4 depend on C1. | pending |
-| [`docs/plans/20260704-model-updates-group-d.md`](20260704-model-updates-group-d.md) | **Group D** — new keyed modes (D1 `refresh: latest_value` SCD-1; D2 `refresh: versioned` SCD-2; D3 `refresh: materialized_view` engine-IVM emit, minimal). D1/D2 depend on Group C (C1's keyed `merge_into` + presentation-view plumbing); D3 depends on Group A (A4's IVM flags + hard error). | pending |
+| [`docs/plans/20260704-model-updates-l3-declarations.md`](20260704-model-updates-l3-declarations.md) | **L3 — Declaration surfaces** (DC1–DC5): declared monotonicity escape hatch, functional dependency `key → column`, bounded-domain/space budget, warning-only horizon ceiling, + source mutation-profile/lateness catalogue-by-reference. Each declaration may only **widen** a proof (fail-closed when it tries to narrow). Runs after Fundamentals. | pending |
+| [`docs/plans/20260704-model-updates-l4-batched.md`](20260704-model-updates-l4-batched.md) | **L4 batched** (BL1–BL8) — **supersedes Group B**. Wires the batched composition (partition-addressed; per-partition equivalence a *strengthening* of the one invariant) from fundamentals F1/F3/F5/F10/F13 + the batched-local residue: taint/pinning, `HAVING`/`DISTINCT`, run/partition granularity, self-referential ordered execution, monotone-integer keys, clamp observability, backfill chunking. | pending |
+| [`docs/plans/20260704-model-updates-l4-cumulative.md`](20260704-model-updates-l4-cumulative.md) | **L4 cumulative** (CU1–CU4) — **supersedes Group C**. Key-addressed ladder rungs 2–4 wired from F4/F7/F11/F12: decomposed-monoid `AVG`/Welford/approx-distinct + presentation view, group-rung retraction via delta history, opt-in bounded-domain multiset (needs the L3 budget declaration). | pending |
+| [`docs/plans/20260704-model-updates-l4-latest-value.md`](20260704-model-updates-l4-latest-value.md) | **L4 latest_value** (LV1–LV4) — **supersedes Group D/D1**. SCD-1 keyed-overwrite: `RefreshStrategy::LatestValue` + upsert-overwrite via the F11 windowed-keyed-maintenance driver; "latest" = max-by-ordering vs last-processed; input-consumption derivation. Wires F2/F4/F9/F11. | pending |
+| [`docs/plans/20260704-model-updates-l4-versioned.md`](20260704-model-updates-l4-versioned.md) | **L4 versioned** (V1–V5) — **supersedes Group D/D2**. SCD-2 close-old/open-new via keyed `merge_into` (the out-of-window keyed write — the canonical proof that output addressing, not the clock, is the axis) + smelt-managed validity columns + tracked-attribute selection. Wires F1/F2/F4/F10/F11/F13. | pending |
+| [`docs/plans/20260704-model-updates-l4-materialized-view.md`](20260704-model-updates-l4-materialized-view.md) | **L4 materialized_view** (MV1–MV3) — **supersedes Group D/D3**, minimal. Delegate-to-native-IVM emit + verbatim engine-error relay + remove the silent `create_table_as` fallback. Wires no fundamentals; depends on A4 (done). | pending |
 
-> **Fundamentals-first ordering (2026-07-04).** The **Fundamentals (L1+L2)** sub-plan is the first
-> registry row, so the loop works the shared proofs + transforms to completion before it reaches
-> Group B. Groups B/C/D remain registered `pending` but are **not** what the loop runs next; once the
-> fundamentals layer lands, they are re-scaffolded as **L4 mode-composition** sub-plans that wire the
-> new capabilities by name (research §"Mapping the current master onto the layers"), superseding their
-> current mode-vertical decomposition. Do not run Group B against this branch until that re-scaffold —
-> it would re-derive capabilities the fundamentals layer already owns.
+> **Fundamentals-first ordering + L3/L4 re-cut (2026-07-04).** The **Fundamentals (L1+L2)** sub-plan is
+> the first registry row, so the loop drives the shared proofs + transforms to completion before it
+> reaches any L3/L4 row. The mode-vertical **Groups B/C/D are superseded** by the now-registered **L3
+> declaration** + **L4 mode-composition** sub-plans above, which wire the fundamentals capabilities **by
+> name** (research §"Mapping the current master onto the layers"). Their `-group-b/-c/-d.md` files are
+> retained for history but **de-registered** (removed from this table) so the loop runs the L4 re-cuts,
+> not the old mode-vertical decomposition — running Group B as-is would re-derive capabilities the
+> fundamentals layer now owns. Group A (rename/ontology) is `done`. Row order encodes the dependency:
+> Fundamentals → L3 → L4 (batched, cumulative, latest_value, versioned, materialized_view); because the
+> loop runs the first READY row to completion, all F-phases land before any L4 row begins.
 
 ### Group scaffolding queue (human-gated — NOT registered until scaffolded)
 
-Scaffold each as its own sub-plan (via `/smelt:plan` against the cited spec) and add a registry row
-when ready. The loop reports `<<MASTER_EXHAUSTED>>` when no registered sub-plan has pending work.
+The L3/L4 re-cut is scaffolded and registered above — Groups B/C/D no longer need separate scaffolding
+(their capabilities are re-homed into the Fundamentals L1/L2 layer and the L4 mode compositions). What
+remains human-gated:
 
-- **Group B** — batched eligibility relaxations (B0–B8). Depends on Group A (A1 surface). B0 first
-  (unified bound derivation), then the monotonicity-primitive consumers and per-relaxation phases.
-- **Group C** — keyed-mode maintenance rungs (C1–C4). Depends on A1. C1 (presentation-view mechanism)
-  first; C2/C4 depend on C1.
-- **Group D** — new keyed modes (D1 `latest_value`, D2 `versioned`, D3 `materialized_view` emit).
-  D1/D2 depend on C1; D3 depends on A4.
+- **`accumulating_snapshot`** — delivered by its own master, `docs/plans/20260704-accumulating-snapshot.md`
+  (not this registry). It composes the join-contribution monotonicity proof + dimension-driven
+  horizon-bounded MERGE + the horizon settled-delay transform once those fundamentals land.
+- The loop reports `<<MASTER_EXHAUSTED>>` when no registered sub-plan has pending work; a human then
+  scaffolds any further sub-plan (via `/smelt:plan` against the cited spec) and adds its registry row.
+  **The loop never scaffolds a sub-plan or authors a spec autonomously.**
 
 ## Progress tracking
 
