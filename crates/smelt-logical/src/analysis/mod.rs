@@ -2,6 +2,7 @@ pub mod bounded_domain;
 pub mod decomposed_state;
 pub mod discriminants;
 pub mod functional_dependency;
+pub mod horizon_ceiling;
 pub mod input_delta;
 pub mod join_shape;
 pub mod model_diff;

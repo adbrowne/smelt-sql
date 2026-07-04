@@ -30,16 +30,29 @@ use crate::fn_bodies::FnBodyMap;
 /// * `dep_timeseries` — For each dependency that has `timeseries:`, maps dep name →
 ///   `(address_segments, partition_column)`. Address segments give the full smelt path
 ///   (e.g., `["silver", "events_parsed"]`).
+/// * `horizon_ceiling` — The model's declared `horizon_ceiling:` warning ceiling, if any.
+///   Never narrows or widens the derived bound (see `docs/specs/model_maintenance.md`
+///   §"Windowed maintenance and the horizon") — it only licenses a warning message in the
+///   returned `Vec<String>` when a source's derived reach exceeds it.
+///
+/// Returns the bound map (used exactly as before) alongside any horizon-ceiling warnings
+/// collected while building it, so callers can surface them (e.g. via `tracing::warn!`)
+/// without a second walk over the sources.
 pub fn build_source_bound_map(
     model_sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-) -> HashMap<String, crate::transformer::SourceBound> {
+    horizon_ceiling: Option<&smelt_core::config::DataLatency>,
+) -> (
+    HashMap<String, crate::transformer::SourceBound>,
+    Vec<String>,
+) {
+    use smelt_logical::analysis::horizon_ceiling::check_horizon_ceiling;
     use smelt_planner::analysis::source_bounds::{
         derive_and_classify_bounds, BoundContext, BoundResult,
     };
 
     if dep_timeseries.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), Vec::new());
     }
 
     // Build BoundContext: dep_name → partition_col
@@ -54,8 +67,18 @@ pub fn build_source_bound_map(
     let raw_bounds = derive_and_classify_bounds(model_sql, &ctx);
 
     let mut result = HashMap::new();
+    let mut warnings = Vec::new();
     for (dep_name, (segs, partition_col)) in dep_timeseries {
         let bound_result = raw_bounds.get(dep_name).map(|(_, bound)| bound.clone());
+
+        // The horizon ceiling is a warning-only comparison against the derived
+        // reach — it never changes `before_secs`/`after_secs` below. Compare
+        // before the match consumes `bound_result`.
+        if let (Some(bound), Some(ceiling)) = (bound_result.as_ref(), horizon_ceiling) {
+            if let Some(msg) = check_horizon_ceiling(bound, ceiling.seconds) {
+                warnings.push(format!("source '{}': {}", dep_name, msg));
+            }
+        }
 
         let (before_secs, after_secs) = match bound_result {
             Some(BoundResult::Bounded { before, after, .. }) => (before.0, after.0),
@@ -79,7 +102,7 @@ pub fn build_source_bound_map(
         );
     }
 
-    result
+    (result, warnings)
 }
 
 /// Build an ordered substitution vector from positional and named arguments,

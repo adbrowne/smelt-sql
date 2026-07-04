@@ -208,6 +208,22 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          crates/smelt-logical/src/rules/incremental.rs)",
     ),
     (
+        "horizon_ceiling_comfortable",
+        "Catalog Error: Table with name sources_raw_events does not exist \
+         (DC4 fixture: `horizon_ceiling` warning-only declaration — the derived 2-hour \
+         reach is comfortably inside the declared 30-day ceiling, so no warning fires; \
+         source table `main.sources_raw_events` not seeded in the standalone build env — \
+         covered by crates/smelt-runtime/tests/horizon_ceiling_warning.rs)",
+    ),
+    (
+        "horizon_ceiling_tight",
+        "Catalog Error: Table with name sources_raw_events does not exist \
+         (DC4 fixture: `horizon_ceiling` warning-only declaration — the derived 2-hour \
+         reach exceeds the declared 1-hour ceiling, licensing a compile-time warning that \
+         never narrows the clamp; source table `main.sources_raw_events` not seeded in the \
+         standalone build env — covered by crates/smelt-runtime/tests/horizon_ceiling_warning.rs)",
+    ),
+    (
         "fn_struct_spread_cte",
         "Catalog Error: Table with name sources_gps_readings does not exist \
          (D2 probe fixture: struct spread inside CTE body schema propagation; \

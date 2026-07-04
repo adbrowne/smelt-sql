@@ -234,6 +234,18 @@ pub struct ModelMetadata {
     /// silent default (no `#[serde(default)]` on `BoundedDomain::max_cardinality`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounded_domain: Option<crate::config::BoundedDomain>,
+
+    /// Model-scoped horizon-ceiling declaration — the modeller's warning
+    /// ceiling on the maintained window. The horizon is always **derived**
+    /// from the model's own reach (lookback, window frames, join
+    /// contribution); this declaration never relaxes or narrows the derived
+    /// clamp. It only licenses a compile-time warning when the derived
+    /// horizon would exceed the declared ceiling. See
+    /// `docs/specs/model_maintenance.md` §"Windowed maintenance and the
+    /// horizon". Reuses `crate::config::DataLatency`'s existing fail-loud
+    /// interval parser — no new interval grammar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizon_ceiling: Option<crate::config::DataLatency>,
 }
 
 impl ModelMetadata {

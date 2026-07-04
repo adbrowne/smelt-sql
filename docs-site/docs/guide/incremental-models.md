@@ -508,6 +508,34 @@ Sources declared in per-entity source YAML files (with a `timeseries:` block —
 
 > **Current scope:** pushdown applies the bound derived from the **outer SQL body**. `smelt.define` function bodies are not yet expanded before bound derivation, so a source whose only INTERVAL pattern is inside a function body receives a partition-local (`PT0S`) filter. The exact run-window filter is still correct for correctness; it may read more data than necessary if the function body introduces a wider lookback. Full expansion-before-derivation is tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
 
+### Declaring a horizon ceiling (warning only)
+
+The **horizon** — the far edge of the maintained window, past which inputs are no longer read — is always **derived** from the model's own SQL (its lookback, window frames, and join contribution). smelt never trusts a declared horizon for the clamp itself: an under-estimate would silently drop rows that should have been rewritten.
+
+A modeller may still declare a `horizon_ceiling:` as a *warning* ceiling on how far that derived horizon is expected to reach:
+
+```sql
+---
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+refresh: batched
+horizon_ceiling: '30 days'
+---
+SELECT
+    event_date,
+    user_id,
+    SUM(amount) OVER (
+        PARTITION BY user_id
+        ORDER BY event_ts
+        RANGE BETWEEN INTERVAL '2 hours' PRECEDING AND CURRENT ROW
+    ) AS rolling_amount
+FROM smelt.events
+```
+
+Here the model's own `RANGE BETWEEN INTERVAL '2 hours'` frame derives a 2-hour horizon, comfortably inside the declared 30-day ceiling — no warning. If a future edit widened that frame past 30 days, smelt would emit a compile-time warning naming both the derived reach and the declared ceiling. Either way, **the clamp always uses the derived value** — the ceiling narrows nothing; it only tells you when the model's real reach has grown further than expected.
+
 ## Batching
 
 When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.

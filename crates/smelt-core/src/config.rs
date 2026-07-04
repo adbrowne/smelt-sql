@@ -1398,6 +1398,30 @@ targets:
         assert_eq!(latency.to_days(), 3);
     }
 
+    /// `horizon_ceiling:` on `ModelMetadata` reuses `DataLatency`'s existing
+    /// fail-loud interval parser — this test confirms the field wiring
+    /// surfaces both the happy path and the malformed-value error, not the
+    /// grammar itself (already covered by `test_data_latency_parse`).
+    #[test]
+    fn test_model_metadata_horizon_ceiling_deserializes_via_data_latency() {
+        let yaml = "horizon_ceiling: '30 days'\n";
+        let metadata: crate::metadata::ModelMetadata = serde_yaml::from_str(yaml).unwrap();
+        let ceiling = metadata
+            .horizon_ceiling
+            .expect("horizon_ceiling must deserialize");
+        assert_eq!(ceiling.seconds, 30 * 86400);
+    }
+
+    #[test]
+    fn test_model_metadata_horizon_ceiling_rejects_malformed_value() {
+        let yaml = "horizon_ceiling: 'banana'\n";
+        let result: Result<crate::metadata::ModelMetadata, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "a malformed horizon_ceiling must be a fail-loud parse error, not a silent default"
+        );
+    }
+
     #[test]
     fn test_model_config_target_field() {
         let yaml = r#"

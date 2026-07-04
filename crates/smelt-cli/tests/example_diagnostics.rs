@@ -179,6 +179,18 @@ fn bounded_domain_declared_no_diagnostics() {
     check_workspace_no_diagnostics("examples/bounded_domain_declared");
 }
 
+/// `horizon_ceiling` declaration fixture (DC4): a downstream model's 2-hour
+/// `RANGE BETWEEN INTERVAL` lookback derives a horizon comfortably inside
+/// the declared 30-day ceiling. Verifies the workspace loads without any
+/// diagnostics (the warning this declaration licenses is a compile-time
+/// `tracing::warn!`, not a Salsa `Diagnostic` — exercised by
+/// `crates/smelt-runtime/tests/horizon_ceiling_warning.rs`, not through
+/// `file_diagnostics`).
+#[test]
+fn horizon_ceiling_comfortable_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/horizon_ceiling_comfortable");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that

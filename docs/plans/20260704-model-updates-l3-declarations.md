@@ -161,7 +161,7 @@ completed elsewhere; it is the reference shape. The other five are `not-yet`.
 | DC1   | Group A (done); F1 (done) | `model_properties.md` §"Model-scoped declarations" (declared monotonicity); §Constraints "may only widen" | done (2026-07-05) |
 | DC2   | Group A (done); F6 | `model_properties.md` §"Model-scoped declarations" (functional dependency `key → column`) | done (2026-07-05) |
 | DC3   | Group A (done); F4 | `model_properties.md` §"Model-scoped declarations" (bounded-domain / space budget) | done (2026-07-05) |
-| DC4   | Group A (done); F1 (done) + derived-horizon proof | `model_maintenance.md` §"Windowed maintenance and the horizon" | pending |
+| DC4   | Group A (done); F1 (done) + derived-horizon proof | `model_maintenance.md` §"Windowed maintenance and the horizon" | done (2026-07-05) |
 | DC5   | Group A (done); F9 | `models.md` §Known Divergences "Source mutation profile …"; `model_properties.md` §"Catalogued inputs" | pending |
 
 ---

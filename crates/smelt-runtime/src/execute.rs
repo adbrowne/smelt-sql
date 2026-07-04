@@ -884,7 +884,16 @@ pub async fn execute_project(
                             Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
                         })
                         .collect();
-                let per_model_source_bounds = build_source_bound_map(&sql_for_bounds, &dep_ts);
+                let horizon_ceiling = plan
+                    .model_file
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.horizon_ceiling.as_ref());
+                let (per_model_source_bounds, horizon_warnings) =
+                    build_source_bound_map(&sql_for_bounds, &dep_ts, horizon_ceiling);
+                for warning in &horizon_warnings {
+                    warn!("model '{}': {warning}", plan.name);
+                }
 
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {

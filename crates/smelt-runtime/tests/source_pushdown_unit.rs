@@ -31,7 +31,7 @@ fn incremental_batch_source_filter_uses_run_window() {
         ),
     );
 
-    let source_bounds = build_source_bound_map(model_sql, &dep_ts);
+    let (source_bounds, _warnings) = build_source_bound_map(model_sql, &dep_ts, None);
 
     // The source must appear in the bound map.
     assert!(
@@ -82,7 +82,7 @@ fn source_filter_uses_partition_range_not_filter_range() {
         ),
     );
 
-    let source_bounds = build_source_bound_map(model_sql, &dep_ts);
+    let (source_bounds, _warnings) = build_source_bound_map(model_sql, &dep_ts, None);
 
     // With 1-day lookback, before_secs must be 86400.
     let bound = source_bounds
@@ -117,7 +117,7 @@ fn empty_source_timeseries_leaves_sql_unchanged() {
     let model_sql = "SELECT event_date FROM smelt.sources.events";
     let dep_ts: HashMap<String, (Vec<String>, String)> = HashMap::new();
 
-    let source_bounds = build_source_bound_map(model_sql, &dep_ts);
+    let (source_bounds, _warnings) = build_source_bound_map(model_sql, &dep_ts, None);
     assert!(
         source_bounds.is_empty(),
         "empty dep_ts must produce empty bounds map"
