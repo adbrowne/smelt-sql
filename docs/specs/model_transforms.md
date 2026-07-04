@@ -54,6 +54,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Compile-time pinning | run-determinism (`NOW`/`CURRENT_*`) | resolve a run-deterministic function to a single literal once per run, before emit | unbuilt |
 | Targeted column backfill | additive-only model diff | `UPDATE`/dimension-merge only the added columns in place, never a full rebuild | unbuilt (new) |
 | Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact | unbuilt (new) |
+| Horizon settled-delay / tail-rewrite | maintained-window / horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value | unbuilt |
 | Idempotent window re-scan vs delta-driven probe | idempotent monoid + source mutation profile | unconditional CDF-free re-scan when the fold is idempotent; a per-run changed-set probe when a change feed is available | *partial* |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
 | DAG composition | litmus rule (`models.md`) | express a mode combination as two composed models at two grains, not a new mode | mechanism exists |
@@ -230,9 +231,11 @@ by `docs/plans/20260704-model-updates.md` (design:
   resolvers, two bound-derivation orchestration sites); the licences these
   transforms read are being consolidated in `model_properties.md`. Until then a
   transform may read the derived bound from more than one code path.
-- **Watermark settled-delay / tail-rewrite** (delay writes until a forward-reach
-  source has settled, or rewrite the tail) is a shared transform for the forward-
-  reach case that is not yet specified here; open, tracked by the same plan.
+- **Horizon settled-delay / tail-rewrite is now catalogued (unbuilt).** Because the
+  derived horizon is a core part of the maintenance contract (`model_maintenance.md`
+  §"Windowed maintenance and the horizon"), the forward-reach settle/tail-rewrite
+  mechanism is catalogued above rather than deferred; only its implementation is
+  outstanding, tracked by the same plan.
 - The **windowed-keyed-maintenance driver** is catalogued above but only *partially*
   built: the loop that sequences `merge_into` across driving partitions is exercised
   today only by `cumulative`, whose implementation is the reference path. It generalises
