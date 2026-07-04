@@ -249,6 +249,50 @@ pub fn scope_distinct_alignment(
     }
 }
 
+/// Partition-alignment verdict for the window `OVER` scope(s) living in
+/// `select`'s own select list: `Aligned` when **every** window found there
+/// has a `PARTITION BY` whose keys are a superset containing `partition_col`
+/// (AST-based, replacing the substring `OVER`/`PARTITION BY` scan). A scope
+/// with no window at all, or any window missing `PARTITION BY` or omitting
+/// `partition_col`, fails closed to `NotAligned{reason}` — never optimistic.
+/// Judged against **this** scope's own select list only (a FROM subquery's
+/// window is read by resolving to that subquery's own `SelectStmt` first).
+pub fn scope_over_alignment(
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+) -> PartitionAlignment {
+    let items = select_stmt_items(select).unwrap_or_default();
+    let windows: Vec<smelt_parser::WindowSpec> = items
+        .iter()
+        .filter_map(|item| item_expr(item).window_spec())
+        .collect();
+    if windows.is_empty() {
+        return PartitionAlignment::NotAligned {
+            reason: "this scope has no window OVER clause".to_string(),
+        };
+    }
+    for window in &windows {
+        let Some(partition_by) = window.partition_by() else {
+            return PartitionAlignment::NotAligned {
+                reason: "a window OVER clause in this scope has no PARTITION BY".to_string(),
+            };
+        };
+        let keys: Vec<String> = partition_by
+            .expressions()
+            .map(|e| e.text().trim().to_string())
+            .collect();
+        if !keys.iter().any(|k| k == partition_col) {
+            return PartitionAlignment::NotAligned {
+                reason: format!(
+                    "window OVER (PARTITION BY {}) does not include the partition_column '{partition_col}'",
+                    keys.join(", ")
+                ),
+            };
+        }
+    }
+    PartitionAlignment::Aligned
+}
+
 /// Analyze a SELECT statement from SQL text.
 ///
 /// Parses the SQL (after stripping frontmatter) and extracts structure
@@ -667,6 +711,79 @@ mod tests {
     fn test_scope_distinct_alignment_not_aligned_when_not_projected() {
         let select = parse_select("SELECT DISTINCT user_id FROM events");
         assert!(!scope_distinct_alignment(&select, "event_date").is_aligned());
+    }
+
+    #[test]
+    fn test_scope_over_alignment_aligned_when_partition_by_superset() {
+        let select = parse_select(
+            "SELECT event_date, user_id, \
+             SUM(amount) OVER (PARTITION BY event_date, user_id ORDER BY user_id) AS running \
+             FROM events",
+        );
+        assert_eq!(
+            scope_over_alignment(&select, "event_date"),
+            PartitionAlignment::Aligned
+        );
+    }
+
+    #[test]
+    fn test_scope_over_alignment_not_aligned_when_partition_by_omits_column() {
+        let select = parse_select(
+            "SELECT event_date, user_id, \
+             SUM(amount) OVER (PARTITION BY user_id ORDER BY user_id) AS running \
+             FROM events",
+        );
+        assert!(!scope_over_alignment(&select, "event_date").is_aligned());
+    }
+
+    #[test]
+    fn test_scope_over_alignment_is_per_scope_not_outer() {
+        // The outer query has no window at all; the FROM subquery's own
+        // window is aligned. Reading the outer scope must not see the
+        // subquery's alignment, and reading the subquery's own scope must
+        // see it correctly regardless of the outer query's shape.
+        let outer = parse_select(
+            "SELECT * FROM (\
+                 SELECT event_date, user_id, \
+                 SUM(amount) OVER (PARTITION BY event_date ORDER BY user_id) AS running \
+                 FROM events\
+             ) t",
+        );
+        assert!(
+            !scope_over_alignment(&outer, "event_date").is_aligned(),
+            "outer scope has no window OVER of its own"
+        );
+
+        let inner = outer
+            .from_clause()
+            .expect("from clause")
+            .table_refs()
+            .next()
+            .expect("table ref")
+            .subquery()
+            .expect("subquery")
+            .select_stmt()
+            .expect("inner select");
+        assert!(
+            scope_over_alignment(&inner, "event_date").is_aligned(),
+            "inner scope's own window is partition-aligned"
+        );
+    }
+
+    #[test]
+    fn test_scope_over_alignment_fails_closed_when_no_partition_by() {
+        // A window with no PARTITION BY at all must never be optimistically
+        // treated as aligned.
+        let select = parse_select(
+            "SELECT event_date, ROW_NUMBER() OVER (ORDER BY event_date) AS rn FROM events",
+        );
+        assert!(!scope_over_alignment(&select, "event_date").is_aligned());
+    }
+
+    #[test]
+    fn test_scope_over_alignment_no_window_fails_closed() {
+        let select = parse_select("SELECT event_date, user_id FROM events");
+        assert!(!scope_over_alignment(&select, "event_date").is_aligned());
     }
 
     /// The alignment verdict is computed **per-scope**: a UNION's second
