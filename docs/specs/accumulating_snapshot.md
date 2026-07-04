@@ -13,7 +13,7 @@ owners: [andrew]
 >
 > **Timeless-oracle rule.** This spec describes the feature as if it has always existed. Implementation status lives in §Known Divergences (with plan link) or §References → Plans (history).
 >
-> **Status: experimental (not yet implemented).** The mode is specified ahead of implementation; `refresh: accumulating_snapshot` currently produces an unknown-refresh-value error. The design is worked in `docs/research/20260703-model-updates.md` Part 20; the sole new engine dependency (forward-reach derivation) is tracked against `docs/plans/20260704-model-updates-group-b.md`.
+> **Status: experimental (not yet implemented).** The mode is specified ahead of implementation; `refresh: accumulating_snapshot` currently produces an unknown-refresh-value error. The design is worked in `docs/research/20260703-model-updates.md` Part 20; the delivery plan is `docs/plans/20260704-accumulating-snapshot.md`. The sole new *engine* dependency (the `after_secs` forward-reach derivation the horizon consumes) is landed by `docs/plans/20260704-model-updates-group-b.md` (phase B2); the classifier, combiner derivation, and windowed `merge_into` execution are the delivery plan's own scope.
 
 ## Surface
 
@@ -72,6 +72,8 @@ The classifier accepts non-key projections that are direct calls to one of the *
 | `MAX_BY(value, ordering)` / `MIN_BY(value, ordering)` | max/min-by-ordering | value at the extreme of an ordering column (§19.4 monoid form) |
 
 The combiner column is a fixed lookup off the per-key aggregator; authors do not declare combiners (Design §"Derive the combiner"). Any other aggregate, any non-aggregate non-key expression, or any milestone that can be *revised* rather than *filled once* is rejected (Semantics §"Classifier checks").
+
+`MIN`/`MAX`/`MIN_BY`/`MAX_BY` are admitted **unconditionally** — `LEAST`/`GREATEST`/max-by-ordering are order-independent monoids, so their cross-window merge converges to the full-refresh value regardless of how a key's contributions are distributed across windows. `COALESCE`-first-non-null is different: its combiner `COALESCE(target, delta)` is order-dependent *unless* a key has at most one distinct non-null value for that column. It is therefore admitted only when the classifier can **prove that once-write property** (Semantics §"Classifier checks", once-write provenance); where it cannot, the milestone fails closed with `AccumulatingSnapshotCorrectableMilestone`.
 
 ### Diagnostic codes (owned by this spec)
 
@@ -141,13 +143,19 @@ The horizon `H` is the maximum time by which an enriching fact may arrive *after
 
 An **unbounded** horizon — no forward predicate and no source-lateness declaration that bounds it — is rejected (`AccumulatingSnapshotUnboundedHorizon`): with `H → ∞` the clamp `run_start − H → −∞`, every run would touch all history and retain unbounded hot state. This is the exact mirror of `batched` rejecting an `UNBOUNDED PRECEDING` lookback frame (`batched_models.md` §"Batch safety classification").
 
+There is **no per-model horizon override**. `H` is either read from the model's own SQL (derived) or inherited from the driving source's declaration (a world-fact shared by every consumer of that source). A per-model override that diverged from the source's declared lateness would let one consumer claim a completeness bound the source does not honour; the two resolution paths above are the whole surface.
+
 ### Classifier checks
 
 A `refresh: accumulating_snapshot` model is rejected at planning time if any of these hold on the inlined outer SELECT (after function expansion):
 
 1. **No `GROUP BY`** — `AccumulatingSnapshotRequiresGroupBy`.
 2. **Non-key projection is not an allowlisted milestone aggregator** — `AccumulatingSnapshotUnknownCombiner`. Composite expressions over aggregates are rejected; add columns for the underlying milestones and derive downstream.
-3. **A milestone is not provably once-write** — `AccumulatingSnapshotCorrectableMilestone`. A `MIN`/`MAX`/`COALESCE`/`MAX_BY` over a source stream is once-write only if the underlying value transitions NULL → set and never set → different-set for a fixed key. Where the classifier cannot prove this (e.g. a `MAX` over a mutable, re-emitted measure), it fails closed.
+3. **A milestone is not provably once-write** — `AccumulatingSnapshotCorrectableMilestone`. This check applies **only to `COALESCE`-first-non-null milestones**: `MIN`/`MAX`/`MIN_BY`/`MAX_BY` are order-independent monoids whose merge converges regardless of once-write, so they need no proof (Surface §"Milestone combiner allowlist"). A `COALESCE`-first-non-null milestone is once-write — at most one distinct non-null value per key — and therefore admitted, only when the classifier can prove it via one of a **bounded set of provable forms**:
+   - **Key-derived** — the `COALESCE` argument is a function of the `GROUP BY` key alone (trivially constant per key).
+   - **Source-declared functional dependency** — the driving source declares `key → column` (the value is a per-key constant by the source's own contract).
+
+   Any `COALESCE`-first-non-null milestone the classifier cannot place in one of these forms **fails closed** — the once-write provenance analysis is deliberately conservative, refusing rather than assuming a value is per-key constant. (`MIN`/`MAX`/`MIN_BY`/`MAX_BY` are never rejected by this check.)
 4. **Enrichment expressed as a fact-to-dimension join** — `AccumulatingSnapshotJoinExpressedEnrichment`. A join between an events relation and a separately-arriving conversions relation is the bilinear operator smelt cannot self-maintain (Design §"Model it as a keyed union"); the model must union both into one keyed driving stream.
 5. **`GROUP BY` contains the driving source's `partition_column`** — `AccumulatingSnapshotGroupByContainsPartitionColumn` (that is the batched shape).
 6. **Non-deterministic functions in the outer body** — `AccumulatingSnapshotForbidsNondeterministic`.
@@ -187,6 +195,14 @@ Windowed consumption is not selected by any knob — there is no `strategy:` sel
 
 Because the milestone combiners are idempotent monoids, run windows may be processed **out of order, backfilled in slices, or run in parallel**, and any window may be **re-run**, without corrupting state (`docs/research/20260703-model-updates.md` §19.4). Re-merging an already-applied window converges to the same value (`GREATEST(x, GREATEST(x, y)) = GREATEST(x, y)`). The mode therefore needs **no** precise DELETE-covers-INSERT write-window invariant — there is no DELETE, and the clamp is a *work* bound (which keys are eligible to be touched), not a *correctness* bound.
 
+### The hot-key set and its space cap
+
+The keys eligible to be merged in a given run — those with event time `≥ run_start − H` (the clamp, §"The attribution horizon") — are the **hot set**. Keys older than that are **settled**: no future in-window delta can reach them.
+
+This mode does **not** garbage-collect settled keys from the stored table — the output is a full keyed lookup and every key, hot or settled, remains readable. What is bounded is the *work*: only hot keys are candidates for a `merge_into` on any run. The stored table therefore grows with the total key space, exactly as a full-refresh table would; the clamp bounds only how far back a run reaches, not the table size.
+
+To keep the mode fail-loud (`architecture.md` §"Fail-loud discipline"), the rule asserts a **cap on the number of keys touched in a single run's merge** (the per-run hot-key working set). If a run's delta would merge more keys than the cap, the rule **errors** — it does not silently process an unbounded working set — and the diagnostic steers the operator to narrow the run window or run a full refresh. The cap is a coarse guard against a mis-derived or unbounded-in-practice horizon, not a correctness mechanism; the concrete default and whether it is operator-tunable are settled at implementation time (§Known Divergences).
+
 ### Source-filter pushdown
 
 For the **driving source**, the rule injects a per-window `WHERE <partition_column> >= W AND < W + granularity` on the source reference, once per window step. For **non-timeseries sources** (lookups), no pushdown happens — they are read in full each window, mirroring `batched_models.md` §"Source-filter pushdown".
@@ -221,6 +237,8 @@ The rule derives `unique_key` from `GROUP BY`. Output column names are the proje
 
 **Output is not a timeseries.** One row per key, no partition column; the model forbids `timeseries:` on itself and reads its partition shape from the driving source. Downstream consumers treat it as a lookup. This is the same boundary `cumulative`, `latest_value`, and `versioned` draw.
 
+**One windowed executor, shared with `cumulative`.** The window-forward step loop — classify → step over the driving source's partitions in temporal order → per-partition source-filter pushdown → create-or-`merge_into` — is *identical* across the smelt-maintained keyed modes; only the classifier and the per-column combiner differ. Accumulating snapshot therefore does **not** copy `cumulative`'s executor: the loop is factored into a single **windowed-keyed-maintenance driver** parameterised by `(classifier, merge-SQL builder)`, and both modes (and, prospectively, `latest_value` / `versioned`) consume it. *A per-rule copy of the step loop* was rejected as the drift risk `docs/research/20260703-model-updates.md` §19.8/§20.9 flags — four near-identical clamp/inject/merge loops would diverge. A consequence: the mode inherits the shared driver's granularity support (`cumulative`'s `day`/`week` today); widening granularities is a property of the shared driver, not of this mode.
+
 ## Constraints & Invariants
 
 1. **Opt-in is `refresh: accumulating_snapshot` alone** (storage implied `table`). No rule-specific config block.
@@ -235,18 +253,20 @@ The rule derives `unique_key` from `GROUP BY`. Output column names are the proje
 10. **End-state equivalence holds for any ordering and any overlap** of processed windows (idempotent-monoid merge).
 11. **No `partition_column` on the output.** Downstream treats it as a lookup.
 12. **No silent downgrade.** A classifier rejection refuses the model at planning time — no fallback to batched, to full-refresh, or to `materialized_view`.
+13. **The per-run hot-key working set is capped and fail-loud.** A run whose delta would merge more keys than the cap errors rather than processing an unbounded working set (Semantics §"The hot-key set and its space cap"). Settled keys are never GC'd from the stored table.
+14. **The windowed step loop is shared, not copied.** Accumulating snapshot consumes the same windowed-keyed-maintenance driver as `cumulative` (Design §"One windowed executor").
+15. **`COALESCE`-first-non-null milestones require a once-write provenance proof; `MIN`/`MAX`/`MIN_BY`/`MAX_BY` do not.** Unprovable `COALESCE` milestones fail closed.
+16. **`H` has no per-model override** — derived from the model SQL or declared on the driving source, nothing else.
 
 ## Known Divergences / Open Questions
 
-- **Not implemented.** Declaring `refresh: accumulating_snapshot` currently produces an unknown-refresh-value error. The classifier, the milestone-combiner derivation, and the windowed `merge_into` execution are unbuilt. The design is worked in `docs/research/20260703-model-updates.md` Part 20. This mode has no delivery plan of its own yet; when scheduled it needs one, and this note should point at it.
-- **Forward-reach (`H`) derivation is not yet emitted.** The `after_secs` forward-reach walk — the mirror of the batched lookback (`before_secs`) walk — does not exist yet, so a derived `H` from a `BETWEEN … + INTERVAL` predicate cannot be read. Until it lands, `H` is **declaration-only** (on the source). The forward-reach walk is the sole new engine dependency and is cheapest to build alongside the lookback walk; tracked in `docs/plans/20260704-model-updates-group-b.md` (the B2 phase note) and `docs/research/20260703-model-updates.md` §20.5.
-- **Eviction / settled-key GC.** When and how a key older than `run_window − H` is retired from the mergeable ("hot") set — and the fail-loud behaviour when the live-key set exceeds a cap — is undecided. Best-known answer: a §14.4-style space-budget assertion with a full-refresh fallback, but the concrete trigger is unspecified (`docs/research/20260703-model-updates.md` §20.9).
-- **Shared executor vs per-rule copies.** Whether the windowed-consumption step loop is shared with `cumulative`/`latest_value`/`versioned` (one executor under the maintained umbrella) or copied per rule is open — the §19.8 question, now with a fourth prospective member (`docs/research/20260703-model-updates.md` §20.9).
-- **Where `H` may be declared.** `H` is currently specified as derived-from-predicate or declared-on-the-source. Whether a per-model horizon override should also exist (and how it interacts with a source-level declaration shared across consumers) is undecided.
-- **`COALESCE`/first-non-null once-write detection.** Proving a `MIN`/`MAX`/`COALESCE` over a source stream is genuinely once-write (never set → different-set) may need column-level provenance the pure classifier lacks; the fallible cases fail closed (`AccumulatingSnapshotCorrectableMilestone`) until the provenance analysis exists.
-- **Non-determinism posture.** This spec rejects `NOW()`/`RANDOM()` outright, while `batched` is relaxing toward run-pinned clocks. Whether accumulating snapshot should adopt the same compile-time run-pinning of `NOW`/`CURRENT_*` is deferred; the conservative reject holds until then.
-- **Granularity range.** If the windowed-consumption step loop is shared with `cumulative`, it may inherit cumulative-v1's `day`/`week` granularity limit; whether accumulating snapshot supports finer/coarser granularities depends on the shared-executor decision above.
-- **Sibling keyed modes.** `cumulative` (running aggregate), `latest_value` (Type 1), and `versioned` (Type 2) are peers on the refresh axis with their own specs and classifiers, not variants of this rule. The engine-maintained counterpart of any keyed mode is `refresh: materialized_view`, not a maintainer flag here.
+- **Not implemented.** Declaring `refresh: accumulating_snapshot` currently produces an unknown-refresh-value error. The classifier, the milestone-combiner derivation, and the windowed `merge_into` execution are unbuilt. The design is worked in `docs/research/20260703-model-updates.md` Part 20; the delivery plan is `docs/plans/20260704-accumulating-snapshot.md`.
+- **Derived `H` waits on the `after_secs` walk.** A derived horizon from a `BETWEEN … + INTERVAL` forward predicate reads the `after_secs` half of the source bound, which is landed by `docs/plans/20260704-model-updates-group-b.md` (phase B2) — the mirror of the batched lookback (`before_secs`) walk. Until B2 lands it, `H` is **declaration-only** (on the source). The classifier, combiner derivation, shared executor, and windowed merge do not depend on it and can be built first; only the derived-horizon path is gated on B2.
+- **The hot-key cap default is unspecified.** The mode caps the per-run hot-key working set and fails loud when exceeded (Semantics §"The hot-key set and its space cap"); the concrete default cap and whether it is operator-tunable are settled at implementation time. This is a value, not a design fork.
+- **Settled-key GC is a deferred enhancement, not v1.** v1 keeps every key (hot and settled) in the stored lookup and never garbage-collects — the table grows with the total key space, as a full-refresh table would. A future §14.4-style space-budget GC that retires keys older than `run_window − H` from a *hot-state store* is possible if a persistent-watermark store is added (`docs/research/20260703-model-updates.md` §20.9), but v1 needs none: the clamp already bounds the per-run work, and the fail-loud cap guards the working set.
+- **`COALESCE` once-write provenance breadth may widen.** v1 admits a `COALESCE`-first-non-null milestone only via the two provable forms (key-derived; source-declared functional dependency — Semantics §"Classifier checks"), failing closed otherwise. Broadening the provable set (e.g. tracing a value through CTEs/subqueries to establish per-key constancy) is a future refinement; the conservative prover holds until then. `MIN`/`MAX`/`MIN_BY`/`MAX_BY` are unaffected — they need no proof.
+- **Non-determinism run-pinning is a deferred alignment.** v1 rejects `NOW()`/`RANDOM()` outright. Adopting `batched`'s compile-time run-pinning of `NOW`/`CURRENT_*` (once that lands and is proven in `batched` — `docs/plans/20260704-model-updates-group-b.md` B3) is a later step; the conservative reject holds until then.
+- **Sibling keyed modes.** `cumulative` (running aggregate), `latest_value` (Type 1), and `versioned` (Type 2) are peers on the refresh axis with their own specs and classifiers, not variants of this rule. They share the windowed-keyed-maintenance driver this mode also consumes (Design §"One windowed executor"). The engine-maintained counterpart of any keyed mode is `refresh: materialized_view`, not a maintainer flag here.
 
 ## References
 
@@ -255,14 +275,15 @@ The rule derives `unique_key` from `GROUP BY`. Output column names are the proje
   - `crates/smelt-core/src/metadata.rs` — frontmatter extraction; validation that `timeseries:` / `batched:` are absent when `refresh: accumulating_snapshot`
   - `crates/smelt-logical/src/rules/` — host for the accumulating-snapshot classifier (pure rule-data in `smelt-logical`; see `architecture.md` §"Layered single-ownership")
   - `crates/smelt-logical/src/analysis/source_bounds.rs` — the forward-reach (`after_secs`) derivation the horizon consumes (mirror of the lookback walk)
-  - `crates/smelt-planner/src/rules/` — the per-window step loop (rule application)
+  - `crates/smelt-runtime/src/cumulative.rs` (→ to be generalised into a shared `windowed-keyed-maintenance` driver) — the window-forward step loop this mode shares with `cumulative` (Design §"One windowed executor")
   - `crates/smelt-backend/src/lib.rs` — `merge_into` trait method (physical primitive the rule calls, shared with `cumulative`)
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `merge_into` implementation
 - **Tests**:
   - Accumulating-snapshot classifier unit tests and once-write / end-state equivalence tests (to be added alongside the implementation plan)
 - **User docs**: `docs-site/docs/guide/materializations.md` (to document `refresh: accumulating_snapshot` on the refresh axis, alongside `batched` and `cumulative`)
 - **Plans (history)**:
-  - `docs/plans/20260704-model-updates-group-b.md` — the batched-eligibility work whose B2 phase is where the shared forward-reach (`after_secs`) walk is scheduled
+  - `docs/plans/20260704-accumulating-snapshot.md` — this mode's delivery plan (classifier, shared windowed executor, combiner + once-write prover, horizon, hot-key cap)
+  - `docs/plans/20260704-model-updates-group-b.md` — the batched-eligibility work whose B2 phase lands the shared forward-reach (`after_secs`) walk this mode's derived horizon consumes
 - **Research**:
   - `docs/research/20260703-model-updates.md` — Part 20 (this mode's worked design); §13 (maintained camp), §14.1–14.2 (monoid/group ladder), §19.1–19.4 (input-consumption axis, windowed keyed consumption), §8.3/§8.6 (forward reach, the `FOLLOWING` mirror, watermark completeness bound)
   - `docs/research/20260522-cumulative-as-its-own-rule.md` — §"Sibling rules beyond cumulative_aggregate" (the earlier accumulating-snapshot sketch)
