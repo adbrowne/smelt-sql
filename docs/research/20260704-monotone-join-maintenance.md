@@ -339,7 +339,65 @@ maintained tables painful to evolve; a targeted, column-scoped backfill keeps th
 change legible and recoverable — the same reason smelt-driven MERGE beats native
 IVM for the recurring case makes it beat a full rebuild for the schema-change one.
 
-## 9. Recommendation
+## 9. Generality across the refresh axis
+
+Neither §7 nor §8 is an `accumulating_snapshot` feature. Both are properties of
+the **refresh axis's keyed/partitioned modes** (`models.md` §"Refresh axis"),
+and they generalise on different terms.
+
+### 9.1 The backfill piece is fully cross-cutting
+
+§8's targeted backfill requires only a **persisted keyed/partitioned target and
+an additive-derivable diff** — nothing enrichment-specific. That holds for every
+materialised mode: `batched`, `cumulative`, `latest_value`, `versioned`,
+`accumulating_snapshot`, and plain `table`/`full`. The only exclusions are the
+non-materialised `view` (no target to `UPDATE` in place) and `materialized_view`
+(the engine owns evolution). So targeted backfill belongs at the `models.md`
+refresh-axis level, specialised per mode — the same hoist the "cross-cutting
+ceiling guardrail" adjacent thread argues for, not a per-mode capability.
+
+### 9.2 The join piece generalises — and is not new
+
+§7's rewrite is not invented here; it is a mechanism smelt already runs. Its
+requirements — a keyed target persisting `(anchor key, ordering key, monoid
+state)`, an inverse-free monotone contribution (§3.1), and a dimension-advance
+trigger — recur across the maintained modes:
+
+- **`cumulative`** already *is* this. Its spec makes it a `merge_into` caller:
+  fold each new per-partition delta into a per-key running state, never
+  re-reading history. That is the target-as-replica invariant. §7 generalises
+  cumulative's own fold from a single-source aggregate to the **join /
+  enrichment** case — this is the grounding for the whole note, not an exotic new
+  execution path.
+- **`latest_value`** (SCD-1) is the order-monotone `MAX_BY`-by-key case (§3.1) as
+  a first-class mode: the stored row *is* the current monoid state, so a
+  join-enriched latest_value model is §7 verbatim.
+- **`batched`** is the biggest prize. A fact table joined to an append-only /
+  monotone dimension can MERGE the dimension delta into the already-materialised
+  partitions instead of re-running the DELETE+INSERT and re-reading the fact
+  window. Fact × monotone-dimension joins are ubiquitous in incremental tables,
+  and this is where "never re-read the fact" saves the most.
+- **`versioned`** (SCD-2) fits only partially — validity-interval maintenance
+  carries its own retraction flavour; only the append-a-version side folds
+  cleanly.
+- **`materialized_view`** / **`view`** — delegate / no target. Out of scope, as
+  expected.
+
+### 9.3 The anchor/contributor boundary (where it stops)
+
+The join piece needs one join input to be the **persisted anchor** (already in
+the target) and the other a **folded monotone contributor** (the mutating
+dimension). This is §4's driving-fact resolution generalised: *the anchor is
+whichever input the target already holds; the contributor is the mutating
+dimension.* It fails in exactly two structural cases, both already implied by §3
+and §6:
+
+- **Fact × fact** joins where both sides grow unboundedly and contributions can
+  retract — the bilinear/retractable slice routed to `materialized_view` / IVM.
+- **Fan-out** joins that change target *cardinality* rather than enriching
+  existing rows — a different operator, not an in-place keyed MERGE.
+
+## 10. Recommendation
 
 - **Relax `AccumulatingSnapshotJoinExpressedEnrichment` from a syntactic to a
   semantic check.** Admit the join / semi-join spelling of an enrichment when
