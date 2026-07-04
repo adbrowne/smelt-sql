@@ -582,6 +582,74 @@ mod tests {
         assert!(!is_transparent_single_source(&bounds));
     }
 
+    // ─── Two-layer widened-scan + exact output clamp invariant ───────────────
+
+    /// Locks the "two windows differ; write window = output window" invariant
+    /// at the transformer-function level (`docs/specs/model_transforms.md`
+    /// §Semantics — "Source-filter pushdown + the two clamps").
+    ///
+    /// For a model with a genuine lookback margin, `inject_source_filters`
+    /// (the scan) must read a *wider* window than the narrow run window,
+    /// while `inject_time_filter` (the output clamp), when called with that
+    /// SAME narrow run window, must clamp to exactly that window — never the
+    /// widened scan window. This is the function-level contract the
+    /// `execute.rs` batch loop must uphold: the scan margin is read but never
+    /// re-written.
+    #[test]
+    fn test_scan_widens_but_output_clamp_stays_exact_to_run_window() {
+        let run_range = TimeRange {
+            start: "2024-01-15".into(),
+            end: "2024-01-16".into(),
+        };
+
+        // A source with a real 1-day lookback margin (e.g. a bounded RANGE
+        // INTERVAL window frame's derived bound).
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 86400, // 1 day
+                after_secs: 0,
+            },
+        );
+
+        let sql = "SELECT * FROM smelt.silver.events_parsed";
+        let scan_sql = inject_source_filters(sql, &bounds, &run_range);
+
+        // The scan filter must be WIDER than the run window: start is pulled
+        // back a day, end is unchanged (no lookahead).
+        assert!(
+            scan_sql.contains("event_date >= '2024-01-14'"),
+            "scan filter must widen the start by the lookback margin: {scan_sql}"
+        );
+        assert!(
+            scan_sql.contains("event_date < '2024-01-16'"),
+            "scan filter end must be unwidened (no lookahead): {scan_sql}"
+        );
+        // Sanity: the scan window differs from the run window at all.
+        assert!(
+            !scan_sql.contains("event_date >= '2024-01-15'"),
+            "scan filter must NOT equal the narrow run window's start: {scan_sql}"
+        );
+
+        // The output clamp, called with the SAME narrow run_range, must equal
+        // the run window exactly — never the widened scan window.
+        let clamp_sql = inject_time_filter("SELECT * FROM staged", "event_date", &run_range)
+            .expect("inject_time_filter must succeed");
+
+        assert!(
+            clamp_sql.contains("event_date >= '2024-01-15' AND event_date < '2024-01-16'"),
+            "output clamp must equal the exact output window [2024-01-15, 2024-01-16): {clamp_sql}"
+        );
+        // The clamp must NOT contain the widened scan's start date — the
+        // margin is read by the scan but never re-written by the clamp.
+        assert!(
+            !clamp_sql.contains("2024-01-14"),
+            "output clamp must not leak the widened scan's margin: {clamp_sql}"
+        );
+    }
+
     // ─── Existing inject_time_filter tests ───────────────────────────────────
 
     #[test]

@@ -46,7 +46,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Source-filter pushdown (window-an-input) | monotonicity trace + derived bound | wrap each bounded input ref in a `partition_column` subquery so the scan reads only its window | **built** |
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
 | Outer output-clamp | event-time projection (needs no proof) | filter the outermost `SELECT` on the projected `event_time` to the write window | **built** |
-| Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[start − k − offset, end)`, clamp output to `[start, end)`: read the margin, never re-write it | *partial* (redesign) |
+| Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[start − k − offset, end)`, clamp output to `[start, end)`: read the margin, never re-write it | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
@@ -212,13 +212,26 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Built today:** keyed `merge_into` (the `Backend::merge_into` trait method,
   impls in `smelt-backend-duckdb`/`-spark`); source-filter pushdown
   (`inject_source_filters`); partition DELETE+INSERT (`delete_partitions` +
-  `insert_into_from_query`); outer output-clamp (`inject_time_filter`); full
-  refresh; backend lowering/emulation (`insert_overwrite`, cross-engine Parquet).
-- **Two-layer widened-scan is a *partial* redesign.** The runtime currently
-  over-widens the *written* window and under-reads the *scan* window; the
-  read-margin/write-window split described in §Semantics is not yet the emitted
-  behaviour. The transparent single-source, zero-margin fast path
-  (`is_transparent_single_source`) is built.
+  `insert_into_from_query`); outer output-clamp (`inject_time_filter`); the
+  two-layer widened-scan + exact output clamp split (the scan reads
+  `[start − k − offset, end)`, but the output clamp and the DELETE partition
+  range both use the unwidened `[start, end)`); the transparent single-source,
+  zero-margin fast path (`is_transparent_single_source`), which skips the
+  outer clamp entirely since the source-level filter already is the output
+  clamp; full refresh; backend lowering/emulation (`insert_overwrite`,
+  cross-engine Parquet).
+- **The output clamp is injected at the model's own SELECT level.** The clamp
+  is added as a `WHERE` condition on the model body itself, at the same query
+  level the model's outermost `SELECT` runs at. For a model whose outermost
+  `SELECT` computes a window function directly (e.g. a bare `LAG(...) OVER
+  (RANGE BETWEEN INTERVAL ... PRECEDING AND CURRENT ROW)` with no wrapping
+  CTE), a same-level `WHERE` is evaluated before the window function per
+  standard SQL order — so the clamp can filter the rows feeding the window
+  function, not just its output, undercutting the widened-scan margin the
+  window function needs. Wrapping the window function in an inner CTE (so the
+  clamp lands on an outer `SELECT` over the CTE) avoids this; the join/subquery
+  lookback shapes are unaffected since their `WHERE` naturally applies after
+  the join.
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.

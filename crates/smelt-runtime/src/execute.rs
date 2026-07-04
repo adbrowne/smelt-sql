@@ -913,26 +913,30 @@ pub async fn execute_project(
                         end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
 
-                    // B0 (unified pushdown-depth walk, `docs/research/20260703-model-updates.md`
-                    // §3.3/§3.5): for the transparent slice — a single bounded source with no
-                    // lookback margin — the source-level filter on the exact run window *is*
-                    // the output clamp; the outer `inject_time_filter` wrap would inject a
-                    // textually identical, redundant filter. Skip it and rely solely on the
-                    // source-level filter. A model with a real lookback margin (or more than
-                    // one source) keeps both layers: the outer clamp uses the widened write
-                    // window (`filter_start`/`filter_end`) so the DELETE+INSERT idempotence
-                    // contract (`batched_models.md` §"Execution model") is unchanged.
+                    // Two-layer widened-scan + exact output clamp
+                    // (`docs/specs/model_transforms.md` §Semantics — "Source-filter
+                    // pushdown + the two clamps"): the *scan* may read a margin
+                    // (handled per-source by `inject_source_filters`, which widens
+                    // each bounded source independently), but the *output clamp*
+                    // must equal the output window exactly — the margin is read but
+                    // never re-written. B0 (unified pushdown-depth walk,
+                    // `docs/research/20260703-model-updates.md` §3.3/§3.5): for the
+                    // transparent slice — a single bounded source with no lookback
+                    // margin — the source-level filter on the exact run window *is*
+                    // the output clamp; the outer `inject_time_filter` wrap would
+                    // inject a textually identical, redundant filter. Skip it and
+                    // rely solely on the source-level filter. A model with a real
+                    // lookback margin (or more than one source) keeps both layers,
+                    // but the outer clamp uses the narrow run window (`run_range`),
+                    // not the widened scan window — the write window must equal the
+                    // output window.
                     let filtered_sql = if is_transparent_single_source(&per_model_source_bounds) {
                         inject_source_filters(&clean_sql, &per_model_source_bounds, &run_range)
                     } else {
-                        let time_range = TimeRange {
-                            start: batch.filter_start.format("%Y-%m-%d").to_string(),
-                            end: batch.filter_end.format("%Y-%m-%d").to_string(),
-                        };
                         let filtered_sql = inject_time_filter(
                             &clean_sql,
                             &inc_plan.timeseries.event_time_column,
-                            &time_range,
+                            &run_range,
                         )?;
                         inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range)
                     };
@@ -947,22 +951,20 @@ pub async fn execute_project(
                     )?;
                     reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
 
-                    // The DELETE range must cover the full set of partitions the
-                    // INSERT actually writes. `inject_time_filter` clamps the output
-                    // on `event_time_column` to [filter_start, filter_end) — i.e. the
-                    // run window widened backward by `context_days` (the derived
-                    // lookback). For models whose write window spans more than the run
-                    // window (a Form B output rebasing, e.g. a session that started on
-                    // D-1 and is updated by events on D), using the un-widened
-                    // partition_start here would DELETE only the run-window partition
-                    // while the INSERT writes the lookback partition too, accumulating
-                    // duplicates across consecutive day-by-day runs. Deleting the same
-                    // [filter_start, filter_end) the output is clamped to keeps the
-                    // DELETE+INSERT contract idempotent regardless of write-window width.
+                    // The DELETE range must equal exactly what the INSERT writes —
+                    // the write window equals the output window
+                    // (`docs/specs/model_transforms.md` §Constraints — "Write window
+                    // = output window; scan window ⊇ output window"). `inject_time_filter`
+                    // now clamps the output on `event_time_column` to the narrow
+                    // `run_range` (`[partition_start, partition_end)`), so the DELETE
+                    // range must match that same narrow window: widening it to the
+                    // scan's margin would re-delete-and-rewrite the neighboring
+                    // partition using a scan sized for *this* batch's margin, not
+                    // that partition's own — silently corrupting it.
                     let partition = PartitionRange {
                         column: inc_plan.timeseries.partition_column.clone(),
-                        start: batch.filter_start.format("%Y-%m-%d").to_string(),
-                        end: batch.filter_end.format("%Y-%m-%d").to_string(),
+                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
 
                     let strategy = MaterializationStrategy::Incremental {

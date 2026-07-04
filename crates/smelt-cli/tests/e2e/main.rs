@@ -42,6 +42,7 @@ mod test_cte_level;
 mod test_decimal_compare;
 mod test_inputs_key_form;
 mod test_json_output;
+mod two_layer_clamp;
 mod ui_startup_generator_expansion;
 mod verbose_flag;
 mod version_flag;
