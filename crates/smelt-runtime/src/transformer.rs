@@ -248,6 +248,31 @@ fn is_smelt_path_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
+/// True when `source_bounds` describes the "transparent slice" (B0, research
+/// `20260703-model-updates.md` §3.3/§3.5): exactly one source, with a
+/// zero-margin bound (`before_secs == 0 && after_secs == 0`).
+///
+/// For this case a single per-source scan filter is both the scan-pruning
+/// filter and the exact output clamp, because the source-level bound and the
+/// model's own write window are, by construction, the same window (no
+/// lookback/lookahead). The caller should skip the outer `inject_time_filter`
+/// wrap and rely solely on `inject_source_filters` — the two filters would
+/// otherwise be textually redundant (same bounds, different injection
+/// points).
+///
+/// A model with more than one bounded source, or any nonzero margin, keeps
+/// both layers: the outer clamp remains load-bearing whenever a genuine
+/// lookback makes the scan window wider than the output window.
+pub fn is_transparent_single_source(
+    source_bounds: &std::collections::HashMap<String, SourceBound>,
+) -> bool {
+    let mut it = source_bounds.values();
+    match (it.next(), it.next()) {
+        (Some(only), None) => only.before_secs == 0 && only.after_secs == 0,
+        _ => false,
+    }
+}
+
 /// Transform a SQL query to filter by event time range.
 ///
 /// This function injects a WHERE clause filter to restrict the query
@@ -488,6 +513,73 @@ mod tests {
     fn test_date_arithmetic_end_of_month() {
         let result = add_seconds_to_date("2023-02-28", 86400);
         assert_eq!(result, "2023-03-01");
+    }
+
+    // ─── is_transparent_single_source (B0) ───────────────────────────────────
+
+    /// A single source with a zero-margin bound is the transparent slice —
+    /// the outer clamp is redundant.
+    #[test]
+    fn test_transparent_single_source_true_for_zero_margin() {
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        assert!(is_transparent_single_source(&bounds));
+    }
+
+    /// A single source with a nonzero lookback margin keeps the outer clamp.
+    #[test]
+    fn test_transparent_single_source_false_for_nonzero_margin() {
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 86400,
+                after_secs: 0,
+            },
+        );
+        assert!(!is_transparent_single_source(&bounds));
+    }
+
+    /// More than one bounded source (e.g. a join) keeps the outer clamp even
+    /// when every source has a zero margin — the routing is conservative and
+    /// only special-cases the single-source case.
+    #[test]
+    fn test_transparent_single_source_false_for_multiple_sources() {
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        bounds.insert(
+            "smelt.silver.other".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        assert!(!is_transparent_single_source(&bounds));
+    }
+
+    /// An empty bound map (no timeseries-declared sources) is not the
+    /// transparent-single-source case — callers keep the outer clamp so the
+    /// model's own output is still constrained to the run window.
+    #[test]
+    fn test_transparent_single_source_false_for_empty() {
+        let bounds = std::collections::HashMap::new();
+        assert!(!is_transparent_single_source(&bounds));
     }
 
     // ─── Existing inject_time_filter tests ───────────────────────────────────

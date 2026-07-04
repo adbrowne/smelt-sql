@@ -37,7 +37,9 @@ use crate::schema_evolution::{
     check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
 };
 use crate::select::{select_executable_models, SelectionRequest};
-use crate::transformer::{inject_source_filters, inject_time_filter, TimeRange};
+use crate::transformer::{
+    inject_source_filters, inject_time_filter, is_transparent_single_source, TimeRange,
+};
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::windowing::{compute_incremental_windows, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
@@ -855,13 +857,26 @@ pub async fn execute_project(
                 // Build source bound map once per model for source-filter pushdown (BUG-073).
                 // The model SQL is the same for every batch — compute once and reuse.
                 // `source_timeseries` is the project-wide smelt-ref → TimeseriesConfig map
-                // (built from model frontmatter + source YAML declarations in Phase 2).
-                // We convert it to the dep_timeseries shape that `build_source_bound_map`
-                // expects: smelt_ref → (address_segments, partition_column).
+                // (built from model frontmatter + source YAML declarations in Phase 2), so it
+                // also contains this model's *own* frontmatter entry (every batched model
+                // declares `timeseries:` on itself). Restrict `dep_ts` to the model's actual
+                // upstream refs (`model.refs`) — otherwise the self-entry would inflate
+                // `per_model_source_bounds` with a spurious zero-margin entry for a ref that
+                // never appears in the model's own SQL, breaking the single-source B0
+                // transparent-slice classification (`is_transparent_single_source`) for every
+                // model that happens to declare `timeseries:` on itself (i.e. every batched
+                // model).
+                let model_ref_paths: std::collections::HashSet<String> = plan
+                    .model_file
+                    .refs
+                    .iter()
+                    .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+                    .collect();
                 let sql_for_bounds = smelt_parser::strip_frontmatter(&plan.sql);
                 let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
                     source_timeseries
                         .iter()
+                        .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
                         .filter_map(|(smelt_ref, ts)| {
                             // Strip the leading "smelt." prefix to get the path segments.
                             let path = smelt_ref.strip_prefix("smelt.")?;
@@ -886,29 +901,41 @@ pub async fn execute_project(
                     let batch_start_time = Instant::now();
 
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                    let time_range = TimeRange {
-                        start: batch.filter_start.format("%Y-%m-%d").to_string(),
-                        end: batch.filter_end.format("%Y-%m-%d").to_string(),
-                    };
-                    let filtered_sql = inject_time_filter(
-                        &clean_sql,
-                        &inc_plan.timeseries.event_time_column,
-                        &time_range,
-                    )?;
 
                     // Source-filter pushdown: narrow each source read to the run window
                     // (partition_start / partition_end) plus per-source bounds derived from
                     // the model SQL's INTERVAL patterns. The run window is the unwidened
-                    // partition range — `inject_time_filter` above uses filter_start/filter_end
-                    // (the widened write window) for the model's own output constraint; source
-                    // filters derive from the run window so the source scan tracks the
-                    // partition being produced, not the potentially wider DELETE range.
+                    // partition range; source filters derive from the run window so the
+                    // source scan tracks the partition being produced, not the potentially
+                    // wider DELETE range.
                     let run_range = TimeRange {
                         start: batch.partition_start.format("%Y-%m-%d").to_string(),
                         end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
-                    let filtered_sql =
-                        inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range);
+
+                    // B0 (unified pushdown-depth walk, `docs/research/20260703-model-updates.md`
+                    // §3.3/§3.5): for the transparent slice — a single bounded source with no
+                    // lookback margin — the source-level filter on the exact run window *is*
+                    // the output clamp; the outer `inject_time_filter` wrap would inject a
+                    // textually identical, redundant filter. Skip it and rely solely on the
+                    // source-level filter. A model with a real lookback margin (or more than
+                    // one source) keeps both layers: the outer clamp uses the widened write
+                    // window (`filter_start`/`filter_end`) so the DELETE+INSERT idempotence
+                    // contract (`batched_models.md` §"Execution model") is unchanged.
+                    let filtered_sql = if is_transparent_single_source(&per_model_source_bounds) {
+                        inject_source_filters(&clean_sql, &per_model_source_bounds, &run_range)
+                    } else {
+                        let time_range = TimeRange {
+                            start: batch.filter_start.format("%Y-%m-%d").to_string(),
+                            end: batch.filter_end.format("%Y-%m-%d").to_string(),
+                        };
+                        let filtered_sql = inject_time_filter(
+                            &clean_sql,
+                            &inc_plan.timeseries.event_time_column,
+                            &time_range,
+                        )?;
+                        inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range)
+                    };
 
                     let compiler = compilers.get(model_target);
                     let resolver = &ephemeral_resolvers[model_target];

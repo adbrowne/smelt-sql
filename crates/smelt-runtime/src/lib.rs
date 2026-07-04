@@ -48,7 +48,8 @@ pub use python::discover_python_models;
 pub use reporter::{NoOpReporter, RunReporter};
 pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{
-    inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
+    inject_source_filters, inject_time_filter, is_transparent_single_source, SourceBound,
+    TimeRange, TransformError,
 };
 pub use types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 

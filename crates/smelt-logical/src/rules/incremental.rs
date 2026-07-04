@@ -2,7 +2,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use tracing::info;
 
-use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
+use crate::analysis::source_bounds::{
+    derive_model_bounds, BoundContext, BoundResult, InjectionPoint,
+};
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
 use crate::analysis::{analyze_select, SelectItemKind};
 use crate::graph::{ModelGraph, ModelInfo};
@@ -544,18 +546,26 @@ fn has_keyword_at_boundary(upper_sql: &str, keyword: &str) -> bool {
     false
 }
 
-/// Derive per-source bounds for an incremental model using the model graph.
+/// Derive per-source bounds *and* their pushdown-depth injection point for an
+/// incremental model, in a single downward walk over the model's SQL.
 ///
 /// Builds a `BoundContext` from the model's upstream refs (only those with
-/// `timeseries:` declared are included; lookup sources are skipped).
-/// Returns the per-source bound map from `derive_model_bounds`.
+/// `timeseries:` declared are included; lookup sources are skipped), then
+/// derives each source's [`BoundResult`] from `derive_model_bounds` exactly
+/// once. The same call that produces the bound also classifies its
+/// [`InjectionPoint`] (`BoundResult::injection_point`), so the value used to
+/// widen the per-source scan and the value that decides whether the outer
+/// output clamp is still needed can never disagree — there is no second,
+/// independent derivation of either window (research
+/// `20260703-model-updates.md` §3.2/§3.5).
 ///
 /// Also returns `Err(diagnostic)` when any bound is `NotDerivable` — that
-/// triggers the same refusal path as a failed safety check.
+/// triggers the same refusal path as a failed safety check (fail-closed,
+/// unchanged from before this walk was unified).
 pub fn derive_model_source_bounds(
     model: &ModelInfo,
     graph: &ModelGraph,
-) -> Result<HashMap<String, BoundResult>, String> {
+) -> Result<HashMap<String, (InjectionPoint, BoundResult)>, String> {
     // Build the context: map ref name → partition_column for timeseries refs.
     let mut ctx = BoundContext::new();
     for ref_name in &model.refs {
@@ -585,7 +595,13 @@ pub fn derive_model_source_bounds(
         }
     }
 
-    Ok(bounds)
+    Ok(bounds
+        .into_iter()
+        .map(|(source_name, bound)| {
+            let injection_point = bound.injection_point();
+            (source_name, (injection_point, bound))
+        })
+        .collect())
 }
 
 /// Produce a SetIncremental transformation for a model.
@@ -1192,6 +1208,175 @@ mod tests {
         assert!(
             err.contains("window function"),
             "error must mention window function; got: {}",
+            err
+        );
+    }
+
+    // --- B0: unified pushdown-depth walk (derive_model_source_bounds) ---
+
+    /// The confirmed §3.2 under-read harness: a model with a genuine bounded
+    /// lookback (`RANGE BETWEEN INTERVAL '2 days' PRECEDING`) derives its
+    /// write-window margin and its per-source scan margin from the *same*
+    /// walk — there is only one `derive_model_bounds` call feeding both, so
+    /// the two numbers cannot independently disagree. The derived `(before,
+    /// after)` must match the frame's `INTERVAL '2 days'`, and the injection
+    /// point must be `OuterClamp` (a real lookback keeps both layers).
+    #[test]
+    fn test_unified_walk_matches_frame_interval() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(ModelInfo {
+            name: "upstream".to_string(),
+            sql: String::new(),
+            refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: None,
+        });
+
+        let m = ModelInfo {
+            name: "windowed".to_string(),
+            sql: "SELECT device_id, event_date, \
+                  SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
+                  RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW) AS running \
+                  FROM upstream"
+                .to_string(),
+            refs: vec!["upstream".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        let (injection_point, bound) = bounds.get("upstream").expect("upstream must have a bound");
+        match bound {
+            BoundResult::Bounded { before, after, .. } => {
+                assert_eq!(
+                    *before,
+                    crate::analysis::source_bounds::Seconds::days(2),
+                    "derived before-margin must match the frame's INTERVAL '2 days'"
+                );
+                assert_eq!(*after, crate::analysis::source_bounds::Seconds::ZERO);
+            }
+            other => panic!("Expected Bounded, got {:?}", other),
+        }
+        assert_eq!(
+            *injection_point,
+            InjectionPoint::OuterClamp,
+            "a genuine lookback margin must keep the outer clamp layer"
+        );
+    }
+
+    /// A transparent single-source subquery (no lookback: no INTERVAL,
+    /// no window function) derives a zero-margin bound and classifies as
+    /// `InjectionPoint::Source` — the source-level filter alone is both the
+    /// scan-pruning filter and the exact output clamp; no outer wrap.
+    #[test]
+    fn test_transparent_single_source_pushes_to_source_no_outer_wrap() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(ModelInfo {
+            name: "upstream".to_string(),
+            sql: String::new(),
+            refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: None,
+        });
+
+        let m = ModelInfo {
+            name: "passthrough".to_string(),
+            sql: "SELECT event_date, user_id, amount FROM upstream WHERE amount > 0".to_string(),
+            refs: vec!["upstream".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        assert_eq!(bounds.len(), 1, "exactly one source-level filter expected");
+        let (injection_point, bound) = bounds.get("upstream").expect("upstream must have a bound");
+        assert_eq!(
+            *bound,
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::ZERO,
+                after: crate::analysis::source_bounds::Seconds::ZERO,
+            }
+        );
+        assert_eq!(
+            *injection_point,
+            InjectionPoint::Source,
+            "transparent slice must push to the source with no outer wrap"
+        );
+    }
+
+    /// Fail-closed (unchanged by B0): a `NotDerivable` source (bare LAG/LEAD
+    /// with no RANGE frame) still refuses at planning time, naming the
+    /// construct.
+    #[test]
+    fn test_not_derivable_still_refuses() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(ModelInfo {
+            name: "upstream".to_string(),
+            sql: String::new(),
+            refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: None,
+        });
+
+        let m = ModelInfo {
+            name: "bare_lag".to_string(),
+            sql: "SELECT device_id, event_date, LAG(amount) OVER (PARTITION BY device_id ORDER BY event_ts) AS prev \
+                  FROM upstream"
+                .to_string(),
+            refs: vec!["upstream".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides {
+                    allow_window_functions: true,
+                    ..Default::default()
+                },
+            }),
+        };
+
+        let result = derive_model_source_bounds(&m, &graph);
+        assert!(result.is_err(), "bare LAG without RANGE must refuse");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cannot derive a temporal bound"),
+            "error must name the derivation failure: {}",
             err
         );
     }

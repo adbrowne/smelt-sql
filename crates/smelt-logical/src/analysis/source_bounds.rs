@@ -96,7 +96,46 @@ where
     serializer.serialize_str(&s.to_iso8601())
 }
 
+/// Where the filter derived for a source should be written, per the
+/// pushdown-depth walk (research `20260703-model-updates.md` §3.3).
+///
+/// The walk that produces a source's [`BoundResult`] also determines how deep
+/// `event_time`'s filter can be pushed: a source with **no** lookback margin
+/// (`Bounded` with `before == after == 0`, the "transparent slice") can be
+/// filtered exactly once, at the source scan — the same filter that clamps
+/// the output also prunes the read, so no outer wrap is needed. A source with
+/// a genuine lookback/lookahead margin needs both layers: a widened scan at
+/// the source *and* an exact output clamp above it, because the scan window
+/// is legitimately wider than the output window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionPoint {
+    /// Push the filter all the way to the source scan; the outer clamp is
+    /// redundant and is skipped.
+    Source,
+    /// Keep the outer output clamp in addition to the per-source scan
+    /// filter — a lookback margin makes the two windows genuinely distinct.
+    OuterClamp,
+}
+
 impl BoundResult {
+    /// Classify the injection point implied by this bound (see
+    /// [`InjectionPoint`]). A zero-margin `Bounded` source pushes all the way
+    /// to the scan; `Unbounded` and `NotDerivable` conservatively keep the
+    /// outer clamp (in practice `NotDerivable` is refused before this is
+    /// consulted, and `Unbounded` routes to per-partition execution rather
+    /// than batched pushdown).
+    pub fn injection_point(&self) -> InjectionPoint {
+        match self {
+            BoundResult::Bounded { before, after, .. }
+                if *before == Seconds::ZERO && *after == Seconds::ZERO =>
+            {
+                InjectionPoint::Source
+            }
+            _ => InjectionPoint::OuterClamp,
+        }
+    }
+
     /// Merge two bound results for the *same* source (union semantics):
     /// before = max(before_i), after = max(after_i).
     /// Any `Unbounded` forces `Unbounded`; any `NotDerivable` forces `NotDerivable`.
@@ -828,5 +867,45 @@ mod tests {
         };
         let merged = b1.merge(BoundResult::Unbounded);
         assert_eq!(merged, BoundResult::Unbounded);
+    }
+
+    // ---- InjectionPoint classification tests (B0) ----
+
+    /// A zero-margin `Bounded` source (the transparent slice) pushes all the
+    /// way to the source scan — no outer wrap needed.
+    #[test]
+    fn test_injection_point_transparent_is_source() {
+        let bound = BoundResult::Bounded {
+            source_partition_col: "event_date".to_string(),
+            before: Seconds::ZERO,
+            after: Seconds::ZERO,
+        };
+        assert_eq!(bound.injection_point(), InjectionPoint::Source);
+    }
+
+    /// A `Bounded` source with a nonzero lookback needs the outer clamp too.
+    #[test]
+    fn test_injection_point_lookback_is_outer_clamp() {
+        let bound = BoundResult::Bounded {
+            source_partition_col: "event_date".to_string(),
+            before: Seconds::days(1),
+            after: Seconds::ZERO,
+        };
+        assert_eq!(bound.injection_point(), InjectionPoint::OuterClamp);
+    }
+
+    /// `Unbounded` and `NotDerivable` both conservatively route to the outer
+    /// clamp classification (they are handled upstream — refused or sent to
+    /// per-partition execution — before this classification matters).
+    #[test]
+    fn test_injection_point_unbounded_and_not_derivable_are_outer_clamp() {
+        assert_eq!(
+            BoundResult::Unbounded.injection_point(),
+            InjectionPoint::OuterClamp
+        );
+        assert_eq!(
+            BoundResult::NotDerivable.injection_point(),
+            InjectionPoint::OuterClamp
+        );
     }
 }

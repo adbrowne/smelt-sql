@@ -124,7 +124,7 @@ done and consumed here, not redone.
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| B0    | pending |        |      |
+| B0    | done    |        | 2026-07-04 |
 | B1    | pending |        |      |
 | B2    | pending |        |      |
 | B3    | pending |        |      |

@@ -264,6 +264,20 @@ async fn incremental_run_pushes_source_filter() {
          compiled SQLs:\n{all_sqls}"
     );
 
+    // B0 (unified pushdown-depth walk): `daily_count` is a transparent
+    // single-source model (no lookback — `derive_model_bounds` yields
+    // `Bounded(event_date, 0, 0)`), so the source-level filter alone is both
+    // the scan-pruning filter and the exact output clamp. The outer
+    // `inject_time_filter` wrap is redundant here and must be skipped —
+    // assert there is exactly *one* occurrence of the start-of-window
+    // filter, not a duplicate outer-clamp copy of the same bound.
+    let start_filter_occurrences = all_sqls.matches("event_date >= '2024-01-01'").count();
+    assert_eq!(
+        start_filter_occurrences, 1,
+        "transparent single-source slice must emit exactly one filter (source-level \
+         only, no outer wrap); got {start_filter_occurrences} occurrences in:\n{all_sqls}"
+    );
+
     // Verify correctness: the run should produce 1 partition (2024-01-01 only,
     // since we requested [2024-01-01, 2024-01-02)).
     let daily_count_record = outcome
