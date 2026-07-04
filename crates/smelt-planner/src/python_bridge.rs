@@ -351,6 +351,7 @@ mod tests {
                     partition_column: "dt".to_string(),
                     granularity: crate::types::Granularity::Day,
                     week_start: None,
+                    assert_monotonic: false,
                 }),
                 incremental_config: Some(BatchedConfig {
                     enabled: true,

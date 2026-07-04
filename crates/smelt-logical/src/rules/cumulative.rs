@@ -481,6 +481,7 @@ mod tests {
             partition_column: partition_col.to_string(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }
     }
 

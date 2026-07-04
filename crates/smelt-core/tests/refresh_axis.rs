@@ -120,6 +120,7 @@ fn refresh_cumulative_forbids_timeseries() {
             partition_column: "dt".to_string(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }),
         ..Default::default()
     };
@@ -207,6 +208,7 @@ fn refresh_batched_with_timeseries_is_valid() {
             partition_column: "dt".to_string(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }),
         ..Default::default()
     };

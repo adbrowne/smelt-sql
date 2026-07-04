@@ -499,6 +499,16 @@ pub struct TimeseriesConfig {
     /// Day of week for weekly partitions (only valid when `granularity` is `week`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub week_start: Option<Weekday>,
+    /// Declared-monotonicity escape hatch: the modeller's assertion that the
+    /// projected `event_time` expression is monotone non-decreasing even
+    /// though static analysis cannot decide it (an opaque UDF / opaque
+    /// function body). Widens only the *undecidable* trace verdict — a
+    /// positive disproof (a constant/NULL seed, or a row-nondeterministic
+    /// value in the event-time position) is still refused; the declaration
+    /// can never override those (`model_properties.md` §Constraints
+    /// "Declared escape hatches may only widen").
+    #[serde(default)]
+    pub assert_monotonic: bool,
 }
 
 /// The `batched:` block — configuration layered on top of the `refresh: batched`
@@ -1126,6 +1136,44 @@ targets:
         "#;
         let config: TimeseriesConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.granularity, Granularity::Year);
+    }
+
+    #[test]
+    fn test_assert_monotonic_defaults_false() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+        "#;
+        let config: TimeseriesConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.assert_monotonic);
+    }
+
+    #[test]
+    fn test_assert_monotonic_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+            assert_monotonic: true
+        "#;
+        let config: TimeseriesConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.assert_monotonic);
+    }
+
+    #[test]
+    fn test_assert_monotonic_rejects_non_bool() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+            assert_monotonic: "yes please"
+        "#;
+        let result: Result<TimeseriesConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "a non-boolean assert_monotonic value must be a configuration error, not a silent default"
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {
         partition_column: partition_col.to_string(),
         granularity: Granularity::Day,
         week_start: None,
+        assert_monotonic: false,
     }
 }
 

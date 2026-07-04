@@ -268,6 +268,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }
     }
 

@@ -322,7 +322,7 @@ fn gen_never_false_positive_on_seed_hazards() {
                      false positive: {verdict:?}"
                 );
             }
-            EventTimeTrace::StaticSeed { reason } | EventTimeTrace::NotTraceable { reason } => {
+            EventTimeTrace::StaticSeed { reason } | EventTimeTrace::NotTraceable { reason, .. } => {
                 assert!(
                     !reason.is_empty(),
                     "hazard `{name}` (expr `{expr_sql}`) produced an empty reason"

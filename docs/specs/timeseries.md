@@ -36,6 +36,7 @@ FROM smelt.orders_raw
 | `partition_column` | yes | — | Identifier — name of the column the engine prunes on (date or integer) |
 | `granularity` | yes | — | One of: `hour`, `day`, `week`, `month`, `quarter`, `year` |
 | `week_start` | no | `monday` | When `granularity: week`. One of: `monday`, `sunday` |
+| `assert_monotonic` | no | `false` | Boolean — the declared-monotonicity escape hatch: the modeller's assertion that the projected `event_time`/partition expression is monotone non-decreasing even where static analysis cannot decide it (an opaque function call). Widens only the *undecidable* verdict; a construct static analysis positively disproves (a constant/`NULL` seed, a row-nondeterministic function, a periodic/piecewise construct) is still refused (`model_properties.md` §"Event-time monotonicity trace") |
 
 `event_time_column` and `partition_column` may be the same column. They differ when the source-of-truth time is a timestamp and the partition is a derived date.
 

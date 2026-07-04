@@ -145,6 +145,17 @@ fn incremental_nondeterministic_columns_no_diagnostics() {
     check_workspace_no_diagnostics("examples/incremental_nondeterministic_columns");
 }
 
+/// `timeseries.assert_monotonic` declared-monotonicity escape hatch fixture
+/// (DC1): a join whose driving-fact partition column is projected through an
+/// opaque scalar function. Verifies the workspace loads without any
+/// diagnostics (the widened join driving-fact resolution runs at build time
+/// in `smelt-logical::rules::incremental`, not through `file_diagnostics`,
+/// but the workspace itself must still be diagnostic-clean).
+#[test]
+fn incremental_declared_monotonic_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/incremental_declared_monotonic");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that

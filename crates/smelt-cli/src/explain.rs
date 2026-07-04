@@ -430,6 +430,7 @@ mod tests {
                     partition_column: "d".to_string(),
                     granularity: Granularity::Day,
                     week_start: None,
+                    assert_monotonic: false,
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Batched),
                 batched: Some(BatchedConfig {
@@ -531,6 +532,7 @@ mod tests {
                     partition_column: "order_date".to_string(),
                     granularity: Granularity::Day,
                     week_start: None,
+                    assert_monotonic: false,
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Batched),
                 batched: Some(BatchedConfig {

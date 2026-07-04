@@ -14,6 +14,7 @@ fn day_ts(partition_column: &str) -> TimeseriesConfig {
         partition_column: partition_column.to_string(),
         granularity: Granularity::Day,
         week_start: None,
+        assert_monotonic: false,
     }
 }
 
@@ -84,6 +85,7 @@ fn model_frontmatter_timeseries_preserved() {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         })),

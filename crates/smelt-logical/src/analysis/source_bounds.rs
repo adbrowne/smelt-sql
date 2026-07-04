@@ -14,8 +14,9 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
+use crate::analysis::monotonicity::find_leaf_column_ref;
 use crate::analysis::monotonicity::EventTimeTrace;
-use crate::analysis::monotonicity::{find_leaf_column_ref, trace_event_time};
+use crate::analysis::monotonicity::NotTraceableKind;
 
 /// Duration expressed in whole seconds (always ≥ 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
@@ -918,11 +919,16 @@ pub fn resolve_join_driving_fact(
     event_time_expr: &smelt_parser::Expr,
     alias_sources: &[(String, String)],
     full_ctx: &BoundContext,
+    declared_monotonic: bool,
 ) -> EventTimeTrace {
     let trace_against = |source_name: &str| -> Option<EventTimeTrace> {
         let partition_col = full_ctx.source_partition_cols.get(source_name)?;
         let singleton = BoundContext::new().with_source(source_name, partition_col);
-        Some(trace_event_time(event_time_expr, &singleton))
+        Some(crate::analysis::monotonicity::trace_event_time_declared(
+            event_time_expr,
+            &singleton,
+            declared_monotonic,
+        ))
     };
 
     if let Some(qualifier) =
@@ -934,12 +940,14 @@ pub fn resolve_join_driving_fact(
                     reason: format!(
                         "join input aliased '{qualifier}' is not a known timeseries source"
                     ),
+                    kind: NotTraceableKind::Disproven,
                 })
             }
             None => EventTimeTrace::NotTraceable {
                 reason: format!(
                     "column qualifier '{qualifier}' does not match any FROM/JOIN alias"
                 ),
+                kind: NotTraceableKind::Disproven,
             },
         };
     }
@@ -954,12 +962,14 @@ pub fn resolve_join_driving_fact(
         Err(AnchorAmbiguity::NoCandidate) => EventTimeTrace::NotTraceable {
             reason: "no join input's source partition column traces the event-time projection"
                 .to_string(),
+            kind: NotTraceableKind::Disproven,
         },
         Err(AnchorAmbiguity::Multiple(names)) => EventTimeTrace::NotTraceable {
             reason: format!(
                 "ambiguous driving fact: {} join inputs trace to the same unqualified column name",
                 names.len()
             ),
+            kind: NotTraceableKind::Disproven,
         },
     }
 }
@@ -1354,7 +1364,7 @@ mod tests {
             .with_source("silver.fact", "event_ts")
             .with_source("silver.lookup", "event_ts");
 
-        match resolve_join_driving_fact(&expr, &alias_sources, &ctx) {
+        match resolve_join_driving_fact(&expr, &alias_sources, &ctx, false) {
             EventTimeTrace::Traceable { source, .. } => {
                 assert_eq!(
                     source, "silver.fact",
@@ -1380,7 +1390,7 @@ mod tests {
             .with_source("silver.lookup", "event_ts");
 
         assert!(matches!(
-            resolve_join_driving_fact(&expr, &alias_sources, &ctx),
+            resolve_join_driving_fact(&expr, &alias_sources, &ctx, false),
             EventTimeTrace::NotTraceable { .. }
         ));
     }
@@ -1399,7 +1409,7 @@ mod tests {
         // column at all (absent from ctx — a plain lookup).
         let ctx = BoundContext::new().with_source("silver.fact", "event_ts");
 
-        match resolve_join_driving_fact(&expr, &alias_sources, &ctx) {
+        match resolve_join_driving_fact(&expr, &alias_sources, &ctx, false) {
             EventTimeTrace::Traceable { source, .. } => {
                 assert_eq!(source, "silver.fact");
             }

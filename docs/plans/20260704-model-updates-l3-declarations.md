@@ -158,7 +158,7 @@ completed elsewhere; it is the reference shape. The other five are `not-yet`.
 
 | Phase | Depends on | Spec anchor | Status |
 |-------|-----------|-------------|--------|
-| DC1   | Group A (done); F1 (done) | `model_properties.md` §"Model-scoped declarations" (declared monotonicity); §Constraints "may only widen" | pending |
+| DC1   | Group A (done); F1 (done) | `model_properties.md` §"Model-scoped declarations" (declared monotonicity); §Constraints "may only widen" | done (2026-07-05) |
 | DC2   | Group A (done); F6 | `model_properties.md` §"Model-scoped declarations" (functional dependency `key → column`) | pending |
 | DC3   | Group A (done); F4 | `model_properties.md` §"Model-scoped declarations" (bounded-domain / space budget) | pending |
 | DC4   | Group A (done); F1 (done) + derived-horizon proof | `model_maintenance.md` §"Windowed maintenance and the horizon" | pending |
@@ -506,6 +506,8 @@ first-class" note to name the home).
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this sub-plan.)
+
+- **DC1 wires only the join driving-fact resolution site** (`rules::incremental::restrict_ctx_for_join`, via `resolve_join_driving_fact`), not the UNION-branch (`restrict_ctx_for_union`/`trace_union_branches`) or derived-table (`restrict_ctx_for_derived_tables`) pushdown-scoping sites — those keep calling the un-declared `trace_event_time` (equivalent to `declared_monotonic: false`), unchanged from their pre-DC1 behaviour. The pure classifier itself (`trace_event_time_declared`, `NotTraceableKind`) is fully general and exhaustively tested independent of any consumption site; wiring the remaining two sites is a small, mechanical follow-up (thread one extra `bool` parameter) left for whichever L4 phase next touches UNION/derived-table incremental eligibility, since neither of those sites currently hard-rejects on `NotTraceable` the way the join site does (UNION/derived-table treat it as a conservative no-op / stay-at-outer-clamp), so there is no live user-facing gap today.
 
 - The **transforms/modes** each declaration licenses (once-write enrichment F14 / `accumulating_snapshot`;
   bounded-domain multiset state Group C C4; horizon-bounded MERGE / widened-scan clamp F13/F15) are L2/L4 and

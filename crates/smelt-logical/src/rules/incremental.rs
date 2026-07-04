@@ -1202,13 +1202,24 @@ fn restrict_ctx_for_union(
 /// entry (full scan, matching how lookup sources already behave when absent
 /// from `ctx`), so the misfilter hazard of pushing a filter onto a
 /// non-driving lookup input is zero by construction.
+///
+/// Reads `model.timeseries_config`'s declared-monotonicity escape hatch
+/// (`assert_monotonic`, DC1) and threads it into the trace: an otherwise
+/// `NotTraceable{Undecidable}` driving fact (an opaque UDF wrapping the
+/// event-time column) is admitted when declared; a positive disproof
+/// (`StaticSeed`, or `NotTraceable{Disproven}`) is refused exactly as before
+/// regardless of the declaration.
 fn restrict_ctx_for_join(
     model: &ModelInfo,
     event_time_expr: &smelt_parser::Expr,
     alias_sources: &[(String, String)],
     ctx: &BoundContext,
 ) -> Result<BoundContext, String> {
-    match resolve_join_driving_fact(event_time_expr, alias_sources, ctx) {
+    let declared_monotonic = model
+        .timeseries_config
+        .as_ref()
+        .is_some_and(|ts| ts.assert_monotonic);
+    match resolve_join_driving_fact(event_time_expr, alias_sources, ctx, declared_monotonic) {
         EventTimeTrace::Traceable {
             source,
             source_column,
@@ -1219,7 +1230,7 @@ fn restrict_ctx_for_join(
              partitionable stream",
             model.name
         )),
-        EventTimeTrace::NotTraceable { reason } => Err(format!(
+        EventTimeTrace::NotTraceable { reason, .. } => Err(format!(
             "Model '{}': cannot resolve a single driving fact among this model's joined \
              timeseries sources ({reason}); batched pushdown requires exactly one join input to \
              trace the event-time projection back to its source partition column",
@@ -1338,7 +1349,7 @@ fn restrict_ctx_for_derived_tables(
                     model.name
                 ));
             }
-            EventTimeTrace::NotTraceable { reason } => {
+            EventTimeTrace::NotTraceable { reason, .. } => {
                 tracing::debug!(
                     model = %model.name,
                     %label,
@@ -1398,6 +1409,7 @@ mod tests {
                 partition_column: partition_column.to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -1422,6 +1434,7 @@ mod tests {
                 partition_column: partition_column.to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -1449,6 +1462,7 @@ mod tests {
                 partition_column: partition_column.to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key,
@@ -1526,6 +1540,7 @@ mod tests {
                 partition_column: "event_hour".to_string(),
                 granularity: Granularity::Hour,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -1957,6 +1972,7 @@ mod tests {
                 partition_column: "event_week".to_string(),
                 granularity: Granularity::Week,
                 week_start: Some(Weekday::Monday),
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2034,6 +2050,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
@@ -2057,6 +2074,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec!["nonexistent_col".to_string()],
@@ -2223,6 +2241,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: None,
         });
@@ -2240,6 +2259,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2284,6 +2304,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: None,
         });
@@ -2297,6 +2318,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2338,6 +2360,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: None,
         });
@@ -2353,6 +2376,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2412,6 +2436,7 @@ mod tests {
                 partition_column: partition_column.to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: None,
         }
@@ -2437,6 +2462,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2477,6 +2503,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2519,6 +2546,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2556,6 +2584,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2602,6 +2631,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2648,6 +2678,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2666,6 +2697,136 @@ mod tests {
             !bounds.contains_key("silver.lookup"),
             "non-driving lookup input must be full-scanned (no entry); keys: {:?}",
             bounds.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // --- DC1: declared-monotonicity escape hatch (join driving-fact site) ---
+
+    /// Without `assert_monotonic`, an opaque function wrapping the join
+    /// driving fact's event-time column is `Undecidable` and the join
+    /// driving-fact resolution refuses the model outright (fail-closed
+    /// default — unchanged behaviour).
+    #[test]
+    fn test_declared_monotonic_absent_opaque_join_udf_is_refused() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("silver.fact", "event_ts", "event_date"));
+        graph.add_model(upstream_ts_model(
+            "silver.lookup",
+            "updated_at",
+            "snapshot_date",
+        ));
+
+        let m = ModelInfo {
+            name: "joined".to_string(),
+            sql: "SELECT my_custom_fn(f.event_date) AS event_date, f.user_id, g.attribute \
+                  FROM smelt.silver.fact f \
+                  JOIN smelt.silver.lookup g ON f.user_id = g.user_id"
+                .to_string(),
+            refs: vec!["silver.fact".to_string(), "silver.lookup".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let result = derive_model_source_bounds(&m, &graph);
+        assert!(
+            result.is_err(),
+            "an opaque function over the join driving fact must be refused without the \
+             declaration; got {result:?}"
+        );
+    }
+
+    /// With `assert_monotonic: true`, the same opaque function widens the
+    /// undecidable verdict — the join driving fact resolves and gets a bound
+    /// entry, exactly as if the column had been projected bare.
+    #[test]
+    fn test_declared_monotonic_admits_opaque_join_udf() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("silver.fact", "event_ts", "event_date"));
+        graph.add_model(upstream_ts_model(
+            "silver.lookup",
+            "updated_at",
+            "snapshot_date",
+        ));
+
+        let m = ModelInfo {
+            name: "joined".to_string(),
+            sql: "SELECT my_custom_fn(f.event_date) AS event_date, f.user_id, g.attribute \
+                  FROM smelt.silver.fact f \
+                  JOIN smelt.silver.lookup g ON f.user_id = g.user_id"
+                .to_string(),
+            refs: vec!["silver.fact".to_string(), "silver.lookup".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: true,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph)
+            .expect("declared monotonicity must admit the opaque-function driving fact");
+        assert!(
+            bounds.contains_key("silver.fact"),
+            "driving fact must get a bound entry once declared monotonic; keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The declaration must not rescue a *positively disproven* join driving
+    /// fact — a row-nondeterministic function in the event-time position
+    /// stays refused even with `assert_monotonic: true`.
+    #[test]
+    fn test_declared_monotonic_does_not_admit_row_nondeterministic_join_driving_fact() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("silver.fact", "event_ts", "event_date"));
+        graph.add_model(upstream_ts_model(
+            "silver.lookup",
+            "updated_at",
+            "snapshot_date",
+        ));
+
+        let m = ModelInfo {
+            name: "joined".to_string(),
+            sql: "SELECT RANDOM() AS event_date, f.user_id, g.attribute \
+                  FROM smelt.silver.fact f \
+                  JOIN smelt.silver.lookup g ON f.user_id = g.user_id"
+                .to_string(),
+            refs: vec!["silver.fact".to_string(), "silver.lookup".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: true,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let result = derive_model_source_bounds(&m, &graph);
+        assert!(
+            result.is_err(),
+            "RANDOM() declared monotonic must still be refused — a row-nondeterministic \
+             value can never occupy the event-time position; got {result:?}"
         );
     }
 
@@ -2709,6 +2870,7 @@ mod tests {
                 partition_column: "session_start_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
@@ -2813,6 +2975,7 @@ mod tests {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],

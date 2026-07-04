@@ -95,6 +95,28 @@ pub struct Monotonicity {
     pub is_strict: bool,
 }
 
+/// Whether a `NotTraceable` verdict is a positive structural disproof or
+/// merely an unrecognised (undecidable) shape.
+///
+/// This is the axis the declared-monotonicity escape hatch
+/// (`TimeseriesConfig::assert_monotonic`) reads: a declaration may widen
+/// `Undecidable` (the classifier has no rule for the shape — an opaque
+/// UDF/function it cannot reason about) but must never widen `Disproven`
+/// (a shape the classifier positively knows is not a monotone chain — a
+/// periodic function, a piecewise `CASE`, a run-nondeterministic clock, a
+/// row-nondeterministic function, two-column arithmetic, an ambiguous or
+/// unresolvable leaf, …). See `docs/specs/model_properties.md` §Constraints
+/// "Declared escape hatches may only widen".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum NotTraceableKind {
+    /// The classifier positively knows this shape is not a monotone chain
+    /// (or cannot be resolved to a single source). Never widened.
+    Disproven,
+    /// The classifier has no rule for this shape (an opaque/unknown
+    /// function). The only kind `assert_monotonic` is permitted to widen.
+    Undecidable,
+}
+
 /// Verdict for a traced `event_time` expression.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum EventTimeTrace {
@@ -108,7 +130,10 @@ pub enum EventTimeTrace {
     /// Constant or NULL-injecting — static seed, not a partitionable stream.
     StaticSeed { reason: String },
     /// Cannot prove monotone traceability — conservative; consumer must not push.
-    NotTraceable { reason: String },
+    NotTraceable {
+        reason: String,
+        kind: NotTraceableKind,
+    },
 }
 
 /// Entry point: trace `event_time_expr` back to a source partition column,
@@ -119,11 +144,35 @@ pub enum EventTimeTrace {
 /// alias-resolution machinery exists at this layer yet. If the leaf column's
 /// name (ignoring qualifier) matches zero or more-than-one source's
 /// partition column in `ctx`, the result is `NotTraceable` (fail closed).
+///
+/// Equivalent to `trace_event_time_declared(event_time_expr, ctx, false)` —
+/// the un-declared, static-only trace.
 pub fn trace_event_time(event_time_expr: &Expr, ctx: &BoundContext) -> EventTimeTrace {
-    match classify(event_time_expr) {
+    trace_event_time_declared(event_time_expr, ctx, false)
+}
+
+/// Like [`trace_event_time`], but when `declared_monotonic` is `true` and the
+/// static classifier's *only* obstacle is an unrecognised (undecidable)
+/// function call, admits the pushdown by tracing into that function's single
+/// column-bearing argument (weakening strictness, since the opaque function's
+/// own shape is unproven) — the declared-monotonicity escape hatch
+/// (`model_properties.md` §"Model-scoped declarations").
+///
+/// The widen is verdict-scoped, not blanket: a `Disproven` `NotTraceable`
+/// (periodic function, piecewise `CASE`, run-/row-nondeterministic function,
+/// two-column arithmetic, ambiguous/unresolvable leaf, non-temporal cast, …)
+/// and every `StaticSeed` are returned unchanged regardless of
+/// `declared_monotonic` — the declaration can only widen the *undecidable*
+/// verdict, never substitute for a positive disproof.
+pub fn trace_event_time_declared(
+    event_time_expr: &Expr,
+    ctx: &BoundContext,
+    declared_monotonic: bool,
+) -> EventTimeTrace {
+    match classify(event_time_expr, declared_monotonic) {
         Classification::Trace(chain) => resolve_against_ctx(chain, ctx),
         Classification::StaticSeed(reason) => EventTimeTrace::StaticSeed { reason },
-        Classification::NotTraceable(reason) => EventTimeTrace::NotTraceable { reason },
+        Classification::NotTraceable(reason, kind) => EventTimeTrace::NotTraceable { reason, kind },
     }
 }
 
@@ -138,7 +187,17 @@ struct Chain {
 enum Classification {
     Trace(Chain),
     StaticSeed(String),
-    NotTraceable(String),
+    NotTraceable(String, NotTraceableKind),
+}
+
+impl Classification {
+    fn disproven(reason: impl Into<String>) -> Classification {
+        Classification::NotTraceable(reason.into(), NotTraceableKind::Disproven)
+    }
+
+    fn undecidable(reason: impl Into<String>) -> Classification {
+        Classification::NotTraceable(reason.into(), NotTraceableKind::Undecidable)
+    }
 }
 
 fn resolve_against_ctx(chain: Chain, ctx: &BoundContext) -> EventTimeTrace {
@@ -161,12 +220,14 @@ fn resolve_against_ctx(chain: Chain, ctx: &BoundContext) -> EventTimeTrace {
                 "leaf column '{}' does not match any known source partition column",
                 chain.source_column
             ),
+            kind: NotTraceableKind::Disproven,
         },
         _ => EventTimeTrace::NotTraceable {
             reason: format!(
                 "leaf column '{}' matches more than one source's partition column (ambiguous)",
                 chain.source_column
             ),
+            kind: NotTraceableKind::Disproven,
         },
     }
 }
@@ -227,7 +288,12 @@ fn identity_monotonicity() -> Monotonicity {
 /// NEVER falls back to text/substring matching — every branch below uses
 /// typed AST accessors. An expression shape with no explicit arm always
 /// resolves to `NotTraceable`, never `Traceable` (fail closed).
-fn classify(expr: &Expr) -> Classification {
+///
+/// `declared_monotonic` threads the declared-monotonicity escape hatch down
+/// to the one arm permitted to read it — the unrecognised-function-name arm
+/// of [`classify_function`]. Every other arm below is a *positive* disproof
+/// and ignores the flag entirely.
+fn classify(expr: &Expr, declared_monotonic: bool) -> Classification {
     // Base case: bare or qualified column reference.
     if let Some(col) = expr.as_column_ref() {
         return Classification::Trace(Chain {
@@ -243,28 +309,26 @@ fn classify(expr: &Expr) -> Classification {
     }
 
     if let Some(func) = expr.as_function_call() {
-        return classify_function(&func);
+        return classify_function(&func, declared_monotonic);
     }
 
     if expr.as_extract().is_some() {
-        return Classification::NotTraceable("periodic function is not monotone".to_string());
+        return Classification::disproven("periodic function is not monotone");
     }
 
     if let Some(cast) = expr.as_cast() {
-        return classify_cast(&cast);
+        return classify_cast(&cast, declared_monotonic);
     }
 
     if let Some(bin) = expr.as_binary() {
-        return classify_binary(&bin);
+        return classify_binary(&bin, declared_monotonic);
     }
 
     if expr.as_case().is_some() {
-        return Classification::NotTraceable(
-            "CASE expression is piecewise, not monotone".to_string(),
-        );
+        return Classification::disproven("CASE expression is piecewise, not monotone");
     }
 
-    Classification::NotTraceable(format!(
+    Classification::disproven(format!(
         "unrecognised expression head: {}",
         expr.text().trim()
     ))
@@ -344,27 +408,52 @@ fn expr_contains_column(expr: &Expr) -> bool {
 
 /// Classify a function-call layer. Whitelisted grid/truncation functions
 /// recurse into their single column-bearing argument (weakening strictness);
-/// `COALESCE(col, const)` is a static seed; everything else is a named
-/// blacklist entry or an unknown function — both fail closed.
-fn classify_function(func: &FunctionCall) -> Classification {
+/// `COALESCE(col, const)` is a static seed; a handful of named functions are
+/// positively disproven; an unrecognised function name is `Undecidable` — and
+/// only that arm reads `declared_monotonic`, recursing into the function's
+/// single column-bearing argument (weakened strictness) when the declaration
+/// is present and exactly one such argument exists; otherwise it stays
+/// `NotTraceable` even when declared (fail closed — the declaration cannot
+/// license a shape it cannot resolve to a single leaf).
+fn classify_function(func: &FunctionCall, declared_monotonic: bool) -> Classification {
     let name = func.name().unwrap_or_default();
     let upper = name.to_uppercase();
     let args = func.arguments();
 
     match upper.as_str() {
-        "DATE_TRUNC" | "DATE_BIN" | "TIME_BUCKET" => recurse_single_column_arg(&args, &upper, true),
-        "FLOOR" => recurse_single_column_arg(&args, &upper, true),
+        "DATE_TRUNC" | "DATE_BIN" | "TIME_BUCKET" => {
+            recurse_single_column_arg(&args, &upper, true, declared_monotonic)
+        }
+        "FLOOR" => recurse_single_column_arg(&args, &upper, true, declared_monotonic),
         "COALESCE" => classify_coalesce(&args),
-        "MOD" => Classification::NotTraceable("periodic function is not monotone".to_string()),
-        "GREATEST" | "LEAST" => Classification::NotTraceable(
-            "GREATEST/LEAST clamps to a plateau that can straddle a window boundary".to_string(),
+        "MOD" => Classification::disproven("periodic function is not monotone"),
+        "GREATEST" | "LEAST" => Classification::disproven(
+            "GREATEST/LEAST clamps to a plateau that can straddle a window boundary",
         ),
         _ if classify_function_determinism(&upper) == FunctionDeterminism::RunDeterministic => {
-            Classification::NotTraceable(
-                "run-nondeterministic clock is not source-traceable".to_string(),
-            )
+            Classification::disproven("run-nondeterministic clock is not source-traceable")
         }
-        _ => Classification::NotTraceable(format!(
+        // Row-nondeterministic functions (RANDOM/UUID/…) must never be
+        // widened by the declaration even though they'd otherwise fall into
+        // the unrecognised-function arm below — a row-nondeterministic value
+        // in the event-time/skeleton position is a positive hazard, not an
+        // undecidable shape (model_properties.md §Constraints).
+        _ if classify_function_determinism(&upper) == FunctionDeterminism::RowNondeterministic => {
+            Classification::disproven(format!(
+                "{name} is row-nondeterministic and cannot occupy an event-time position"
+            ))
+        }
+        _ if declared_monotonic => {
+            match recurse_single_column_arg(&args, &upper, true, declared_monotonic) {
+                Classification::Trace(chain) => Classification::Trace(chain),
+                _ => Classification::undecidable(format!(
+                    "unknown function {name}: monotonicity cannot be proven, and the \
+                     declared-monotonicity escape hatch could not resolve a single traced \
+                     leaf column among its arguments"
+                )),
+            }
+        }
+        _ => Classification::undecidable(format!(
             "unknown function {name}: monotonicity cannot be proven"
         )),
     }
@@ -373,15 +462,20 @@ fn classify_function(func: &FunctionCall) -> Classification {
 /// Recurse into the single column-bearing argument among `args`, weakening
 /// strictness (many-to-one truncation/grid function) if `weaken_strict`.
 /// Zero or more-than-one column-bearing arguments fails closed.
-fn recurse_single_column_arg(args: &[Expr], fn_label: &str, weaken_strict: bool) -> Classification {
+fn recurse_single_column_arg(
+    args: &[Expr],
+    fn_label: &str,
+    weaken_strict: bool,
+    declared_monotonic: bool,
+) -> Classification {
     let column_bearing: Vec<&Expr> = args.iter().filter(|a| expr_contains_column(a)).collect();
     if column_bearing.len() != 1 {
-        return Classification::NotTraceable(format!(
+        return Classification::disproven(format!(
             "{fn_label}: expected exactly one column-bearing argument, found {}",
             column_bearing.len()
         ));
     }
-    match classify(column_bearing[0]) {
+    match classify(column_bearing[0], declared_monotonic) {
         Classification::Trace(mut chain) => {
             if weaken_strict {
                 chain.monotonicity.is_strict = false;
@@ -396,7 +490,7 @@ fn recurse_single_column_arg(args: &[Expr], fn_label: &str, weaken_strict: bool)
 /// is a static seed (constant injected for NULL rows), not a monotone chain.
 fn classify_coalesce(args: &[Expr]) -> Classification {
     if args.len() != 2 {
-        return Classification::NotTraceable(format!(
+        return Classification::disproven(format!(
             "COALESCE: expected exactly 2 arguments, found {}",
             args.len()
         ));
@@ -405,7 +499,7 @@ fn classify_coalesce(args: &[Expr]) -> Classification {
     if column_bearing == 1 {
         Classification::StaticSeed("COALESCE injects a constant for NULL rows".to_string())
     } else {
-        Classification::NotTraceable(format!(
+        Classification::disproven(format!(
             "COALESCE: expected exactly one column-bearing argument, found {column_bearing}"
         ))
     }
@@ -418,7 +512,7 @@ fn classify_coalesce(args: &[Expr]) -> Classification {
 /// same as `DATE_TRUNC`'s day-grid truncation). Other temporal targets
 /// (`TIMESTAMP`/`TIMESTAMPTZ`/`DATETIME`) leave the child's `is_strict`
 /// unchanged, since those casts are not lossy in the same way.
-fn classify_cast(cast: &CastExpr) -> Classification {
+fn classify_cast(cast: &CastExpr, declared_monotonic: bool) -> Classification {
     let type_name = cast
         .type_spec()
         .and_then(|t| t.type_name())
@@ -429,16 +523,16 @@ fn classify_cast(cast: &CastExpr) -> Classification {
         type_name.as_str(),
         "DATE" | "TIMESTAMP" | "TIMESTAMPTZ" | "DATETIME"
     ) {
-        return Classification::NotTraceable(format!(
+        return Classification::disproven(format!(
             "CAST target {type_name} is not a temporal type"
         ));
     }
 
     let Some(inner) = cast.expression() else {
-        return Classification::NotTraceable("CAST has no inner expression".to_string());
+        return Classification::disproven("CAST has no inner expression");
     };
 
-    match classify(&inner) {
+    match classify(&inner, declared_monotonic) {
         Classification::Trace(mut chain) => {
             if type_name == "DATE" {
                 chain.monotonicity.is_strict = false;
@@ -458,20 +552,16 @@ fn classify_cast(cast: &CastExpr) -> Classification {
 /// not separately tracked by this primitive (a future consumer that needs
 /// signed offsets can read the original operator off the AST itself; this
 /// phase only proves *that* the chain is a constant shift, not which way).
-fn classify_binary(bin: &BinaryExpr) -> Classification {
+fn classify_binary(bin: &BinaryExpr, declared_monotonic: bool) -> Classification {
     let Some(left) = bin.left() else {
-        return Classification::NotTraceable(
-            "binary expression is missing its left operand".to_string(),
-        );
+        return Classification::disproven("binary expression is missing its left operand");
     };
     let Some(right) = bin.right() else {
-        return Classification::NotTraceable(
-            "binary expression is missing its right operand".to_string(),
-        );
+        return Classification::disproven("binary expression is missing its right operand");
     };
     let op = bin.operator().unwrap_or_default();
     if op != "+" && op != "-" {
-        return Classification::NotTraceable(format!(
+        return Classification::disproven(format!(
             "binary operator {op} is not a column ± constant interval shift"
         ));
     }
@@ -480,14 +570,12 @@ fn classify_binary(bin: &BinaryExpr) -> Classification {
     let right_has_col = expr_contains_column(&right);
 
     if left_has_col && right_has_col {
-        return Classification::NotTraceable(
-            "arithmetic on two columns is not monotone in either column alone".to_string(),
+        return Classification::disproven(
+            "arithmetic on two columns is not monotone in either column alone",
         );
     }
     if !left_has_col && !right_has_col {
-        return Classification::NotTraceable(
-            "binary +/- is not a column ± constant interval shift".to_string(),
-        );
+        return Classification::disproven("binary +/- is not a column ± constant interval shift");
     }
 
     let (col_side, const_side) = if left_has_col {
@@ -497,12 +585,10 @@ fn classify_binary(bin: &BinaryExpr) -> Classification {
     };
 
     let Some(shift) = parse_interval_literal(&const_side) else {
-        return Classification::NotTraceable(
-            "binary +/- is not a column ± constant interval shift".to_string(),
-        );
+        return Classification::disproven("binary +/- is not a column ± constant interval shift");
     };
 
-    match classify(&col_side) {
+    match classify(&col_side, declared_monotonic) {
         Classification::Trace(mut chain) => {
             chain.offset = combine_offset(chain.offset, shift);
             Classification::Trace(chain)
@@ -842,7 +928,123 @@ mod tests {
         let ctx = events_ctx();
         assert!(matches!(
             trace_event_time(&expr, &ctx),
-            EventTimeTrace::NotTraceable { .. }
+            EventTimeTrace::NotTraceable {
+                kind: NotTraceableKind::Undecidable,
+                ..
+            }
+        ));
+    }
+
+    // --- Declared-monotonicity escape hatch (DC1) ---
+
+    #[test]
+    fn declared_monotonic_widens_unknown_udf() {
+        // Without the declaration: undecidable, stays NotTraceable.
+        let expr = first_select_expr("SELECT my_custom_fn(event_ts) AS event_time FROM t");
+        let ctx = events_ctx();
+        assert!(matches!(
+            trace_event_time_declared(&expr, &ctx, false),
+            EventTimeTrace::NotTraceable {
+                kind: NotTraceableKind::Undecidable,
+                ..
+            }
+        ));
+
+        // With the declaration: the opaque function's single column-bearing
+        // argument is traced through, admitting the pushdown.
+        match trace_event_time_declared(&expr, &ctx, true) {
+            EventTimeTrace::Traceable {
+                source,
+                source_column,
+                monotonicity,
+                ..
+            } => {
+                assert_eq!(source, "events");
+                assert_eq!(source_column, "event_ts");
+                assert!(
+                    !monotonicity.is_strict,
+                    "opaque function weakens strictness"
+                );
+            }
+            other => panic!("expected Traceable under declared_monotonic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declared_monotonic_does_not_widen_static_seed() {
+        // A StaticSeed (constant/NULL event-time) is a positive disproof —
+        // the declaration must not override it.
+        let expr = first_select_expr("SELECT NULL AS event_time FROM t");
+        let ctx = events_ctx();
+        assert!(matches!(
+            trace_event_time_declared(&expr, &ctx, true),
+            EventTimeTrace::StaticSeed { .. }
+        ));
+    }
+
+    #[test]
+    fn declared_monotonic_does_not_widen_row_nondeterministic_function() {
+        // RANDOM()/UUID() etc. in the event-time position is a positive
+        // hazard, not an undecidable shape — the declaration cannot widen it
+        // even though it would otherwise fall into the "unknown function" arm.
+        for func in ["RANDOM()", "UUID()", "GEN_RANDOM_UUID()"] {
+            let sql = format!("SELECT {func} AS event_time FROM t");
+            let expr = first_select_expr(&sql);
+            let ctx = events_ctx();
+            assert!(
+                matches!(
+                    trace_event_time_declared(&expr, &ctx, true),
+                    EventTimeTrace::NotTraceable {
+                        kind: NotTraceableKind::Disproven,
+                        ..
+                    }
+                ),
+                "{func} declared monotonic must still be refused (Disproven), not widened"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_monotonic_does_not_widen_case_or_greatest() {
+        // Structurally-proven-not-monotone shapes stay Disproven under the
+        // declaration too — the escape hatch only ever widens Undecidable.
+        let case_expr = first_select_expr(
+            "SELECT CASE WHEN x THEN event_ts ELSE other_ts END AS event_time FROM t",
+        );
+        let ctx = events_ctx();
+        assert!(matches!(
+            trace_event_time_declared(&case_expr, &ctx, true),
+            EventTimeTrace::NotTraceable {
+                kind: NotTraceableKind::Disproven,
+                ..
+            }
+        ));
+
+        let greatest_expr =
+            first_select_expr("SELECT GREATEST(event_ts, '2026-01-01') AS event_time FROM t");
+        assert!(matches!(
+            trace_event_time_declared(&greatest_expr, &ctx, true),
+            EventTimeTrace::NotTraceable {
+                kind: NotTraceableKind::Disproven,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn declared_monotonic_still_fails_closed_on_ambiguous_leaf() {
+        // An opaque function with zero or multiple column-bearing arguments
+        // still can't be resolved to a single leaf even when declared.
+        let expr = first_select_expr("SELECT my_custom_fn(a, b) AS event_time FROM t");
+        let ctx = BoundContext::new()
+            .with_source("events", "a")
+            .with_source("other", "b");
+        assert!(matches!(
+            trace_event_time_declared(&expr, &ctx, true),
+            EventTimeTrace::NotTraceable {
+                kind: NotTraceableKind::Undecidable,
+                ..
+            }
         ));
     }
 

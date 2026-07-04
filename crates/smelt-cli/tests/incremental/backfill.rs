@@ -46,6 +46,7 @@ fn _unused_config_ref() -> (BatchedConfig, TimeseriesConfig) {
             partition_column: "revenue_date".into(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         },
     )
 }

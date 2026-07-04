@@ -15,6 +15,7 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
         partition_column: partition_col.to_string(),
         granularity,
         week_start: None,
+        assert_monotonic: false,
     }
 }
 

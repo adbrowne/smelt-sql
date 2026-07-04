@@ -480,6 +480,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }
     }
 
@@ -670,6 +671,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         };
         let inc_cfg = inc_config();
         let mut ts_map: SourceTimeseriesMap = HashMap::new();
@@ -712,6 +714,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         };
         let inc_cfg = inc_config();
         let mut ts_map: SourceTimeseriesMap = HashMap::new();
@@ -723,6 +726,7 @@ mod tests {
                 partition_column: "event_ts".to_string(),
                 granularity: smelt_core::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             },
         );
         let ctx = RuleContext {
@@ -757,6 +761,7 @@ mod tests {
             partition_column: "month_start".to_string(),
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         };
         let inc_cfg = BatchedConfig {
             unique_key: vec!["month_start".to_string()],
@@ -792,6 +797,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         };
         let inc_cfg = inc_config();
         let ts_map: SourceTimeseriesMap = HashMap::new();
@@ -823,6 +829,7 @@ mod tests {
             partition_column: "event_ts".to_string(),
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         };
         let inc_cfg = BatchedConfig {
             unique_key: vec!["event_ts".to_string()],

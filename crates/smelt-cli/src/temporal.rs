@@ -125,6 +125,7 @@ mod tests {
             partition_column: partition_column.into(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }
     }
 

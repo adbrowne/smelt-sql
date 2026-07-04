@@ -13,7 +13,7 @@
 //! query-shaped wrapper that resolves the leaf column's nullability from
 //! smelt-db's inferred schema and calls it.
 
-use smelt_logical::{BoundContext, EventTimeTrace};
+use smelt_logical::{BoundContext, EventTimeTrace, NotTraceableKind};
 
 use crate::queries::project::project_sources;
 use crate::queries::schema::typed_model_schema;
@@ -38,11 +38,13 @@ pub fn gate_nullable_leaf(trace: EventTimeTrace, leaf_nullable: Option<bool>) ->
         Some(false) => trace,
         Some(true) => EventTimeTrace::NotTraceable {
             reason: format!("event-time leaf column {source}.{source_column} is nullable"),
+            kind: NotTraceableKind::Disproven,
         },
         None => EventTimeTrace::NotTraceable {
             reason: format!(
                 "event-time leaf column {source}.{source_column} nullability could not be resolved"
             ),
+            kind: NotTraceableKind::Disproven,
         },
     }
 }

@@ -227,6 +227,7 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             refresh: Some(smelt_core::config::RefreshStrategy::Batched),
             batched: Some(BatchedConfig {

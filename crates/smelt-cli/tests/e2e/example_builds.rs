@@ -200,6 +200,14 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          standalone build env; verified e2e via incremental_nondeterministic_columns_e2e.rs)",
     ),
     (
+        "incremental_declared_monotonic",
+        "Catalog Error: Table with name sources_fact does not exist \
+         (DC1 fixture: `timeseries.assert_monotonic` correctly widens the opaque-function \
+         join driving-fact trace and admits the model; source table `main.sources_fact` \
+         not seeded in the standalone build env — covered by the unit tests in \
+         crates/smelt-logical/src/rules/incremental.rs)",
+    ),
+    (
         "fn_struct_spread_cte",
         "Catalog Error: Table with name sources_gps_readings does not exist \
          (D2 probe fixture: struct spread inside CTE body schema propagation; \

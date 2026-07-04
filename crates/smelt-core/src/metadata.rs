@@ -1611,6 +1611,7 @@ FROM smelt.orders_raw"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             batched: Some(crate::config::BatchedConfig::default()),
             ..Default::default()
@@ -1637,6 +1638,7 @@ FROM smelt.orders_raw"#;
                 partition_column: "order_date".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
@@ -1667,6 +1669,7 @@ FROM smelt.orders_raw"#;
                 partition_column: "order_date".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
@@ -1697,6 +1700,7 @@ FROM smelt.orders_raw"#;
                 partition_column: "order_date".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec!["order_id".to_string()],
@@ -1727,6 +1731,7 @@ FROM smelt.orders_raw"#;
                 partition_column: "order_date".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec!["order_id".to_string()],
@@ -1810,6 +1815,7 @@ SELECT dt FROM foo"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1836,6 +1842,7 @@ SELECT dt FROM foo"#;
                 partition_column: "event_date".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1915,6 +1922,7 @@ GROUP BY device_id, user_id"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1991,6 +1999,7 @@ GROUP BY device_id, user_id"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -2062,6 +2071,7 @@ SELECT * FROM users"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Week,
                 week_start: Some(crate::config::Weekday::Wednesday),
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -2089,6 +2099,7 @@ SELECT * FROM users"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Week,
                 week_start: Some(crate::config::Weekday::Monday),
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -2106,6 +2117,7 @@ SELECT * FROM users"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Week,
                 week_start: Some(crate::config::Weekday::Sunday),
+                assert_monotonic: false,
             }),
             ..Default::default()
         };

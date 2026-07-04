@@ -232,6 +232,33 @@ smelt run --event-time-start 2025-01-01 --event-time-end 2025-01-02 --allow-down
 
 With `--allow-downgrade` set, refused models fall back to a full-table refresh for this run. A warning is emitted for each downgraded model. This flag must be passed explicitly every time; it is not persisted anywhere. Using it regularly means the model is not actually running incrementally — fix the SQL instead.
 
+### Declaring monotonicity when smelt can't prove it
+
+Some `event_time`/partition-column expressions cannot be proven monotone by static analysis alone — most commonly a projection through a UDF or another opaque function call. By default smelt rejects the pushdown in that case (the safe, conservative default). If you know the expression is in fact monotone non-decreasing, set `assert_monotonic: true` on the `timeseries:` block:
+
+```yaml
+models:
+  joined_daily:
+    materialization: table
+    refresh: batched
+    timeseries:
+      event_time_column: partition_key
+      partition_column: partition_key
+      granularity: day
+      assert_monotonic: true
+```
+
+```sql
+SELECT
+    my_normalize_fn(f.partition_key) AS partition_key,
+    f.user_id,
+    g.attribute
+FROM smelt.sources.fact f
+JOIN smelt.sources.lookup g ON f.user_id = g.user_id
+```
+
+`assert_monotonic` only ever **widens** the pushdown decision — it never overrides a case smelt can already prove is *not* monotone. A constant/`NULL` seed, a row-nondeterministic function (`RANDOM()`, `UUID()`), a periodic or piecewise construct (`MOD`, `CASE`, `EXTRACT`), or an ambiguous/unresolvable column reference is still refused even with the declaration set — only an otherwise-unrecognised function call is admitted.
+
 ### Non-deterministic columns
 
 The non-deterministic-function check can be relaxed per column instead of disabled entirely. List the output column in `batched.nondeterministic_columns` and the value is allowed to vary between runs — useful for audit stamps and surrogates such as `inserted_at = NOW()` or `batch_id = UUID()`:
