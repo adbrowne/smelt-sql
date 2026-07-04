@@ -200,8 +200,8 @@ pub trait Backend: Send + Sync {
                     let _ = unique_key; // unused since the cumulative path owns merge_into
                     match inc_strategy {
                         IncrementalStrategy::DeleteInsert => {
-                            self.delete_partitions(schema, name, &partition).await?;
-                            self.insert_into_from_query(schema, name, sql).await?;
+                            self.delete_and_insert_transactional(schema, name, &partition, sql)
+                                .await?;
                         }
                         IncrementalStrategy::Append => {
                             self.insert_into_from_query(schema, name, sql).await?;
@@ -263,6 +263,30 @@ pub trait Backend: Send + Sync {
         name: &str,
         sql: &str,
     ) -> Result<(), BackendError>;
+
+    /// Delete a partition range and insert the replacement rows as **one**
+    /// backend transaction (`docs/specs/batched_models.md` §"First-run and
+    /// backfill" — "Each chunk's DELETE+INSERT is one backend transaction.
+    /// INSERT failure rolls back the chunk's DELETE; earlier committed
+    /// chunks do not roll back.").
+    ///
+    /// Default implementation preserves the pre-transactional behaviour
+    /// (two independent calls, no atomicity across them) for any backend
+    /// that does not override it — e.g. Spark Connect, whose execution model
+    /// does not offer a straightforward two-statement transaction wrapper
+    /// here. Backends that can wrap both statements in a native transaction
+    /// (DuckDB) should override this.
+    async fn delete_and_insert_transactional(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.delete_partitions(schema, name, partition).await?;
+        self.insert_into_from_query(schema, name, sql).await?;
+        Ok(())
+    }
 
     /// MERGE (upsert) rows using unique_key columns for matching.
     ///

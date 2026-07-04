@@ -105,6 +105,44 @@ pub fn build_source_bound_map(
     (result, warnings)
 }
 
+/// Derive the F1 bound-based [`smelt_planner::BatchSafety`] classification for a
+/// model's backfill chunk-size decision.
+///
+/// This is the batched-local consumer of the same `BoundContext` /
+/// `derive_and_classify_bounds` walk `build_source_bound_map` uses — there is
+/// no second, independent bound derivation. `Err` means a source's bound is
+/// `NotDerivable` (fail-closed, `batched_models.md` Constraint 10): the
+/// caller must surface this as a hard refusal, never approximate a chunk
+/// shape from it.
+///
+/// A model with no dependency timeseries info at all (no upstream ref
+/// carries `timeseries:`) has no source to bound against, so it is
+/// `FullyBatchSafe` — there is nothing to chunk around.
+pub fn batch_safety_for_model(
+    model_sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+) -> Result<smelt_planner::BatchSafety, String> {
+    use smelt_planner::analysis::source_bounds::{derive_and_classify_bounds, BoundContext};
+    use smelt_planner::{batch_safety_from_bounds, BoundResult};
+
+    if dep_timeseries.is_empty() {
+        return Ok(smelt_planner::BatchSafety::FullyBatchSafe);
+    }
+
+    let mut ctx = BoundContext::new();
+    for (dep_name, (_segs, partition_col)) in dep_timeseries {
+        ctx.add_source(dep_name, partition_col);
+    }
+
+    let raw_bounds = derive_and_classify_bounds(model_sql, &ctx);
+    let bounds: HashMap<String, BoundResult> = raw_bounds
+        .into_iter()
+        .map(|(name, (_, bound))| (name, bound))
+        .collect();
+
+    batch_safety_from_bounds(&bounds)
+}
+
 /// Build an ordered substitution vector from positional and named arguments,
 /// optionally falling back to declared default values for unfilled slots.
 ///

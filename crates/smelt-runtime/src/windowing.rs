@@ -8,17 +8,19 @@
 //!
 //! Also owns `validate_run_window_alignment` (moved from `smelt-cli::temporal`).
 
+use std::collections::HashMap;
+
 use chrono::{Duration, NaiveDate};
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{BatchedConfig, Granularity};
 use smelt_planner::{
-    analyze_batch_safety, analyze_temporal_dependencies, compute_effective_window,
-    granularity_period_days, BatchSafety, ModelInfo,
+    analyze_temporal_dependencies, compute_effective_window, granularity_period_days, BatchSafety,
 };
 
 pub use smelt_planner::EffectiveWindow;
 
+use crate::compile::batch_safety_for_model;
 use crate::transformer::TimeRange;
 
 /// One batch in an incremental run.
@@ -53,49 +55,64 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 
 /// Compute incremental execution windows for an entire run range.
 ///
-/// Splits `full_range` into batches using `analyze_batch_safety` (unless overridden
-/// by `batch_size_days` or `per_partition`), then widens each batch's filter range
-/// by the effective temporal window (max of SQL-inferred lookback and `data_latency_days`).
+/// Splits `full_range` into batches using the F1 bound-based batch-safety
+/// roll-up (`compile::batch_safety_for_model`, unless overridden by
+/// `batch_size_days` or `per_partition`), then widens each batch's filter
+/// range by the effective temporal window (max of SQL-inferred lookback and
+/// `data_latency_days`).
+///
+/// `dep_timeseries` maps each upstream dependency that carries `timeseries:`
+/// to its `(address_segments, partition_column)` — see
+/// `compile::build_source_bound_map` for the exact shape/derivation. It
+/// drives the batch-safety classification; it does not affect filter
+/// widening (that stays SQL/`data_latency_days`-derived, untouched by BL2).
 ///
 /// `data_latency_days` should be resolved by the caller from the model's column
 /// metadata (`ColumnMetadata::data_latency` on the event-time column) or a
 /// sources configuration.
+///
+/// Returns `Err` (fail-closed, `batched_models.md` Constraint 10) when the
+/// batch-safety roll-up cannot classify the model (a `NotDerivable` source
+/// bound) — the caller must surface this as a hard refusal, never fall back
+/// to an approximate chunk shape.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_incremental_windows(
     timeseries: &TimeseriesConfig,
-    inc_config: &BatchedConfig,
+    _inc_config: &BatchedConfig,
     sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
     full_range: &TimeRange,
     batch_size_days: Option<u32>,
     per_partition: bool,
-) -> IncrementalWindows {
+) -> Result<IncrementalWindows, String> {
     let start_date = match parse_date(&full_range.start) {
         Ok(d) => d,
         Err(_) => {
-            return IncrementalWindows {
+            return Ok(IncrementalWindows {
                 batches: vec![],
                 effective_window: zero_effective_window(),
                 wide_batch_warning: None,
-            }
+            })
         }
     };
     let end_date = match parse_date(&full_range.end) {
         Ok(d) => d,
         Err(_) => {
-            return IncrementalWindows {
+            return Ok(IncrementalWindows {
                 batches: vec![],
                 effective_window: zero_effective_window(),
                 wide_batch_warning: None,
-            }
+            })
         }
     };
 
     if start_date >= end_date {
-        return IncrementalWindows {
+        return Ok(IncrementalWindows {
             batches: vec![],
             effective_window: zero_effective_window(),
             wide_batch_warning: None,
-        };
+        });
     }
 
     // Analyze temporal dependencies to compute effective window.
@@ -116,15 +133,6 @@ pub fn compute_incremental_windows(
         effective_window.lookahead_days
     };
 
-    // Determine batch chunk size using analyze_batch_safety (respects SQL patterns).
-    let model_info = ModelInfo {
-        name: String::new(),
-        sql: sql.to_string(),
-        refs: vec![],
-        incremental_config: Some(inc_config.clone()),
-        timeseries_config: Some(timeseries.clone()),
-    };
-    let safety = analyze_batch_safety(&model_info);
     let granularity_period = granularity_days(&timeseries.granularity);
 
     let mut wide_batch_warning: Option<String> = None;
@@ -136,6 +144,11 @@ pub fn compute_incremental_windows(
     } else if let Some(override_days) = batch_size_days {
         override_days.max(1)
     } else {
+        // Determine batch chunk size from the F1 bound-based batch-safety
+        // roll-up (replaces the legacy text-based `analyze_batch_safety`).
+        // Fail-closed: propagate `Err` (a `NotDerivable` source) rather than
+        // approximating a chunk shape (`batched_models.md` Constraint 10).
+        let safety = batch_safety_for_model(&stripped, dep_timeseries)?;
         match &safety {
             BatchSafety::FullyBatchSafe => {
                 let total_days = (end_date - start_date).num_days() as u32;
@@ -187,11 +200,11 @@ pub fn compute_incremental_windows(
         batch_start = batch_end;
     }
 
-    IncrementalWindows {
+    Ok(IncrementalWindows {
         batches,
         effective_window,
         wide_batch_warning,
-    }
+    })
 }
 
 /// Validate that a run window `[start, end)` is aligned to the model's granularity.

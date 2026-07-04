@@ -292,7 +292,7 @@ This section captures the batched-**specific** rationale; the rationale for each
   - `crates/smelt-logical/src/rules/incremental.rs` — batched detection + safety checks (in `smelt-logical`; `smelt-planner` re-exports)
   - `crates/smelt-logical/src/types.rs` — safety-override types
   - `crates/smelt-runtime/src/transformer.rs` — `inject_time_filter`, `inject_source_filters`, `is_transparent_single_source`
-  - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions`, `Backend::insert_into_from_query`
+  - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions`, `Backend::insert_into_from_query`, `Backend::delete_and_insert_transactional` (per-chunk transaction boundary)
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
 - **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition full-refresh-equivalence harness

@@ -615,6 +615,48 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
+    async fn delete_and_insert_transactional(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        let table_name = format!("{}.{}", schema, name);
+
+        let delete_sql = format!(
+            "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+            table_name,
+            partition.column,
+            partition.start.replace('\'', "''"),
+            partition.column,
+            partition.end.replace('\'', "''"),
+        );
+        let insert_sql = format!("INSERT INTO {} {}", table_name, sql);
+
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
+            // `Transaction` rolls back on `Drop` unless explicitly committed
+            // (`duckdb::transaction::DropBehavior::Rollback` is the default),
+            // so an INSERT failure below — the `?` returns before `commit()`
+            // is reached — rolls back the paired DELETE for free.
+            let tx = conn
+                .transaction()
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            tx.execute(&delete_sql, [])
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            tx.execute(&insert_sql, [])
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            tx.commit()
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
+
     async fn merge_into(
         &self,
         schema: &str,
@@ -978,6 +1020,123 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(val, 999);
+    }
+
+    // ── delete_and_insert_transactional: per-chunk transaction boundary ─────────
+    // (`batched_models.md` §"First-run and backfill": "Each chunk's
+    // DELETE+INSERT is one backend transaction. INSERT failure rolls back
+    // the chunk's DELETE.")
+
+    #[tokio::test]
+    async fn test_delete_and_insert_transactional_commits_on_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql(
+                "CREATE TABLE main.daily AS SELECT * FROM (VALUES \
+                 ('2024-01-01', 10), ('2024-01-02', 30)) AS t(dt, val)",
+            )
+            .await
+            .unwrap();
+
+        let partition = smelt_backend::PartitionRange {
+            column: "dt".to_string(),
+            start: "2024-01-01".to_string(),
+            end: "2024-01-02".to_string(),
+        };
+
+        backend
+            .delete_and_insert_transactional(
+                "main",
+                "daily",
+                &partition,
+                "SELECT '2024-01-01' as dt, 999 as val",
+            )
+            .await
+            .unwrap();
+
+        let count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(count, 2, "delete removed 1 row, insert added 1 row back");
+
+        let result = backend
+            .execute_sql("SELECT val FROM main.daily WHERE dt = '2024-01-01'")
+            .await
+            .unwrap();
+        let val: i32 = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(val, 999, "the replacement row from the INSERT is present");
+    }
+
+    #[tokio::test]
+    async fn test_delete_and_insert_transactional_rolls_back_delete_on_insert_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.daily (dt VARCHAR, val INTEGER)")
+            .await
+            .unwrap();
+        backend
+            .execute_sql(
+                "INSERT INTO main.daily VALUES ('2024-01-01', 10), ('2024-01-01', 20), \
+                 ('2024-01-02', 30)",
+            )
+            .await
+            .unwrap();
+
+        let before_count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(before_count, 3);
+
+        let partition = smelt_backend::PartitionRange {
+            column: "dt".to_string(),
+            start: "2024-01-01".to_string(),
+            end: "2024-01-02".to_string(),
+        };
+
+        // The INSERT SELECT references a column that doesn't exist in
+        // `main.daily`'s schema (dt, val) — this fails at INSERT time, after
+        // the DELETE has already run inside the same transaction.
+        let result = backend
+            .delete_and_insert_transactional(
+                "main",
+                "daily",
+                &partition,
+                "SELECT '2024-01-01' as dt, 999 as val, 'bogus' as nonexistent_column",
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "an INSERT into a mismatched schema should fail"
+        );
+
+        // The DELETE must have been rolled back — the table state must equal
+        // what it was before this (failed) attempt, not "deleted with no
+        // replacement rows".
+        let after_count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(
+            after_count, before_count,
+            "a failed INSERT must roll back the paired DELETE"
+        );
+
+        let jan1_count: usize = {
+            let rows = backend
+                .execute_sql("SELECT val FROM main.daily WHERE dt = '2024-01-01' ORDER BY val")
+                .await
+                .unwrap();
+            rows.iter().map(|b| b.num_rows()).sum()
+        };
+        assert_eq!(
+            jan1_count, 2,
+            "the two 2024-01-01 rows deleted mid-transaction must be restored"
+        );
     }
 
     /// `resolve_strategy` is no longer a dispatching function — it always

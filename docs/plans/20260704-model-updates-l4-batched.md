@@ -185,7 +185,7 @@ keys**, and **per-source clamp observability**.
 | Phase | Depends on | Spec anchor | Status |
 |-------|-----------|-------------|--------|
 | BL1 | F1, F13, Group A (A1) | `batched_models.md` §"Composition", §"Batch safety classification", §"Execution model", §"Event-time outer-visibility" | done |
-| BL2 | BL1 | `batched_models.md` §"First-run and backfill"; `model_transforms.md` §"Transforms that stay in a mode spec" | pending |
+| BL2 | BL1 | `batched_models.md` §"First-run and backfill"; `model_transforms.md` §"Transforms that stay in a mode spec" | done |
 | BL3 | F3, Group A (A1) | `batched_models.md` §"Non-determinism and the payload rule", Constraint 12; `model_transforms.md` "Compile-time pinning" | pending |
 | BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | pending |
 | BL5 | F1, Group A (A1) | `batched_models.md` §"Run window vs partition granularity"; `timeseries.md` §"Granularity arithmetic" | pending |
@@ -700,6 +700,14 @@ append to (do not replace) the existing schema/column hover.
 - Deeper taint indirection through CTEs/subqueries (BL3), auto-coarsen the run window (BL5), CTE-only
   `event_time_column` non-visibility, function-body `OVER` invisibility, per-column `data_latency` — deferred
   per §Scope "Explicitly deferred".
+- **Pre-existing stale fixture (found in BL2 pre-flight, 2026-07-05):**
+  `crates/smelt-cli/tests/e2e/incremental_refusal.rs::test_outer_having_refused` fails on current `main`
+  (confirmed red already at `e03f42d9`, before BL1) — its `bad_having` fixture's `GROUP BY 1, 2` already
+  contains the declared `partition_column` (`event_date` at position 1), so under the group-aligned `HAVING`
+  semantics this HAVING should be **admitted**, not refused; the fixture predates that semantics and needs a
+  genuinely non-aligned `GROUP BY` to still exercise a refusal. Left red and untouched by BL2 (unrelated to
+  backfill chunking) — **BL4 owns the fix** (its own TDD list already covers "a non-aligned HAVING refuses");
+  BL4 should update this fixture's `GROUP BY` to omit `event_date` as part of landing group-aligned admission.
 
 ## Verification
 

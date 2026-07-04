@@ -407,6 +407,15 @@ pub async fn execute_project(
         _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
     };
 
+    // Project-wide `smelt.<path> → timeseries` map. Merges model-frontmatter
+    // timeseries with per-entity source YAML timeseries declarations (BUG-072).
+    // Built here (before model-plan construction) because BL2's bound-based
+    // batch-safety derivation needs each model's dependency timeseries info
+    // while building its `ModelPlan`/`IncrementalPlan`; cumulative dispatch and
+    // incremental pushdown also use this same map further below.
+    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
+    let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
+
     // ── Model-plan construction + ephemeral collection ──────────────────
     let mut model_plans: Vec<ModelPlan> = Vec::new();
     let mut total_batches: usize = 0;
@@ -442,15 +451,50 @@ pub async fn execute_project(
                 // Use bound-aware windowing: SQL temporal dependencies + data latency
                 // determine filter widening (not just analyze_batch_safety context_days).
                 let expanded_sql = expand_function_calls(&model.content, &fn_bodies);
+
+                // Dependency timeseries map for this model — mirrors the
+                // restriction to `model.refs` used later for
+                // `build_source_bound_map` (see the comment at that call
+                // site): `source_timeseries` also carries this model's own
+                // frontmatter `timeseries:` entry, which must be excluded or
+                // it inflates the bound map with a spurious self-entry.
+                let model_ref_paths: std::collections::HashSet<String> = model
+                    .refs
+                    .iter()
+                    .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+                    .collect();
+                let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
+                    .iter()
+                    .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
+                    .filter_map(|(smelt_ref, ts_cfg)| {
+                        let path = smelt_ref.strip_prefix("smelt.")?;
+                        let segs: Vec<String> = path.split('.').map(String::from).collect();
+                        Some((smelt_ref.clone(), (segs, ts_cfg.partition_column.clone())))
+                    })
+                    .collect();
+
                 let inc_windows = compute_incremental_windows(
                     &ts,
                     &inc,
                     &expanded_sql,
+                    &dep_ts,
                     data_latency_days,
                     &full_range,
                     request.batch_size_days,
                     request.per_partition,
-                );
+                )
+                .map_err(|diag| {
+                    // Fail-closed last line of defense (`batched_models.md` Constraint 10):
+                    // even under `--allow-downgrade` (which only warns at the earlier
+                    // `check_bound_derivation` gate), the batch-safety roll-up here must
+                    // still refuse rather than silently approximate a chunk shape —
+                    // there is no flag that makes an unsafe chunk shape safe.
+                    anyhow::anyhow!(
+                        "Backfill chunk-size derivation refused model '{}':\n  \u{2022} {}",
+                        model_name,
+                        diag
+                    )
+                })?;
 
                 if let Some(ref warning) = inc_windows.wide_batch_warning {
                     warn!("model '{model_name}': {warning}");
@@ -525,11 +569,8 @@ pub async fn execute_project(
             }
         }
     }
-    // Project-wide `smelt.<path> → timeseries` map. Merges model-frontmatter
-    // timeseries with per-entity source YAML timeseries declarations (BUG-072).
-    // Cumulative dispatch and incremental pushdown (Phase 3) both use this map.
-    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
-    let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
+    // `source_infos`/`source_timeseries` are built earlier (before model-plan
+    // construction) — see the comment there.
     drop(graph_lock);
 
     // ── Compile context (UpstreamSchemas + FnBodyMap from Salsa) ────────

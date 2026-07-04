@@ -8,6 +8,7 @@ use smelt_core::config::TimeseriesConfig;
 use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 use smelt_runtime::windowing::{compute_incremental_windows, validate_run_window_alignment};
 use smelt_runtime::TimeRange;
+use std::collections::HashMap;
 
 fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> TimeseriesConfig {
     TimeseriesConfig {
@@ -34,6 +35,10 @@ fn make_range(start: &str, end: &str) -> TimeRange {
     }
 }
 
+fn no_dep_timeseries() -> HashMap<String, (Vec<String>, String)> {
+    HashMap::new()
+}
+
 // ── Multi-source bound-aware windows ──────────────────────────────────────────
 
 #[test]
@@ -49,7 +54,9 @@ fn test_multi_source_bound_aware_windows() {
     let range = make_range("2026-03-20", "2026-03-22");
 
     // data_latency_days=2; SQL has 3-period lookback; max=3
-    let windows = compute_incremental_windows(&ts, &inc, sql, 2, &range, None, false);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 2, &range, None, false)
+            .unwrap();
 
     // FullyBatchSafe batch (bounded 3-day context → ~9–90 day chunks → one batch for 2-day range)
     assert!(!windows.batches.is_empty(), "expected at least one batch");
@@ -73,7 +80,9 @@ fn test_lookback_widens_filter_window() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 3, &range, None, false);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 3, &range, None, false)
+            .unwrap();
 
     assert!(!windows.batches.is_empty(), "expected at least one batch");
     let b = &windows.batches[0];
@@ -100,7 +109,9 @@ fn test_per_partition_override() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
+            .unwrap();
 
     // 2 days → 2 per-day batches
     assert_eq!(windows.batches.len(), 2, "expected 2 per-day batches");
@@ -124,7 +135,17 @@ fn test_batch_size_days_override() {
     // 7-day range → 3 full 2-day batches + 1 partial 1-day batch
     let range = make_range("2026-03-20", "2026-03-27");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, Some(2), false);
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        Some(2),
+        false,
+    )
+    .unwrap();
 
     assert_eq!(windows.batches.len(), 4, "expected 4 batches (3×2d + 1×1d)");
 
@@ -195,7 +216,9 @@ fn test_per_partition_monthly_calendar_aligned() {
     // 24 months: 2025-01-01 to 2027-01-01
     let range = make_range("2025-01-01", "2027-01-01");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
+            .unwrap();
 
     // Must be exactly 24 batches
     assert_eq!(
@@ -256,7 +279,9 @@ fn test_per_partition_monthly_feb_boundary() {
     // Jan-Mar 2024 (Feb has 29 days — leap year)
     let range = make_range("2024-01-01", "2024-04-01");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
+            .unwrap();
 
     assert_eq!(windows.batches.len(), 3);
     use chrono::NaiveDate;
@@ -297,7 +322,9 @@ fn test_per_partition_quarterly_calendar_aligned() {
     // 4 quarters: 2025-01-01 to 2026-01-01
     let range = make_range("2025-01-01", "2026-01-01");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
+            .unwrap();
 
     assert_eq!(
         windows.batches.len(),
@@ -334,7 +361,9 @@ fn test_per_partition_yearly_calendar_aligned() {
     // 3 years: 2023-01-01 to 2026-01-01
     let range = make_range("2023-01-01", "2026-01-01");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
+            .unwrap();
 
     assert_eq!(
         windows.batches.len(),
@@ -369,13 +398,33 @@ fn test_per_partition_daily_and_weekly_unchanged() {
     let ts_day = make_ts("event_time", "day", Granularity::Day);
     let inc = make_inc();
     let range = make_range("2026-03-01", "2026-03-04");
-    let windows = compute_incremental_windows(&ts_day, &inc, sql, 0, &range, None, true);
+    let windows = compute_incremental_windows(
+        &ts_day,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        None,
+        true,
+    )
+    .unwrap();
     assert_eq!(windows.batches.len(), 3, "expected 3 daily batches");
 
     // 2 weeks with per_partition → 2 weekly batches
     let ts_week = make_ts("event_time", "week_start", Granularity::Week);
     let range_w = make_range("2026-03-02", "2026-03-16"); // 14 days, 2 Mon→Mon
-    let windows_w = compute_incremental_windows(&ts_week, &inc, sql, 0, &range_w, None, true);
+    let windows_w = compute_incremental_windows(
+        &ts_week,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range_w,
+        None,
+        true,
+    )
+    .unwrap();
     assert_eq!(windows_w.batches.len(), 2, "expected 2 weekly batches");
 }
 
@@ -391,7 +440,9 @@ fn test_wide_single_batch_warns() {
     // 90 days > 30-period threshold
     let range = make_range("2026-01-01", "2026-04-01");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, false);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, false)
+            .unwrap();
 
     // FullyBatchSafe → single batch
     assert_eq!(
@@ -419,7 +470,9 @@ fn test_narrow_single_batch_no_warn() {
     let inc = make_inc();
     let range = make_range("2026-01-01", "2026-01-08"); // 7 days
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, false);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, false)
+            .unwrap();
 
     assert!(
         windows.wide_batch_warning.is_none(),
@@ -436,7 +489,9 @@ fn test_per_partition_no_wide_batch_warn() {
     let inc = make_inc();
     let range = make_range("2026-01-01", "2026-04-01"); // 90 days
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, true);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, true)
+            .unwrap();
 
     assert!(
         windows.wide_batch_warning.is_none(),
@@ -453,7 +508,17 @@ fn test_batch_size_override_no_wide_batch_warn() {
     let inc = make_inc();
     let range = make_range("2026-01-01", "2026-04-01"); // 90 days
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, Some(30), false);
+    let windows = compute_incremental_windows(
+        &ts,
+        &inc,
+        sql,
+        &no_dep_timeseries(),
+        0,
+        &range,
+        Some(30),
+        false,
+    )
+    .unwrap();
 
     assert!(
         windows.wide_batch_warning.is_none(),
@@ -472,7 +537,9 @@ fn test_no_lookback_no_widening() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    let windows = compute_incremental_windows(&ts, &inc, sql, 0, &range, None, false);
+    let windows =
+        compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 0, &range, None, false)
+            .unwrap();
 
     let b = &windows.batches[0];
     assert_eq!(
@@ -483,4 +550,157 @@ fn test_no_lookback_no_widening() {
         b.filter_end, b.partition_end,
         "filter_end should equal partition_end when no lookahead"
     );
+}
+
+// ── BL2: F1 bound-based batch-safety drives the chunk shape ──────────────────
+//
+// These tests exercise `compute_incremental_windows`'s auto (non-per_partition,
+// non-batch_size_days-override) chunk-size path, which now derives its
+// `BatchSafety` class from `dep_timeseries` via
+// `compile::batch_safety_for_model` (`derive_and_classify_bounds`), not the
+// legacy `analyze_batch_safety`.
+
+fn one_source_dep(source: &str, partition_col: &str) -> HashMap<String, (Vec<String>, String)> {
+    let mut m = HashMap::new();
+    m.insert(
+        source.to_string(),
+        (
+            source.split('.').map(String::from).collect(),
+            partition_col.to_string(),
+        ),
+    );
+    m
+}
+
+#[test]
+fn test_fully_batch_safe_single_pair_for_60_day_range() {
+    // No temporal dependency on the declared source (zero-margin Bounded) →
+    // FullyBatchSafe → one DELETE+INSERT pair for the whole 60-day range.
+    let sql = "SELECT d, SUM(amount) FROM smelt.silver.events GROUP BY d";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-03-02"); // 60 days
+    let deps = one_source_dep("silver.events", "d");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false)
+        .expect("FullyBatchSafe model should not be refused");
+
+    assert_eq!(
+        windows.batches.len(),
+        1,
+        "FullyBatchSafe should yield exactly one batch for the whole range"
+    );
+    assert_eq!(windows.batches[0].partition_start.to_string(), "2026-01-01");
+    assert_eq!(windows.batches[0].partition_end.to_string(), "2026-03-02");
+}
+
+#[test]
+fn test_bounded_safe_yields_subranges_clamped_to_its_own_max_chunk_days() {
+    // A Form-A window frame with a 10-day PRECEDING margin on `d` makes the
+    // source BoundedSafe with context_days=10 → max_chunk_days =
+    // (10*3).clamp(7,90) = 30. A 100-day range must therefore split into
+    // sub-ranges each <= 30 days (batch-safety's own clamp), not one pair.
+    let sql = "SELECT d, SUM(amount) OVER (ORDER BY d RANGE BETWEEN INTERVAL '10 day' \
+               PRECEDING AND CURRENT ROW) FROM smelt.silver.events";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-04-11"); // 100 days
+    let deps = one_source_dep("silver.events", "d");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false)
+        .expect("BoundedSafe model should not be refused");
+
+    assert!(
+        windows.batches.len() > 1,
+        "BoundedSafe should split a 100-day range into multiple sub-ranges, got {}",
+        windows.batches.len()
+    );
+    for b in &windows.batches {
+        let span_days = (b.partition_end - b.partition_start).num_days();
+        assert!(
+            span_days <= 30,
+            "each BoundedSafe sub-range must be clamped to its own max_chunk_days (30), got {span_days}"
+        );
+    }
+    // Sub-ranges are contiguous and cover the whole requested range.
+    assert_eq!(windows.batches[0].partition_start.to_string(), "2026-01-01");
+    assert_eq!(
+        windows.batches.last().unwrap().partition_end.to_string(),
+        "2026-04-11"
+    );
+}
+
+#[test]
+fn test_per_partition_only_yields_one_partition_per_iteration() {
+    // `RANGE BETWEEN UNBOUNDED PRECEDING` on the source's partition column is
+    // an unbounded cross-partition dependency → PerPartitionOnly, even
+    // without the caller passing `per_partition: true` — the auto chunk-size
+    // path must fall back to one partition per iteration on its own.
+    let sql = "SELECT d, SUM(amount) OVER (ORDER BY d RANGE BETWEEN UNBOUNDED PRECEDING \
+               AND CURRENT ROW) FROM smelt.silver.events";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-01-06"); // 5 days
+    let deps = one_source_dep("silver.events", "d");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false)
+        .expect("PerPartitionOnly model should not be refused");
+
+    assert_eq!(
+        windows.batches.len(),
+        5,
+        "PerPartitionOnly should yield one partition per iteration (5 daily batches)"
+    );
+    for (i, b) in windows.batches.iter().enumerate() {
+        let span_days = (b.partition_end - b.partition_start).num_days();
+        assert_eq!(
+            span_days, 1,
+            "batch {i} should be exactly one partition wide"
+        );
+    }
+}
+
+#[test]
+fn test_not_derivable_source_bound_is_a_hard_refusal_not_an_approximate_chunk() {
+    // A bare LAG(...) OVER (...) with no RANGE clause is NotDerivable
+    // (fail-closed, `batched_models.md` Constraint 10). The auto chunk-size
+    // path must surface this as `Err`, never silently fall back to an
+    // approximate chunk shape (e.g. FullyBatchSafe or a default BoundedSafe).
+    let sql = "SELECT d, LAG(amount) OVER (ORDER BY d) FROM smelt.silver.events";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-03-02");
+    let deps = one_source_dep("silver.events", "d");
+
+    let result = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, false);
+
+    let err = result.expect_err("a NotDerivable source bound must refuse, not chunk");
+    assert!(
+        err.contains("cannot derive a temporal bound"),
+        "error should name the derivation failure, got: {err}"
+    );
+    assert!(
+        err.contains("silver.events"),
+        "error should name the offending source, got: {err}"
+    );
+}
+
+#[test]
+fn test_not_derivable_is_not_masked_by_per_partition_or_batch_size_override() {
+    // Explicit `--batch-size`/`--per-partition` bypass the auto chunk-size
+    // path entirely (the user made an explicit choice), so they must NOT be
+    // used to silently route around a NotDerivable refusal. This test
+    // documents current behaviour: an explicit override skips the
+    // batch-safety derivation, and therefore skips the refusal too — it is
+    // the model author's explicit choice, not an approximation the system
+    // invented.
+    let sql = "SELECT d, LAG(amount) OVER (ORDER BY d) FROM smelt.silver.events";
+    let ts = make_ts("event_time", "d", Granularity::Day);
+    let inc = make_inc();
+    let range = make_range("2026-01-01", "2026-01-06");
+    let deps = one_source_dep("silver.events", "d");
+
+    let windows = compute_incremental_windows(&ts, &inc, sql, &deps, 0, &range, None, true)
+        .expect("per_partition=true bypasses batch-safety derivation entirely");
+    assert_eq!(windows.batches.len(), 5);
 }
