@@ -82,10 +82,19 @@ queue the next group, scaffold its sub-plan (own spec-diff + docs-site update) a
 
 | Sub-plan | Group / what it delivers | Status |
 |----------|--------------------------|--------|
+| [`docs/plans/20260704-model-updates-fundamentals.md`](20260704-model-updates-fundamentals.md) | **Fundamentals (L1+L2)** — derived proofs + transforms (F1–F3 consolidate the six code duplications; F4–F10 the new proof classifiers: algebraic discriminants, scoped partition-alignment, join-contribution/fan-out, presentation-map purity, additive-only diff, input-delta discovery, window-independence; F11–F15 the transforms: windowed-keyed-maintenance driver, decomposed-state+view, two-layer widened-scan/exact-clamp redesign, targeted column backfill, dimension-driven horizon MERGE). Runs **first** — the fundamentals-first re-cut (`docs/research/20260704-maintenance-fundamentals.md` §"Target plan architecture") that Groups B/C/D later compose. Does not cover L3 declaration surfaces or L4 mode compositions. | pending |
 | [`docs/plans/20260704-model-updates-group-a.md`](20260704-model-updates-group-a.md) | **Group A** — rename & ontology landing (A1 `refresh: batched` selector + `batched:` block, hard-cutting the `incremental:` block; A2 `Incremental→Batched` diagnostic/config rename + downstream doc sweep; A3 remove `materialized_view` from the storage axis; A4 IVM capability flags + `refresh: materialized_view` hard error). | done (2026-07-04) |
 | [`docs/plans/20260704-model-updates-group-b.md`](20260704-model-updates-group-b.md) | **Group B** — batched eligibility relaxations (B0 filter-placement classifier + unified bound derivation; B1 monotonicity-primitive consumers UNION/subquery-CTE/joins; B2 bounded-`RANGE`+`LAG`/`LEAD`; B3 non-determinism run-pinning + payload opt-in; B4 `HAVING`/`DISTINCT` group-aligned; B5 run-window↔partition-granularity alignment; B6 self-referential ordered execution; B7 monotone-integer partition keys; B8 per-source clamp observability). Depends on Group A. | pending |
 | [`docs/plans/20260704-model-updates-group-c.md`](20260704-model-updates-group-c.md) | **Group C** — keyed-mode maintenance rungs (C1 decomposed-monoid `AVG → (sum,count)` state table + presentation view — the enabling mechanism; C2 variance/stddev + approximate-distinct; C3 group-rung retraction + delta history + `--auto` fidelity; C4 opt-in bounded-domain multiset for exact holistic aggregates). C1 depends on Group A (A1); C2/C4 depend on C1. | pending |
 | [`docs/plans/20260704-model-updates-group-d.md`](20260704-model-updates-group-d.md) | **Group D** — new keyed modes (D1 `refresh: latest_value` SCD-1; D2 `refresh: versioned` SCD-2; D3 `refresh: materialized_view` engine-IVM emit, minimal). D1/D2 depend on Group C (C1's keyed `merge_into` + presentation-view plumbing); D3 depends on Group A (A4's IVM flags + hard error). | pending |
+
+> **Fundamentals-first ordering (2026-07-04).** The **Fundamentals (L1+L2)** sub-plan is the first
+> registry row, so the loop works the shared proofs + transforms to completion before it reaches
+> Group B. Groups B/C/D remain registered `pending` but are **not** what the loop runs next; once the
+> fundamentals layer lands, they are re-scaffolded as **L4 mode-composition** sub-plans that wire the
+> new capabilities by name (research §"Mapping the current master onto the layers"), superseding their
+> current mode-vertical decomposition. Do not run Group B against this branch until that re-scaffold —
+> it would re-derive capabilities the fundamentals layer already owns.
 
 ### Group scaffolding queue (human-gated — NOT registered until scaffolded)
 

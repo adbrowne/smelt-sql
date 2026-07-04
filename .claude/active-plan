@@ -83,8 +83,17 @@
 # reports <<MASTER_EXHAUSTED>>, a human scaffolds Group B/C/D's sub-plan.
 # PREREQUISITE for the property/equivalence suites: DUCKDB_LIB_DIR +
 # LD_LIBRARY_PATH exported into the loop env (unset → DuckDB tests skip green).
+# ACTIVE (2026-07-04, fundamentals-first): the loop works the shared proofs +
+# transforms FIRST. The master's "## Spawned sub-plans" registry now lists
+# docs/plans/20260704-model-updates-fundamentals.md as its first row (L1 derived
+# proofs + L2 transforms: F1–F3 consolidate the six code duplications, F4–F10 the
+# new proof classifiers, F11–F15 the transforms). The loop runs it to completion
+# before reaching Group B; Groups B/C/D are re-scaffolded as L4 mode-composition
+# sub-plans afterwards. Design: docs/research/20260704-maintenance-fundamentals.md
+# §"Target plan architecture"; specs: model_properties.md, model_transforms.md,
+# model_maintenance.md.
 master_plan: docs/plans/20260704-model-updates.md
-active_subplan: docs/plans/20260704-model-updates-group-a.md
+active_subplan: docs/plans/20260704-model-updates-fundamentals.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.
