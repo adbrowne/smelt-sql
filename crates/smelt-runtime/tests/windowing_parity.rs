@@ -21,6 +21,7 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
 fn make_inc() -> BatchedConfig {
     BatchedConfig {
         unique_key: vec![],
+        nondeterministic_columns: vec![],
         safety_overrides: BatchedSafetyOverrides::default(),
     }
 }

@@ -38,6 +38,7 @@ fn _unused_config_ref() -> (BatchedConfig, TimeseriesConfig) {
     (
         BatchedConfig {
             unique_key: vec![],
+            nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
         },
         TimeseriesConfig {

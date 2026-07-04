@@ -132,6 +132,7 @@ mod tests {
         use smelt_core::BatchedSafetyOverrides;
         BatchedConfig {
             unique_key: vec![],
+            nondeterministic_columns: vec![],
             safety_overrides: BatchedSafetyOverrides::default(),
         }
     }

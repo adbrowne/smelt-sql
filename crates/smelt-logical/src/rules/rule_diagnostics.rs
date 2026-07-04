@@ -564,6 +564,7 @@ mod tests {
     fn inc_config() -> BatchedConfig {
         BatchedConfig {
             unique_key: vec!["event_date".to_string()],
+            nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
         }
     }
@@ -756,6 +757,7 @@ mod tests {
         };
         let inc_cfg = BatchedConfig {
             unique_key: vec!["month_start".to_string()],
+            nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
         };
         let ts_map: SourceTimeseriesMap = HashMap::new();
@@ -821,6 +823,7 @@ mod tests {
         };
         let inc_cfg = BatchedConfig {
             unique_key: vec!["event_ts".to_string()],
+            nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
         };
         let ts_map: SourceTimeseriesMap = HashMap::new();

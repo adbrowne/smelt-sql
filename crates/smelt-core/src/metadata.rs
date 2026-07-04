@@ -516,6 +516,42 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
+    // Rule: `batched.nondeterministic_columns` must not name a column that
+    // governs windowing, partition placement, or dedup identity — those
+    // roles must stay deterministic regardless of any opt-in (Constraint 13;
+    // `batched_models.md` §"Non-determinism and the equivalence contract").
+    if let Some(batched) = &metadata.batched {
+        for col in &batched.nondeterministic_columns {
+            if col == &ts.event_time_column {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: format!(
+                        "nondeterministic_columns cannot list '{col}' — it is the \
+                         event_time_column, which governs windowing and must stay \
+                         deterministic"
+                    ),
+                });
+            }
+            if col == &ts.partition_column {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: format!(
+                        "nondeterministic_columns cannot list '{col}' — it is the \
+                         partition_column, which governs partition placement and must \
+                         stay deterministic"
+                    ),
+                });
+            }
+            if batched.unique_key.contains(col) {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: format!(
+                        "nondeterministic_columns cannot list '{col}' — it is a \
+                         unique_key column, which governs dedup identity and must stay \
+                         deterministic"
+                    ),
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1588,6 +1624,124 @@ FROM smelt.orders_raw"#;
         );
     }
 
+    /// Listing `event_time_column` in `batched.nondeterministic_columns` is a
+    /// configuration error (Constraint 13; `batched_models.md` §Surface) — that
+    /// column governs windowing and can never tolerate non-determinism.
+    #[test]
+    fn test_nondeterministic_columns_rejects_event_time_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Batched),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec!["order_ts".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
+            .expect_err("listing event_time_column in nondeterministic_columns must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("order_ts"));
+    }
+
+    /// Listing `partition_column` in `batched.nondeterministic_columns` is a
+    /// configuration error — that column governs partition placement.
+    #[test]
+    fn test_nondeterministic_columns_rejects_partition_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Batched),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec!["order_date".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
+            .expect_err("listing partition_column in nondeterministic_columns must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("order_date"));
+    }
+
+    /// Listing a `unique_key` column in `batched.nondeterministic_columns` is a
+    /// configuration error — that column governs dedup identity.
+    #[test]
+    fn test_nondeterministic_columns_rejects_unique_key_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Batched),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec!["order_id".to_string()],
+                nondeterministic_columns: vec!["order_id".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT order_ts, order_date, order_id FROM foo")
+            .expect_err("listing a unique_key column in nondeterministic_columns must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("order_id"));
+    }
+
+    /// A payload column not overlapping event_time/partition/unique_key is a
+    /// legitimate `nondeterministic_columns` entry and parses cleanly.
+    #[test]
+    fn test_nondeterministic_columns_accepts_payload_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Batched),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec!["order_id".to_string()],
+                nondeterministic_columns: vec!["inserted_at".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        validate_timeseries(
+            &metadata,
+            "SELECT order_ts, order_date, order_id, inserted_at FROM foo",
+        )
+        .expect("payload-only nondeterministic_columns must pass validation");
+    }
+
     /// A `.sql` file declaring the retired `incremental:` block is a hard error
     /// naming `refresh: batched` as the replacement (models.md hard-cut).
     #[test]
@@ -1782,6 +1936,7 @@ GROUP BY device_id, user_id"#;
             refresh: Some(crate::config::RefreshStrategy::Cumulative),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: crate::config::BatchedSafetyOverrides::default(),
             }),
             ..Default::default()
@@ -1857,6 +2012,7 @@ GROUP BY device_id, user_id"#;
             refresh: Some(crate::config::RefreshStrategy::MaterializedView),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: crate::config::BatchedSafetyOverrides::default(),
             }),
             ..Default::default()

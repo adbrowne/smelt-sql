@@ -143,6 +143,7 @@ fn refresh_cumulative_forbids_incremental() {
         refresh: Some(RefreshStrategy::Cumulative),
         batched: Some(BatchedConfig {
             unique_key: vec![],
+            nondeterministic_columns: vec![],
             safety_overrides: BatchedSafetyOverrides::default(),
         }),
         ..Default::default()

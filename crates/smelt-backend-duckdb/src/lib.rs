@@ -995,6 +995,7 @@ mod tests {
 
         let config_with_key = BatchedConfig {
             unique_key: vec!["id".to_string()],
+            nondeterministic_columns: vec![],
             safety_overrides: BatchedSafetyOverrides::default(),
         };
         assert_eq!(
@@ -1004,6 +1005,7 @@ mod tests {
 
         let config_without_key = BatchedConfig {
             unique_key: vec![],
+            nondeterministic_columns: vec![],
             safety_overrides: BatchedSafetyOverrides::default(),
         };
         assert_eq!(

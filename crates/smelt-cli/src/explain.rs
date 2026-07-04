@@ -434,6 +434,7 @@ mod tests {
                 refresh: Some(smelt_core::config::RefreshStrategy::Batched),
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
+                    nondeterministic_columns: vec![],
                     safety_overrides: Default::default(),
                 }),
                 tags: vec![],
@@ -534,6 +535,7 @@ mod tests {
                 refresh: Some(smelt_core::config::RefreshStrategy::Batched),
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
+                    nondeterministic_columns: vec![],
                     safety_overrides: Default::default(),
                 }),
                 tags: vec!["revenue".to_string(), "daily".to_string()],

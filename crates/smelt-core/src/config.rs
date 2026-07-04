@@ -510,6 +510,16 @@ pub struct BatchedConfig {
     /// Columns that uniquely identify a row (backend uses presence to choose strategy)
     #[serde(default)]
     pub unique_key: Vec<String>,
+    /// Output columns exempt from the determinism requirement — audit stamps
+    /// and surrogates the modeller accepts may vary (e.g. `inserted_at =
+    /// NOW()`, `batch_id = UUID()`). A non-deterministic value is admitted
+    /// only when it flows exclusively into a listed column (`batched_models.md`
+    /// §"Non-determinism and the equivalence contract"). Listing
+    /// `timeseries.event_time_column`, `timeseries.partition_column`, or a
+    /// `unique_key` column here is a configuration error — validated in
+    /// `smelt-core::metadata::validate_timeseries`.
+    #[serde(default)]
+    pub nondeterministic_columns: Vec<String>,
     /// Safety overrides for patterns that may diverge on partial data
     #[serde(default)]
     pub safety_overrides: BatchedSafetyOverrides,
@@ -1066,6 +1076,7 @@ models:
             refresh: Some(RefreshStrategy::Cumulative),
             batched: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
             ..Default::default()
@@ -1151,6 +1162,27 @@ targets:
         "#;
         let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.unique_key.is_empty());
+    }
+
+    #[test]
+    fn test_nondeterministic_columns_defaults_empty() {
+        let yaml = r#"
+            safety_overrides: {}
+        "#;
+        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.nondeterministic_columns.is_empty());
+    }
+
+    #[test]
+    fn test_nondeterministic_columns_deserialization() {
+        let yaml = r#"
+            nondeterministic_columns: [inserted_at, batch_id]
+        "#;
+        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.nondeterministic_columns,
+            vec!["inserted_at".to_string(), "batch_id".to_string()]
+        );
     }
 
     #[test]
@@ -1401,6 +1433,7 @@ models:
                 materialization: Some(Materialization::Ephemeral),
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
+                    nondeterministic_columns: vec![],
                     safety_overrides: BatchedSafetyOverrides::default(),
                 }),
                 ..Default::default()
@@ -1551,6 +1584,7 @@ targets:
                 materialization: Some(Materialization::Table),
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
+                    nondeterministic_columns: vec![],
                     safety_overrides: BatchedSafetyOverrides::default(),
                 }),
                 ..Default::default()

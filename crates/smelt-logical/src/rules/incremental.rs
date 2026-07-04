@@ -1040,6 +1040,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         }
@@ -1063,6 +1064,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: overrides,
             }),
         }
@@ -1139,6 +1141,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1360,6 +1363,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1436,6 +1440,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1458,6 +1463,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec!["nonexistent_col".to_string()],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1640,6 +1646,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1696,6 +1703,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1751,6 +1759,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides {
                     allow_window_functions: true,
                     ..Default::default()
@@ -1834,6 +1843,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1873,6 +1883,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1914,6 +1925,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -1950,6 +1962,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides {
                     allow_subqueries: true,
                     ..Default::default()
@@ -1995,6 +2008,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -2040,6 +2054,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -2100,6 +2115,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
@@ -2203,6 +2219,7 @@ mod tests {
             }),
             incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
+                nondeterministic_columns: vec![],
                 safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
