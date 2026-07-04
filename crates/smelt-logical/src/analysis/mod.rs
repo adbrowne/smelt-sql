@@ -1,6 +1,7 @@
 pub mod discriminants;
 pub mod join_shape;
 pub mod monotonicity;
+pub mod presentation;
 pub mod source_bounds;
 pub mod temporal;
 
