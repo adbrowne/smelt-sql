@@ -317,6 +317,14 @@ partition_column"; §"Partition-aligned window functions").
   through B0's injection points.
 - Preserve the existing rejects: no RANGE, `ROWS`/`GROUPS`, `UNBOUNDED` → refuse or `PerPartitionOnly`;
   `safety_overrides.allow_window_functions: true` remains the escape hatch.
+- **Forward-reach opportunity (`after_secs` mirror).** B2 derives the *backward* (`before_secs`)
+  margin from a `RANGE … PRECEDING` frame. The symmetric *forward* (`after_secs`) reach — from a
+  `RANGE … FOLLOWING` frame or a `BETWEEN event.ts AND event.ts + INTERVAL` predicate — is the
+  currently-unworked mirror (`batched_models.md` §8.3 forward reach) and is the sole new engine
+  dependency of the accumulating-snapshot peer (**research
+  [`20260703-model-updates.md`](../research/20260703-model-updates.md) Part 20**, §20.5). It is the
+  same walk with the opposite sign of margin; landing it here while this code is open is cheaper than
+  deferring it to that peer. Optional for B2's own goal, but note in the commit whether it was wired.
 
 **Critical files.**
 - `crates/smelt-logical/src/rules/incremental.rs` — `find_inadmissible_over` (`:343`),

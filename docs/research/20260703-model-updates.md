@@ -3768,6 +3768,216 @@ pattern-×-maintainer blow-up (§17.8) — stated as one rule.
 
 ---
 
+## Part 20 — Accumulating snapshot: a windowed keyed peer for late enrichment
+
+*(Added after Part 19, from a design discussion working the concrete
+"did this event convert?" enrichment case. §20.9 records what it settles
+against the §18 ledger and §19.5's "future peer when demand arrives" note.)*
+
+The motivating case is **retroactive enrichment**: a row represents an event at
+time `t_e` and carries milestone columns — `converted_at`, `conversion_value`,
+`did_convert` — that are filled in when a *later* event (a conversion) arrives
+at `t_c ≥ t_e`, possibly many days on. This is the **accumulating snapshot**
+pattern §19.5 (line "accumulating snapshot") parks as a *future peer when demand
+arrives — a new contract, not a combo*, and sketched in
+[`20260522-cumulative-as-its-own-rule.md`](20260522-cumulative-as-its-own-rule.md)
+§"Sibling rules". This Part supplies the demand and works the design to the
+point where it is almost entirely a composition of already-shipped parts, with
+one genuinely new dependency (§20.5).
+
+### 20.1 It is a keyed maintained peer, not a batched-clamp concern
+
+The instinct to reach for the batched write window (the widened outer clamp,
+DELETE+INSERT over touched partitions) is a category error here, for two reasons
+Parts 8 and 13 already establish:
+
+- **The forward reach is (potentially) unbounded and sparse.** A conversion may
+  land any time in `[t_e, t_e + H]`; only a small fraction of prior rows gain one
+  per run. Whole-partition DELETE+INSERT rebuilds *everything* in a touched
+  partition to update a handful of rows — the wrong write primitive (Part 8's
+  batched contract is per-partition *rebuild*, §1.2).
+- **The correct primitive is keyed MERGE.** One row per key, no output partition
+  column, milestone columns combined per-key — the **maintained** camp's
+  `merge_into` (§13.2), whose end-state equivalence contract (§13.3)
+  *sidesteps monotonicity* and touches only changed keys.
+
+So the peer lands in the maintained camp. The batched machinery contributes not
+its *write* path but its *input-consumption* axis (§20.3), which is a different
+thing (§19.1).
+
+### 20.2 Algebraic placement: the cheapest rung
+
+The milestone combiners are exactly the once-write / extremal family:
+`MIN`/`LEAST`, `MAX`/`GREATEST`, `COALESCE`-first-non-null, `MAX_BY(value,
+ordering)`. On Part 14's ladder these are **commutative monoids** (associative,
+commutative, identity = NULL / ±∞) — but **not groups**: you cannot un-see a set
+milestone (§14.2). Placement:
+
+> **§14.1 append-only maintainable — smelt-driven on a plain engine
+> (`merge_into` + a table), no native IVM.** The same rung as `SUM`/`MIN`/`MAX`
+> cumulative; *not* the join/`DISTINCT`/retraction slice that is native-IVM-only
+> (§14.3).
+
+The monoid-not-group boundary fixes the safety line: a milestone that only makes
+`NULL → non-NULL` transitions is monoid-maintainable; a milestone that can be
+*revised* (value → different value) needs a group (§14.2) or native IVM, and is
+refused (§20.7). The classifier's one new question is therefore **once-write
+verification** — read each milestone projection's aggregator and confirm its
+per-key contribution is idempotent and non-retracting.
+
+### 20.3 Windowed consumption is inherited, not built
+
+The "process it batch by batch, with clamping" requirement is **not a property
+of this peer** — it is the §19 input-consumption axis, orthogonal to the mode and
+**derived from the driving source's shape** (§19.3):
+
+- Because the driving (conversion) source carries a `timeseries:` clock, the peer
+  is consumed **window-forward**: the same `--event-time-start/-end` flags as
+  batched, applied to the *driving source's* `partition_column` — **not** to any
+  column on the keyed output (the spelling `cumulative_aggregate.md` §CLI already
+  uses, §19.2).
+- `cumulative` is the existence proof (§19.2): its driving-source + per-window
+  merge loop is *indifferent to the combiner*. This peer occupies the same
+  window-forward cell of the §19.3 grid with a once-write combiner instead of
+  `⊕`. No new executor, no `strategy:` knob (§20.8).
+
+**The clamp, on the driver axis.** A run reading conversions in `[start, end)`
+MERGEs into event-keys whose `event_time ∈ [start − H, end]`, where `H` is the
+bounded attribution horizon. `start − H` is the clamp — the exact analog of
+batched's lookback clamp, relocated onto the driver. State kept *hot*
+(mergeable) is only keys within `H` of the current window; older keys are settled
+and evictable — the §14.4 space bound, now doubling as a work bound.
+
+### 20.4 Inherited limitations — "the same as batched", precisely
+
+Windowing a maintained model re-imports the batched camp's price **on the
+driver**. Three limitations transfer:
+
+1. **Monotonicity price.** Window-forward consumption "pays the monotonicity
+   price (Part 4)" (§19.1). The driving source must carry a monotone clock. The
+   maintained camp normally sidesteps monotonicity (§13.3); clamping its input
+   re-introduces the requirement on the driver — the honest cost of bounding the
+   work, not a wart.
+2. **Bounded reach or reject.** As batched rejects `UNBOUNDED PRECEDING`, the
+   windowed peer rejects an **unbounded forward horizon**: with `H → ∞` the clamp
+   `start − H → −∞`, every run touches all history, hot state is unbounded, and
+   it degrades to full-key-refresh. Bounded `H` → clampable; unbounded → refuse,
+   fail-closed (§20.7). Same wall, mirror direction.
+3. **Completeness-bound semantics.** `H` is a watermark-style completeness bound
+   (§8.6, Dataflow watermarks): enrichment arriving after `H` is dropped (or
+   forces a full refresh). This is the same promise batched's lookback bound
+   makes about late source data — a declared/derived reach past which data is
+   assumed settled.
+
+### 20.5 The one new dependency: forward-reach `H`, derived where written as a predicate
+
+`H` decomposes on the §8.6 split. The **combiner** is derived (§20.2); the
+**horizon** is the §8.6(b) *source-lateness* term — a data/pipeline property
+invisible in SQL — *unless* the model expresses the attribution window as a
+predicate:
+
+```sql
+JOIN conversions ON conversion.ts BETWEEN event.ts AND event.ts + INTERVAL '30 days'
+```
+
+The `+ INTERVAL '30 days'` is a **Form-B forward reach**, derivable as the
+`after_secs` half of the source bound (§3.2, and the `FOLLOWING`-frame forward
+reach §8.3 flags as *the unworked mirror* of the lookback table, §8.6 line
+"Forward (`FOLLOWING`) reach is the unworked mirror"). So:
+
+- **`H` written as a `BETWEEN … + INTERVAL` predicate → derived** (derive-don't-
+  declare intact), requiring the `after_secs` forward-reach walk to be built.
+- **Otherwise → declared on the source** (§19.3 / §17.6 route this exact
+  world-fact to a source declaration shared by all consumers), default 0.
+
+This forward-reach derivation is the sole genuinely-new engine work in the peer,
+and it is the mirror of the lookback (`before_secs`) walk being built now in
+`docs/plans/20260704-model-updates-group-b.md` (B0's unified downward walk, B2's
+window-frame reach). **Recommendation:** build the `after_secs` mirror alongside
+B2 while that walk is open, rather than deferring it to the peer — the machinery
+is the same, only the sign of the margin differs.
+
+### 20.6 Overlap-tolerance dividend
+
+Because the milestone combiners are **idempotent** monoids
+(`MAX(x, MAX(x,y)) = MAX(x,y)`; `COALESCE`-once-write and `MAX_BY` likewise),
+§19.4's order-independence applies in full: run windows "may be processed **out
+of order, backfilled in slices, or parallelised**." This is strictly *more*
+forgiving than batched DELETE+INSERT and than cumulative's non-idempotent `SUM`
+(which §19.3's grid flags as "✗ for non-idempotent combiners — re-merging
+double-counts" and which relies on exactly-once window consumption). The peer
+needs **no** precise DELETE-covers-INSERT write-window invariant — there is no
+DELETE, and re-merge over an overlapping window converges. The clamp is a *work*
+bound, not a *correctness* bound.
+
+### 20.7 The modelling constraint that keeps it in the cheap rung
+
+The peer stays smelt-driven-on-DuckDB only if the enrichment is modelled as a
+**keyed stream with once-write milestone columns** — event and conversion are
+rows keyed by the same id, milestones combined per key. Expressed instead as a
+`events ⋈ conversions` **fact-to-dimension join**, it becomes the bilinear
+general-operator slice that is native-IVM-only (§14.3) — and §19.5 already routes
+"batched fact enriched from a keyed dimension" to *DAG composition, not a mode
+combo*. Two constructs are therefore refused, fail-closed, steering the author to
+the keyed-union form or full refresh:
+
+- **Correctable (non-once-write) milestones** — monoid-not-group; needs
+  retraction (§14.2) or native IVM.
+- **Join-expressed enrichment** — bilinear; native-IVM-only (§14.3).
+
+### 20.8 Design rule: one declaration, everything else derived
+
+Per §19.3's vertical-declared / horizontal-derived rule, the peer adds exactly
+**one** declaration and no knobs:
+
+- **Declared (vertical, the contract):** `refresh: accumulating_snapshot`.
+- **Derived (horizontal, the scan):** batch-by-batch windowed consumption falls
+  out of the driving source carrying a `timeseries:` clock — as it does for
+  `cumulative` today. **No `strategy:` selector, no `batched_snapshot:` mode, no
+  per-model window knob** — any of which would be the §1.3 anti-pattern.
+- **Derived (algebra):** unique key from `GROUP BY`, milestone columns and their
+  combiners from the projection list's aggregators via the fixed lookup
+  (`20260522` §"Aggregator algebra"). `H` derived from a forward predicate where
+  present (§20.5), else declared on the source.
+
+### 20.9 Sizing, and what this settles
+
+| Piece | Status |
+|---|---|
+| Batch / clamp / run-window loop | **shipped** — the §19 input-consumption axis (`cumulative` runs on it) |
+| Keyed `merge_into` write | **shipped** — cumulative's execution model |
+| Derived combiner (fixed lookup) | **shipped** — add `COALESCE`-once-write / milestone entries |
+| Once-write classifier | small, new (§20.2) |
+| Per-column once-write end-state contract | small (spec), a §13.3 specialization |
+| Forward-reach `H` derivation (`after_secs`) | **medium — the only new engine work** (§20.5); mirror of Group B's lookback walk |
+| Out-of-order / parallel backfill | **free** — idempotent monoids (§20.6) |
+| Unbounded `H`, correctable milestones, join-expressed enrichment | out, fail-closed (§20.7) |
+
+**Settled (updates to §18 / §19.5):**
+
+- The accumulating-snapshot "future peer when demand arrives" (§19.5) has a
+  worked design: a keyed maintained peer in the §14.1 monoid rung, consuming
+  windowed input on the §19 axis, with a once-write contract.
+- **Bounded horizon + derived combiner** are the two governing decisions.
+  Batch-by-batch clamping is *inherited*, not built; the peer inherits batched's
+  monotonicity + bounded-reach + fail-closed limitations on the driver, and gains
+  overlap-tolerance from idempotent monoids.
+
+**Newly opened:**
+
+- **Forward-reach (`after_secs`) derivation** — the `FOLLOWING`-frame mirror
+  (§8.3) is still unworked; §20.5 recommends landing it in the Group B walk.
+  Until it exists, `H` is declared-only.
+- **Shared executor** — this is the §19.8 "shared executor vs per-rule copies"
+  question with a fourth prospective member (accumulating snapshot alongside
+  `cumulative`/`latest_value`/`versioned`); the windowed-consumption loop should
+  be shared, not re-copied per keyed rule.
+- **Eviction / settled-key GC** — the §14.4 hot-state cap becomes concrete here:
+  when and how a key older than the current window minus `H` is retired from the
+  mergeable set, and the fail-loud behaviour if the live-key set exceeds a cap.
+
+---
+
 ## Non-goals
 
 - Broadcast/dimension `UNION` branches that must appear in every partition
