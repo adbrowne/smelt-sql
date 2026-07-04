@@ -82,7 +82,7 @@ A new version is opened for a key only when a **tracked attribute** changes betw
 ## References
 
 - **Related specs**:
-  - [`models.md`](models.md) — the refresh axis; `versioned` as a keyed-output peer
+  - [`models.md`](models.md) — the refresh axis; the input-consumption axis (canonical home for window-forward vs snapshot-diff derivation); `versioned` as a keyed-output peer
   - [`latest_value_models.md`](latest_value_models.md) — the symmetric Type-1 mode (overwrite, keep current)
   - [`cumulative_aggregate.md`](cumulative_aggregate.md) — the running-aggregate keyed mode; source of the keyed end-state contract and `merge_into` execution model
   - [`materialized_view.md`](materialized_view.md) — engine-owned maintenance (where hand-written SCD2 SQL goes instead)

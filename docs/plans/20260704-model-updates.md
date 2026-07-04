@@ -357,11 +357,12 @@ spec oracle, the key edits, the red-green test, and the acceptance gate.
     ordering column the combiner is max-by-ordering-key — a commutative monoid — so merges are
     order-independent (out-of-order/parallel backfill is licensed). Last-processed is the fallback
     and *derives ordered execution* (strictly sequential windows), never a declaration.
-  - **Input consumption is derived from the source** (`latest_value_models.md` §Semantics): a
-    `timeseries:` source is consumed window-forward via the same `--event-time` driving-source
-    machinery as cumulative; a mutable snapshot source is re-scanned and upserted whole. Whether the
-    windowed path *shares* cumulative's executor or keeps a per-rule copy is decided in the sub-plan
-    (research §19.8 open question).
+  - **Input consumption is derived from the source** (canonical: `models.md` §"Input-consumption
+    axis"; mode-specific: `latest_value_models.md` §Semantics): the cell is derived, never declared —
+    a `timeseries:` source is consumed window-forward via the same `--event-time` driving-source
+    machinery as cumulative; a mutable snapshot source is re-scanned and upserted whole. No `strategy:`
+    knob. Whether the windowed path *shares* cumulative's executor or keeps a per-rule copy is decided
+    in the sub-plan (research §19.8 open question).
 - **Depends on.** C1 (keyed-mode `merge_into` + view plumbing).
 - **Test.** One row per key, always the most-recent value; changing an attribute overwrites in place.
   With an ordering column, replaying an old run window does **not** clobber newer values (the §19.4
@@ -372,8 +373,9 @@ spec oracle, the key edits, the red-green test, and the acceptance gate.
 #### D2 — `refresh: versioned` (SCD Type 2)
 - **Goal.** Classifier + version maintenance (compare incoming to stored current per key; close the prior
   version and open a new one on a tracked-attribute change) + smelt-managed validity columns
-  (`valid_from`/`valid_to`/`is_current`). Input consumption is derived from the source
-  (`versioned_models.md` §Semantics, research Part 19): a `timeseries:` source (update-events / CDC
+  (`valid_from`/`valid_to`/`is_current`). Input consumption is derived from the source (canonical:
+  `models.md` §"Input-consumption axis"; mode-specific: `versioned_models.md` §Semantics, research
+  Part 19): a `timeseries:` source (update-events / CDC
   feed) is consumed window-forward with windows applied in temporal order (close/open is inherently
   ordered) and validity intervals stamped from the **source's event time**, not the run clock, so
   end-state equivalence survives replays; a mutable snapshot source is re-scanned and compared. Settle

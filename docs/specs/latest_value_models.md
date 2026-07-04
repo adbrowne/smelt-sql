@@ -76,7 +76,7 @@ How new input is discovered is never declared on the model; it follows from the 
 ## References
 
 - **Related specs**:
-  - [`models.md`](models.md) — the refresh axis; `latest_value` as a keyed-output peer
+  - [`models.md`](models.md) — the refresh axis; the input-consumption axis (canonical home for window-forward vs snapshot-diff derivation); `latest_value` as a keyed-output peer
   - [`versioned_models.md`](versioned_models.md) — the symmetric Type-2 mode (keep every version)
   - [`cumulative_aggregate.md`](cumulative_aggregate.md) — the running-aggregate keyed mode; source of the keyed end-state contract and `merge_into` execution model
   - [`materialized_view.md`](materialized_view.md) — engine-owned maintenance (where hand-written overwrite SQL goes instead)
