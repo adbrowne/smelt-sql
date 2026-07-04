@@ -9,6 +9,7 @@ mod intervals;
 mod lookback;
 mod schema_evolution;
 mod strategies;
+mod window_lookback;
 
 use anyhow::Result;
 use smelt_backend::{Backend, IncrementalStrategy, MaterializationStrategy, PartitionRange};

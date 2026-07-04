@@ -263,6 +263,26 @@ SUM(amount) OVER (ORDER BY event_ts) AS running_total
 
 Use `safety_overrides.allow_window_functions: true` for windows that cannot be partition-aligned and that you have verified are safe in your specific context.
 
+### Bounded-`RANGE` cross-partition windows
+
+A window whose `PARTITION BY` keys do **not** include the model's `partition_column` is still admitted — without an override — when its frame is a bounded `RANGE BETWEEN INTERVAL '…' PRECEDING [AND …]` clause with no `UNBOUNDED` bound. The finite interval is a derivable lookback (or lookforward): the planner widens the *source* read to cover it, so the window is provably partition-local up to that bound even though `PARTITION BY` disagrees with the model's own partition column.
+
+This is what lets a sessionization model window `LAG`/`LEAD` by `device_id` (ordered by event time, framed to a bounded interval) while the model itself is partitioned by a derived `session_start_date`:
+
+```sql
+-- Admitted despite PARTITION BY device_id not matching partition_column session_start_date:
+-- the bounded 30-minute RANGE frame licenses a 30-minute widened source read.
+LAG(event_ts) OVER (
+    PARTITION BY device_id ORDER BY event_ts
+    RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW
+) AS prev_ts
+```
+
+The exception is narrow:
+
+- Only a `RANGE` frame qualifies — a `ROWS` or `GROUPS` frame with the same shape is **not** admitted this way (row/group counts do not translate into a time margin the source read can be widened by); a non-aligned `PARTITION BY` with a `ROWS`/`GROUPS` frame is refused as usual.
+- An `UNBOUNDED` bound on either side (`UNBOUNDED PRECEDING`, or `UNBOUNDED FOLLOWING`/a `FOLLOWING` bound with no `INTERVAL`) is **not** admitted — an unbounded reach in either direction is cumulative-across-history and forces `PerPartitionOnly` or refusal, the same as a non-partition-aligned window with no frame at all.
+
 ## Per-source lookback derivation
 
 For each upstream `smelt.<path>` reference in an incremental model body, the planner derives how far outside the run window that source must be read. This **bound** has the form `(before, after)`: read the source starting `before` seconds before the run start and ending `after` seconds after the run end.
@@ -289,6 +309,18 @@ The planner reads `INTERVAL '30 minutes' PRECEDING` and derives `before = PT30M`
 
 A bare `LAG(x) OVER (PARTITION BY id ORDER BY ts)` without a `RANGE BETWEEN` clause is **not derivable** — the planner cannot determine the lookback and will refuse the model at planning time. Rewrite it with an explicit `RANGE BETWEEN INTERVAL '…' PRECEDING` clause.
 
+**Forward reach (`after`).** The same frame can carry a `FOLLOWING` bound, read as the source's *lookforward* margin — the mirror of the `PRECEDING` case above, from the same walk:
+
+```sql
+LEAD(event_ts) OVER (
+    PARTITION BY device_id
+    ORDER BY event_ts
+    RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours' FOLLOWING
+) AS next_ts
+```
+
+The planner reads `INTERVAL '2 hours' FOLLOWING` and derives `after = PT2H`. An **unbounded** forward reach — `UNBOUNDED FOLLOWING`, or a `FOLLOWING` bound with no `INTERVAL` literal — is **not derivable**, mirroring the bare-`LAG`/`UNBOUNDED PRECEDING` refusal: the planner cannot bound how far forward the source must be read, so the model is refused at planning time rather than silently treated as zero-margin.
+
 ### Form B — explicit WHERE/JOIN interval filters
 
 When the model's WHERE clause or a JOIN condition contains an explicit `INTERVAL` offset on a source column, the interval becomes the source's bound:
@@ -302,6 +334,11 @@ WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1 day' AND m.partition_d
 -- Cross-column rebase: UTC timestamps into local-date partitions
 WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL '1 day'
                           AND m.event_date_local + INTERVAL '1 day'
+```
+
+```sql
+-- Forward-only reach: no backward offset, only a lookforward
+WHERE e.event_ts BETWEEN m.conversion_ts AND m.conversion_ts + INTERVAL '30 days'
 ```
 
 Both `BETWEEN` form and paired `>=` / `<` form are read:

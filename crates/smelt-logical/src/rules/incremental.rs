@@ -2056,4 +2056,172 @@ mod tests {
             bounds.keys().collect::<Vec<_>>()
         );
     }
+
+    // --- B2: bounded-RANGE cross-partition windows + forward-reach walk ---
+
+    /// The sessionization harness: `LAG(...) OVER (PARTITION BY device_id
+    /// ORDER BY event_ts RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND
+    /// CURRENT ROW)` is admitted (`find_inadmissible_over` returns `None`)
+    /// even though the model's own `partition_column` is a *derived*
+    /// `session_start_date` unrelated to the window's `PARTITION BY
+    /// device_id` — the bounded RANGE frame is the licensing lookback. The
+    /// same walk that admits it derives the upstream source's bound as
+    /// `Bounded(_, 30min, 0)` via `derive_model_source_bounds`.
+    #[test]
+    fn test_bounded_range_lag_admitted_despite_derived_partition_column() {
+        let sql = "LAG(event_ts) OVER (PARTITION BY device_id ORDER BY event_ts \
+                   RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW) AS prev_ts";
+        assert_eq!(
+            find_inadmissible_over(sql, "session_start_date"),
+            None,
+            "a bounded RANGE INTERVAL frame must be admitted regardless of PARTITION BY alignment"
+        );
+
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model(
+            "silver.events_parsed",
+            "event_ts",
+            "event_ts",
+        ));
+
+        let m = ModelInfo {
+            name: "sessions".to_string(),
+            sql: "SELECT device_id, session_start_date, \
+                  LAG(event_ts) OVER (PARTITION BY device_id ORDER BY event_ts \
+                  RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW) AS prev_ts \
+                  FROM smelt.silver.events_parsed"
+                .to_string(),
+            refs: vec!["silver.events_parsed".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "session_start_date".to_string(),
+                partition_column: "session_start_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        let (_, bound) = bounds
+            .get("silver.events_parsed")
+            .expect("events_parsed must have a bound entry");
+        match bound {
+            BoundResult::Bounded { before, after, .. } => {
+                assert_eq!(
+                    *before,
+                    crate::analysis::source_bounds::Seconds::minutes(30),
+                    "the 30-minute RANGE frame must derive a 30-minute lookback"
+                );
+                assert_eq!(*after, crate::analysis::source_bounds::Seconds::ZERO);
+            }
+            other => panic!("Expected Bounded(_, 30min, 0), got {:?}", other),
+        }
+    }
+
+    /// Fail-closed: a bare `LAG` with no `RANGE` frame at all stays
+    /// inadmissible when `PARTITION BY` is not aligned to the partition
+    /// column — the bounded-RANGE exception does not extend to frame-less
+    /// windows.
+    #[test]
+    fn test_bare_lag_no_range_stays_inadmissible() {
+        let sql = "LAG(event_ts) OVER (PARTITION BY device_id ORDER BY event_ts) AS prev_ts";
+        assert!(
+            find_inadmissible_over(sql, "session_start_date").is_some(),
+            "a bare LAG with no RANGE frame must stay inadmissible"
+        );
+    }
+
+    /// Fail-closed: a `ROWS BETWEEN ... PRECEDING` frame does not qualify
+    /// for the bounded-RANGE exception (`has_bounded_range_interval_frame`
+    /// requires the `RANGE` keyword specifically) — a non-aligned
+    /// `PARTITION BY` still refuses.
+    #[test]
+    fn test_rows_frame_does_not_get_range_exception() {
+        let sql = "SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
+                   ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) AS running";
+        assert!(
+            find_inadmissible_over(sql, "session_start_date").is_some(),
+            "a ROWS frame must not be admitted by the RANGE-INTERVAL exception"
+        );
+    }
+
+    /// Fail-closed: a `GROUPS BETWEEN ... PRECEDING` frame likewise does not
+    /// qualify for the bounded-RANGE exception.
+    #[test]
+    fn test_groups_frame_does_not_get_range_exception() {
+        let sql = "SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
+                   GROUPS BETWEEN 5 PRECEDING AND CURRENT ROW) AS running";
+        assert!(
+            find_inadmissible_over(sql, "session_start_date").is_some(),
+            "a GROUPS frame must not be admitted by the RANGE-INTERVAL exception"
+        );
+    }
+
+    /// Fail-closed: `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND UNBOUNDED
+    /// FOLLOWING` is not admitted by the bounded-RANGE exception — the
+    /// forward reach is unbounded even though the backward reach is finite.
+    #[test]
+    fn test_unbounded_following_range_stays_inadmissible() {
+        let sql = "SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
+                   RANGE BETWEEN INTERVAL '1 day' PRECEDING AND UNBOUNDED FOLLOWING) AS running";
+        assert!(
+            find_inadmissible_over(sql, "session_start_date").is_some(),
+            "UNBOUNDED FOLLOWING must not be admitted even with a bounded PRECEDING half"
+        );
+    }
+
+    /// The forward-reach (`after_secs`) walk shares B0's single derivation:
+    /// a model whose only temporal pattern is a `RANGE ... FOLLOWING` frame
+    /// derives a nonzero `after` and a zero `before` from `derive_model_source_bounds`,
+    /// and the injection point is `OuterClamp` (a genuine forward margin needs
+    /// both the widened source scan and the exact output clamp).
+    #[test]
+    fn test_forward_reach_derives_outer_clamp_injection_point() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model(
+            "silver.events_parsed",
+            "event_ts",
+            "event_ts",
+        ));
+
+        let m = ModelInfo {
+            name: "attribution".to_string(),
+            sql: "SELECT device_id, event_date, \
+                  LEAD(event_ts) OVER (PARTITION BY device_id ORDER BY event_ts \
+                  RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours' FOLLOWING) AS next_ts \
+                  FROM smelt.silver.events_parsed"
+                .to_string(),
+            refs: vec!["silver.events_parsed".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        let (injection_point, bound) = bounds
+            .get("silver.events_parsed")
+            .expect("events_parsed must have a bound entry");
+        match bound {
+            BoundResult::Bounded { before, after, .. } => {
+                assert_eq!(*before, crate::analysis::source_bounds::Seconds::ZERO);
+                assert_eq!(*after, crate::analysis::source_bounds::Seconds::hours(2));
+            }
+            other => panic!("Expected Bounded(_, 0, 2h), got {:?}", other),
+        }
+        assert_eq!(
+            *injection_point,
+            InjectionPoint::OuterClamp,
+            "a genuine forward margin must keep the outer clamp layer"
+        );
+    }
 }

@@ -235,6 +235,19 @@ fn derive_bound_for_source(sql: &str, partition_col: &str) -> Option<BoundResult
     let upper = sql.to_uppercase();
     let partition_col_upper = partition_col.to_uppercase();
 
+    // Fail-closed: a RANGE frame whose forward (FOLLOWING) bound is either
+    // explicitly `UNBOUNDED FOLLOWING` or a `FOLLOWING` bound with no
+    // parseable `INTERVAL` reads an unbounded amount of future history — the
+    // mirror of `UNBOUNDED PRECEDING`. This must be checked *before* the
+    // Form A/B accumulation below: a frame like `RANGE BETWEEN INTERVAL '1
+    // day' PRECEDING AND UNBOUNDED FOLLOWING` has a genuinely-derivable
+    // (nonzero) `before`, so it would otherwise accumulate into a `Bounded`
+    // result and never reach the "no bound found at all" fallback where the
+    // old `UNBOUNDED PRECEDING`-only check lived.
+    if has_unbounded_forward_reach(&upper) {
+        return Some(BoundResult::Unbounded);
+    }
+
     // Collect all Form A and Form B windows; merge them.
     let mut accumulated: Option<BoundResult> = None;
 
@@ -337,6 +350,51 @@ fn has_bare_lag_lead_over(upper_sql: &str) -> bool {
 /// Check for RANGE BETWEEN UNBOUNDED PRECEDING in the SQL.
 fn has_unbounded_preceding_range(upper_sql: &str) -> bool {
     upper_sql.contains("UNBOUNDED PRECEDING")
+}
+
+/// Check whether any `RANGE BETWEEN` frame in the SQL has an unbounded or
+/// unparseable forward (`FOLLOWING`) reach — the mirror of
+/// [`has_unbounded_preceding_range`]. Unlike the `PRECEDING` check (a plain
+/// substring search, safe because a bound that resolves to `(0, 0)` never
+/// gets accumulated and so always falls through to this fallback), the
+/// `FOLLOWING` side is checked per-frame via [`frame_forward_is_unbounded`]
+/// so it still fires even when the *same* frame also carries a derivable,
+/// nonzero backward margin (e.g. `RANGE BETWEEN INTERVAL '1 day' PRECEDING
+/// AND UNBOUNDED FOLLOWING`) — that frame's `before` would otherwise
+/// accumulate into a `Bounded` result before the "no bound found" fallback
+/// (where a bare substring check would live) is ever reached.
+fn has_unbounded_forward_reach(upper_sql: &str) -> bool {
+    let keyword = "RANGE BETWEEN ";
+    let mut search_from = 0;
+    while let Some(rel) = upper_sql[search_from..].find(keyword) {
+        let abs = search_from + rel;
+        let after_range_between = &upper_sql[abs + keyword.len()..];
+        if frame_forward_is_unbounded(after_range_between) {
+            return true;
+        }
+        search_from = abs + 1;
+    }
+    false
+}
+
+/// True if the text after `RANGE BETWEEN ` carries a `FOLLOWING` bound that
+/// is either `UNBOUNDED FOLLOWING` or a `FOLLOWING` bound with no parseable
+/// `INTERVAL` literal before it (an unrecognised/non-Form-A forward bound —
+/// refuse rather than silently treat it as zero-margin). A frame with no
+/// `FOLLOWING` at all (e.g. `... AND CURRENT ROW`) is not flagged.
+fn frame_forward_is_unbounded(text: &str) -> bool {
+    let Some(and_pos) = text.find(" AND ") else {
+        return false;
+    };
+    let after_and = &text[and_pos + 5..];
+    let Some(fol_pos) = after_and.find("FOLLOWING") else {
+        return false;
+    };
+    let before_fol = &after_and[..fol_pos];
+    if before_fol.contains("UNBOUNDED") {
+        return true;
+    }
+    parse_interval_seconds_before(before_fol).is_none()
 }
 
 /// Extract Form A bounds: (before, after) from RANGE BETWEEN INTERVAL patterns.
@@ -797,6 +855,92 @@ mod tests {
                 assert_eq!(*after, Seconds::ZERO, "after must be zero");
             }
             other => panic!("Expected Bounded, got {:?}", other),
+        }
+    }
+
+    /// Form A forward reach: `RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours'
+    /// FOLLOWING` derives `Bounded(event_date, 0, 2h)` — the `before`-only B0
+    /// walk left `after` at zero; this is the symmetric B2 forward-reach
+    /// derivation off the *same* signed walk.
+    #[test]
+    fn test_range_between_interval_following() {
+        let sql = "SELECT id, ts, LEAD(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours' FOLLOWING) AS next_x \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events_parsed").unwrap();
+        match bound {
+            BoundResult::Bounded {
+                source_partition_col,
+                before,
+                after,
+            } => {
+                assert_eq!(source_partition_col, "event_date");
+                assert_eq!(*before, Seconds::ZERO, "before must be zero");
+                assert_eq!(*after, Seconds::hours(2), "after must be 2 hours");
+            }
+            other => panic!("Expected Bounded(event_date, 0, 2h), got {:?}", other),
+        }
+    }
+
+    /// Fail-closed: `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND UNBOUNDED
+    /// FOLLOWING` has a genuinely-derivable (nonzero) backward margin, but its
+    /// forward reach is unbounded — the whole source must refuse (`Unbounded`),
+    /// not silently admit `after = 0`. Mirrors the `UNBOUNDED PRECEDING` reject.
+    #[test]
+    fn test_unbounded_following_is_unbounded() {
+        let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '1 day' PRECEDING AND UNBOUNDED FOLLOWING) AS x \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events_parsed").unwrap();
+        assert_eq!(
+            *bound,
+            BoundResult::Unbounded,
+            "UNBOUNDED FOLLOWING must refuse fail-closed as Unbounded, not derive after=0"
+        );
+    }
+
+    /// Fail-closed: a `FOLLOWING` bound with no parseable `INTERVAL` (neither
+    /// `UNBOUNDED` nor a quoted interval literal) is an unrecognised forward
+    /// bound — refuse rather than treat it as zero-margin.
+    #[test]
+    fn test_following_with_no_interval_is_unbounded() {
+        let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '1 day' PRECEDING AND 5 FOLLOWING) AS x \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events_parsed", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events_parsed").unwrap();
+        assert_eq!(
+            *bound,
+            BoundResult::Unbounded,
+            "a FOLLOWING bound with no INTERVAL literal must refuse fail-closed"
+        );
+    }
+
+    /// Form B forward-only reach: `BETWEEN event_ts AND event_ts + INTERVAL
+    /// '30 days'` (no backward offset) derives `Bounded(event_ts, 0, 30d)`.
+    #[test]
+    fn test_form_b_forward_only() {
+        let sql = "SELECT * FROM events e \
+                   WHERE e.event_ts BETWEEN m.conversion_ts AND m.conversion_ts + INTERVAL '30 days'";
+        let ctx = BoundContext::new().with_source("silver.events", "event_ts");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events").unwrap();
+        match bound {
+            BoundResult::Bounded {
+                source_partition_col,
+                before,
+                after,
+            } => {
+                assert_eq!(source_partition_col, "event_ts");
+                assert_eq!(*before, Seconds::ZERO, "before must be zero");
+                assert_eq!(*after, Seconds::days(30), "after must be 30 days");
+            }
+            other => panic!("Expected Bounded(event_ts, 0, 30d), got {:?}", other),
         }
     }
 
