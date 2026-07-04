@@ -149,7 +149,7 @@ L3 (declaration surfaces) and L4 (mode compositions) are out of scope entirely â
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| F1    | done    | TBD    | 2026-07-04 |
+| F1    | done    | 09927bc6 | 2026-07-04 |
 | F2    | pending |        |      |
 | F3    | pending |        |      |
 | F4    | pending |        |      |
