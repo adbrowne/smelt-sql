@@ -33,6 +33,54 @@ use crate::analysis::source_bounds::{self, BoundContext, Seconds};
 /// `docs/specs/model_properties.md` "Unified bound / reach derivation".
 pub use source_bounds::Offset;
 
+/// Determinism classification of a bare SQL function name — the single
+/// shared predicate replacing the three private `NONDETERMINISTIC_FUNCTIONS`
+/// copies formerly duplicated in `rules::incremental`, `rules::cumulative`,
+/// and this module's own inline match arm.
+///
+/// See `docs/specs/model_properties.md` §"Determinism (run vs row) and the
+/// nondeterminism predicate".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FunctionDeterminism {
+    /// One value per run (`NOW`, `CURRENT_TIMESTAMP`, `CURRENT_DATE`) —
+    /// frozen at compile time, so pinnable / safe as a direct projection.
+    RunDeterministic,
+    /// A fresh value per row (`RANDOM`, `RAND`, `UUID`, `GEN_RANDOM_UUID`,
+    /// `SETSEED`) — unpinnable.
+    RowNondeterministic,
+    /// Neither class; an ordinary (or unrecognised) function.
+    Neither,
+}
+
+/// Every function name covered by the nondeterminism predicate (run- or
+/// row-nondeterministic), for text-scanning call sites that need the flat
+/// list rather than a per-name query.
+pub const NONDETERMINISTIC_FUNCTIONS: &[&str] = &[
+    "RANDOM",
+    "RAND",
+    "NOW",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_DATE",
+    "UUID",
+    "GEN_RANDOM_UUID",
+    "SETSEED",
+];
+
+/// Classify a bare function name (case-insensitive) into its determinism
+/// class. An unrecognised name is conservatively `Neither` — callers that
+/// need fail-closed treatment of unknown functions handle that at their own
+/// call site (the predicate itself only answers "is this a known
+/// non-deterministic function").
+pub fn classify_function_determinism(name: &str) -> FunctionDeterminism {
+    match name.to_ascii_uppercase().as_str() {
+        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" => FunctionDeterminism::RunDeterministic,
+        "RANDOM" | "RAND" | "UUID" | "GEN_RANDOM_UUID" | "SETSEED" => {
+            FunctionDeterminism::RowNondeterministic
+        }
+        _ => FunctionDeterminism::Neither,
+    }
+}
+
 /// ClickHouse-style verdict for the traced chain (cf. ClickHouse getMonotonicityForRange).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Monotonicity {
@@ -311,9 +359,11 @@ fn classify_function(func: &FunctionCall) -> Classification {
         "GREATEST" | "LEAST" => Classification::NotTraceable(
             "GREATEST/LEAST clamps to a plateau that can straddle a window boundary".to_string(),
         ),
-        "NOW" | "CURRENT_DATE" | "CURRENT_TIMESTAMP" => Classification::NotTraceable(
-            "run-nondeterministic clock is not source-traceable".to_string(),
-        ),
+        _ if classify_function_determinism(&upper) == FunctionDeterminism::RunDeterministic => {
+            Classification::NotTraceable(
+                "run-nondeterministic clock is not source-traceable".to_string(),
+            )
+        }
         _ => Classification::NotTraceable(format!(
             "unknown function {name}: monotonicity cannot be proven"
         )),
@@ -515,6 +565,44 @@ mod tests {
 
     fn events_ctx() -> BoundContext {
         BoundContext::new().with_source("events", "event_ts")
+    }
+
+    #[test]
+    fn nondeterminism_predicate_classifies_row_nondeterministic() {
+        for name in ["RANDOM", "RAND", "UUID", "GEN_RANDOM_UUID", "SETSEED"] {
+            assert_eq!(
+                classify_function_determinism(name),
+                FunctionDeterminism::RowNondeterministic,
+                "{name} should classify as row-nondeterministic"
+            );
+            // Case-insensitive.
+            assert_eq!(
+                classify_function_determinism(&name.to_ascii_lowercase()),
+                FunctionDeterminism::RowNondeterministic
+            );
+        }
+    }
+
+    #[test]
+    fn nondeterminism_predicate_classifies_run_deterministic() {
+        for name in ["NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE"] {
+            assert_eq!(
+                classify_function_determinism(name),
+                FunctionDeterminism::RunDeterministic,
+                "{name} should classify as run-deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn nondeterminism_predicate_classifies_ordinary_function_as_neither() {
+        for name in ["SUM", "COUNT", "DATE_TRUNC", "SOME_UNKNOWN_FN"] {
+            assert_eq!(
+                classify_function_determinism(name),
+                FunctionDeterminism::Neither,
+                "{name} should classify as neither"
+            );
+        }
     }
 
     #[test]

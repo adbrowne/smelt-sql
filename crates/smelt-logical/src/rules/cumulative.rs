@@ -20,8 +20,10 @@ use serde::Serialize;
 use smelt_core::config::TimeseriesConfig;
 use std::collections::HashMap;
 
+use crate::analysis::monotonicity::NONDETERMINISTIC_FUNCTIONS;
 use crate::analysis::source_bounds::{resolve_single_anchor, AnchorAmbiguity};
 use crate::analysis::{analyze_select, SelectItemKind};
+use smelt_types::SqlFunction;
 
 /// A per-partition aggregator paired with its cross-partition combiner.
 ///
@@ -204,18 +206,6 @@ pub struct DrivingSource {
 /// `CumulativeGroupByContainsPartitionColumn`.
 pub type SourceTimeseriesMap = HashMap<String, TimeseriesConfig>;
 
-/// Non-deterministic function names that disqualify a cumulative SELECT.
-const NONDETERMINISTIC_FUNCTIONS: &[&str] = &[
-    "RANDOM",
-    "RAND",
-    "NOW",
-    "CURRENT_TIMESTAMP",
-    "CURRENT_DATE",
-    "UUID",
-    "GEN_RANDOM_UUID",
-    "SETSEED",
-];
-
 /// Classify a `cumulative_aggregate` model.
 ///
 /// `sql` is the inlined model SQL (post function expansion). `refs` is the
@@ -295,11 +285,20 @@ pub fn classify_cumulative(
                     offending: "COUNT(DISTINCT)".to_string(),
                 });
             }
-            SelectItemKind::OtherAggregate { text, alias, .. } => {
-                // Extract the outer function name. The projection text is
-                // something like `COUNT(*)` or `MIN(event_ts)`; we want the
-                // identifier before the first `(`.
-                let agg_name = extract_outer_function_name(text);
+            SelectItemKind::OtherAggregate {
+                text, alias, expr, ..
+            } => {
+                // Extract the outer function name from the already-parsed
+                // expression (no string re-parse) and confirm it against the
+                // typed aggregate classifier — the same
+                // `SqlFunction::is_aggregate` predicate `analysis::mod` used
+                // to classify this item as `OtherAggregate` in the first
+                // place.
+                let agg_name = expr
+                    .as_function_call()
+                    .and_then(|f| f.name())
+                    .map(|n| n.to_ascii_uppercase())
+                    .filter(|n| SqlFunction::from_name(n).is_some_and(|f| f.is_aggregate()));
                 let combiner = agg_name.as_deref().and_then(combiner_for);
                 match (agg_name, combiner) {
                     (Some(agg_upper), Some(combiner)) => {
@@ -422,28 +421,6 @@ pub fn classify_cumulative(
         aggregator_columns,
         driving_source: driving_source.expect("driving_source must be set when diagnostics empty"),
     })
-}
-
-/// Extract the outer function name from a projection expression like
-/// `COUNT(*)` or `MIN(event_ts)`. Returns the uppercased identifier before
-/// the first `(`, or `None` if the text doesn't look like a function call.
-fn extract_outer_function_name(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let paren_pos = trimmed.find('(')?;
-    let name = trimmed[..paren_pos].trim();
-    if name.is_empty() {
-        return None;
-    }
-    // Reject any non-identifier characters (whitespace, operators).
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-    {
-        return None;
-    }
-    // For qualified names like `pg_catalog.sum`, take the last segment.
-    let last_segment = name.rsplit('.').next().unwrap_or(name);
-    Some(last_segment.to_ascii_uppercase())
 }
 
 /// Verify the projection is a direct call to `expected_fn` and nothing else —

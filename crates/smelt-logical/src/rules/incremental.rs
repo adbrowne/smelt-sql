@@ -2,7 +2,10 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
-use crate::analysis::monotonicity::{trace_event_time, EventTimeTrace};
+use crate::analysis::monotonicity::{
+    classify_function_determinism, trace_event_time, EventTimeTrace, FunctionDeterminism,
+    NONDETERMINISTIC_FUNCTIONS,
+};
 use crate::analysis::source_bounds::{
     from_clause_alias_sources, resolve_join_driving_fact, BoundContext, BoundResult, InjectionPoint,
 };
@@ -14,18 +17,6 @@ use crate::analysis::{
 };
 use crate::graph::{ModelGraph, ModelInfo};
 use crate::types::{Opportunity, OpportunityData, Transformation};
-
-/// Non-deterministic function names that produce different results on each run.
-const NONDETERMINISTIC_FUNCTIONS: &[&str] = &[
-    "RANDOM",
-    "RAND",
-    "NOW",
-    "CURRENT_TIMESTAMP",
-    "CURRENT_DATE",
-    "UUID",
-    "GEN_RANDOM_UUID",
-    "SETSEED",
-];
 
 /// How safely a model can be backfilled in large batches.
 ///
@@ -696,7 +687,7 @@ fn find_nondeterministic_fn(text_upper: &str) -> Option<&'static str> {
 /// the target column is not listed in `nondeterministic_columns` (still
 /// subject to the same hard-exclusion roles as every other class).
 fn is_run_clock_pinning_fn(func: &str) -> bool {
-    matches!(func, "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE")
+    classify_function_determinism(func) == FunctionDeterminism::RunDeterministic
 }
 
 /// Build the rejection message for a non-deterministic value reaching a
