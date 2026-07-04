@@ -6,6 +6,7 @@ pub mod monotonicity;
 pub mod presentation;
 pub mod source_bounds;
 pub mod temporal;
+pub mod window_independence;
 
 use serde::Serialize;
 use smelt_types::SqlFunction;
