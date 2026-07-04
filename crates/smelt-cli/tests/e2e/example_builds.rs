@@ -224,6 +224,14 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          standalone build env — covered by crates/smelt-runtime/tests/horizon_ceiling_warning.rs)",
     ),
     (
+        "source_mutation_profile_declared",
+        "Catalog Error: Table with name sources_raw_events does not exist \
+         (DC5 fixture: source-side `mutation_profile` + `source_lateness` declaration; \
+         source table `main.sources_raw_events` not seeded in the standalone build env — \
+         covered by crates/smelt-core/tests/source_yaml.rs and \
+         crates/smelt-logical/src/analysis/input_delta.rs unit tests)",
+    ),
+    (
         "fn_struct_spread_cte",
         "Catalog Error: Table with name sources_gps_readings does not exist \
          (D2 probe fixture: struct spread inside CTE body schema propagation; \

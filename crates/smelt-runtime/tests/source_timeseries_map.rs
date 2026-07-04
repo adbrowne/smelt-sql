@@ -27,6 +27,8 @@ fn make_source(segments: Vec<&str>, ts: Option<TimeseriesConfig>) -> SourceInfo 
         name_override: None,
         tags: vec![],
         timeseries: ts,
+        mutation_profile: None,
+        source_lateness: None,
     }
 }
 

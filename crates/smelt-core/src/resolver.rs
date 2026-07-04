@@ -643,6 +643,8 @@ mod tests {
             name_override: None,
             tags: vec![],
             timeseries: None,
+            mutation_profile: None,
+            source_lateness: None,
         };
 
         let collisions = compute_emitted_name_collisions(&[&m], &[], &[src], "main");

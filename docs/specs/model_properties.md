@@ -58,7 +58,7 @@ These are world-facts smelt cannot derive from the SQL, stated in the model's ow
 
 ### Catalogued inputs (owned elsewhere)
 
-The proofs above consume world-facts that live on the source, backend, or core. This spec does **not** re-home them; it names them so the proof inputs are traceable: the **timeseries clock** (`event_time_column`/`partition_column`/`granularity`, `timeseries.md`); the **source mutation profile** (append-only / mutable / CDF, `sources.md`); the **source-lateness margin** (the declared term of the reach split); the **backend capability flags** (`multi_backend.md`); and the **refresh selector** itself (`models.md`).
+The proofs above consume world-facts that live on the source, backend, or core. This spec does **not** re-home them; it names them so the proof inputs are traceable: the **timeseries clock** (`event_time_column`/`partition_column`/`granularity`, `timeseries.md`); the **source mutation profile** (`mutation_profile:` — `append_only` / `mutable` / `change_feed`, `sources.md` §"Source YAML shape"); the **source-lateness margin** (`source_lateness:`, the declared term of the reach split, `sources.md` §"Source YAML shape"); the **backend capability flags** (`multi_backend.md`); and the **refresh selector** itself (`models.md`).
 
 ## Semantics
 

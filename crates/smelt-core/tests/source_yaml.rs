@@ -5,7 +5,7 @@
 
 use smelt_core::resolver::WorkspaceLoadError;
 use smelt_core::sources::{
-    discover_source_infos, parse_source_yaml, SourceError, SourceNameOverride,
+    discover_source_infos, parse_source_yaml, MutationProfile, SourceError, SourceNameOverride,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -516,5 +516,103 @@ fn name_map_key_names_undeclared_target_is_malformed() {
     assert!(
         literal.validate_target_keys(&["dev"]).is_none(),
         "Literal override must not produce a target-key error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DC5: source mutation-profile + source-lateness declaration
+// (docs/plans/20260704-model-updates-l3-declarations.md, Phase DC5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn source_yaml_parses_declared_mutation_profile_and_source_lateness() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    fs::write(
+        dir.join("events.yml"),
+        r#"
+description: CDC feed
+columns:
+  - name: event_id
+    type: INTEGER
+mutation_profile: change_feed
+source_lateness: '2 hours'
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("events.yml")).unwrap();
+    assert_eq!(info.mutation_profile, Some(MutationProfile::ChangeFeed));
+    let lateness = info
+        .source_lateness
+        .expect("source_lateness must deserialize");
+    assert_eq!(
+        lateness.seconds,
+        2 * 3600,
+        "expected a 2-hour lateness margin"
+    );
+}
+
+#[test]
+fn source_yaml_mutation_profile_and_source_lateness_default_absent() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    fs::write(
+        dir.join("events.yml"),
+        r#"
+description: Undeclared feed
+columns:
+  - name: event_id
+    type: INTEGER
+"#,
+    )
+    .unwrap();
+
+    let info = parse_source_yaml(&dir.join("events.yml")).unwrap();
+    assert_eq!(info.mutation_profile, None);
+    assert_eq!(info.source_lateness, None);
+}
+
+#[test]
+fn source_yaml_rejects_malformed_mutation_profile() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    fs::write(
+        dir.join("events.yml"),
+        r#"
+columns:
+  - name: event_id
+    type: INTEGER
+mutation_profile: not_a_real_profile
+"#,
+    )
+    .unwrap();
+
+    let err = parse_source_yaml(&dir.join("events.yml"));
+    assert!(
+        err.is_err(),
+        "an unrecognised mutation_profile value must be a fail-loud parse error, not a silent default"
+    );
+}
+
+#[test]
+fn source_yaml_rejects_malformed_source_lateness() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    fs::write(
+        dir.join("events.yml"),
+        r#"
+columns:
+  - name: event_id
+    type: INTEGER
+source_lateness: banana
+"#,
+    )
+    .unwrap();
+
+    let err = parse_source_yaml(&dir.join("events.yml"));
+    assert!(
+        err.is_err(),
+        "a malformed source_lateness interval must be a fail-loud parse error, not a silent default"
     );
 }

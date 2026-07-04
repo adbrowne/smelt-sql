@@ -6,7 +6,7 @@
 //!
 //! References: docs/specs/sources.md §"Source YAML shape" and §"Filesystem layout"
 
-use crate::config::TimeseriesConfig;
+use crate::config::{DataLatency, TimeseriesConfig};
 use crate::discovery::ModelDiscovery;
 use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
@@ -53,6 +53,26 @@ impl SourceNameOverride {
     }
 }
 
+/// A source's declared mutation profile — the one non-derivable world-fact on
+/// the input-consumption axis (`docs/specs/models.md` §"Input-consumption
+/// axis"; `docs/specs/model_properties.md` §"Catalogued inputs"). Undeclared
+/// (`None`) is the conservative default: `smelt-logical`'s input-delta
+/// discovery (F9) treats an unclocked source with no declared profile as
+/// `mutable` and falls back to a whole-relation snapshot-diff rather than an
+/// optimistic delta that could silently drop rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationProfile {
+    /// Rows are only ever appended, never updated or deleted in place.
+    AppendOnly,
+    /// Rows may be updated or deleted in place — only a full re-scan sees
+    /// every change.
+    Mutable,
+    /// The source itself exposes a change-data feed (CDC/CDF): a run can read
+    /// only the rows that changed since the last run.
+    ChangeFeed,
+}
+
 /// Information about a single source discovered from a per-entity `.yml` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -77,6 +97,16 @@ pub struct SourceInfo {
     /// Optional time dimension declaration. When present, the source is a
     /// pushdown target for incremental models that reference it.
     pub timeseries: Option<TimeseriesConfig>,
+    /// Declared mutation profile (append-only / mutable / change-feed). See
+    /// [`MutationProfile`]. `None` is the undeclared/unknown case — the
+    /// fail-closed default consumed by `smelt-logical`'s input-delta
+    /// discovery (F9).
+    pub mutation_profile: Option<MutationProfile>,
+    /// Declared source-lateness margin — the term of the reach split
+    /// (`docs/specs/model_properties.md` §"Unified bound/reach derivation").
+    /// Reuses [`DataLatency`]'s existing fail-loud interval parser; `None`
+    /// (absent) means no declared lateness margin (default 0).
+    pub source_lateness: Option<DataLatency>,
 }
 
 impl SourceInfo {
@@ -189,6 +219,14 @@ struct RawSourceYaml {
     /// pushdown target for incremental models.
     #[serde(default)]
     timeseries: Option<TimeseriesConfig>,
+
+    /// Declared mutation profile — see [`MutationProfile`].
+    #[serde(default)]
+    mutation_profile: Option<MutationProfile>,
+
+    /// Declared source-lateness margin — see [`DataLatency`].
+    #[serde(default)]
+    source_lateness: Option<DataLatency>,
 }
 
 #[derive(Deserialize)]
@@ -299,6 +337,8 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
         name_override: raw.name,
         tags: raw.tags,
         timeseries: raw.timeseries,
+        mutation_profile: raw.mutation_profile,
+        source_lateness: raw.source_lateness,
     })
 }
 
@@ -406,7 +446,6 @@ pub fn check_aggregate_sources_yml(project_root: &Path) -> Result<(), WorkspaceL
 // until they are also migrated in later phases.
 // ---------------------------------------------------------------------------
 
-use crate::config::DataLatency;
 use std::collections::HashMap;
 
 /// Sources configuration from the legacy aggregate sources.yml.

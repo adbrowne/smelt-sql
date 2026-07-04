@@ -1,0 +1,24 @@
+name: source_mutation_profile_declared
+version: 1
+
+# Fixture for the source-side mutation-profile + source-lateness declaration
+# (docs/plans/20260704-model-updates-l3-declarations.md, DC5;
+# docs/specs/sources.md §"Source YAML shape"). The raw_events source declares
+# mutation_profile: change_feed and a 2-hour source_lateness margin — both
+# parse via the fail-loud declaration surface. `smelt-logical`'s F9
+# input-delta discovery reads the declared profile via
+# `SourceShape::from_source_info` (unit-tested in
+# `crates/smelt-logical/src/analysis/input_delta.rs`, not exercised here);
+# this fixture only verifies the workspace loads clean with the declaration
+# present.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

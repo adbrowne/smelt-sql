@@ -162,7 +162,7 @@ completed elsewhere; it is the reference shape. The other five are `not-yet`.
 | DC2   | Group A (done); F6 | `model_properties.md` §"Model-scoped declarations" (functional dependency `key → column`) | done (2026-07-05) |
 | DC3   | Group A (done); F4 | `model_properties.md` §"Model-scoped declarations" (bounded-domain / space budget) | done (2026-07-05) |
 | DC4   | Group A (done); F1 (done) + derived-horizon proof | `model_maintenance.md` §"Windowed maintenance and the horizon" | done (2026-07-05) |
-| DC5   | Group A (done); F9 | `models.md` §Known Divergences "Source mutation profile …"; `model_properties.md` §"Catalogued inputs" | pending |
+| DC5   | Group A (done); F9 | `models.md` §Known Divergences "Source mutation profile …"; `model_properties.md` §"Catalogued inputs" | done (2026-07-05) |
 
 ---
 
@@ -515,8 +515,15 @@ first-class" note to name the home).
 - The **derived maintained-window / horizon proof** (`model_properties.md`, `not-yet`, fed by F1) is a
   fundamentals concern; DC4 layers the ceiling declaration on top and defers to that proof for the derived
   value.
-- If DC5 decides the source mutation-profile surface belongs to a different master, the residue is recorded
-  here with a plan link (per DC5's implementation shape).
+- **DC5 landed the declaration surface** (`mutation_profile:` / `source_lateness:` on `SourceInfo`, wired to
+  F9 via `SourceShape::from_source_info`) rather than deferring it — the existing `SourceInfo`/`TimeseriesConfig`
+  struct and F9's `Option<MutationProfile>` parameter already anticipated exactly this extension, and no other
+  master claims ownership. `source_lateness` parses but is not yet read by `derive_model_bounds`/`BoundContext`
+  (no consumer wired) — that remains a residue for whichever phase next touches the reach-split derivation.
+  Similarly, only a declared `change_feed` changes `input_delta_discovery`'s verdict — a declared `append_only`
+  or `mutable` on an unclocked source still falls back to `SnapshotDiff` (F9's own pre-existing fail-closed
+  behaviour, unchanged by DC5); wiring `append_only` to a real delta-discovery path (e.g. a monotone-key probe)
+  is left for whichever L4 phase needs it.
 
 ## Verification
 

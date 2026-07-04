@@ -191,6 +191,18 @@ fn horizon_ceiling_comfortable_no_diagnostics() {
     check_workspace_no_diagnostics("examples/horizon_ceiling_comfortable");
 }
 
+/// Source-side `mutation_profile` + `source_lateness` declaration fixture
+/// (DC5): a source declaring `mutation_profile: change_feed` and a `2 hours`
+/// `source_lateness` margin. Verifies the workspace loads without any
+/// diagnostics — the declaration is structural YAML validation
+/// (`sources.md`), not a Salsa `Diagnostic`; `SourceShape::from_source_info`'s
+/// read of the declared profile is exercised by
+/// `crates/smelt-logical/src/analysis/input_delta.rs` unit tests.
+#[test]
+fn source_mutation_profile_declared_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/source_mutation_profile_declared");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that

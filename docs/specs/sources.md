@@ -55,6 +55,8 @@ columns:
 | `columns[].description` | no | absent | Free-text description, surfaced in LSP hover. |
 | `name` | no | derived | Override the database-side name. **Target-aware** (see §"Target-aware `name:` override"): either a single `<schema>.<table>` literal applied to every target, or a per-target map `{ <target>: <schema>.<table>, … }` so different targets read different external schemas/tables. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
 | `timeseries` | no | absent | Declares a time dimension on this source (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. When present, the named columns must appear in `columns:` with date/timestamp-compatible types. |
+| `mutation_profile` | no | absent (undeclared) | Declares the source's mutation shape: `append_only` (rows are only ever appended), `mutable` (rows may be updated/deleted in place — only a full re-scan sees every change), or `change_feed` (the source itself exposes a CDC/CDF; a run reads only the rows that changed since the last run). This is the one non-derivable world-fact on the input-consumption axis (`models.md` §"Input-consumption axis"; `model_properties.md` §"Catalogued inputs") — `smelt-logical`'s input-delta discovery reads it via `SourceShape::from_source_info`. An unrecognised value is a fail-loud `MalformedSource` parse error. When absent, the conservative default applies: a clocked source (`timeseries:` present) is window-forward, an unclocked source is snapshot-diff. |
+| `source_lateness` | no | absent (zero) | Declares the source-lateness margin — the term of the reach split (`model_properties.md` §"Unified bound/reach derivation") — as an interval (`'2 hours'`, `'1 day'`, …), parsed via the same fail-loud interval grammar as `horizon_ceiling` (`model_maintenance.md`). A malformed value is a fail-loud `MalformedSource` parse error. |
 | `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
 The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML — seed-specific keys"). Differences: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path); a source may declare `timeseries:` (a seed sidecar may not — seeds are loaded by smelt and have no externally-imposed partition layout).
@@ -126,7 +128,7 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 
 | Code | Severity | Trigger |
 |---|---|---|
-| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry, or a `name:` override whose value is not a `<schema>.<table>` literal / whose per-target map names an undeclared target). |
+| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry, a `name:` override whose value is not a `<schema>.<table>` literal / whose per-target map names an undeclared target, an unrecognised `mutation_profile:` value, or a `source_lateness:` value that does not parse as an interval). |
 | `SourceTypeError` | Error | A `columns[].type` value is not a recognised smelt `DataType` (`types.md`). |
 
 ## Semantics
