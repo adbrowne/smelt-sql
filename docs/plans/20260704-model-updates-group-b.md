@@ -96,7 +96,9 @@ done and consumed here, not redone.
   subquery/CTE-body pushdown, join driving-fact resolution (adds alias-scoped leaf resolution).
 - **B2** — Cross-partition window functions with a bounded `RANGE BETWEEN INTERVAL … PRECEDING` frame
   and the `LAG`/`LEAD` two-layer widened-scan/exact-clamp move; bare `LAG`/`ROWS`/`GROUPS`/`UNBOUNDED`
-  stay rejected or per-partition.
+  stay rejected or per-partition. Also lands the symmetric `after_secs` forward-reach walk (bounded
+  `FOLLOWING` frame / forward `BETWEEN … + INTERVAL`), the one new engine dependency of the
+  accumulating-snapshot peer (research §20.5) — one signed walk with B0's `before_secs` half.
 - **B3** — Non-determinism split: compile-time pinning of run-deterministic clocks (`NOW`/`CURRENT_*`)
   + payload opt-in `nondeterministic_columns` with the flow/taint check and three hard exclusions.
 - **B4** — Group-aligned `HAVING` / `DISTINCT` relaxations; relocate the partition-alignment check to
@@ -112,9 +114,10 @@ done and consumed here, not redone.
 - The keyed-mode maintenance rungs (Group C) and the new keyed modes (Group D). Group B touches only
   the `batched` (partitioned-output) member of the refresh axis.
 - The batched Open Questions research §18.2 lists as *not yet settled* — scalar subqueries over
-  bounded sources, `GROUPING SETS`/`ROLLUP`/`CUBE`, `FOLLOWING`-frame forward reach,
-  membership/grouping non-determinism, aggregating-branch unions. Each stays **rejected (fail-closed)**;
-  none is a phase here.
+  bounded sources, `GROUPING SETS`/`ROLLUP`/`CUBE`, membership/grouping non-determinism,
+  aggregating-branch unions. Each stays **rejected (fail-closed)**; none is a phase here. (The
+  `FOLLOWING`-frame forward reach that §18.2 also listed is **no longer deferred** — B2 lands its
+  `after_secs` derivation alongside the `PRECEDING` lookback.)
 - Exact-clamp *migration* (the wholesale switch from widened outer clamps to exact output clamps that
   changes the late-data re-write use case, research §3.2/§8.6). B0 and B2 read the exact margin but the
   B0 decision (below) fixes what carries late-data re-writes; a full migration is out of scope.
@@ -294,6 +297,18 @@ output clamp (research Part 8). Keep `ROWS`/`GROUPS`/bare `LAG`/`LEAD`/`UNBOUNDE
 per-partition (`batched_models.md` §"Batch safety classification" → "Window functions and the
 partition_column"; §"Partition-aligned window functions").
 
+**Also lands the symmetric `after_secs` forward-reach walk** (research §8.3 "the unworked mirror",
+§20.5). The same downward walk that reads a `RANGE … PRECEDING` frame's `INTERVAL` as a backward
+(`before_secs`) margin must also read a forward reach — a `RANGE … FOLLOWING` frame or a
+`BETWEEN col AND col + INTERVAL '…'` predicate — as the `after_secs` half of the source bound. This is
+**one signed walk**, not two: the margin already has a `(before, after)` shape (`BoundResult::Bounded(_,
+before, after)`); B0 wired the `before` half, B2 wires the `after` half at the same call sites. Landing
+it here — while the walk is open — is why research §20.5/§20.9 route it into Group B rather than
+deferring it to the accumulating-snapshot peer, whose horizon `H` is exactly this `after_secs` term
+(`docs/specs/accumulating_snapshot.md` §"The attribution horizon"). An **unbounded** forward reach
+(a `FOLLOWING` frame with no `INTERVAL` bound, `UNBOUNDED FOLLOWING`) is refused, fail-closed — the
+mirror of the `UNBOUNDED PRECEDING` rejection.
+
 **Pre-conditions.** B0 landed. Complements B1's primitive wiring.
 
 **Depends on.** B0.
@@ -308,6 +323,14 @@ partition_column"; §"Partition-aligned window functions").
   and an `UNBOUNDED PRECEDING` frame are rejected / forced `PerPartitionOnly`.
 - `crates/smelt-cli/tests/incremental_parity.rs` (real fixture, e.g. a sessionization model under
   `examples/timeseries/`) — the bounded-`RANGE` `LAG` model matches full refresh across partitions.
+- `crates/smelt-logical/src/analysis/source_bounds.rs` unit (forward reach) — a `RANGE BETWEEN CURRENT
+  ROW AND INTERVAL '2 hours' FOLLOWING` frame (and, separately, a `BETWEEN event_ts AND event_ts +
+  INTERVAL '30 days'` predicate on the source) derives `BoundResult::Bounded(col, 0, after)` with
+  `after = 2 hours` / `30 days`; assert the `after` field the `before`-only B0 walk left at `0` is now
+  populated. Symmetric with the existing `PRECEDING → before` unit test.
+- `crates/smelt-logical/src/analysis/source_bounds.rs` unit (fail-closed) — an `UNBOUNDED FOLLOWING`
+  frame (or a `FOLLOWING` frame with no `INTERVAL` bound) leaves the source `NotDerivable` / refuses,
+  naming the unbounded forward reach — the mirror of the `UNBOUNDED PRECEDING` rejection.
 
 **Implementation shape.**
 - Extend `has_bounded_range_interval_frame` (`incremental.rs:419`) + `find_inadmissible_over`
@@ -317,14 +340,17 @@ partition_column"; §"Partition-aligned window functions").
   through B0's injection points.
 - Preserve the existing rejects: no RANGE, `ROWS`/`GROUPS`, `UNBOUNDED` → refuse or `PerPartitionOnly`;
   `safety_overrides.allow_window_functions: true` remains the escape hatch.
-- **Forward-reach opportunity (`after_secs` mirror).** B2 derives the *backward* (`before_secs`)
-  margin from a `RANGE … PRECEDING` frame. The symmetric *forward* (`after_secs`) reach — from a
-  `RANGE … FOLLOWING` frame or a `BETWEEN event.ts AND event.ts + INTERVAL` predicate — is the
-  currently-unworked mirror (`batched_models.md` §8.3 forward reach) and is the sole new engine
-  dependency of the accumulating-snapshot peer (**research
-  [`20260703-model-updates.md`](../research/20260703-model-updates.md) Part 20**, §20.5). It is the
-  same walk with the opposite sign of margin; landing it here while this code is open is cheaper than
-  deferring it to that peer. Optional for B2's own goal, but note in the commit whether it was wired.
+- **Forward-reach (`after_secs` mirror) — required, not optional.** B0 wired the *backward*
+  (`before_secs`) half of the source bound's `(before, after)` margin. B2 wires the symmetric *forward*
+  (`after_secs`) half at the same call sites: read a `RANGE … FOLLOWING` frame's `INTERVAL` (and a
+  `BETWEEN col AND col + INTERVAL '…'` forward predicate on the source) as `after`, populating
+  `BoundResult::Bounded(col, before, after)`'s `after` field. It is the **same signed walk** — only the
+  sign of the margin differs — so it costs little while this code is open, and research §20.5/§20.9
+  route it here deliberately rather than deferring it to the accumulating-snapshot peer whose horizon
+  `H` *is* this `after_secs` term. An unbounded forward reach (`UNBOUNDED FOLLOWING`, or a `FOLLOWING`
+  frame with no `INTERVAL`) refuses fail-closed, mirroring `UNBOUNDED PRECEDING`. The source-filter
+  injection widens the scan on both sides symmetrically (`WHERE c >= run_start − before AND c <
+  run_end + after`).
 
 **Critical files.**
 - `crates/smelt-logical/src/rules/incremental.rs` — `find_inadmissible_over` (`:343`),
@@ -340,19 +366,35 @@ tracked in `20260530-thread-fn-registry-classification.md`; B2 need not close it
 text scan, do **not** remove that note; if it happens to parse the frame properly, note the reduction.
 
 **Docs touched.**
-- `docs/specs/batched_models.md` §Known Divergences — no full note removed by B2 (the window
+- `docs/specs/batched_models.md` §Known Divergences — no *batched* note fully removed by B2 (the window
   §Known-Divergence is the function-body-invisibility one, out of B2 scope). Verify §"Batch safety
   classification" → "Window functions and the partition_column" prose matches the shipped admission.
-- `docs-site/docs/guide/incremental-models.md` — document the bounded-`RANGE` window admission and the
-  rejected frame shapes.
+  Update the §8.3 "Forward (`FOLLOWING`) reach is the unworked mirror" wording where it appears as an
+  open item — the walk now exists (backward + forward are one signed derivation).
+- `docs/specs/accumulating_snapshot.md` §Known Divergences — the "Forward-reach (`H`) derivation is not
+  yet emitted" note points at this B2 phase; **narrow it**: the `after_secs` walk now exists, so a
+  derived `H` from a `BETWEEN … + INTERVAL` predicate is readable. This spec stays otherwise
+  unimplemented (no classifier, no `merge_into` wiring yet), so do **not** delete the note — reword it
+  to "the forward-reach walk `H` consumes now exists (`source_bounds.rs`); the accumulating-snapshot
+  classifier that reads it is still unbuilt." (Timeless-oracle: describe the behaviour, keep the plan
+  link.)
+- `docs-site/docs/guide/incremental-models.md` — document the bounded-`RANGE` window admission, the
+  rejected frame shapes, and that a bounded `FOLLOWING` frame is now admitted (forward reach) while an
+  unbounded one is refused.
 
 **Review checklist.**
 - [ ] Bounded-`RANGE` `LAG`/`LEAD` admitted cross-partition and equivalence-tested.
 - [ ] Bare `LAG`, `ROWS`/`GROUPS`, `UNBOUNDED` still rejected/per-partition (fail-closed).
 - [ ] Two-layer move: source widened, output clamp exact.
+- [ ] Forward-reach `after_secs` derives from a `FOLLOWING` frame / forward `BETWEEN … + INTERVAL`
+      predicate, populating `BoundResult::Bounded`'s `after`; unbounded forward reach refuses fail-closed.
+- [ ] `after_secs` shares B0's walk (one signed derivation, not a parallel forward-only pass); source
+      filter widens symmetrically on both sides.
+- [ ] `accumulating_snapshot.md` §Known-Divergence forward-reach note narrowed (walk exists), not deleted
+      (classifier still unbuilt); `batched_models.md` §8.3 forward-reach open item updated.
 - [ ] Function-body-`OVER` §Known-Divergence note left intact (out of scope) unless genuinely closed.
 
-**Commit.** `feat(logical): admit bounded-RANGE cross-partition window functions via derived lookback margin`
+**Commit.** `feat(logical): admit bounded-RANGE cross-partition windows + land the symmetric after_secs forward-reach walk`
 
 ---
 
