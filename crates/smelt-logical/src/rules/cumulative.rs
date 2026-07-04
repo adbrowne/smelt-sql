@@ -79,20 +79,26 @@ impl CrossPartitionCombiner {
     }
 }
 
-/// Lookup a per-partition aggregator name in the allowlist and return its
-/// cross-partition combiner. `None` means the aggregator is not in the v1
-/// allowlist.
+/// Lookup a per-partition aggregator name and return its cross-partition
+/// combiner. The gate is the shared algebraic-discriminants classifier
+/// (`analysis::discriminants::combiner_discriminants`) — only a monoid
+/// combiner is admitted; `None` means the aggregator is not a monoid (either
+/// holistic, e.g. `AVG`/`STRING_AGG`, or unrecognised).
 pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
-    match agg_name.to_ascii_uppercase().as_str() {
-        "COUNT" => Some(CrossPartitionCombiner::Sum),
-        "SUM" => Some(CrossPartitionCombiner::Sum),
-        "MIN" => Some(CrossPartitionCombiner::Min),
-        "MAX" => Some(CrossPartitionCombiner::Max),
-        "BOOL_AND" => Some(CrossPartitionCombiner::BoolAnd),
-        "BOOL_OR" => Some(CrossPartitionCombiner::BoolOr),
-        "BIT_AND" => Some(CrossPartitionCombiner::BitAnd),
-        "BIT_OR" => Some(CrossPartitionCombiner::BitOr),
-        "BIT_XOR" => Some(CrossPartitionCombiner::BitXor),
+    let function = SqlFunction::from_name(agg_name)?;
+    let discriminants = crate::analysis::discriminants::combiner_discriminants(function, false);
+    if !discriminants.is_monoid {
+        return None;
+    }
+    match function {
+        SqlFunction::Count | SqlFunction::Sum => Some(CrossPartitionCombiner::Sum),
+        SqlFunction::Min => Some(CrossPartitionCombiner::Min),
+        SqlFunction::Max => Some(CrossPartitionCombiner::Max),
+        SqlFunction::BoolAnd => Some(CrossPartitionCombiner::BoolAnd),
+        SqlFunction::BoolOr => Some(CrossPartitionCombiner::BoolOr),
+        SqlFunction::BitAnd => Some(CrossPartitionCombiner::BitAnd),
+        SqlFunction::BitOr => Some(CrossPartitionCombiner::BitOr),
+        SqlFunction::BitXor => Some(CrossPartitionCombiner::BitXor),
         _ => None,
     }
 }
