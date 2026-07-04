@@ -65,7 +65,7 @@ lands the rename and the ontology so every later group (B, C, D) references the 
 | A1    | done    | f72c1d7d | 2026-07-04 |
 | A2    | done    | 2e74d516 | 2026-07-04 |
 | A3    | done    | b5e1cd99 | 2026-07-04 |
-| A4    | done    |        | 2026-07-04 |
+| A4    | done    | c7ae57d9 | 2026-07-04 |
 
 ---
 
