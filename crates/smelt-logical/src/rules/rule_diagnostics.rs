@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use smelt_core::config::TimeseriesConfig;
 
 use crate::analysis::monotonicity::EventTimeTrace;
-use crate::analysis::source_bounds::BoundContext;
+use crate::analysis::source_bounds::{derive_model_bounds, BoundContext};
 use crate::analysis::{item_alias, select_stmt_items};
 use crate::graph::ModelInfo;
 use crate::rules::cumulative::{classify_cumulative, CumulativeDiagnostic, SourceTimeseriesMap};
@@ -145,6 +145,19 @@ impl PlannerRule for IncrementalRule {
             return vec![diag];
         }
 
+        // Advisory surfacing of the unified bound map's roll-up
+        // (`batched_models.md` §"Batch safety classification"): a
+        // `NotDerivable` source is flagged here so the editor sees it, but
+        // (per `check_batched_bound_derivable`'s doc comment) the actual
+        // fail-closed enforcement with the `--allow-downgrade` escape hatch
+        // lives in `smelt_runtime::safety::check_bound_derivation`. This
+        // reads the *same* `derive_model_bounds` walk the pushdown-scoping
+        // rule and the runtime SQL compiler consume — there is no second,
+        // independent derivation deciding the verdict here.
+        if let Some(diag) = check_batched_bound_derivable(ctx) {
+            return vec![diag];
+        }
+
         let model = ModelInfo {
             name: ctx.model_name.to_string(),
             sql: ctx.sql.to_string(),
@@ -160,6 +173,49 @@ impl PlannerRule for IncrementalRule {
                 message,
             }],
         }
+    }
+}
+
+/// Returns `Some(Warning)` when any of `ctx`'s declared-timeseries upstream
+/// sources has a `NotDerivable` bound — the batch-safety roll-up
+/// (`incremental::batch_safety_from_bounds`) cannot classify the model.
+/// `None` when every source's bound is derivable (or there are no
+/// declared-timeseries sources to bound at all).
+///
+/// **Advisory, not blocking** — mirrors [`IncrementalRule`]'s existing
+/// severity policy (see its doc comment): the actual fail-closed enforcement
+/// of `batched_models.md` Constraint 10 ("No silent downgrade to
+/// full-refresh") happens at the CLI/runtime layer
+/// (`smelt_runtime::safety::check_bound_derivation`), which hard-refuses by
+/// default and honours the explicit `--allow-downgrade` escape hatch. This
+/// diagnostic-parity gate has no notion of that CLI flag — the LSP has no
+/// runtime invocation to attach it to — so it stays `Warning` here exactly as
+/// `IncrementalRule`'s other checks do, rather than pre-empting
+/// `--allow-downgrade` with a harder, unconditional `Error`.
+///
+/// Builds the same per-ref `BoundContext` the pushdown-scoping walk
+/// (`rules::incremental::derive_model_source_bounds`) builds from
+/// `ctx.refs`/`ctx.source_timeseries`, so this and the pushdown filter
+/// injection can never disagree about which sources are (non-)derivable.
+fn check_batched_bound_derivable(ctx: &RuleContext) -> Option<RuleDiagnostic> {
+    let mut bound_ctx = BoundContext::new();
+    for ref_name in ctx.refs {
+        if let Some(ts) = ctx.source_timeseries.get(ref_name) {
+            bound_ctx.add_source(ref_name, &ts.partition_column);
+        }
+    }
+    if bound_ctx.source_partition_cols.is_empty() {
+        return None;
+    }
+
+    let bounds = derive_model_bounds(ctx.sql, &bound_ctx);
+    match incremental::batch_safety_from_bounds(&bounds) {
+        Ok(_) => None,
+        Err(message) => Some(RuleDiagnostic {
+            code: RuleDiagnosticCode::BatchedNotSafe,
+            severity: RuleSeverity::Warning,
+            message: format!("Model '{}': {message}", ctx.model_name),
+        }),
     }
 }
 
@@ -314,6 +370,27 @@ fn check_union_all_injectable(
     let Ok(traces) = trace_union_branches(stmt, event_time_column, position, &bound_ctx) else {
         return reject();
     };
+
+    // A `StaticSeed` branch (a constant/NULL literal in the event-time slot)
+    // is named-and-rejected rather than folded into the generic reject
+    // message — it is a distinct, positively-proven hazard (not merely
+    // "couldn't prove traceable"), so the diagnostic should say so.
+    for (i, trace) in traces.iter().enumerate() {
+        if let EventTimeTrace::StaticSeed { reason } = trace {
+            return Some(RuleDiagnostic {
+                code: RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect,
+                severity: RuleSeverity::Error,
+                message: format!(
+                    "Model '{}': UNION ALL branch {} projects a static/NULL seed for \
+                     '{}' ({reason}) — not a partitionable stream, so the event-time filter \
+                     cannot be proven safe to inject for this UNION ALL.",
+                    model_name,
+                    i + 1,
+                    event_time_column
+                ),
+            });
+        }
+    }
 
     if traces
         .iter()
@@ -814,6 +891,130 @@ mod tests {
             detect_builtin_rules(&ctx).is_empty(),
             "simple incremental model must be clean; got: {:?}",
             detect_builtin_rules(&ctx)
+        );
+    }
+
+    #[test]
+    fn event_time_not_injectable_into_union_all_static_seed_branch_is_named() {
+        // Branch 2 projects a constant literal for the partition-column
+        // position — a `StaticSeed` hazard, distinct from a generic
+        // `NotTraceable` verdict. The diagnostic message must name it
+        // ("static") rather than falling back to the generic UNION-ALL
+        // rejection wording, so authors can tell the two failure modes
+        // apart.
+        let sql = "SELECT event_date, COUNT(*) AS n \
+                   FROM smelt.orders GROUP BY event_date \
+                   UNION ALL \
+                   SELECT DATE '2024-01-01' AS event_date, COUNT(*) AS n \
+                   FROM smelt.returns GROUP BY 1";
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        };
+        let inc_cfg = inc_config();
+        let mut ts_map: SourceTimeseriesMap = HashMap::new();
+        ts_map.insert("smelt.orders".to_string(), ts_cfg.clone());
+        ts_map.insert("smelt.returns".to_string(), ts_cfg.clone());
+        let ctx = RuleContext {
+            model_name: "union_static_seed",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        let hit = diags
+            .iter()
+            .find(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect);
+        assert!(
+            hit.is_some(),
+            "StaticSeed UNION ALL branch must still be rejected; got: {diags:?}"
+        );
+        assert!(
+            hit.unwrap().message.to_lowercase().contains("static"),
+            "message must name the StaticSeed hazard, not just the generic rejection: {}",
+            hit.unwrap().message
+        );
+    }
+
+    #[test]
+    fn incremental_rule_flags_not_derivable_bound_as_warning() {
+        // `bare_lag` derives an `event_date` column but the model's own
+        // dependency on `smelt.src` goes through a bare LAG (no explicit
+        // RANGE BETWEEN INTERVAL frame) — `derive_model_bounds` cannot prove
+        // a bound for `smelt.src`, so the roll-up
+        // (`incremental::batch_safety_from_bounds`) refuses and the rule
+        // surfaces `BatchedNotSafe` as a Warning here (advisory —
+        // `check_batched_bound_derivable`'s doc comment explains why this
+        // diagnostic-parity gate stays non-blocking: the fail-closed
+        // enforcement with the `--allow-downgrade` escape hatch lives at the
+        // CLI/runtime layer, `smelt_runtime::safety::check_bound_derivation`).
+        let sql = "SELECT event_date, \
+                   LAG(amount) OVER (PARTITION BY device_id ORDER BY event_date) AS prev_amount \
+                   FROM smelt.src";
+        let refs = collect_path_refs(sql);
+        let tsc = day_ts();
+        let mut ts_map: SourceTimeseriesMap = HashMap::new();
+        ts_map.insert("smelt.src".to_string(), tsc.clone());
+        let inc = BatchedConfig {
+            unique_key: vec![],
+            nondeterministic_columns: vec![],
+            safety_overrides: crate::types::BatchedSafetyOverrides {
+                allow_window_functions: true,
+                ..Default::default()
+            },
+        };
+        let ctx = RuleContext {
+            model_name: "bare_lag",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&tsc),
+            incremental_config: Some(&inc),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::BatchedNotSafe
+                    && d.severity == RuleSeverity::Warning),
+            "a NotDerivable source bound must surface as an advisory Warning; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_batched_bound_derivable_silent_when_bound_derivable() {
+        // A genuine bounded lookback (Form B: `WHERE col BETWEEN expr -
+        // INTERVAL '...' AND expr`) derives cleanly — the bound-derivability
+        // gate must stay silent. Exercises `check_batched_bound_derivable`
+        // directly (rather than the full `IncrementalRule`) so this test is
+        // independent of the separate `OVER`-admissibility check.
+        let sql = "SELECT event_date, amount FROM smelt.src \
+                   WHERE event_date BETWEEN start_date - INTERVAL '2 days' AND start_date";
+        let refs = collect_path_refs(sql);
+        let tsc = day_ts();
+        let mut ts_map: SourceTimeseriesMap = HashMap::new();
+        ts_map.insert("smelt.src".to_string(), tsc.clone());
+        let inc = inc_config();
+        let ctx = RuleContext {
+            model_name: "windowed_lookback",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&tsc),
+            incremental_config: Some(&inc),
+        };
+        assert!(
+            check_batched_bound_derivable(&ctx).is_none(),
+            "a genuinely-derivable bound must not refuse"
         );
     }
 

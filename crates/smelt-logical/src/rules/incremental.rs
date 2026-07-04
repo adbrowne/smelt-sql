@@ -126,6 +126,111 @@ pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety {
     }
 }
 
+/// Roll F1's unified per-source [`BoundResult`] map into the batched-local
+/// three-class **batch-safety** verdict (`batched_models.md` §"Batch safety
+/// classification").
+///
+/// This is the *composition* entry point: everywhere a model's batch-safety
+/// class is needed for planning-time refusal or transform selection, it reads
+/// this roll-up over the same `BoundResult` map `derive_and_classify_bounds`
+/// produces — there is no second, independent walk over the model's SQL to
+/// decide safety.
+///
+/// - All sources `Bounded(_, 0, 0)` (or no timeseries sources at all) →
+///   [`BatchSafety::FullyBatchSafe`].
+/// - Any source `Bounded` with `before + after > 0` → [`BatchSafety::BoundedSafe`],
+///   with `n` (`context_days`, rendered in whole days, rounded up) the maximum
+///   `before + after` across every bounded source.
+/// - Any source `Unbounded` → [`BatchSafety::PerPartitionOnly`], naming the
+///   source(s).
+///
+/// A `NotDerivable` source is **not** assigned a class — the roll-up refuses
+/// with `Err`, naming the offending source, per Constraint 10 ("No silent
+/// downgrade to full-refresh"): the optimizer cannot prove the partition
+/// DELETE+INSERT contract is safe, so there is nothing to classify. `Err` is
+/// checked first, before `Unbounded`/`Bounded`, so a `NotDerivable` source can
+/// never be silently outclassed by a coarser-but-still-buildable verdict
+/// computed from the *other* sources.
+pub fn batch_safety_from_bounds(
+    bounds: &HashMap<String, BoundResult>,
+) -> Result<BatchSafety, String> {
+    // Fail-closed: any NotDerivable source refuses the whole model — checked
+    // before Unbounded/Bounded so it can never be masked by another source's
+    // coarser-but-buildable verdict.
+    let not_derivable: Vec<&str> = bounds
+        .iter()
+        .filter(|(_, b)| matches!(b, BoundResult::NotDerivable))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !not_derivable.is_empty() {
+        return Err(format!(
+            "cannot derive a temporal bound for source(s) {} — the SQL contains a construct \
+             (e.g. a window function without an explicit RANGE BETWEEN INTERVAL clause, or a \
+             symbolic month/year interval literal in a bound-relevant position) that cannot be \
+             proven safe for the batched partition DELETE+INSERT contract. Rewrite into a \
+             derivable form or remove the temporal dependency.",
+            not_derivable.join(", ")
+        ));
+    }
+
+    let unbounded: Vec<&str> = bounds
+        .iter()
+        .filter(|(_, b)| matches!(b, BoundResult::Unbounded))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !unbounded.is_empty() {
+        return Ok(BatchSafety::PerPartitionOnly {
+            reason: format!(
+                "source(s) {} require unbounded history (cumulative-across-history dependency)",
+                unbounded.join(", ")
+            ),
+        });
+    }
+
+    let max_context_secs: u64 = bounds
+        .values()
+        .filter_map(|b| match b {
+            BoundResult::Bounded { before, after, .. } => Some(before.0 + after.0),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+
+    if max_context_secs == 0 {
+        return Ok(BatchSafety::FullyBatchSafe);
+    }
+
+    let context_days = max_context_secs.div_ceil(86400).max(1) as u32;
+    let min_chunk = context_days * 3;
+    let max_chunk_days = min_chunk.clamp(7, 90);
+
+    let mut reasons: Vec<(&String, u64)> = bounds
+        .iter()
+        .filter_map(|(name, b)| match b {
+            BoundResult::Bounded { before, after, .. } if before.0 + after.0 > 0 => {
+                Some((name, before.0 + after.0))
+            }
+            _ => None,
+        })
+        .collect();
+    reasons.sort_by(|a, b| a.0.cmp(b.0));
+    let reason = format!(
+        "temporal dependency of {} day(s) from: {}",
+        context_days,
+        reasons
+            .iter()
+            .map(|(name, secs)| format!("{name} ({}s)", secs))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    Ok(BatchSafety::BoundedSafe {
+        max_chunk_days,
+        context_days,
+        reason,
+    })
+}
+
 /// Detect incremental materialization opportunity from frontmatter config.
 pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     let inc_config = match &model.incremental_config {
@@ -2161,6 +2266,132 @@ mod tests {
         };
         let safety = analyze_batch_safety(&m);
         assert_eq!(safety, BatchSafety::FullyBatchSafe);
+    }
+
+    // --- batch_safety_from_bounds: the F1 BoundResult-map roll-up (BL1) ---
+
+    /// All sources `Bounded(_, 0, 0)` → `FullyBatchSafe`.
+    #[test]
+    fn test_batch_safety_from_bounds_all_zero_margin_is_fully_safe() {
+        let mut bounds = HashMap::new();
+        bounds.insert(
+            "orders".to_string(),
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::ZERO,
+                after: crate::analysis::source_bounds::Seconds::ZERO,
+            },
+        );
+        bounds.insert(
+            "returns".to_string(),
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::ZERO,
+                after: crate::analysis::source_bounds::Seconds::ZERO,
+            },
+        );
+        let safety = batch_safety_from_bounds(&bounds).expect("must classify, not refuse");
+        assert_eq!(safety, BatchSafety::FullyBatchSafe);
+    }
+
+    /// An empty bound map (no timeseries sources at all) is also
+    /// `FullyBatchSafe` — there is nothing to bound.
+    #[test]
+    fn test_batch_safety_from_bounds_empty_map_is_fully_safe() {
+        let bounds: HashMap<String, BoundResult> = HashMap::new();
+        assert_eq!(
+            batch_safety_from_bounds(&bounds).expect("must classify"),
+            BatchSafety::FullyBatchSafe
+        );
+    }
+
+    /// Any source `Bounded` with `before + after > 0` classifies as
+    /// `BoundedSafe(n)`, with `n` the *maximum* `before + after` across every
+    /// bounded source — not the max of `before` and `after` taken
+    /// separately.
+    #[test]
+    fn test_batch_safety_from_bounds_nonzero_margin_is_bounded_safe_with_max_n() {
+        let mut bounds = HashMap::new();
+        bounds.insert(
+            "orders".to_string(),
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::days(2),
+                after: crate::analysis::source_bounds::Seconds::ZERO,
+            },
+        );
+        bounds.insert(
+            "returns".to_string(),
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::days(1),
+                after: crate::analysis::source_bounds::Seconds::days(1),
+            },
+        );
+        let safety = batch_safety_from_bounds(&bounds).expect("must classify, not refuse");
+        match safety {
+            BatchSafety::BoundedSafe { context_days, .. } => {
+                // max(before+after) = max(2 days, 2 days) = 2 days.
+                assert_eq!(
+                    context_days, 2,
+                    "n must be max(before+after), not max(before, after)"
+                );
+            }
+            other => panic!("Expected BoundedSafe, got {:?}", other),
+        }
+    }
+
+    /// Any source `Unbounded` classifies the whole model `PerPartitionOnly`,
+    /// naming the offending source.
+    #[test]
+    fn test_batch_safety_from_bounds_unbounded_source_is_per_partition_only() {
+        let mut bounds = HashMap::new();
+        bounds.insert(
+            "orders".to_string(),
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::ZERO,
+                after: crate::analysis::source_bounds::Seconds::ZERO,
+            },
+        );
+        bounds.insert("running_balance".to_string(), BoundResult::Unbounded);
+        let safety = batch_safety_from_bounds(&bounds).expect("must classify, not refuse");
+        match safety {
+            BatchSafety::PerPartitionOnly { reason } => {
+                assert!(
+                    reason.contains("running_balance"),
+                    "reason must name the unbounded source: {reason}"
+                );
+            }
+            other => panic!("Expected PerPartitionOnly, got {:?}", other),
+        }
+    }
+
+    /// Fail-closed reject: any `NotDerivable` source refuses the whole model
+    /// (`BatchedNotSafe`), naming the offending source — never silently
+    /// downgraded to a coarser class computed from the other sources.
+    #[test]
+    fn test_batch_safety_from_bounds_not_derivable_refuses_naming_source() {
+        let mut bounds = HashMap::new();
+        bounds.insert(
+            "orders".to_string(),
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: crate::analysis::source_bounds::Seconds::ZERO,
+                after: crate::analysis::source_bounds::Seconds::ZERO,
+            },
+        );
+        bounds.insert("bare_lag_source".to_string(), BoundResult::NotDerivable);
+        let result = batch_safety_from_bounds(&bounds);
+        assert!(
+            result.is_err(),
+            "NotDerivable source must refuse, not classify"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("bare_lag_source"),
+            "error must name the offending source: {err}"
+        );
     }
 
     // --- Partition-aligned OVER admissibility tests (Phase 3) ---

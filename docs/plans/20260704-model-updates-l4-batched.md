@@ -184,7 +184,7 @@ keys**, and **per-source clamp observability**.
 
 | Phase | Depends on | Spec anchor | Status |
 |-------|-----------|-------------|--------|
-| BL1 | F1, F13, Group A (A1) | `batched_models.md` §"Composition", §"Batch safety classification", §"Execution model", §"Event-time outer-visibility" | pending |
+| BL1 | F1, F13, Group A (A1) | `batched_models.md` §"Composition", §"Batch safety classification", §"Execution model", §"Event-time outer-visibility" | done |
 | BL2 | BL1 | `batched_models.md` §"First-run and backfill"; `model_transforms.md` §"Transforms that stay in a mode spec" | pending |
 | BL3 | F3, Group A (A1) | `batched_models.md` §"Non-determinism and the payload rule", Constraint 12; `model_transforms.md` "Compile-time pinning" | pending |
 | BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | pending |
