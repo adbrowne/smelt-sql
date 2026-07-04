@@ -62,7 +62,7 @@ lands the rename and the ontology so every later group (B, C, D) references the 
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| A1    | done    |        | 2026-07-04 |
+| A1    | done    | f72c1d7d | 2026-07-04 |
 | A2    | pending |        |      |
 | A3    | pending |        |      |
 | A4    | pending |        |      |
