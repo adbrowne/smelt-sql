@@ -88,7 +88,22 @@ pub struct Frontmatter {
     #[serde(default)]
     pub timeseries: Option<TimeseriesConfig>,
     #[serde(default)]
-    pub incremental: Option<IncrementalConfig>,
+    pub refresh: Option<smelt_core::config::RefreshStrategy>,
+    #[serde(default)]
+    pub batched: Option<IncrementalConfig>,
+}
+
+impl Frontmatter {
+    /// The `batched:` block, defaulted to empty, when this frontmatter opts
+    /// into `refresh: batched` — the opt-in is the `refresh:` selector, not
+    /// the presence of the optional `batched:` block.
+    pub fn batched_config(&self) -> Option<IncrementalConfig> {
+        if self.refresh == Some(smelt_core::config::RefreshStrategy::Batched) {
+            Some(self.batched.clone().unwrap_or_default())
+        } else {
+            None
+        }
+    }
 }
 
 impl Frontmatter {

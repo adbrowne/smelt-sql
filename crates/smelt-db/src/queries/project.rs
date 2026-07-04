@@ -1516,7 +1516,7 @@ pub fn evaluate_generator(
     };
     let (metadata, _body_offset) = gen_meta;
     let frontmatter_tags = metadata.tags.clone();
-    let frontmatter_incremental = metadata.incremental.clone();
+    let frontmatter_incremental = metadata.batched.clone();
     let frontmatter_timeseries = metadata.timeseries.clone();
     let gen_file_path = file.path(db).to_path_buf();
 
@@ -3492,17 +3492,19 @@ mod tests {
 
     // ─── Test Phase 5 (E2): incremental frontmatter inheritance ─────────────
 
-    /// A generator file whose frontmatter declares `incremental:` and `timeseries:` and emits a
+    /// A generator file whose frontmatter declares `batched:` (with
+    /// `refresh: batched`) and `timeseries:` and emits a
     /// `ModelDef { materialization: 'incremental' }` — the resulting emission
     /// carries `materialization == "incremental"` and its `timeseries_config`
     /// reflects the generator file's frontmatter `timeseries:` block.
     #[test]
     fn emitted_incremental_model_inherits_frontmatter_incremental_block() {
-        // Generator file with incremental + timeseries frontmatter.
+        // Generator file with batched + timeseries frontmatter.
         let generator = concat!(
             "---\n",
             "generates: models\n",
-            "incremental:\n",
+            "refresh: batched\n",
+            "batched:\n",
             "  unique_key: [dt]\n",
             "timeseries:\n",
             "  event_time_column: dt\n",
@@ -3654,7 +3656,8 @@ mod tests {
         let generator = concat!(
             "---\n",
             "generates: models\n",
-            "incremental:\n",
+            "refresh: batched\n",
+            "batched:\n",
             "  unique_key: [dt]\n",
             "timeseries:\n",
             "  event_time_column: dt\n",

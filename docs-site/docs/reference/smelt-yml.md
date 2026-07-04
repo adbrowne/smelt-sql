@@ -130,8 +130,9 @@ models:
     materialization: <type>
     tags: [<tag>, ...]
     target: <target_name>
-    incremental:
-      # incremental fields...
+    refresh: batched
+    batched:
+      # batched fields...
 ```
 
 ### Model Fields
@@ -141,8 +142,9 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `timeseries` | object | no | | Time-dimension declaration for incremental/cumulative models (see [Timeseries Configuration](#timeseries-configuration)) |
-| `incremental` | object | no | | Incremental materialization configuration (see [Incremental Configuration](#incremental-configuration)) |
+| `timeseries` | object | no | | Time-dimension declaration for batched/cumulative models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `refresh` | string | no | `full` | Refresh axis: `full`, `batched`, or `cumulative` |
+| `batched` | object | no | | Batched materialization configuration, valid only with `refresh: batched` (see [Batched Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -153,18 +155,18 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for incremental models and cumulative aggregates. The `timeseries:` and `incremental:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: batched` models (cumulative aggregates do not declare `timeseries:`). The `timeseries:` and `batched:` keys are siblings, not nested.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
       granularity: day
-    incremental:
-      enabled: true
+    batched:
       unique_key:
         - transaction_id
 ```
@@ -184,29 +186,28 @@ Example with weekly granularity:
 models:
   weekly_rollup:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: event_ts
       partition_column: week_start_date
       granularity: week
       week_start: monday
-    incremental:
-      enabled: true
 ```
 
 ### Incremental Configuration
 
-Incremental materialization processes only new or changed data instead of rebuilding the entire table. It is only valid for models with `materialization: table`. A `timeseries:` block must also be present (see above).
+Batched (incremental) refresh processes only new or changed data instead of rebuilding the entire table. Opt in with `refresh: batched`, which implies a stored `table`. A `timeseries:` block must also be present (see above); the `batched:` block itself is optional.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
+    batched:
       unique_key:
         - transaction_id
       safety_overrides:
@@ -217,7 +218,6 @@ models:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | bool | no | `true` | Whether incremental processing is active |
 | `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
 | `safety_overrides` | object | no | _(all false)_ | Override safety checks for patterns that may produce different results on partial data (see [Safety Overrides](#safety-overrides)) |
 
@@ -242,13 +242,13 @@ Smelt validates model configurations and reports errors or warnings:
 
 **Errors (block execution):**
 
-- Ephemeral models cannot have incremental configuration
+- Ephemeral models cannot have batched configuration
 - Ephemeral models cannot have a target override
 
 **Warnings (printed to stderr):**
 
-- View models with incremental config (incremental only applies to tables)
-- Materialized view models with incremental config (materialized views are refreshed atomically)
+- View models with batched config (batched refresh only applies to tables)
+- Materialized view models with batched config (materialized views are refreshed atomically)
 
 ---
 
@@ -300,15 +300,14 @@ models:
   transactions:
     materialization: table
 
-  # Incremental model — timeseries: and incremental: are sibling keys
+  # Batched model — timeseries: and batched: are sibling keys
   daily_revenue:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
       granularity: day
-    incremental:
-      enabled: true
 
   cube_metrics:
     materialization: table

@@ -14,24 +14,24 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-Incremental behavior is configured using two frontmatter blocks:
+Incremental behavior is configured by selecting `refresh: batched`, plus one required frontmatter block:
 
+- **`refresh: batched`** opts the model into incremental (batched) execution. It implies a stored `table` — you do not also declare `materialization: table`.
 - **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
-- **`incremental:`** opts the model into incremental execution and carries strategy-specific keys.
+- **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`).
 
-Both blocks are required when running incrementally. Declaring `incremental:` without `timeseries:` is a validation error (`TimeseriesRequiredForIncremental`).
+`timeseries:` is required when `refresh: batched` is set. Declaring `refresh: batched` without `timeseries:` is a validation error (`TimeseriesRequiredForIncremental`). A `batched:` block without `refresh: batched` is also a validation error.
 
 ### Frontmatter example
 
 ```sql
 ---
 materialization: table
+refresh: batched
 timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: day
-incremental:
-  enabled: true
 ---
 
 SELECT
@@ -44,7 +44,7 @@ WHERE transaction_timestamp IS NOT NULL
 GROUP BY 1, 2
 ```
 
-`timeseries:` declares the time dimension; `incremental:` opts the model into incremental execution.
+`refresh: batched` opts the model into incremental execution; `timeseries:` declares the time dimension.
 
 ### smelt.yml example
 
@@ -52,19 +52,17 @@ GROUP BY 1, 2
 models:
   daily_revenue:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
 ```
 
-### `incremental:` fields
+### `batched:` fields
 
 | Field | Required | Description |
 |---|---|---|
-| `enabled` | No | Defaults to `true`. Set to `false` to disable incremental processing. |
 | `unique_key` | No | List of columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
 | `safety_overrides` | No | Override safety checks for patterns that may behave differently on partial data. See [Safety analysis](#safety-analysis). |
 
@@ -156,12 +154,11 @@ ORDER BY 1, 2
 models:
   daily_revenue:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
 ```
 
 **Running it**:
@@ -222,12 +219,12 @@ If you understand the implications and the pattern is safe in your specific case
 models:
   my_model:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: event_time
       partition_column: event_date
       granularity: day
-    incremental:
-      enabled: true
+    batched:
       safety_overrides:
         allow_window_functions: true
         allow_having: true

@@ -26,8 +26,7 @@ models:
   int_visitor_daily:
     materialization: table
     target: spark_docker
-    incremental:
-      enabled: true
+    refresh: batched
     timeseries:
       event_time_column: session_start
       partition_column: session_date
@@ -35,8 +34,7 @@ models:
   mart_daily_metrics:
     materialization: table
     target: duckdb_local
-    incremental:
-      enabled: true
+    refresh: batched
     timeseries:
       event_time_column: session_date
       partition_column: metric_date

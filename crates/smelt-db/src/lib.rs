@@ -111,10 +111,11 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::GeneratesMixedWithBareModel { .. } => None,
         // These variants only arise from validate_timeseries on the Ok(Single)
         // path — they are never returned by extract_file_metadata itself:
-        MetadataError::TimeseriesRequiredForIncremental => None,
+        MetadataError::TimeseriesRequiredForBatched => None,
         MetadataError::MalformedTimeseries { .. } => None,
         MetadataError::CumulativeForbidsTimeseries => None,
         MetadataError::CumulativeForbidsIncremental => None,
+        MetadataError::BatchedRequiresRefreshBatched => None,
     }
 }
 
@@ -1421,7 +1422,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let sql_body = &text[sql_offset..];
         if let Err(ts_err) = smelt_core::metadata::validate_timeseries(metadata, sql_body) {
             let maybe_diag = match &ts_err {
-                smelt_core::metadata::MetadataError::TimeseriesRequiredForIncremental => Some((
+                // `TimeseriesRequiredForBatched` maps to the existing
+                // `DiagnosticCode::TimeseriesRequiredForIncremental` code for now;
+                // renaming the emitted diagnostic code is a downstream rename.
+                smelt_core::metadata::MetadataError::TimeseriesRequiredForBatched => Some((
                     ts_err.to_string(),
                     DiagnosticCode::TimeseriesRequiredForIncremental,
                 )),
@@ -1436,6 +1440,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     ts_err.to_string(),
                     DiagnosticCode::CumulativeForbidsIncremental,
                 )),
+                // `batched:` without `refresh: batched` maps to the generic
+                // YamlParseError code — no dedicated code exists yet.
+                smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
+                    Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
+                }
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
                 _ => None,
@@ -1500,12 +1509,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
         // Route cumulative detection through is_cumulative() (a `refresh:
-        // cumulative` model) so it reaches the classifier. The string below is
-        // the classifier's internal key for the cumulative rule, not a user
-        // surface value.
+        // cumulative` model) and batched detection through `refresh: batched`
+        // (the opt-in, independent of whether the optional `batched:` block is
+        // present) so both reach the classifier. The strings below are the
+        // classifier's internal keys for each rule, not user surface values.
         let materialization = if metadata.is_cumulative() {
             "cumulative_aggregate"
-        } else if metadata.incremental.is_some() {
+        } else if metadata.refresh == Some(smelt_core::config::RefreshStrategy::Batched) {
             "incremental"
         } else {
             ""
@@ -1528,6 +1538,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
+            // The opt-in is `refresh: batched`, not the presence of the optional
+            // `batched:` block — default to an empty config when the block is
+            // absent so a bare `refresh: batched` model still reaches the rule.
+            let default_batched_config = smelt_core::config::IncrementalConfig::default();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,
@@ -1535,7 +1549,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 refs: &refs,
                 source_timeseries: &source_timeseries,
                 timeseries_config: metadata.timeseries.as_ref(),
-                incremental_config: metadata.incremental.as_ref(),
+                incremental_config: if materialization == "incremental" {
+                    Some(metadata.batched.as_ref().unwrap_or(&default_batched_config))
+                } else {
+                    None
+                },
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
             for rd in smelt_logical::detect_builtin_rules(&ctx) {

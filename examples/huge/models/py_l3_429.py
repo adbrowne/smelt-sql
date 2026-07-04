@@ -11,8 +11,7 @@ def py_l3_429(project):
     return f"""
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date

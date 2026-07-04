@@ -122,8 +122,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
         let frontmatter = Frontmatter::parse(&model.content);
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -302,8 +301,7 @@ fn build_physical_section(
 
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()

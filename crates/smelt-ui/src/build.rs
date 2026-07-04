@@ -149,14 +149,12 @@ pub fn build_model_details(
             .collect();
 
         // Build incremental info from config
-        let inc_config = config
-            .get_incremental(name)
-            .or_else(|| metadata.and_then(|m| m.incremental.as_ref()));
+        let inc_config = config.get_incremental_with_metadata(name, metadata);
         let ts_config = config
             .get_timeseries_with_metadata(name, metadata)
             .or_else(|| metadata.and_then(|m| m.timeseries.as_ref()));
 
-        let incremental = inc_config.and_then(|inc| {
+        let incremental = inc_config.clone().and_then(|inc| {
             ts_config.map(|ts| IncrementalInfo {
                 granularity: format!("{:?}", ts.granularity).to_lowercase(),
                 partition_column: ts.partition_column.clone(),
@@ -358,8 +356,7 @@ pub fn build_run_plan(
 
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
 
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)

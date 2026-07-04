@@ -281,7 +281,8 @@ async fn test_incremental_full_then_partial() {
 
     let model_sql = r#"---
 materialized: table
-incremental:
+refresh: batched
+batched:
   unique_key: [event_date, user_id]
 timeseries:
   partition_column: event_date
@@ -301,8 +302,8 @@ GROUP BY 1, 2"#;
         name: "daily_events".to_string(),
         sql: model_sql.to_string(),
         refs: vec![],
+        incremental_config: frontmatter.batched_config(),
         timeseries_config: frontmatter.timeseries,
-        incremental_config: frontmatter.incremental,
     };
 
     let mut graph = ModelGraph::new();
@@ -409,7 +410,8 @@ async fn test_composed_cube_split_incremental() {
 
     let model_sql = r#"---
 materialized: table
-incremental:
+refresh: batched
+batched:
   unique_key: [event_date]
 timeseries:
   partition_column: event_date
@@ -431,8 +433,8 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
         name: "cube_metrics".to_string(),
         sql: model_sql.to_string(),
         refs: vec![],
+        incremental_config: frontmatter.batched_config(),
         timeseries_config: frontmatter.timeseries,
-        incremental_config: frontmatter.incremental,
     };
 
     let mut graph = ModelGraph::new();
@@ -557,7 +559,8 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
 fn test_mandatory_time_range_detection() {
     let model_sql = r#"---
 materialized: table
-incremental:
+refresh: batched
+batched:
   unique_key: [event_date]
 timeseries:
   partition_column: event_date
@@ -571,8 +574,8 @@ SELECT date_trunc('day', event_time) as event_date, COUNT(*) as cnt FROM events 
         name: "inc_model".to_string(),
         sql: model_sql.to_string(),
         refs: vec![],
+        incremental_config: frontmatter.batched_config(),
         timeseries_config: frontmatter.timeseries,
-        incremental_config: frontmatter.incremental,
     };
 
     let mut graph = ModelGraph::new();

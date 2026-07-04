@@ -20,12 +20,17 @@ pub enum ConfigError {
 ///
 /// Stored outputs (`materialization: table` or `materialized_view`) may
 /// opt into a non-default refresh strategy.  `Full` is the default (no key
-/// needed).  `Cumulative` enables the cumulative-aggregate merge loop (see
-/// `docs/specs/cumulative_aggregate.md`).
+/// needed).  `Batched` processes new data forward in partition-sized slices
+/// (see `docs/specs/batched_models.md`).  `Cumulative` enables the
+/// cumulative-aggregate merge loop (see `docs/specs/cumulative_aggregate.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshStrategy {
     /// Rebuild from scratch on every run (default; no key required).
     Full,
+    /// Partitioned window-forward refresh: per-partition slice, driven by a
+    /// `timeseries:` block. Opt-in: `refresh: batched` (+ optional `batched:`
+    /// block for `unique_key`/`safety_overrides`).
+    Batched,
     /// Cumulative-aggregate merge: one row per GROUP BY key, grown across
     /// partitions using commutative-associative per-column combiners.
     Cumulative,
@@ -39,9 +44,10 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
         let s = String::deserialize(deserializer)?;
         match s.to_lowercase().as_str() {
             "full" => Ok(RefreshStrategy::Full),
+            "batched" => Ok(RefreshStrategy::Batched),
             "cumulative" => Ok(RefreshStrategy::Cumulative),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid refresh strategy: {}. Must be 'full' or 'cumulative'",
+                "Invalid refresh strategy: {}. Must be 'full', 'batched', or 'cumulative'",
                 s
             ))),
         }
@@ -55,6 +61,7 @@ impl Serialize for RefreshStrategy {
     {
         match self {
             RefreshStrategy::Full => serializer.serialize_str("full"),
+            RefreshStrategy::Batched => serializer.serialize_str("batched"),
             RefreshStrategy::Cumulative => serializer.serialize_str("cumulative"),
         }
     }
@@ -311,8 +318,14 @@ pub struct ModelConfig {
     pub materialization: Option<Materialization>,
     #[serde(default)]
     pub timeseries: Option<TimeseriesConfig>,
+    /// Refresh axis override (`full` | `batched` | `cumulative`). Frontmatter
+    /// wins over this when both set it (see `Config::get_refresh`).
     #[serde(default)]
-    pub incremental: Option<IncrementalConfig>,
+    pub refresh: Option<RefreshStrategy>,
+    /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
+    /// itself is `refresh: batched`, not the presence of this block.
+    #[serde(default)]
+    pub batched: Option<IncrementalConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
     /// Target to execute this model on (overrides CLI --target)
@@ -462,16 +475,12 @@ pub enum IncrementalStrategy {
     InsertOverwrite,
 }
 
-fn default_enabled() -> bool {
-    true
-}
-
 /// Time-dimension declaration for a model or source output.
 ///
-/// Factored out of `IncrementalConfig` so that views, non-incremental tables,
+/// Factored out of `IncrementalConfig` so that views, non-batched tables,
 /// and external sources can declare a time dimension without opting into
-/// incremental execution. `incremental:` consumes this block; any model
-/// declaring `incremental:` must also declare `timeseries:`.
+/// batched execution. `refresh: batched` consumes this block; any model
+/// declaring `refresh: batched` must also declare `timeseries:`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimeseriesConfig {
@@ -486,11 +495,12 @@ pub struct TimeseriesConfig {
     pub week_start: Option<Weekday>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// The `batched:` block — configuration layered on top of the `refresh: batched`
+/// selector. Selection itself is `refresh: batched`; this struct carries only
+/// the optional knobs (`unique_key`, `safety_overrides`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IncrementalConfig {
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
     /// Columns that uniquely identify a row (backend uses presence to choose strategy)
     #[serde(default)]
     pub unique_key: Vec<String>,
@@ -648,14 +658,50 @@ impl Config {
         self.get_materialization(model_name)
     }
 
-    /// Get incremental config for a model if enabled
+    /// Get the effective refresh strategy for a model (smelt.yml only).
     ///
-    /// **Precedence**: smelt.yml only (for now)
-    pub fn get_incremental(&self, model_name: &str) -> Option<&IncrementalConfig> {
+    /// **Precedence**: smelt.yml only (for now). Use
+    /// [`Config::get_refresh_with_metadata`] to also consider SQL frontmatter.
+    pub fn get_refresh(&self, model_name: &str) -> RefreshStrategy {
         self.models
             .get(model_name)
-            .and_then(|m| m.incremental.as_ref())
-            .filter(|i| i.enabled)
+            .and_then(|m| m.refresh.clone())
+            .unwrap_or(RefreshStrategy::Full)
+    }
+
+    /// Get the effective refresh strategy for a model.
+    ///
+    /// **Precedence**: SQL file metadata > smelt.yml model config > `Full`.
+    pub fn get_refresh_with_metadata(
+        &self,
+        model_name: &str,
+        sql_metadata: Option<&ModelMetadata>,
+    ) -> RefreshStrategy {
+        if let Some(metadata) = sql_metadata {
+            if let Some(refresh) = &metadata.refresh {
+                return refresh.clone();
+            }
+        }
+        self.get_refresh(model_name)
+    }
+
+    /// Get the `batched:` block for a model, when the model is selected into
+    /// batched refresh (`refresh: batched`), from smelt.yml only.
+    ///
+    /// The opt-in is `refresh: batched`, not the presence of the `batched:`
+    /// block — a batched model with no block returns `Some(default)`.
+    ///
+    /// **Precedence**: smelt.yml only (for now).
+    pub fn get_incremental(&self, model_name: &str) -> Option<IncrementalConfig> {
+        if !matches!(self.get_refresh(model_name), RefreshStrategy::Batched) {
+            return None;
+        }
+        Some(
+            self.models
+                .get(model_name)
+                .and_then(|m| m.batched.clone())
+                .unwrap_or_default(),
+        )
     }
 
     /// Get merged tags for a model (union of smelt.yml + frontmatter, fully deduplicated)
@@ -764,25 +810,37 @@ impl Config {
         target.table_format()
     }
 
-    /// Get incremental config with SQL metadata precedence
+    /// Get the `batched:` block for a model, when the model is selected into
+    /// batched refresh (`refresh: batched`), with SQL metadata precedence.
+    ///
+    /// The opt-in is `refresh: batched` (frontmatter wins over smelt.yml, see
+    /// [`Config::get_refresh_with_metadata`]), not the presence of the
+    /// `batched:` block — a batched model with no block returns
+    /// `Some(default)`.
     ///
     /// **Precedence**: SQL file metadata > smelt.yml model config
-    pub fn get_incremental_with_metadata<'a>(
-        &'a self,
+    pub fn get_incremental_with_metadata(
+        &self,
         model_name: &str,
-        sql_metadata: Option<&'a ModelMetadata>,
-    ) -> Option<&'a IncrementalConfig> {
-        // Check SQL metadata first
+        sql_metadata: Option<&ModelMetadata>,
+    ) -> Option<IncrementalConfig> {
+        if !matches!(
+            self.get_refresh_with_metadata(model_name, sql_metadata),
+            RefreshStrategy::Batched
+        ) {
+            return None;
+        }
         if let Some(metadata) = sql_metadata {
-            if let Some(ref incremental) = metadata.incremental {
-                if incremental.enabled {
-                    return Some(incremental);
-                }
+            if let Some(batched) = &metadata.batched {
+                return Some(batched.clone());
             }
         }
-
-        // Fall back to smelt.yml
-        self.get_incremental(model_name)
+        Some(
+            self.models
+                .get(model_name)
+                .and_then(|m| m.batched.clone())
+                .unwrap_or_default(),
+        )
     }
 
     /// Validate model configuration for materialization constraints.
@@ -811,7 +869,7 @@ impl Config {
                 name.as_str(),
                 (
                     mat,
-                    model_config.incremental.as_ref(),
+                    model_config.batched.as_ref(),
                     model_config.target.as_deref(),
                 ),
             );
@@ -825,7 +883,7 @@ impl Config {
             if let Some(mat) = &metadata.materialization {
                 entry.0 = mat.clone();
             }
-            if let Some(inc) = &metadata.incremental {
+            if let Some(inc) = &metadata.batched {
                 entry.1 = Some(inc);
             }
             if let Some(target) = &metadata.target {
@@ -850,23 +908,19 @@ impl Config {
                     }
                 }
                 Materialization::View => {
-                    if let Some(inc) = incremental {
-                        if inc.enabled {
-                            warn!(
-                                "model '{}' is a view but has incremental config — incremental only applies to tables",
-                                name
-                            );
-                        }
+                    if incremental.is_some() {
+                        warn!(
+                            "model '{}' is a view but has batched config — batched refresh only applies to tables",
+                            name
+                        );
                     }
                 }
                 Materialization::MaterializedView => {
-                    if let Some(inc) = incremental {
-                        if inc.enabled {
-                            warn!(
-                                "model '{}' is a materialized view but has incremental config — materialized views are refreshed atomically",
-                                name
-                            );
-                        }
+                    if incremental.is_some() {
+                        warn!(
+                            "model '{}' is a materialized view but has batched config — materialized views are refreshed atomically",
+                            name
+                        );
                     }
                 }
                 Materialization::Table => {} // All config is valid for tables
@@ -1002,7 +1056,7 @@ models:
         );
     }
 
-    /// `refresh: cumulative` models cannot carry an `incremental:` block.
+    /// `refresh: cumulative` models cannot carry a `batched:` block.
     /// The forbid is enforced in `validate_timeseries` via `is_cumulative()`.
     /// Since `materialization: cumulative_aggregate` is no longer accepted,
     /// this test uses the new surface (`materialization: table` + `refresh: cumulative`).
@@ -1014,15 +1068,14 @@ models:
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
             refresh: Some(RefreshStrategy::Cumulative),
-            incremental: Some(IncrementalConfig {
-                enabled: true,
+            batched: Some(IncrementalConfig {
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("refresh: cumulative + incremental must error");
+            .expect_err("refresh: cumulative + batched: must error");
         assert!(
             matches!(err, MetadataError::CumulativeForbidsIncremental),
             "Expected CumulativeForbidsIncremental, got: {}",
@@ -1088,7 +1141,7 @@ targets:
     #[test]
     fn test_safety_overrides_default_when_absent() {
         let yaml = r#"
-            enabled: true
+            unique_key: []
         "#;
         let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
@@ -1101,7 +1154,7 @@ targets:
     #[test]
     fn test_unique_key_defaults_empty() {
         let yaml = r#"
-            enabled: true
+            safety_overrides: {}
         "#;
         let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.unique_key.is_empty());
@@ -1110,7 +1163,6 @@ targets:
     #[test]
     fn test_unique_key_deserialization() {
         let yaml = r#"
-            enabled: true
             unique_key:
               - id
               - source
@@ -1302,8 +1354,7 @@ models:
             "my_model".to_string(),
             ModelMetadata {
                 materialization: Some(Materialization::Ephemeral),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                batched: Some(IncrementalConfig {
                     unique_key: vec![],
                     safety_overrides: IncrementalSafetyOverrides::default(),
                 }),
@@ -1453,8 +1504,7 @@ targets:
             "my_model".to_string(),
             ModelMetadata {
                 materialization: Some(Materialization::Table),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                batched: Some(IncrementalConfig {
                     unique_key: vec![],
                     safety_overrides: IncrementalSafetyOverrides::default(),
                 }),
@@ -1467,8 +1517,8 @@ targets:
     }
 
     /// BUG-056: `event_time_column`/`partition_column`/`granularity` are fields
-    /// on `timeseries:`, not `incremental:`. Because `IncrementalConfig` uses
-    /// `deny_unknown_fields`, putting them under `incremental:` must fail at
+    /// on `timeseries:`, not `batched:`. Because `IncrementalConfig` uses
+    /// `deny_unknown_fields`, putting them under `batched:` must fail at
     /// parse time rather than silently being dropped.
     #[test]
     fn incremental_config_rejects_timeseries_fields() {
@@ -1483,18 +1533,18 @@ targets:
 models:
   daily_revenue:
     materialization: table
-    incremental:
-      enabled: true
+    refresh: batched
+    batched:
       event_time_column: ts
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(
             result.is_err(),
-            "event_time_column under incremental: must fail — belongs under timeseries:"
+            "event_time_column under batched: must fail — belongs under timeseries:"
         );
     }
 
-    /// BUG-056 regression: correct format has `timeseries:` and `incremental:`
+    /// BUG-056 regression: correct format has `timeseries:` and `batched:`
     /// as sibling keys on the model config, not nested.
     #[test]
     fn timeseries_and_incremental_are_sibling_keys() {
@@ -1509,22 +1559,21 @@ targets:
 models:
   daily_revenue:
     materialization: table
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
+    batched: {}
 "#;
         let config: Config =
-            serde_yaml::from_str(yaml).expect("timeseries + incremental as siblings must parse");
+            serde_yaml::from_str(yaml).expect("timeseries + batched as siblings must parse");
         let model = config.models.get("daily_revenue").unwrap();
         let ts = model.timeseries.as_ref().unwrap();
         assert_eq!(ts.event_time_column, "transaction_timestamp");
         assert_eq!(ts.partition_column, "revenue_date");
         assert_eq!(ts.granularity, Granularity::Day);
-        let inc = model.incremental.as_ref().unwrap();
-        assert!(inc.enabled);
+        assert!(model.batched.is_some());
     }
 
     /// `paths:` defaults to `["models"]` when omitted (`smelt_yml.md`

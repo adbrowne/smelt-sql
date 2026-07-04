@@ -51,7 +51,12 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         generates: None,
         materialization,
         timeseries: emitted.timeseries_config.clone(),
-        incremental: emitted.incremental_config.clone(),
+        refresh: if emitted.incremental_config.is_some() {
+            Some(smelt_core::config::RefreshStrategy::Batched)
+        } else {
+            None
+        },
+        batched: emitted.incremental_config.clone(),
         target: None,
         tags: emitted.tags.clone(),
         owner: None,
@@ -68,7 +73,6 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         reuse: None,
         forward_only: false,
         state: None,
-        refresh: None,
     });
 
     // Virtual path: generator_file path with the model name appended as

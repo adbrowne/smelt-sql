@@ -31,8 +31,7 @@ models:
     materialization: table
   daily_revenue:
     materialization: table
-    incremental:
-      enabled: true
+    refresh: batched
     timeseries:
       event_time_column: transaction_timestamp  # Column in SOURCE data (for WHERE filter)
       partition_column: revenue_date             # Column in OUTPUT (for DELETE)

@@ -467,7 +467,6 @@ mod tests {
 
     fn inc_config() -> IncrementalConfig {
         IncrementalConfig {
-            enabled: true,
             unique_key: vec!["event_date".to_string()],
             safety_overrides: Default::default(),
         }
@@ -597,7 +596,6 @@ mod tests {
             week_start: None,
         };
         let inc_cfg = IncrementalConfig {
-            enabled: true,
             unique_key: vec!["month_start".to_string()],
             safety_overrides: Default::default(),
         };
@@ -663,7 +661,6 @@ mod tests {
             week_start: None,
         };
         let inc_cfg = IncrementalConfig {
-            enabled: true,
             unique_key: vec!["event_ts".to_string()],
             safety_overrides: Default::default(),
         };

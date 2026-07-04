@@ -9,8 +9,7 @@ def py_l1_382(project):
     return """
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date

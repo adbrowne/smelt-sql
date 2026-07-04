@@ -207,12 +207,11 @@ async fn test_planner_override_applied() {
 
     // Write a model with incremental frontmatter so it's classified as Incremental
     let inc_sql = r#"---
+refresh: batched
 timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-incremental:
-  enabled: true
 ---
 SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
 
@@ -229,8 +228,8 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
                 granularity: Granularity::Day,
                 week_start: None,
             }),
-            incremental: Some(IncrementalConfig {
-                enabled: true,
+            refresh: Some(smelt_core::config::RefreshStrategy::Batched),
+            batched: Some(IncrementalConfig {
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),

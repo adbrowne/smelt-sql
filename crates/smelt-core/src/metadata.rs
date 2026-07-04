@@ -27,6 +27,7 @@ use crate::config::{
     DataLatency, IncrementalConfig, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -146,9 +147,12 @@ pub struct ModelMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeseries: Option<TimeseriesConfig>,
 
-    /// Incremental configuration
+    /// `batched:` block — optional configuration (`unique_key`,
+    /// `safety_overrides`) layered on top of the `refresh: batched` selector.
+    /// Selection itself is `refresh: batched` (`refresh` field below), not the
+    /// presence of this block.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub incremental: Option<IncrementalConfig>,
+    pub batched: Option<IncrementalConfig>,
 
     /// Target to execute this model on (overrides smelt.yml and CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -313,9 +317,9 @@ pub enum MetadataError {
         span: SourceSpan,
     },
 
-    /// A model declares `incremental:` without a sibling `timeseries:` block.
-    #[error("TimeseriesRequiredForIncremental: model declares `incremental:` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
-    TimeseriesRequiredForIncremental,
+    /// A model declares `refresh: batched` without a sibling `timeseries:` block.
+    #[error("TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
+    TimeseriesRequiredForBatched,
 
     /// The `timeseries:` block violates a structural rule.
     #[error("MalformedTimeseries: {message}")]
@@ -328,9 +332,14 @@ pub enum MetadataError {
     #[error("CumulativeForbidsTimeseries: cumulative models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
     CumulativeForbidsTimeseries,
 
-    /// A model declares `refresh: cumulative` and an `incremental:` block.
-    #[error("CumulativeForbidsIncremental: cumulative and incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
+    /// A model declares `refresh: cumulative` (or another keyed-output mode)
+    /// and a `batched:` block.
+    #[error("CumulativeForbidsIncremental: cumulative and batched are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
     CumulativeForbidsIncremental,
+
+    /// A model declares a `batched:` block without `refresh: batched`.
+    #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: batched` — add `refresh: batched` or remove the `batched:` block")]
+    BatchedRequiresRefreshBatched,
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -352,16 +361,18 @@ fn frontmatter_has_generates(source: &str) -> bool {
     false
 }
 
-/// Validate `timeseries:` and `incremental:` constraints on parsed metadata.
+/// Validate `timeseries:`, `refresh: batched`, and `batched:` constraints on
+/// parsed metadata.
 ///
 /// Pure function — operates only on the already-parsed `ModelMetadata` and the
 /// SQL body text (for partition-column projection checks). Emits the first
 /// constraint violation found, or `Ok(())` when all constraints pass.
 ///
-/// Rules checked (per `timeseries.md` §Semantics):
-/// - `incremental:` present without `timeseries:` → `TimeseriesRequiredForIncremental`
+/// Rules checked (per `models.md` §"Constraint violations", `timeseries.md` §Semantics):
+/// - `refresh: batched` without `timeseries:` → `TimeseriesRequiredForBatched`
+/// - `batched:` block without `refresh: batched` → `BatchedRequiresRefreshBatched`
 /// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
-/// - Legacy nested form (`event_time_column` inside `incremental:`) was removed;
+/// - Legacy nested form (`event_time_column` inside `batched:`) was removed;
 ///   its presence in the YAML block now produces a YAML parse error (unknown field)
 ///   rather than a custom diagnostic, because `IncrementalConfig` no longer
 ///   declares those fields.
@@ -369,10 +380,10 @@ fn frontmatter_has_generates(source: &str) -> bool {
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
-    // Rule: cumulative forbids incremental: — enforced here so the diagnostic
+    // Rule: cumulative forbids batched: — enforced here so the diagnostic
     // fires alongside the other materialization-block constraints.
     // Triggered by `refresh: cumulative`.
-    if metadata.is_cumulative() && metadata.incremental.is_some() {
+    if metadata.is_cumulative() && metadata.batched.is_some() {
         return Err(MetadataError::CumulativeForbidsIncremental);
     }
 
@@ -408,9 +419,14 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
-    // Rule: incremental: without timeseries: → TimeseriesRequiredForIncremental
-    if metadata.incremental.is_some() && metadata.timeseries.is_none() {
-        return Err(MetadataError::TimeseriesRequiredForIncremental);
+    // Rule: batched: block without refresh: batched → BatchedRequiresRefreshBatched
+    if metadata.batched.is_some() && metadata.refresh != Some(RefreshStrategy::Batched) {
+        return Err(MetadataError::BatchedRequiresRefreshBatched);
+    }
+
+    // Rule: refresh: batched without timeseries: → TimeseriesRequiredForBatched
+    if metadata.refresh == Some(RefreshStrategy::Batched) && metadata.timeseries.is_none() {
+        return Err(MetadataError::TimeseriesRequiredForBatched);
     }
 
     let ts = match &metadata.timeseries {
@@ -682,7 +698,8 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // both must fail hard rather than be silently stripped (fail-loud discipline).
         // `materialization: cumulative_aggregate` is also checked here to give a
         // clear migration error — this value was removed; use `materialization: table`
-        // + `refresh: cumulative` instead.
+        // + `refresh: cumulative` instead. `incremental:` is checked for the same
+        // reason — the block was retired; use `refresh: batched` + `batched:` instead.
         for (key, value) in validated_map.iter() {
             let key_str = key.as_str().unwrap_or("");
             if key_str == "reuse" {
@@ -700,6 +717,11 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 return Err(MetadataError::YamlParseError(
                     serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
                 ));
+            } else if key_str == "incremental" {
+                return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                    "the `incremental:` block has been removed — use `refresh: batched` + \
+                     an optional `batched:` block instead (see docs/specs/batched_models.md)",
+                )));
             }
         }
 
@@ -711,7 +733,8 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 // discoverable.
                 let mut fallback = validated_map;
                 fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
-                fallback.remove(serde_yaml::Value::String("incremental".to_string()));
+                fallback.remove(serde_yaml::Value::String("batched".to_string()));
+                fallback.remove(serde_yaml::Value::String("refresh".to_string()));
                 serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
             }
         }
@@ -800,6 +823,11 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     return Err(MetadataError::YamlParseError(
                         serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
                     ));
+                } else if key_str == "incremental" {
+                    return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                        "the `incremental:` block has been removed — use `refresh: batched` + \
+                         an optional `batched:` block instead (see docs/specs/batched_models.md)",
+                    )));
                 }
             }
 
@@ -808,7 +836,8 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 Err(_) => {
                     let mut fallback = validated_map;
                     fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
-                    fallback.remove(serde_yaml::Value::String("incremental".to_string()));
+                    fallback.remove(serde_yaml::Value::String("batched".to_string()));
+                    fallback.remove(serde_yaml::Value::String("refresh".to_string()));
                     serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
                 }
             }
@@ -920,16 +949,15 @@ SELECT * FROM users"#;
     }
 
     #[test]
-    fn test_single_model_with_incremental() {
+    fn test_single_model_with_batched() {
         let source = r#"---
 name: daily_revenue
 materialization: table
+refresh: batched
 timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: day
-incremental:
-  enabled: true
 tags: [revenue, core]
 ---
 SELECT DATE(transaction_timestamp) as revenue_date, SUM(amount)
@@ -942,9 +970,7 @@ GROUP BY 1"#;
                 assert_eq!(metadata.name, Some("daily_revenue".to_string()));
                 assert_eq!(metadata.materialization, Some(Materialization::Table));
                 assert_eq!(metadata.tags, vec!["revenue", "core"]);
-
-                let incremental = metadata.incremental.unwrap();
-                assert!(incremental.enabled);
+                assert_eq!(metadata.refresh, Some(RefreshStrategy::Batched));
 
                 let timeseries = metadata.timeseries.unwrap();
                 assert_eq!(timeseries.event_time_column, "transaction_timestamp");
@@ -1479,39 +1505,82 @@ FROM smelt.orders_raw"#;
         }
     }
 
-    /// A `.sql` file declaring `incremental:` with no `timeseries:` produces
-    /// `TimeseriesRequiredForIncremental` from `validate_timeseries`.
+    /// A `.sql` file declaring `refresh: batched` with no `timeseries:` produces
+    /// `TimeseriesRequiredForBatched` from `validate_timeseries`.
     #[test]
-    fn test_incremental_without_timeseries_errors() {
-        // Build a ModelMetadata with incremental but no timeseries
+    fn test_batched_without_timeseries_errors() {
+        // Build a ModelMetadata with refresh: batched but no timeseries
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            incremental: Some(crate::config::IncrementalConfig {
-                enabled: true,
-                unique_key: vec![],
-                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
-            }),
+            refresh: Some(RefreshStrategy::Batched),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT event_date FROM foo")
-            .expect_err("must error when incremental: has no timeseries:");
+            .expect_err("must error when refresh: batched has no timeseries:");
         assert!(
-            matches!(err, MetadataError::TimeseriesRequiredForIncremental),
-            "Expected TimeseriesRequiredForIncremental, got: {}",
+            matches!(err, MetadataError::TimeseriesRequiredForBatched),
+            "Expected TimeseriesRequiredForBatched, got: {}",
             err
         );
     }
 
-    /// A `.sql` file declaring `event_time_column` inside `incremental:` has a
+    /// A `batched:` block without `refresh: batched` is a hard error.
+    #[test]
+    fn test_batched_block_without_refresh_batched_errors() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            batched: Some(crate::config::IncrementalConfig::default()),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("must error when batched: has no refresh: batched");
+        assert!(
+            matches!(err, MetadataError::BatchedRequiresRefreshBatched),
+            "Expected BatchedRequiresRefreshBatched, got: {}",
+            err
+        );
+    }
+
+    /// A `.sql` file declaring the retired `incremental:` block is a hard error
+    /// naming `refresh: batched` as the replacement (models.md hard-cut).
+    #[test]
+    fn test_incremental_block_is_hard_cut() {
+        let source = r#"---
+materialization: table
+incremental:
+  enabled: true
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+---
+SELECT dt FROM foo"#;
+        let err = extract_file_metadata(source)
+            .expect_err("declaring the retired `incremental:` block must hard-error");
+        let message = err.to_string();
+        assert!(
+            message.contains("refresh: batched"),
+            "error message must name refresh: batched as the replacement; got: {}",
+            message
+        );
+    }
+
+    /// A `.sql` file declaring `event_time_column` inside `batched:` has a
     /// bad nested value (IncrementalConfig has deny_unknown_fields). The recovery
-    /// path strips `incremental:` and returns Ok with partial metadata.
+    /// path strips `batched:` and returns Ok with partial metadata.
     /// Discovery is resilient; smelt-db surfaces a MalformedTimeseries diagnostic.
     #[test]
     fn test_legacy_nested_form_errors() {
         let source = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
+batched:
   event_time_column: ts
   partition_column: dt
   granularity: day
@@ -1523,15 +1592,15 @@ SELECT dt FROM foo"#;
             "discovery must be resilient to bad nested fields; got: {:?}",
             result.unwrap_err()
         );
-        // The incremental block is stripped in recovery; materialization is kept.
+        // The batched block is stripped in recovery; materialization is kept.
         if let Ok(FileMetadata::Single { metadata, .. }) = result {
             assert_eq!(
                 metadata.materialization,
                 Some(crate::config::Materialization::Table)
             );
             assert!(
-                metadata.incremental.is_none(),
-                "malformed incremental block must be stripped in recovery"
+                metadata.batched.is_none(),
+                "malformed batched block must be stripped in recovery"
             );
         }
     }
@@ -1633,7 +1702,7 @@ GROUP BY device_id, user_id"#;
                     Some(crate::config::RefreshStrategy::Cumulative)
                 );
                 assert!(metadata.timeseries.is_none());
-                assert!(metadata.incremental.is_none());
+                assert!(metadata.batched.is_none());
             }
             _ => panic!("Expected Single variant"),
         }
@@ -1663,22 +1732,21 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// A model with `refresh: cumulative` + an `incremental:` block
+    /// A model with `refresh: cumulative` + a `batched:` block
     /// emits `CumulativeForbidsIncremental`.
     #[test]
     fn test_cumulative_aggregate_forbids_incremental() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::Cumulative),
-            incremental: Some(crate::config::IncrementalConfig {
-                enabled: true,
+            batched: Some(crate::config::IncrementalConfig {
                 unique_key: vec![],
                 safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("refresh: cumulative + incremental must error");
+            .expect_err("refresh: cumulative + batched: must error");
         assert!(
             matches!(err, MetadataError::CumulativeForbidsIncremental),
             "Expected CumulativeForbidsIncremental, got: {}",

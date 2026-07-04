@@ -245,7 +245,8 @@ async fn test_cli_ui_manifest_parity() {
         ModelConfig {
             materialization: Some(Materialization::Table),
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            batched: None,
             tags: vec![],
             target: None,
             format: None,
@@ -256,7 +257,8 @@ async fn test_cli_ui_manifest_parity() {
         ModelConfig {
             materialization: Some(Materialization::Table),
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            batched: None,
             tags: vec![],
             target: None,
             format: None,
@@ -267,7 +269,8 @@ async fn test_cli_ui_manifest_parity() {
         ModelConfig {
             materialization: Some(Materialization::Ephemeral),
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            batched: None,
             tags: vec![],
             target: None,
             format: None,

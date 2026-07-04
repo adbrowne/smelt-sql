@@ -122,7 +122,8 @@ fn test_logical_graph_cross_engine_edges() {
         ModelConfig {
             materialization: None,
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            batched: None,
             tags: vec![],
             target: Some("spark_local".to_string()),
             format: None,

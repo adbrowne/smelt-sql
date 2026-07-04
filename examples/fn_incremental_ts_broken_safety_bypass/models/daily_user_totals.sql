@@ -4,8 +4,7 @@ timeseries:
   event_time_column: order_ts
   partition_column: order_date
   granularity: day
-incremental:
-  enabled: true
+refresh: batched
 ---
 
 -- D1 safety bypass: outer SQL has no OVER clause, so the safety check passes.

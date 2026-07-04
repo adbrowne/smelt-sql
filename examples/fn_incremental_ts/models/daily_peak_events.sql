@@ -4,8 +4,7 @@ timeseries:
   event_time_column: event_ts
   partition_column: event_date
   granularity: day
-incremental:
-  enabled: true
+refresh: batched
 ---
 
 -- D1 scenario A: smelt.define predicates used in WHERE/SELECT of an incremental model.

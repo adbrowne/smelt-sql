@@ -115,8 +115,7 @@ pub fn build_explain_output(
         let materialization = config.get_materialization_with_metadata(model_name, metadata);
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -432,8 +431,8 @@ mod tests {
                     granularity: Granularity::Day,
                     week_start: None,
                 }),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                refresh: Some(smelt_core::config::RefreshStrategy::Batched),
+                batched: Some(IncrementalConfig {
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),
@@ -532,8 +531,8 @@ mod tests {
                     granularity: Granularity::Day,
                     week_start: None,
                 }),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                refresh: Some(smelt_core::config::RefreshStrategy::Batched),
+                batched: Some(IncrementalConfig {
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),

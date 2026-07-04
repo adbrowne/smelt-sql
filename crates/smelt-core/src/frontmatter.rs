@@ -60,7 +60,11 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
     ("generates", &[DeclarationKind::Model]),
     ("materialization", &[DeclarationKind::Model]),
     ("timeseries", &[DeclarationKind::Model]),
+    // Retired — kept catalogued (not "unknown") so `extract_single_model` can
+    // hard-error with a migration hint pointing at `refresh: batched` instead
+    // of the generic "unknown key" message.
     ("incremental", &[DeclarationKind::Model]),
+    ("batched", &[DeclarationKind::Model]),
     ("target", &[DeclarationKind::Model]),
     ("owner", &[DeclarationKind::Model]),
     ("description", &[DeclarationKind::Model]),

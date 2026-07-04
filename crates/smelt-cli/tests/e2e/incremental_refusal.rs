@@ -40,8 +40,7 @@ fn stage_workspace(tmp: &TempDir, name: &str, model_files: &[(&str, &str)]) -> P
 /// A model with OVER in the outer body (window function — not partition-local).
 const SQL_OVER: &str = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -59,8 +58,7 @@ GROUP BY 1, 2
 /// A model with HAVING in the outer body.
 const SQL_HAVING: &str = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_date
   partition_column: event_date

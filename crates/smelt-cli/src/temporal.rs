@@ -131,7 +131,6 @@ mod tests {
     fn make_inc() -> IncrementalConfig {
         use smelt_core::IncrementalSafetyOverrides;
         IncrementalConfig {
-            enabled: true,
             unique_key: vec![],
             safety_overrides: IncrementalSafetyOverrides::default(),
         }

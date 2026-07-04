@@ -9,8 +9,7 @@ def py_l2_264(project):
     return """
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date

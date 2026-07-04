@@ -1,8 +1,7 @@
 ---
 materialization: table
 refresh: cumulative
-incremental:
-  enabled: true
+batched: {}
 ---
 SELECT device_id, COUNT(*) AS event_count
 FROM some_events

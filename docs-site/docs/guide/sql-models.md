@@ -20,10 +20,11 @@ Add configuration inline using YAML frontmatter:
 ---
 name: user_activity
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
+timeseries:
   event_time_column: event_time
   partition_column: event_date
+  granularity: day
 tags: [users, daily]
 owner: analytics-team
 description: Daily user activity summary

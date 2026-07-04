@@ -1,8 +1,7 @@
 ---
 materialization: table
 target: spark_docker
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: session_start
   partition_column: session_date

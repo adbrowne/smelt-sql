@@ -992,7 +992,6 @@ mod tests {
         let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
 
         let config_with_key = IncrementalConfig {
-            enabled: true,
             unique_key: vec!["id".to_string()],
             safety_overrides: IncrementalSafetyOverrides::default(),
         };
@@ -1002,7 +1001,6 @@ mod tests {
         );
 
         let config_without_key = IncrementalConfig {
-            enabled: true,
             unique_key: vec![],
             safety_overrides: IncrementalSafetyOverrides::default(),
         };

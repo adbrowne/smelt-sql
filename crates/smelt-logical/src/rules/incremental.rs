@@ -636,7 +636,6 @@ mod tests {
                 week_start: None,
             }),
             incremental_config: Some(IncrementalConfig {
-                enabled: true,
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -660,7 +659,6 @@ mod tests {
                 week_start: None,
             }),
             incremental_config: Some(IncrementalConfig {
-                enabled: true,
                 unique_key: vec![],
                 safety_overrides: overrides,
             }),
@@ -737,7 +735,6 @@ mod tests {
                 week_start: None,
             }),
             incremental_config: Some(IncrementalConfig {
-                enabled: true,
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -959,7 +956,6 @@ mod tests {
                 week_start: Some(Weekday::Monday),
             }),
             incremental_config: Some(IncrementalConfig {
-                enabled: true,
                 unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -1036,7 +1032,6 @@ mod tests {
                 week_start: None,
             }),
             incremental_config: Some(IncrementalConfig {
-                enabled: true,
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
@@ -1059,7 +1054,6 @@ mod tests {
                 week_start: None,
             }),
             incremental_config: Some(IncrementalConfig {
-                enabled: true,
                 unique_key: vec!["nonexistent_col".to_string()],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),

@@ -31,7 +31,6 @@ fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {
 
 fn make_inc() -> IncrementalConfig {
     IncrementalConfig {
-        enabled: true,
         unique_key: vec![],
         safety_overrides: IncrementalSafetyOverrides::default(),
     }

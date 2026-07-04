@@ -2035,7 +2035,8 @@ JOIN smelt.model_b b ON a.id = b.id
             ModelConfig {
                 materialization: Some(Materialization::Table),
                 timeseries: None,
-                incremental: None,
+                refresh: None,
+                batched: None,
                 tags: Vec::new(),
                 target: None,
                 format: None,

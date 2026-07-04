@@ -20,7 +20,6 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
 
 fn make_inc() -> IncrementalConfig {
     IncrementalConfig {
-        enabled: true,
         unique_key: vec![],
         safety_overrides: IncrementalSafetyOverrides::default(),
     }

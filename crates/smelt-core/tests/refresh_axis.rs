@@ -132,7 +132,7 @@ fn refresh_cumulative_forbids_timeseries() {
     );
 }
 
-/// `refresh: cumulative` + `incremental:` → `CumulativeForbidsIncremental`.
+/// `refresh: cumulative` + `batched:` → `CumulativeForbidsIncremental`.
 #[test]
 fn refresh_cumulative_forbids_incremental() {
     use smelt_core::config::{IncrementalConfig, IncrementalSafetyOverrides};
@@ -141,19 +141,140 @@ fn refresh_cumulative_forbids_incremental() {
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
         refresh: Some(RefreshStrategy::Cumulative),
-        incremental: Some(IncrementalConfig {
-            enabled: true,
+        batched: Some(IncrementalConfig {
             unique_key: vec![],
             safety_overrides: IncrementalSafetyOverrides::default(),
         }),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-        .expect_err("refresh: cumulative + incremental: must error");
+        .expect_err("refresh: cumulative + batched: must error");
     assert!(
         matches!(err, MetadataError::CumulativeForbidsIncremental),
         "Expected CumulativeForbidsIncremental, got: {}",
         err
+    );
+}
+
+// ── refresh: batched selector + batched: block ────────────────────────────────
+
+/// `refresh: batched` deserialises to `RefreshStrategy::Batched`.
+#[test]
+fn refresh_batched_parses() {
+    let source = r#"---
+materialization: table
+refresh: batched
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+---
+SELECT dt FROM foo"#;
+
+    let result = extract_file_metadata(source).expect("should parse");
+    match result {
+        FileMetadata::Single { metadata, .. } => {
+            assert_eq!(metadata.refresh, Some(RefreshStrategy::Batched));
+        }
+        _ => panic!("Expected Single variant"),
+    }
+}
+
+/// A bare `refresh: foo` still errors listing `batched` among the valid values.
+#[test]
+fn refresh_unknown_value_lists_batched() {
+    let err = serde_yaml::from_str::<RefreshStrategy>("foo")
+        .expect_err("unknown refresh value must fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("batched"),
+        "error must list 'batched' among valid refresh values; got: {}",
+        message
+    );
+}
+
+/// `refresh: batched` + `timeseries:` validates cleanly.
+#[test]
+fn refresh_batched_with_timeseries_is_valid() {
+    use smelt_core::config::{Granularity, TimeseriesConfig};
+
+    let metadata = ModelMetadata {
+        materialization: Some(Materialization::Table),
+        refresh: Some(RefreshStrategy::Batched),
+        timeseries: Some(TimeseriesConfig {
+            event_time_column: "ts".to_string(),
+            partition_column: "dt".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+        }),
+        ..Default::default()
+    };
+    validate_timeseries(&metadata, "SELECT dt FROM foo")
+        .expect("refresh: batched + timeseries: must validate");
+}
+
+/// `refresh: batched` without `timeseries:` → `TimeseriesRequiredForBatched`.
+#[test]
+fn refresh_batched_without_timeseries_errors() {
+    use smelt_core::metadata::MetadataError;
+
+    let metadata = ModelMetadata {
+        materialization: Some(Materialization::Table),
+        refresh: Some(RefreshStrategy::Batched),
+        ..Default::default()
+    };
+    let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+        .expect_err("refresh: batched without timeseries: must error");
+    assert!(
+        matches!(err, MetadataError::TimeseriesRequiredForBatched),
+        "Expected TimeseriesRequiredForBatched, got: {}",
+        err
+    );
+}
+
+/// A `batched:` block without `refresh: batched` is a hard error.
+#[test]
+fn batched_block_without_refresh_batched_errors() {
+    use smelt_core::config::IncrementalConfig;
+    use smelt_core::metadata::MetadataError;
+
+    let metadata = ModelMetadata {
+        materialization: Some(Materialization::Table),
+        batched: Some(IncrementalConfig::default()),
+        ..Default::default()
+    };
+    let err = validate_timeseries(&metadata, "SELECT 1")
+        .expect_err("batched: without refresh: batched must error");
+    assert!(
+        matches!(err, MetadataError::BatchedRequiresRefreshBatched),
+        "Expected BatchedRequiresRefreshBatched, got: {}",
+        err
+    );
+}
+
+/// A model declaring the retired `incremental:` block is a hard error naming
+/// `refresh: batched` as the replacement — the hard-cut has no dual-accept
+/// deprecation window.
+#[test]
+fn legacy_incremental_block_is_hard_cut() {
+    let source = r#"---
+materialization: table
+incremental:
+  enabled: true
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+---
+SELECT dt FROM foo"#;
+
+    let err =
+        extract_file_metadata(source).expect_err("declaring incremental: must be a hard error");
+    let message = err.to_string();
+    assert!(
+        message.contains("refresh: batched"),
+        "error must name refresh: batched as the replacement; got: {}",
+        message
     );
 }
 

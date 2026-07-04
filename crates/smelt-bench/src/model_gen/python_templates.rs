@@ -26,8 +26,7 @@ def {name}(project):
     return """
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date
@@ -61,8 +60,7 @@ def {name}(project):
     return """
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date
@@ -89,8 +87,7 @@ def {name}(project):
     return """
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date
@@ -126,8 +123,7 @@ def {name}(project):
     return f"""
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
 timeseries:
   event_time_column: event_time
   partition_column: event_date

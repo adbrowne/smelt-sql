@@ -37,7 +37,6 @@ fn _unused_range_ref() -> TimeRange {
 fn _unused_config_ref() -> (IncrementalConfig, TimeseriesConfig) {
     (
         IncrementalConfig {
-            enabled: true,
             unique_key: vec![],
             safety_overrides: Default::default(),
         },
