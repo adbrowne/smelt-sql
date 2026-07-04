@@ -42,7 +42,7 @@ The surface is the set of properties and their verdicts. Callers are the planner
 | Static-seed detection | a constant/`NULL` in the `event_time` slot (or `COALESCE(col, const)`) → `StaticSeed`, not a stream | built |
 | Additive-only model-diff | a model edit only *adds* columns derivable from `{existing target} ∪ {monotone dim}` → in-place backfill is admissible, not a rebuild | built |
 | Window-independence / ordered-execution | a window reads only sources (parallelisable) vs its own prior output (ordered); self-edge detection | not-yet |
-| Input-delta discovery | window-forward / snapshot-diff / change-feed, derived from the source's shape — the proof stage of the input-consumption axis (`models.md`); pairs with the mutation-profile world-fact | partial |
+| Input-delta discovery | window-forward / snapshot-diff / change-feed, derived from the source's shape — the proof stage of the input-consumption axis (`models.md`); pairs with the mutation-profile world-fact | built |
 
 ### Model-scoped declarations
 

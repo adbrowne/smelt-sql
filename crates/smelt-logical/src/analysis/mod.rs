@@ -1,4 +1,5 @@
 pub mod discriminants;
+pub mod input_delta;
 pub mod join_shape;
 pub mod model_diff;
 pub mod monotonicity;
