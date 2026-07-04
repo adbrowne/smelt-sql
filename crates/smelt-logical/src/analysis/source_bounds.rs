@@ -849,6 +849,47 @@ pub fn from_clause_alias_sources(from_clause: &smelt_parser::FromClause) -> Vec<
     out
 }
 
+/// Why a single anchor could not be resolved among a scope's joined inputs.
+pub enum AnchorAmbiguity {
+    /// No candidate among the joined inputs satisfied the test.
+    NoCandidate,
+    /// More than one candidate satisfied the test — their (alias-scoped)
+    /// source names, for the caller's diagnostic.
+    Multiple(Vec<String>),
+}
+
+/// Disambiguate, among the joined inputs of a scope (`alias_sources`, from
+/// [`from_clause_alias_sources`]), the single input satisfying `is_candidate`
+/// — the anchor-resolution primitive `model_properties.md` §"Driving-fact /
+/// anchor resolution" names: exactly-one-candidate is required; zero or two
+/// or more is fail-closed (never guess the anchor).
+///
+/// This is the shared disambiguation shared by [`resolve_join_driving_fact`]
+/// (candidate test: re-traces the event-time expression against each
+/// alias-scoped source) and `rules::cumulative::classify_cumulative`
+/// (candidate test: is this alias's source registered with a `timeseries:`
+/// block) — the two independent driving-fact resolvers this phase merges.
+pub fn resolve_single_anchor<T>(
+    alias_sources: &[(String, String)],
+    mut is_candidate: impl FnMut(&str) -> Option<T>,
+) -> Result<T, AnchorAmbiguity> {
+    let mut found: Vec<(String, T)> = Vec::new();
+    for (_, source_name) in alias_sources {
+        if let Some(payload) = is_candidate(source_name) {
+            found.push((source_name.clone(), payload));
+        }
+    }
+    if found.len() > 1 {
+        return Err(AnchorAmbiguity::Multiple(
+            found.into_iter().map(|(name, _)| name).collect(),
+        ));
+    }
+    match found.into_iter().next() {
+        Some((_, payload)) => Ok(payload),
+        None => Err(AnchorAmbiguity::NoCandidate),
+    }
+}
+
 /// Resolve the "driving fact" among a join's inputs for a traced
 /// `event_time_expr` (Join relaxation, `batched_models.md` §"Event-time
 /// monotonicity trace").
@@ -903,24 +944,21 @@ pub fn resolve_join_driving_fact(
         };
     }
 
-    let mut traceable: Vec<(String, EventTimeTrace)> = Vec::new();
-    for (_, source_name) in alias_sources {
-        if let Some(trace @ EventTimeTrace::Traceable { .. }) = trace_against(source_name) {
-            traceable.push((source_name.clone(), trace));
+    match resolve_single_anchor(alias_sources, |source_name| {
+        match trace_against(source_name) {
+            Some(trace @ EventTimeTrace::Traceable { .. }) => Some(trace),
+            _ => None,
         }
-    }
-
-    let count = traceable.len();
-    let mut iter = traceable.into_iter();
-    match (count, iter.next()) {
-        (1, Some((_, trace))) => trace,
-        (0, _) => EventTimeTrace::NotTraceable {
+    }) {
+        Ok(trace) => trace,
+        Err(AnchorAmbiguity::NoCandidate) => EventTimeTrace::NotTraceable {
             reason: "no join input's source partition column traces the event-time projection"
                 .to_string(),
         },
-        (n, _) => EventTimeTrace::NotTraceable {
+        Err(AnchorAmbiguity::Multiple(names)) => EventTimeTrace::NotTraceable {
             reason: format!(
-                "ambiguous driving fact: {n} join inputs trace to the same unqualified column name"
+                "ambiguous driving fact: {} join inputs trace to the same unqualified column name",
+                names.len()
             ),
         },
     }

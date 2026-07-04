@@ -20,6 +20,7 @@ use serde::Serialize;
 use smelt_core::config::TimeseriesConfig;
 use std::collections::HashMap;
 
+use crate::analysis::source_bounds::{resolve_single_anchor, AnchorAmbiguity};
 use crate::analysis::{analyze_select, SelectItemKind};
 
 /// A per-partition aggregator paired with its cross-partition combiner.
@@ -353,24 +354,40 @@ pub fn classify_cumulative(
         }
     }
 
-    // Find the driving source from refs.
-    let candidate_sources: Vec<(String, TimeseriesConfig)> = refs
-        .iter()
-        .filter_map(|r| source_timeseries.get(r).map(|ts| (r.clone(), ts.clone())))
-        .collect();
+    // Find the driving source: the single alias-scoped FROM/JOIN input that
+    // is both a collected ref and registered with a `timeseries:` block —
+    // the shared anchor resolver (`resolve_single_anchor`) also used by
+    // `resolve_join_driving_fact`'s alias-scoped monotonicity trace.
+    let alias_sources: Vec<(String, String)> =
+        smelt_parser::File::cast(smelt_parser::parse(sql).syntax())
+            .and_then(|file| file.select_stmt())
+            .and_then(|select| select.from_clause())
+            .map(|from_clause| {
+                crate::analysis::source_bounds::from_clause_alias_sources(&from_clause)
+            })
+            .unwrap_or_default();
 
-    let driving_source = match candidate_sources.len() {
-        0 => {
+    let driving_source = match resolve_single_anchor(&alias_sources, |source_name| {
+        let key = format!("smelt.{source_name}");
+        if !refs.iter().any(|r| r == &key) {
+            return None;
+        }
+        source_timeseries.get(&key).map(|ts| DrivingSource {
+            name: key.clone(),
+            timeseries: ts.clone(),
+        })
+    }) {
+        Ok(ds) => Some(ds),
+        Err(AnchorAmbiguity::NoCandidate) => {
             diagnostics.push(CumulativeDiagnostic::CumulativeNoDrivingSource);
             None
         }
-        1 => Some(DrivingSource {
-            name: candidate_sources[0].0.clone(),
-            timeseries: candidate_sources[0].1.clone(),
-        }),
-        _ => {
+        Err(AnchorAmbiguity::Multiple(candidates)) => {
             diagnostics.push(CumulativeDiagnostic::CumulativeMultipleDrivingSources {
-                candidates: candidate_sources.iter().map(|(n, _)| n.clone()).collect(),
+                candidates: candidates
+                    .into_iter()
+                    .map(|n| format!("smelt.{n}"))
+                    .collect(),
             });
             None
         }
@@ -714,6 +731,31 @@ GROUP BY device_id"#;
             "diagnostics: {:?}",
             err
         );
+    }
+
+    /// A timeseries-tagged ref that is only reached through a subquery (not
+    /// one of the top-level FROM/JOIN inputs) is not a driving-fact
+    /// candidate — the alias-scoped resolver only considers the joined
+    /// inputs of the outer scope, unlike the former ref-count selection
+    /// (which would have flat-counted both refs and refused as ambiguous).
+    #[test]
+    fn test_driving_source_resolved_via_alias_scope_ignores_non_joined_ref() {
+        let sql = r#"SELECT
+    device_id,
+    COUNT(*) AS n
+FROM smelt.silver.events_a
+WHERE device_id IN (SELECT device_id FROM smelt.silver.events_b)
+GROUP BY device_id"#;
+        let refs = vec![
+            "smelt.silver.events_a".to_string(),
+            "smelt.silver.events_b".to_string(),
+        ];
+        let mut map = HashMap::new();
+        map.insert("smelt.silver.events_a".to_string(), ts("event_date"));
+        map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
+        let classification =
+            classify_cumulative(sql, &refs, &map).expect("must classify: only events_a is joined");
+        assert_eq!(classification.driving_source.name, "smelt.silver.events_a");
     }
 
     /// A SELECT from one timeseries source and one lookup classifies cleanly.
