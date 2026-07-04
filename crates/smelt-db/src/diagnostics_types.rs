@@ -649,6 +649,12 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedFunctionalDependency: {message}"
     MalformedFunctionalDependency,
+    /// A `bounded_domain:` declaration is structurally invalid: an absent
+    /// (already a YAML parse error) or non-positive `max_cardinality`, an
+    /// empty `column`, or a `column` absent from the model's SQL body.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "MalformedBoundedDomain: {message}"
+    MalformedBoundedDomain,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or

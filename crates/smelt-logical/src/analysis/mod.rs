@@ -1,3 +1,4 @@
+pub mod bounded_domain;
 pub mod decomposed_state;
 pub mod discriminants;
 pub mod functional_dependency;

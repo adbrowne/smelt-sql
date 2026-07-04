@@ -531,6 +531,36 @@ pub struct FunctionalDependency {
     pub determines: String,
 }
 
+/// Model-scoped bounded-domain / space-budget declaration: the modeller's
+/// assertion that `column`'s active domain is bounded by `max_cardinality`
+/// distinct values — a world-fact the model's own SQL cannot decide
+/// statically. Licenses an exact holistic aggregate (`MEDIAN`/`MODE`/exact
+/// `COUNT(DISTINCT)`) for multiset maintenance via an explicit per-key
+/// multiset (`model_properties.md` §"Model-scoped declarations" row
+/// "Bounded-domain / space budget").
+///
+/// **Fail-loud with a cap, never the default.** `max_cardinality` is a
+/// required field (no `#[serde(default)]`): an absent cap is a YAML parse
+/// error, not a permissive default. `max_cardinality == 0` is additionally
+/// rejected by `validate_bounded_domains` as a structural error, since a
+/// zero-sized budget can never license anything.
+///
+/// Widens only the *holistic* aggregate-licence gate — a declaration applied
+/// to a non-holistic (monoid/decomposable) combiner is refused/inert; it
+/// cannot substitute for the fail-closed refusal of an unbounded domain, and
+/// cannot narrow (`model_properties.md` §Constraints "Declared escape
+/// hatches may only widen").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundedDomain {
+    /// The column whose active domain is asserted to be bounded.
+    pub column: String,
+    /// The explicit space budget: the maximum number of distinct values the
+    /// column may take. Required — an absent cap is a parse-time error, not
+    /// a silent default.
+    pub max_cardinality: u64,
+}
+
 /// The `batched:` block — configuration layered on top of the `refresh: batched`
 /// selector. Selection itself is `refresh: batched`; this struct carries only
 /// the optional knobs (`unique_key`, `safety_overrides`).
@@ -1272,6 +1302,37 @@ targets:
             narrows: true
         "#;
         assert!(serde_yaml::from_str::<FunctionalDependency>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_bounded_domain_deserialization() {
+        let yaml = r#"
+            column: category
+            max_cardinality: 10000
+        "#;
+        let bd: BoundedDomain = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(bd.column, "category");
+        assert_eq!(bd.max_cardinality, 10000);
+    }
+
+    /// An absent `max_cardinality` is a fail-loud parse error, not a
+    /// permissive default — the field carries no `#[serde(default)]`.
+    #[test]
+    fn test_bounded_domain_rejects_missing_cap() {
+        let yaml = r#"
+            column: category
+        "#;
+        assert!(serde_yaml::from_str::<BoundedDomain>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_bounded_domain_rejects_unknown_fields() {
+        let yaml = r#"
+            column: category
+            max_cardinality: 10000
+            narrows: true
+        "#;
+        assert!(serde_yaml::from_str::<BoundedDomain>(yaml).is_err());
     }
 
     #[test]

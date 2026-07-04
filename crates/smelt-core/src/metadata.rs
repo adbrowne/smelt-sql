@@ -224,6 +224,16 @@ pub struct ModelMetadata {
     /// §"Model-scoped declarations".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub functional_dependencies: Vec<crate::config::FunctionalDependency>,
+
+    /// Model-scoped bounded-domain / space-budget declaration
+    /// (`column` + required `max_cardinality`). See
+    /// `crate::config::BoundedDomain` and `model_properties.md`
+    /// §"Model-scoped declarations". A model asserts at most one bounded
+    /// domain today (one holistic-aggregate column per model); the field is
+    /// `Option`, not a list — an absent cap is a YAML parse error, never a
+    /// silent default (no `#[serde(default)]` on `BoundedDomain::max_cardinality`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounded_domain: Option<crate::config::BoundedDomain>,
 }
 
 impl ModelMetadata {
@@ -375,6 +385,13 @@ pub enum MetadataError {
     /// model's SQL body.
     #[error("MalformedFunctionalDependency: {message}")]
     MalformedFunctionalDependency { message: String },
+
+    /// A `bounded_domain:` declaration is structurally invalid: an absent
+    /// (already caught at YAML-parse time by the required field) or
+    /// non-positive `max_cardinality`, an empty `column`, or a `column`
+    /// absent from the model's SQL body.
+    #[error("MalformedBoundedDomain: {message}")]
+    MalformedBoundedDomain { message: String },
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -627,6 +644,60 @@ pub fn validate_functional_dependencies(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Validate the `bounded_domain:` declaration on parsed metadata.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata` and
+/// the SQL body text (for the column-presence check, mirroring
+/// [`validate_functional_dependencies`]'s heuristic). Emits the first
+/// constraint violation found, or `Ok(())` when the declaration is absent or
+/// passes every check.
+///
+/// Rules checked (`model_properties.md` §"Model-scoped declarations",
+/// §Constraints "Declared escape hatches may only widen"):
+/// - `max_cardinality` must be strictly positive — a zero-sized budget can
+///   never license anything and is a configuration error, not treated as
+///   "no declaration". (An *absent* cap is already a YAML parse error at the
+///   `BoundedDomain` struct level — the field carries no
+///   `#[serde(default)]` — so it never reaches this validator.)
+/// - `column` must be non-empty.
+/// - `column` must appear in the model's SQL body (a fast presence
+///   heuristic, same limitation as `validate_functional_dependencies`'s
+///   check — full SELECT-list resolution is the planner's job).
+pub fn validate_bounded_domains(
+    metadata: &ModelMetadata,
+    sql_body: &str,
+) -> Result<(), MetadataError> {
+    let Some(bd) = metadata.bounded_domain.as_ref() else {
+        return Ok(());
+    };
+
+    if bd.column.trim().is_empty() {
+        return Err(MetadataError::MalformedBoundedDomain {
+            message: "bounded_domain declaration has an empty `column`".to_string(),
+        });
+    }
+    if bd.max_cardinality == 0 {
+        return Err(MetadataError::MalformedBoundedDomain {
+            message: format!(
+                "bounded_domain declaration for column '{}' has max_cardinality: 0 — a \
+                 zero-sized space budget can never license a holistic aggregate; declare a \
+                 positive cap or remove the declaration",
+                bd.column
+            ),
+        });
+    }
+    if !sql_body.trim().is_empty() && !sql_body.to_uppercase().contains(&bd.column.to_uppercase()) {
+        return Err(MetadataError::MalformedBoundedDomain {
+            message: format!(
+                "bounded_domain declaration names column '{}' which does not appear in the \
+                 model's SQL body",
+                bd.column
+            ),
+        });
     }
     Ok(())
 }
@@ -1905,6 +1976,77 @@ FROM smelt.orders_raw"#;
             MetadataError::MalformedFunctionalDependency { .. }
         ));
         assert!(err.to_string().contains("phone_number"));
+    }
+
+    // ── bounded_domain: validation (DC3) ─────────────────────────────────────
+
+    fn bounded_domain(column: &str, max_cardinality: u64) -> crate::config::BoundedDomain {
+        crate::config::BoundedDomain {
+            column: column.to_string(),
+            max_cardinality,
+        }
+    }
+
+    /// A valid bounded-domain declaration naming a column present in the SQL
+    /// body, with a positive cap, parses cleanly.
+    #[test]
+    fn test_bounded_domain_accepts_valid_declaration() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("category", 10_000)),
+            ..Default::default()
+        };
+        validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect("a valid bounded-domain declaration must pass validation");
+    }
+
+    /// No declaration at all is the ordinary case — not an error.
+    #[test]
+    fn test_bounded_domain_absent_is_ok() {
+        let metadata = ModelMetadata {
+            bounded_domain: None,
+            ..Default::default()
+        };
+        validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect("no bounded_domain declaration at all must not error");
+    }
+
+    /// A `max_cardinality: 0` cap can never license anything — fail-loud,
+    /// not a silent default that behaves like "no declaration".
+    #[test]
+    fn test_bounded_domain_rejects_zero_cap() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("category", 0)),
+            ..Default::default()
+        };
+        let err = validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect_err("a zero max_cardinality must be a configuration error");
+        assert!(matches!(err, MetadataError::MalformedBoundedDomain { .. }));
+    }
+
+    /// An empty `column` is a self-contradictory declaration — fail-loud.
+    #[test]
+    fn test_bounded_domain_rejects_empty_column() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("", 10_000)),
+            ..Default::default()
+        };
+        let err = validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect_err("an empty column must be a configuration error");
+        assert!(matches!(err, MetadataError::MalformedBoundedDomain { .. }));
+    }
+
+    /// A `column` absent from the model's SQL body is a configuration error
+    /// (fail-loud, not silently accepted).
+    #[test]
+    fn test_bounded_domain_rejects_absent_column() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("region", 10_000)),
+            ..Default::default()
+        };
+        let err = validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect_err("a column absent from the SQL body must error");
+        assert!(matches!(err, MetadataError::MalformedBoundedDomain { .. }));
+        assert!(err.to_string().contains("region"));
     }
 
     /// A `.sql` file declaring the retired `incremental:` block is a hard error

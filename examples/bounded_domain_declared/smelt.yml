@@ -1,0 +1,21 @@
+name: bounded_domain_declared
+version: 1
+
+# Fixture for the `bounded_domain` declaration (docs/plans/20260704-model-updates-l3-declarations.md;
+# docs/specs/model_properties.md §"Model-scoped declarations"): `category`'s
+# active domain is asserted bounded at 10,000 distinct values, licensing the
+# exact holistic `MEDIAN` aggregate below via an explicit per-key multiset.
+# The declaration parses and structurally validates clean; no transform
+# consumes it yet (this phase builds the declaration + its widening/guard
+# only — the multiset-maintenance transform is separate work).
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

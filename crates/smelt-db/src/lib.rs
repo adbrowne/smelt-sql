@@ -119,6 +119,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::MaterializedViewForbidsTimeseries => None,
         MetadataError::MaterializedViewForbidsBatched => None,
         MetadataError::MalformedFunctionalDependency { .. } => None,
+        MetadataError::MalformedBoundedDomain { .. } => None,
     }
 }
 
@@ -1491,6 +1492,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: fd_err.to_string(),
                 range: rowan::TextRange::empty(rowan::TextSize::from(0)),
                 code: Some(DiagnosticCode::MalformedFunctionalDependency),
+                data: None,
+            })
+            .accumulate(db);
+        }
+
+        // Bounded-domain / space-budget declaration structural validation
+        // (DC3, `model_properties.md` §"Model-scoped declarations").
+        if let Err(bd_err) = smelt_core::metadata::validate_bounded_domains(metadata, sql_body) {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: bd_err.to_string(),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::MalformedBoundedDomain),
                 data: None,
             })
             .accumulate(db);

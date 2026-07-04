@@ -167,6 +167,18 @@ fn functional_dependency_declared_no_diagnostics() {
     check_workspace_no_diagnostics("examples/functional_dependency_declared");
 }
 
+/// `bounded_domain` declaration fixture: an exact `MEDIAN` aggregate over a
+/// column asserted to have a bounded active domain (an explicit
+/// `max_cardinality` cap). Verifies the workspace loads without any
+/// diagnostics (structural validation of the declaration passes; the
+/// widening/guard proof it feeds is exercised by
+/// `smelt-logical::analysis::bounded_domain` unit tests, not through
+/// `file_diagnostics`).
+#[test]
+fn bounded_domain_declared_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/bounded_domain_declared");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that
