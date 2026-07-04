@@ -351,6 +351,90 @@ fn catalog_origin_generator_file_is_workspace_relative() {
     }
 }
 
+// ── `materialized_view` is not a storage-axis value ──────────────────────────
+
+/// A model whose frontmatter declares `materialization: materialized_view`
+/// cannot end up in the catalog under that storage value: the discovery
+/// pipeline treats an unrecognised `materialization:` frontmatter value the
+/// same as an absent one (surfaced as a diagnostic by `smelt-db`/the LSP, not
+/// a hard failure of catalog *generation*), so the model falls back to the
+/// project's `default_materialization`. `smelt run`/`smelt build` (the
+/// execution path — see `materialization_parity.rs`) are where this value is
+/// hard-rejected with the `refresh: materialized_view` migration hint.
+#[test]
+fn catalog_pipeline_never_reports_materialized_view_for_retired_value() {
+    let tmp = stage_workspace(&[(
+        "models/cached_report.sql",
+        "---\nmaterialization: materialized_view\n---\nSELECT 1 AS id",
+    )]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+        &project_dir,
+        None,
+    )
+    .expect("build catalog");
+
+    let cached_report = catalog
+        .models
+        .get("cached_report")
+        .expect("cached_report model must still be discoverable");
+    assert_ne!(
+        cached_report.materialization, "materialized_view",
+        "retired storage value must never surface in the catalog"
+    );
+}
+
+/// No `CatalogModel` produced by the real pipeline can ever carry
+/// `"materialization":"materialized_view"` — the enum has no such variant, so
+/// serialization structurally cannot emit it.
+#[test]
+fn catalog_json_never_contains_materialized_view_storage_value() {
+    let tmp = stage_workspace(&[
+        (
+            "models/view_model.sql",
+            "---\nmaterialization: view\n---\nSELECT 1 AS id",
+        ),
+        (
+            "models/table_model.sql",
+            "---\nmaterialization: table\n---\nSELECT 1 AS id",
+        ),
+    ]);
+    let project_dir = tmp.path().to_path_buf();
+
+    let config = smelt_cli::Config::load(&project_dir).expect("load config");
+    let (graph, db, origins) =
+        smelt_cli::build_dependency_graph_with_origins(&project_dir, &config, None, &[], "dev")
+            .expect("build logical graph");
+
+    let catalog = smelt_cli::docs::build_catalog(
+        &graph,
+        &config,
+        &db,
+        &origins,
+        &std::collections::HashMap::new(),
+        &project_dir,
+        None,
+    )
+    .expect("build catalog");
+
+    let json = serde_json::to_string(&catalog).expect("serialize catalog");
+    assert!(
+        !json.contains("materialized_view"),
+        "catalog JSON must never contain the retired storage value 'materialized_view'; got: {json}"
+    );
+}
+
 // ── W8-catalog P3: --select filtering ────────────────────────────────────────
 
 /// W8-catalog P3 TDD gate: when `build_catalog` is called with

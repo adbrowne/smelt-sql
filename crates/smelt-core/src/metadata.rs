@@ -696,9 +696,12 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // Pre-validate strict sub-fields before the resilient fallback path.
         // `reuse` uses deny_unknown_fields and `state` uses strict enum variants;
         // both must fail hard rather than be silently stripped (fail-loud discipline).
-        // `materialization: cumulative_aggregate` is also checked here to give a
-        // clear migration error — this value was removed; use `materialization: table`
-        // + `refresh: cumulative` instead. `incremental:` is checked for the same
+        // `materialization: cumulative_aggregate` and `materialization:
+        // materialized_view` are also checked here to give a clear migration
+        // error — `cumulative_aggregate` was removed (use `materialization:
+        // table` + `refresh: cumulative` instead); `materialized_view` was
+        // relocated from the storage axis to the refresh axis (use `refresh:
+        // materialized_view` instead). `incremental:` is checked for the same
         // reason — the block was retired; use `refresh: batched` + `batched:` instead.
         for (key, value) in validated_map.iter() {
             let key_str = key.as_str().unwrap_or("");
@@ -709,10 +712,15 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 serde_yaml::from_value::<StateConfig>(value.clone())
                     .map_err(MetadataError::YamlParseError)?;
             // Fail hard specifically for the removed `cumulative_aggregate`
-            // value so the error is clear. Other unknown materialization values
-            // use the resilient fallback path below (surfaced as diagnostics
-            // by smelt-db rather than hard-failing discovery).
-            } else if key_str == "materialization" && value.as_str() == Some("cumulative_aggregate")
+            // and relocated `materialized_view` values so the error is clear.
+            // Other unknown materialization values use the resilient fallback
+            // path below (surfaced as diagnostics by smelt-db rather than
+            // hard-failing discovery).
+            } else if key_str == "materialization"
+                && matches!(
+                    value.as_str(),
+                    Some("cumulative_aggregate") | Some("materialized_view")
+                )
             {
                 return Err(MetadataError::YamlParseError(
                     serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
@@ -807,8 +815,9 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
             let (validated_map, _fm_diags) =
                 parse_frontmatter(&yaml_content, DeclarationKind::Model);
             // Pre-validate strict sub-fields before the resilient fallback path.
-            // `materialization: cumulative_aggregate` is caught here for a clear
-            // migration error; other unknown values follow the resilient path.
+            // `materialization: cumulative_aggregate` and `materialization:
+            // materialized_view` are caught here for a clear migration error;
+            // other unknown values follow the resilient path.
             for (key, value) in validated_map.iter() {
                 let key_str = key.as_str().unwrap_or("");
                 if key_str == "reuse" {
@@ -818,7 +827,10 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     serde_yaml::from_value::<StateConfig>(value.clone())
                         .map_err(MetadataError::YamlParseError)?;
                 } else if key_str == "materialization"
-                    && value.as_str() == Some("cumulative_aggregate")
+                    && matches!(
+                        value.as_str(),
+                        Some("cumulative_aggregate") | Some("materialized_view")
+                    )
                 {
                     return Err(MetadataError::YamlParseError(
                         serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
@@ -1206,19 +1218,14 @@ SELECT * FROM users"#;
     }
 
     #[test]
-    fn test_frontmatter_materialized_view() {
+    fn test_frontmatter_materialized_view_rejected() {
         let source = "---\nname: cached_report\nmaterialization: materialized_view\n---\nSELECT 1";
 
-        let result = extract_file_metadata(source).unwrap();
-        match result {
-            FileMetadata::Single { metadata, .. } => {
-                assert_eq!(
-                    metadata.materialization,
-                    Some(Materialization::MaterializedView)
-                );
-            }
-            _ => panic!("Expected Single variant"),
-        }
+        let err = extract_file_metadata(source).unwrap_err().to_string();
+        assert!(
+            err.contains("refresh: materialized_view"),
+            "expected migration hint pointing to `refresh: materialized_view`, got: {err}"
+        );
     }
 
     #[test]

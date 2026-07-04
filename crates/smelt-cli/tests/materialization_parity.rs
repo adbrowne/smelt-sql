@@ -1,20 +1,14 @@
-//! W5·P6 — materialization parity (view / table / materialized_view) across backends.
+//! materialization parity (view / table) across backends.
 //!
-//! Exercises `view`, `table`, and `materialized_view` materializations via
-//! `smelt run` on both DuckDB and Spark.  All three must produce a queryable
-//! relation with the same logical rows.
+//! Exercises `view` and `table` materializations via `smelt run` on both
+//! DuckDB and Spark.  Both must produce a queryable relation with the same
+//! logical rows.
 //!
-//! **MV flag/behavior note (recorded for W6):**
-//! - DuckDB: `supports_materialized_views = false` → `MaterializedView` falls
-//!   back to a table via the `else` branch in `execute_model`.
-//!
-//! - Spark: `supports_materialized_views = true` → `MaterializedView` enters the
-//!   `if` branch, calls `create_materialized_view_as`, which the Spark backend
-//!   inherits as the default trait impl (calls `create_table_as` + `warn!`).
-//!
-//! Both produce a plain table. The mismatch is Spark's capability flag claiming
-//! "yes" while the implementation creates a regular table — fixing the flag to
-//! `false` or implementing real Spark MV support is a **W6** conformance task.
+//! `materialized_view` is not a storage-axis value: `materialization:
+//! materialized_view` is rejected at config-parse time with a migration hint
+//! pointing to `refresh: materialized_view` (see `docs/specs/models.md`
+//! §"Materialization (storage) modes"). That rejection is covered below by
+//! `materialized_view_storage_value_is_rejected`.
 //!
 //! With `SPARK_CONNECT_URL` unset: DuckDB only (Spark path skips green).
 //! With `SPARK_CONNECT_URL` set AND `--features spark`: also covers Spark.
@@ -39,17 +33,6 @@ SELECT id, label FROM data
 
 const TABLE_MODEL: &str = r#"---
 materialization: table
----
-WITH data AS (
-    SELECT CAST(1 AS BIGINT) AS id, 'alpha' AS label
-    UNION ALL SELECT CAST(2 AS BIGINT), 'beta'
-    UNION ALL SELECT CAST(3 AS BIGINT), 'gamma'
-)
-SELECT id, label FROM data
-"#;
-
-const MV_MODEL: &str = r#"---
-materialization: materialized_view
 ---
 WITH data AS (
     SELECT CAST(1 AS BIGINT) AS id, 'alpha' AS label
@@ -93,7 +76,6 @@ fn stage_mat_workspace(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
     std::fs::write(root.join("models").join("view_model.sql"), VIEW_MODEL).unwrap();
     std::fs::write(root.join("models").join("table_model.sql"), TABLE_MODEL).unwrap();
-    std::fs::write(root.join("models").join("mv_model.sql"), MV_MODEL).unwrap();
 
     (root, warehouse)
 }
@@ -112,17 +94,8 @@ fn run_smelt(project_dir: &std::path::Path, target: &str) -> std::process::Outpu
         .unwrap_or_else(|e| panic!("failed to spawn `smelt run`: {e}"))
 }
 
-/// `view`, `table`, and `materialized_view` materializations produce the same
-/// queryable rows on both backends.
-///
-/// For `materialized_view`:
-///
-/// - DuckDB (supports_materialized_views=false): falls back to a plain table.
-/// - Spark (supports_materialized_views=true): routes to create_materialized_view_as,
-///   which falls back to create_table_as via the default trait impl.
-///
-/// Both produce a queryable relation with the same rows. The Spark flag/impl
-/// mismatch is a **W6** conformance fix.
+/// `view` and `table` materializations produce the same queryable rows on
+/// both backends.
 ///
 /// **DuckDB always green; Spark skips when `SPARK_CONNECT_URL` is unset.**
 #[cfg(feature = "duckdb")]
@@ -135,7 +108,6 @@ fn view_and_table_materialize_consistently_on_both() {
     let expected = expected_rows();
     let mut ref_view: Vec<Vec<String>> = Vec::new();
     let mut ref_table: Vec<Vec<String>> = Vec::new();
-    let mut ref_mv: Vec<Vec<String>> = Vec::new();
 
     for kind in targets_to_run() {
         let (target_name, schema) = match &kind {
@@ -180,21 +152,39 @@ fn view_and_table_materialize_consistently_on_both() {
                 &format!("{target_name}:table_model cross-backend"),
             );
         }
-
-        // mv_model: both backends fall back to a plain table (DuckDB: flag=false,
-        // Spark: flag=true but default create_materialized_view_as → create_table_as).
-        // The relation must still be queryable with correct rows.
-        // Spark flag/impl mismatch is recorded for W6 conformance.
-        let mv_rows = fetch_rows(&kind, &db_path, &warehouse, schema, "mv_model");
-        assert_table_parity(&mv_rows, &expected, &format!("{target_name}:mv_model"));
-        if ref_mv.is_empty() {
-            ref_mv = mv_rows;
-        } else {
-            assert_table_parity(
-                &mv_rows,
-                &ref_mv,
-                &format!("{target_name}:mv_model cross-backend"),
-            );
-        }
     }
+}
+
+/// `materialization: materialized_view` is not a storage-axis value — it is
+/// rejected at config-parse time with a migration hint pointing to
+/// `refresh: materialized_view` (the refresh-axis replacement).
+#[cfg(feature = "duckdb")]
+#[test]
+fn materialized_view_storage_value_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("mv_reject_proj");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+
+    let yml = "name: mv_reject_proj\n\
+               version: 1\n\
+               paths:\n  - models\n\
+               targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n";
+    std::fs::write(root.join("smelt.yml"), yml).unwrap();
+    std::fs::write(
+        root.join("models").join("mv_model.sql"),
+        "---\nmaterialization: materialized_view\n---\nSELECT 1 AS id\n",
+    )
+    .unwrap();
+
+    let out = run_smelt(&root, "dev");
+    assert!(
+        !out.status.success(),
+        "`smelt run` should fail for a `materialization: materialized_view` model"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refresh: materialized_view"),
+        "expected migration hint pointing to `refresh: materialized_view`, got: {stderr}"
+    );
 }

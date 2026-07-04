@@ -1,6 +1,6 @@
 # Materializations
 
-A materialization controls how smelt persists the results of a model in the target database. There are five materialization types, each suited to different use cases.
+A materialization controls how smelt persists the results of a model in the target database. There are four materialization types, each suited to different use cases.
 
 ## Materialization types
 
@@ -50,18 +50,6 @@ Best for:
 
 !!! warning
     Ephemeral models cannot have incremental configuration, `refresh: cumulative`, or target overrides. smelt will raise an error if you try to combine these.
-
-### materialized_view
-
-Creates a backend-managed materialized view. The database handles refresh scheduling and invalidation.
-
-Best for:
-
-- Backends that support materialized view refresh (PostgreSQL, Databricks)
-- Cases where you want the database to manage the refresh lifecycle
-
-!!! note
-    Materialized views are refreshed atomically by the backend. Incremental configuration on a materialized view has no effect and will produce a warning.
 
 ### cumulative_aggregate
 
@@ -161,7 +149,7 @@ When `materialization` is omitted in the SQL frontmatter, in `models.<name>` of 
 
 ## Refresh axis
 
-The `refresh:` frontmatter key controls how a stored model's output is recomputed on each run. It applies only to `materialization: table` and `materialization: materialized_view`; setting it on other materialization types has no effect for `view` (a warning is emitted) and is a hard error for `ephemeral`.
+The `refresh:` frontmatter key controls how a stored model's output is recomputed on each run. It applies only to `materialization: table`; setting it on other materialization types has no effect for `view` (a warning is emitted) and is a hard error for `ephemeral`. There is no `materialization: materialized_view` storage type — a backend-managed materialized view is selected on the refresh axis instead, via `refresh: materialized_view` over an implied `table`.
 
 | Value | Meaning |
 |---|---|
@@ -208,7 +196,7 @@ GROUP BY device_id, user_id
 | Model with many downstream dependents | `table` |
 | Incremental processing (per-partition output) | `incremental` (per-partition `timeseries:` output) |
 | Cumulative state (one row per key across history) | `table` + `refresh: cumulative` |
-| Database-managed refresh | `materialized_view` |
+| Database-managed refresh | `table` + `refresh: materialized_view` |
 | Development / iteration | `view` |
 
 ## Incremental vs cumulative (refresh: cumulative)

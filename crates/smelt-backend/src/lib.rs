@@ -130,22 +130,6 @@ pub trait Backend: Send + Sync {
                 self.drop_view_if_exists(schema, name).await?;
                 self.create_view_as(schema, name, sql).await?;
             }
-            Materialization::MaterializedView => {
-                if self.capabilities().supports_materialized_views {
-                    self.drop_table_if_exists(schema, name).await?;
-                    self.drop_view_if_exists(schema, name).await?;
-                    self.drop_materialized_view_if_exists(schema, name).await?;
-                    self.create_materialized_view_as(schema, name, sql).await?;
-                } else {
-                    warn!(
-                        "backend doesn't support materialized views, using table for '{}'",
-                        name
-                    );
-                    self.drop_view_if_exists(schema, name).await?;
-                    self.drop_table_if_exists(schema, name).await?;
-                    self.create_table_as(schema, name, sql).await?;
-                }
-            }
         }
 
         let duration = start.elapsed();
@@ -180,8 +164,8 @@ pub trait Backend: Send + Sync {
         let start = std::time::Instant::now();
 
         match (materialization, strategy) {
-            (Materialization::View | Materialization::MaterializedView, _) => {
-                // Views and materialized views can't be incremental — full refresh
+            (Materialization::View, _) => {
+                // Views can't be incremental — full refresh
                 self.execute_model(schema, name, sql, materialization, show_preview)
                     .await?;
                 // Return early to avoid double row count/preview

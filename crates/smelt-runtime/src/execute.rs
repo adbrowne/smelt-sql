@@ -1019,9 +1019,6 @@ pub async fn execute_project(
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
                     smelt_core::config::Materialization::View => Materialization::View,
-                    smelt_core::config::Materialization::MaterializedView => {
-                        Materialization::MaterializedView
-                    }
                     smelt_core::config::Materialization::Ephemeral => {
                         unreachable!("Ephemeral models should be inlined as CTEs, not executed")
                     }

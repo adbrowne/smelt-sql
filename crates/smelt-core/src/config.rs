@@ -18,7 +18,7 @@ pub enum ConfigError {
 
 /// The refresh axis — how a stored model's output is recomputed across runs.
 ///
-/// Stored outputs (`materialization: table` or `materialized_view`) may
+/// Stored outputs (`materialization: table`) may
 /// opt into a non-default refresh strategy.  `Full` is the default (no key
 /// needed).  `Batched` processes new data forward in partition-sized slices
 /// (see `docs/specs/batched_models.md`).  `Cumulative` enables the
@@ -73,8 +73,6 @@ pub enum Materialization {
     View,
     /// Not materialized — inlined as a CTE into downstream models.
     Ephemeral,
-    /// Backend-managed persistent view (e.g., PostgreSQL, Databricks).
-    MaterializedView,
 }
 
 impl<'de> Deserialize<'de> for Materialization {
@@ -87,11 +85,11 @@ impl<'de> Deserialize<'de> for Materialization {
             "table" => Ok(Materialization::Table),
             "view" => Ok(Materialization::View),
             "ephemeral" => Ok(Materialization::Ephemeral),
-            "materialized_view" => Ok(Materialization::MaterializedView),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', or 'materialized_view'. \
+                "Invalid materialization type: {}. Must be 'table', 'view', or 'ephemeral'. \
                  Note: 'test' has been removed — use `smelt.test` declarations instead. \
-                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: cumulative` instead.",
+                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: cumulative` instead. \
+                 Note: 'materialized_view' has been removed — use `refresh: materialized_view` instead.",
                 s
             ))),
         }
@@ -107,7 +105,6 @@ impl Serialize for Materialization {
             Materialization::Table => serializer.serialize_str("table"),
             Materialization::View => serializer.serialize_str("view"),
             Materialization::Ephemeral => serializer.serialize_str("ephemeral"),
-            Materialization::MaterializedView => serializer.serialize_str("materialized_view"),
         }
     }
 }
@@ -913,14 +910,6 @@ impl Config {
                         );
                     }
                 }
-                Materialization::MaterializedView => {
-                    if incremental.is_some() {
-                        warn!(
-                            "model '{}' is a materialized view but has batched config — materialized views are refreshed atomically",
-                            name
-                        );
-                    }
-                }
                 Materialization::Table => {} // All config is valid for tables
             }
         }
@@ -1310,7 +1299,7 @@ models:
     }
 
     #[test]
-    fn test_materialized_view_deserialization() {
+    fn test_materialized_view_storage_value_rejected() {
         let yaml = r#"
 name: test_project
 version: 1
@@ -1323,11 +1312,63 @@ models:
   cached_report:
     materialization: materialized_view
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.models.get("cached_report").unwrap().materialization,
-            Some(Materialization::MaterializedView)
+        let err = serde_yaml::from_str::<Config>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refresh: materialized_view"),
+            "expected migration hint pointing to `refresh: materialized_view`, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_default_materialization_rejects_materialized_view() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+default_materialization: materialized_view
+"#;
+        let err = serde_yaml::from_str::<Config>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refresh: materialized_view"),
+            "expected migration hint pointing to `refresh: materialized_view`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_materialization_storage_values_still_parse() {
+        for (value, expected) in [
+            ("table", Materialization::Table),
+            ("view", Materialization::View),
+            ("ephemeral", Materialization::Ephemeral),
+        ] {
+            let yaml = format!(
+                r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  m:
+    materialization: {value}
+"#
+            );
+            let config: Config = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(
+                config.models.get("m").unwrap().materialization,
+                Some(expected)
+            );
+        }
     }
 
     #[test]
@@ -2019,10 +2060,12 @@ default_materialization: {default_mat}
         assert_eq!(config.default_materialization, Materialization::Ephemeral);
     }
 
-    /// D-33: table, view, materialized_view remain legal defaults (regression guard).
+    /// D-33: table, view, ephemeral remain legal defaults (regression guard).
+    /// `materialized_view` is no longer a storage-axis value — see
+    /// `test_default_materialization_rejects_materialized_view`.
     #[test]
     fn default_materialization_standard_values_are_allowed() {
-        for mat in ["table", "view", "materialized_view"] {
+        for mat in ["table", "view", "ephemeral"] {
             let yaml = minimal_config_yaml(mat);
             assert!(
                 Config::parse_with_warnings(&yaml).is_ok(),
