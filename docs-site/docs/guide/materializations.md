@@ -155,6 +155,7 @@ The `refresh:` frontmatter key controls how a stored model's output is recompute
 |---|---|
 | `full` (default) | Rebuild the table from scratch on every run. |
 | `cumulative` | Cumulative-aggregate merge: one row per `GROUP BY` key, grown across partitions. |
+| `materialized_view` | Engine-maintained view: the backend keeps the output current with its own native incremental-view maintenance, not a smelt-driven refresh loop. Requires a backend with native IVM — see below. |
 
 When `refresh:` is omitted, `full` is assumed — the model always rebuilds completely.
 
@@ -185,6 +186,23 @@ FROM smelt.silver.events_parsed
 WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
+
+### refresh: materialized_view
+
+Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like `cumulative`; it must not declare a `timeseries:` block or a `batched:` block.
+
+```sql
+---
+materialization: table
+refresh: materialized_view
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.silver.events_parsed
+WHERE user_id IS NOT NULL
+GROUP BY device_id, user_id
+```
+
+smelt never silently substitutes another refresh mode for this one: on a backend without native incremental-view maintenance (every backend today — DuckDB and both Spark profiles), `refresh: materialized_view` is a **hard error** rather than a silent fallback to `cumulative` or a full-refresh table. Use `refresh: cumulative` for smelt-driven maintenance on those backends.
 
 ## Decision guide
 

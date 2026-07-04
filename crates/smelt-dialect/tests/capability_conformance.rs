@@ -109,15 +109,15 @@ fn every_flag_matches_matrix() {
     cell!(delta, supports_insert_overwrite, true, "Spark(Delta)");
     cell!(parquet, supports_insert_overwrite, true, "Spark(Parquet)");
 
-    // supports_materialized_views — matrix: all ✗ (table fallback for every backend)
-    cell!(duckdb, supports_materialized_views, false, "DuckDB");
-    cell!(delta, supports_materialized_views, false, "Spark(Delta)");
-    cell!(
-        parquet,
-        supports_materialized_views,
-        false,
-        "Spark(Parquet)"
-    );
+    // supports_native_ivm — matrix: all ✗ (no backend has native IVM today)
+    cell!(duckdb, supports_native_ivm, false, "DuckDB");
+    cell!(delta, supports_native_ivm, false, "Spark(Delta)");
+    cell!(parquet, supports_native_ivm, false, "Spark(Parquet)");
+
+    // supports_retraction — matrix: all ✗ (meaningful only alongside native IVM)
+    cell!(duckdb, supports_retraction, false, "DuckDB");
+    cell!(delta, supports_retraction, false, "Spark(Delta)");
+    cell!(parquet, supports_retraction, false, "Spark(Parquet)");
 
     // supports_struct_field_ddl
     cell!(duckdb, supports_struct_field_ddl, true, "DuckDB");
@@ -180,7 +180,8 @@ fn all_fields_destructured() {
         supports_double_colon_cast: _,
         supports_trailing_commas: _,
         supports_insert_overwrite: _,
-        supports_materialized_views: _,
+        supports_native_ivm: _,
+        supports_retraction: _,
         supports_struct_field_ddl: _,
         supports_alter_column_using: _,
         supports_nested_array_ddl: _,

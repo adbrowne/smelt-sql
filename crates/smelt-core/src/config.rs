@@ -34,6 +34,13 @@ pub enum RefreshStrategy {
     /// Cumulative-aggregate merge: one row per GROUP BY key, grown across
     /// partitions using commutative-associative per-column combiners.
     Cumulative,
+    /// Engine-maintained materialized view: the backend keeps the output
+    /// current with its own native incremental-view maintenance, not a
+    /// smelt-driven refresh loop. Keyed output, like `Cumulative`; forbids
+    /// `timeseries:` and a `batched:` block. Requires the resolved backend's
+    /// `supports_native_ivm` capability — otherwise a hard error, never a
+    /// silent fallback (`docs/specs/materialized_view.md` §"No silent fallback").
+    MaterializedView,
 }
 
 impl<'de> Deserialize<'de> for RefreshStrategy {
@@ -46,8 +53,9 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
             "full" => Ok(RefreshStrategy::Full),
             "batched" => Ok(RefreshStrategy::Batched),
             "cumulative" => Ok(RefreshStrategy::Cumulative),
+            "materialized_view" => Ok(RefreshStrategy::MaterializedView),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid refresh strategy: {}. Must be 'full', 'batched', or 'cumulative'",
+                "Invalid refresh strategy: {}. Must be 'full', 'batched', 'cumulative', or 'materialized_view'",
                 s
             ))),
         }
@@ -63,6 +71,7 @@ impl Serialize for RefreshStrategy {
             RefreshStrategy::Full => serializer.serialize_str("full"),
             RefreshStrategy::Batched => serializer.serialize_str("batched"),
             RefreshStrategy::Cumulative => serializer.serialize_str("cumulative"),
+            RefreshStrategy::MaterializedView => serializer.serialize_str("materialized_view"),
         }
     }
 }

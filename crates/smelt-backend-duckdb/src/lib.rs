@@ -848,6 +848,8 @@ mod tests {
         assert!(caps.supports_merge);
         assert!(caps.supports_create_or_replace_table);
         assert!(!caps.supports_insert_overwrite);
+        assert!(!caps.supports_native_ivm);
+        assert!(!caps.supports_retraction);
     }
 
     #[tokio::test]

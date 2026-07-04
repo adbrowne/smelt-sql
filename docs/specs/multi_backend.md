@@ -233,7 +233,6 @@ resolves nested widening to a table rewrite.
   performance gap, not a correctness one. Deferred.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
-- **`supports_native_ivm` / `supports_retraction` are specified but unwired; the old flag is not yet renamed.** The matrix lists both as normative flags (all `false`), and `refresh: materialized_view` gates on `supports_native_ivm` (§"Incremental-view-maintenance capabilities"). The code today has neither flag; it still carries `supports_materialized_views` (which gated a now-removed storage-axis `materialized_view` via a `Table` fallback). Renaming `supports_materialized_views` → `supports_native_ivm`, adding `supports_retraction`, and wiring the `refresh: materialized_view` hard error are a phase of `docs/plans/20260704-model-updates.md`. No backend advertises native IVM, so the mode is inert until a Databricks/Enzyme backend lands.
 
 ## References
 

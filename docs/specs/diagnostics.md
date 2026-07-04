@@ -137,6 +137,17 @@ Owned by `docs/specs/cumulative_aggregate.md`.
 
 ---
 
+### Materialized view
+
+Owned by `docs/specs/materialized_view.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `MaterializedViewForbidsTimeseries` | Error | A `refresh: materialized_view` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
+| `MaterializedViewForbidsBatched` | Error | A `refresh: materialized_view` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+
+---
+
 ### Testing
 
 Owned by `docs/specs/testing.md`.

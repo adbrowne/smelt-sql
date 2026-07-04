@@ -698,6 +698,14 @@ pub enum DiagnosticCode {
     /// The two materializations have different equivalence contracts; pick one.
     /// Anchored at offset 0. Error severity.
     CumulativeForbidsBatched,
+    /// A `refresh: materialized_view` model incorrectly declares a
+    /// `timeseries:` block. Like `cumulative`, the engine-maintained output
+    /// has no partition column. Anchored at offset 0. Error severity.
+    MaterializedViewForbidsTimeseries,
+    /// A `refresh: materialized_view` model incorrectly declares a
+    /// `batched:` block. The engine, not smelt, owns freshness for this
+    /// mode. Anchored at offset 0. Error severity.
+    MaterializedViewForbidsBatched,
     /// Advisory (`Warning`): a `batched` model's SQL is not batch-safe
     /// under the planner's batch safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).

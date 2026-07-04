@@ -228,6 +228,15 @@ impl ModelMetadata {
     pub fn is_cumulative(&self) -> bool {
         self.refresh == Some(RefreshStrategy::Cumulative)
     }
+
+    /// Returns `true` when this model delegates freshness to a backend's
+    /// native incremental-view maintenance.
+    ///
+    /// The opt-in is `materialization: table` + `refresh: materialized_view`.
+    /// Every materialized-view detection site must route through this predicate.
+    pub fn is_materialized_view(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::MaterializedView)
+    }
 }
 
 /// Complete file metadata (single or multi-model)
@@ -340,6 +349,19 @@ pub enum MetadataError {
     /// A model declares a `batched:` block without `refresh: batched`.
     #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: batched` — add `refresh: batched` or remove the `batched:` block")]
     BatchedRequiresRefreshBatched,
+
+    /// A model declares `refresh: materialized_view` and a `timeseries:` block.
+    /// Like `cumulative`, the engine-maintained output is a keyed lookup with
+    /// no partition column (`docs/specs/materialized_view.md` §"Constraints
+    /// & Invariants").
+    #[error("MaterializedViewForbidsTimeseries: refresh: materialized_view models must not declare a `timeseries:` block — the output is a keyed lookup with no partition column")]
+    MaterializedViewForbidsTimeseries,
+
+    /// A model declares `refresh: materialized_view` and a `batched:` block.
+    /// The engine, not smelt, owns freshness for this mode — there is no
+    /// smelt-driven batch loop to configure.
+    #[error("MaterializedViewForbidsBatched: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
+    MaterializedViewForbidsBatched,
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -391,6 +413,18 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // has no partition column.
     if metadata.is_cumulative() && metadata.timeseries.is_some() {
         return Err(MetadataError::CumulativeForbidsTimeseries);
+    }
+
+    // Rule: materialized_view forbids batched: — the engine owns freshness
+    // for this mode; there is no smelt-driven batch loop to configure.
+    if metadata.is_materialized_view() && metadata.batched.is_some() {
+        return Err(MetadataError::MaterializedViewForbidsBatched);
+    }
+
+    // Rule: materialized_view forbids timeseries: — like cumulative, the
+    // engine-maintained output is a keyed lookup with no partition column.
+    if metadata.is_materialized_view() && metadata.timeseries.is_some() {
+        return Err(MetadataError::MaterializedViewForbidsTimeseries);
     }
 
     // `refresh: cumulative` on a non-stored materialization:
@@ -1757,6 +1791,81 @@ GROUP BY device_id, user_id"#;
         assert!(
             matches!(err, MetadataError::CumulativeForbidsBatched),
             "Expected CumulativeForbidsBatched, got: {}",
+            err
+        );
+    }
+
+    /// `materialization: table` + `refresh: materialized_view` parses cleanly.
+    #[test]
+    fn test_refresh_materialized_view_frontmatter_parses() {
+        let source = r#"---
+materialization: table
+refresh: materialized_view
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.events
+GROUP BY device_id, user_id"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(
+                    metadata.materialization,
+                    Some(crate::config::Materialization::Table)
+                );
+                assert_eq!(
+                    metadata.refresh,
+                    Some(crate::config::RefreshStrategy::MaterializedView)
+                );
+                assert!(metadata.timeseries.is_none());
+                assert!(metadata.batched.is_none());
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    /// A model with `refresh: materialized_view` + a `timeseries:` block
+    /// emits `MaterializedViewForbidsTimeseries`.
+    #[test]
+    fn test_materialized_view_forbids_timeseries() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(crate::config::RefreshStrategy::MaterializedView),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("refresh: materialized_view + timeseries must error");
+        assert!(
+            matches!(err, MetadataError::MaterializedViewForbidsTimeseries),
+            "Expected MaterializedViewForbidsTimeseries, got: {}",
+            err
+        );
+    }
+
+    /// A model with `refresh: materialized_view` + a `batched:` block
+    /// emits `MaterializedViewForbidsBatched`.
+    #[test]
+    fn test_materialized_view_forbids_batched() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(crate::config::RefreshStrategy::MaterializedView),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT * FROM foo")
+            .expect_err("refresh: materialized_view + batched: must error");
+        assert!(
+            matches!(err, MetadataError::MaterializedViewForbidsBatched),
+            "Expected MaterializedViewForbidsBatched, got: {}",
             err
         );
     }

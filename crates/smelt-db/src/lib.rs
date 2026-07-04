@@ -116,6 +116,8 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::CumulativeForbidsTimeseries => None,
         MetadataError::CumulativeForbidsBatched => None,
         MetadataError::BatchedRequiresRefreshBatched => None,
+        MetadataError::MaterializedViewForbidsTimeseries => None,
+        MetadataError::MaterializedViewForbidsBatched => None,
     }
 }
 
@@ -1441,6 +1443,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
                     Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
                 }
+                smelt_core::metadata::MetadataError::MaterializedViewForbidsTimeseries => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::MaterializedViewForbidsTimeseries,
+                )),
+                smelt_core::metadata::MetadataError::MaterializedViewForbidsBatched => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::MaterializedViewForbidsBatched,
+                )),
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
                 _ => None,

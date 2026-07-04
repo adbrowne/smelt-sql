@@ -158,7 +158,7 @@ Frontmatter in SQL files overrides project-level `smelt.yml` settings.
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Model name (optional, inferred from filename) |
-| `materialization` | `table` \| `view` \| `ephemeral` \| `materialized_view` | How to materialize. See [Materializations](materializations.md) for details on each type. |
+| `materialization` | `table` \| `view` \| `ephemeral` | How to materialize. See [Materializations](materializations.md) for details on each type. |
 | `incremental.enabled` | boolean | Enable incremental updates |
 | `incremental.event_time_column` | string | Column for time-based filtering |
 | `incremental.partition_column` | string | Column for partition deletion |

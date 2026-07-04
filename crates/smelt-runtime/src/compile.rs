@@ -1,5 +1,5 @@
 use anyhow::Result;
-use smelt_core::config::{BackendType, Config, Materialization, Target};
+use smelt_core::config::{BackendType, Config, Materialization, RefreshStrategy, Target};
 use smelt_core::{ModelFile, SourcesConfig};
 use smelt_db::type_inference::infer_select_column_types;
 use smelt_db::{build_type_context, StaticRefSchemaProvider};
@@ -998,8 +998,33 @@ impl SqlCompiler {
         })
     }
 
+    /// Hard-error when a model is `refresh: materialized_view` and the resolved
+    /// backend's capabilities have no native incremental-view maintenance.
+    ///
+    /// No backend advertises `supports_native_ivm` today, so this always fires
+    /// for `refresh: materialized_view` models — never a silent fallback to
+    /// `cumulative` or a full-refresh table
+    /// (`docs/specs/materialized_view.md` §"No silent fallback"). Called from
+    /// every compile entry point (`compile`, `compile_with_sql`,
+    /// `compile_with_sql_and_ephemerals`) so the gate applies uniformly
+    /// whether or not ephemeral inlining or SQL transformation happened first.
+    fn check_native_ivm_gate(&self, model: &ModelFile) -> Result<()> {
+        let refresh = self
+            .config
+            .get_refresh_with_metadata(&model.name, model.metadata.as_ref().map(|b| b.as_ref()));
+        if refresh == RefreshStrategy::MaterializedView && !self.capabilities.supports_native_ivm {
+            anyhow::bail!(
+                "`refresh: materialized_view` requires native incremental-view maintenance; \
+                 this engine has none — use `refresh: cumulative` for smelt-driven maintenance."
+            );
+        }
+        Ok(())
+    }
+
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         // Strip frontmatter to avoid parse errors from YAML metadata
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         // Evaluate in-model meta-language constructs (e.g. list spread) to plain
@@ -1118,6 +1143,8 @@ impl SqlCompiler {
         schema: &str,
         sql: &str,
     ) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -1172,6 +1199,8 @@ impl SqlCompiler {
         sql: &str,
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         let ephemeral_refs: HashSet<&str> = resolver
             .ephemeral_names
             .iter()
@@ -1716,6 +1745,8 @@ impl SqlCompiler {
         schema: &str,
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let clean_content =
             crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
@@ -2011,6 +2042,48 @@ JOIN smelt.model_b b ON a.id = b.id
             result.is_ok(),
             "compile() must not reject has_named_params=true refs (function calls with named args are valid): {:?}",
             result.err()
+        );
+    }
+
+    /// `refresh: materialized_view` on DuckDB (no native IVM) is a hard error —
+    /// never a silent fallback to `cumulative` or a full-refresh table
+    /// (`docs/specs/materialized_view.md` §"No silent fallback").
+    #[test]
+    fn test_materialized_view_hard_errors_without_native_ivm() {
+        let model = ModelFile {
+            name: "mv_model".to_string(),
+            path: "models/mv_model.sql".into(),
+            content: "SELECT device_id, COUNT(*) AS n FROM smelt.raw_events GROUP BY device_id"
+                .to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(smelt_core::metadata::ModelMetadata {
+                materialization: Some(Materialization::Table),
+                refresh: Some(RefreshStrategy::MaterializedView),
+                ..Default::default()
+            })),
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("mv_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let config = make_test_config();
+        // make_test_target() is `duckdb`, which sets `supports_native_ivm = false`.
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let err = compiler
+            .compile(&model, "main")
+            .expect_err("refresh: materialized_view on DuckDB must hard-error");
+        let message = err.to_string();
+        assert!(
+            message.contains("requires native incremental-view maintenance"),
+            "expected the §\"No silent fallback\" hard error, got: {}",
+            message
+        );
+        assert!(
+            message.contains("use `refresh: cumulative`"),
+            "expected the hard error to point at `refresh: cumulative`, got: {}",
+            message
         );
     }
 

@@ -422,6 +422,8 @@ impl Backend {
                 DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
                 DbCode::CumulativeForbidsTimeseries => "cumulative-forbids-timeseries",
                 DbCode::CumulativeForbidsBatched => "cumulative-forbids-batched",
+                DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
+                DbCode::MaterializedViewForbidsBatched => "materialized-view-forbids-batched",
                 DbCode::BatchedNotSafe => "batched-not-safe",
                 // Multi-model section structure diagnostic codes.
                 DbCode::MalformedSectionDelimiter => "malformed-section-delimiter",
