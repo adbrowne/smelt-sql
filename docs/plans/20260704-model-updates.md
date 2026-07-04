@@ -152,7 +152,10 @@ maintenance ladder rungs 2–4 (Part 14), the two new smelt-driven keyed modes (
 - **The two §19.6 hybrid cells** (research Part 19): no new refresh values and no combo modes — the
   litmus rule (§19.7) resolves every surveyed combination to an existing cell, a derived behaviour,
   or DAG composition. The two residual hybrids stay out of scope: a *maintained-trajectory* peer
-  (cumulative-with-history) is demand-gated, and the *observation-series* shape ("snapshot X daily",
+  (cumulative-with-history) is demand-gated — the concrete `accumulating_snapshot` enrichment peer
+  worked in `docs/research/20260703-model-updates.md` Part 20 (a keyed monoid-rung peer with a bounded
+  forward horizon; its one new dependency, the `after_secs` forward-reach walk, is noted in Group B
+  §B2) is the first demand instance, still out of scope here — and the *observation-series* shape ("snapshot X daily",
   a non-replayable input under a partitioned output) should eventually get a **named rejection** —
   but that rejection needs the source mutation-profile declaration (§17.6), which does not exist
   yet, so it is deferred with it rather than phased here.

@@ -255,6 +255,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
 - **Keyed refresh modes beyond `cumulative` are not yet implemented.** The refresh axis names `versioned`, `latest_value`, and `materialized_view` as normative peers (each with its own spec), but only `full`, `batched`, and `cumulative` are built today. Declaring `versioned` / `latest_value` / `materialized_view` currently produces an unknown-refresh-value error; each is delivered by a phase of `docs/plans/20260704-model-updates.md`.
+- **A further keyed peer is under research, not yet a named mode.** An `accumulating_snapshot` refresh — a keyed once-write/milestone peer for late enrichment, consuming windowed input like `cumulative` with a bounded forward-attribution horizon — is a demand-gated design direction, *not* a recognized `refresh:` value and not accepted by the parser. Its worked design is `docs/research/20260703-model-updates.md` Part 20.
 
 ## References
 

@@ -74,7 +74,7 @@ analysis (`materialized_view.md` §Design "Delegation inherits the engine's corr
 - **Deletions and late corrections** for D1/D2 (a key vanishing from the incoming set; a correction to an already-closed interval) — the shared keyed-mode retraction question (`latest_value_models.md` / `versioned_models.md` §Open Questions; research §18.2). Stays an Open Question; not a phase here.
 - **Snapshot-diff `--auto` staleness** for a source with no monotone clock (§19.8). D1/D2 may ship snapshot-diff as always-full-rescan and defer the staleness firing; record under §Deferred.
 - **Richer native-IVM pre-flight** (predicting incrementalisability before submission) and the **per-engine physical-strategy modifier** for D3 — out of scope by design until a concrete IVM backend motivates them (`materialized_view.md` §Known Divergences; research §17.8, §18.2).
-- **The `accumulating_snapshot` / maintained-trajectory peer** (research §19.6 cell 1) and the **observation-series named rejection** (§19.6 cell 2) — no new refresh values here; both are master-level Open Questions.
+- **The `accumulating_snapshot` / maintained-trajectory peer** (research §19.6 cell 1, now worked to a design in Part 20 — a keyed monoid-rung peer with a bounded forward horizon `H`) and the **observation-series named rejection** (§19.6 cell 2) — no new refresh values here; both are master-level Open Questions.
 
 ## Progress tracking
 
