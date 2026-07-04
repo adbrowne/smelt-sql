@@ -14,6 +14,9 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
+use crate::analysis::monotonicity::EventTimeTrace;
+use crate::analysis::monotonicity::{find_leaf_column_ref, trace_event_time};
+
 /// Duration expressed in whole seconds (always ≥ 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
 pub struct Seconds(pub u64);
@@ -642,6 +645,131 @@ fn extract_balanced_parens_str(sql: &str, paren_pos: usize) -> Option<String> {
     Some(sql[s..e].to_string())
 }
 
+/// Resolve the `smelt.<path>` source name a `TableRef` refers to, dot-joining
+/// its path segments (e.g. `smelt.silver.events_parsed` → `"silver.events_parsed"`,
+/// matching the ref names in `ModelInfo.refs`/`BoundContext::source_partition_cols`).
+/// Returns `None` for table refs that are not `smelt.<path>` refs/calls
+/// (bare identifiers, CTE references, subqueries) — those are not join
+/// driving-fact candidates by this resolution (they have no known
+/// partition column to trace against).
+pub fn resolve_table_ref_source_name(table_ref: &smelt_parser::TableRef) -> Option<String> {
+    if let Some(path_ref) = table_ref.smelt_path_ref() {
+        let segs = path_ref.segments();
+        if !segs.is_empty() {
+            return Some(segs.join("."));
+        }
+    }
+    if let Some(path_call) = table_ref.smelt_path_call() {
+        let segs = path_call.segments();
+        if !segs.is_empty() {
+            return Some(segs.join("."));
+        }
+    }
+    None
+}
+
+/// Build the list of `(alias_or_source_name, source_name)` pairs for every
+/// `smelt.<path>` input in a FROM clause — the base table ref plus every
+/// JOIN's table ref. The key is the table ref's explicit/implicit alias if
+/// present, else the source name itself (matching how an unqualified
+/// column reference would resolve). Non-ref inputs (subqueries, CTE
+/// references) are skipped — they are not join driving-fact candidates.
+pub fn from_clause_alias_sources(from_clause: &smelt_parser::FromClause) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut push = |table_ref: &smelt_parser::TableRef| {
+        if let Some(source) = resolve_table_ref_source_name(table_ref) {
+            let key = table_ref.alias().unwrap_or_else(|| source.clone());
+            out.push((key, source));
+        }
+    };
+    for table_ref in from_clause.table_refs() {
+        push(&table_ref);
+    }
+    for join in from_clause.joins() {
+        if let Some(table_ref) = join.table_ref() {
+            push(&table_ref);
+        }
+    }
+    out
+}
+
+/// Resolve the "driving fact" among a join's inputs for a traced
+/// `event_time_expr` (Join relaxation, `batched_models.md` §"Event-time
+/// monotonicity trace").
+///
+/// `alias_sources` is the FROM/JOIN alias→source map (`from_clause_alias_sources`);
+/// `full_ctx` maps every known timeseries source (reachable from the model's
+/// refs) to its partition column.
+///
+/// Resolution never widens `trace_event_time`'s own decision logic — each
+/// candidate is tested against a *singleton* `BoundContext` containing only
+/// that one candidate's `(source, partition_column)`, so
+/// `resolve_against_ctx`'s ambiguous-name fallback inside the pure primitive
+/// never triggers; ambiguity is instead decided here, across candidates,
+/// which is the "alias-scoped leaf resolution" this phase adds:
+///
+/// - If the traced expression's leaf column carries an explicit qualifier
+///   (e.g. `f.event_ts`) that matches one of the FROM/JOIN aliases, only that
+///   aliased input is tested — this disambiguates two joined inputs whose
+///   partition columns happen to share a bare column *name*, which the
+///   name-only primitive alone cannot.
+/// - Otherwise every candidate is tested independently; exactly one
+///   `Traceable` result is required. Zero or more than one candidate tracing
+///   fails closed to `NotTraceable` (Constraint 12 — never guess the driving
+///   fact).
+pub fn resolve_join_driving_fact(
+    event_time_expr: &smelt_parser::Expr,
+    alias_sources: &[(String, String)],
+    full_ctx: &BoundContext,
+) -> EventTimeTrace {
+    let trace_against = |source_name: &str| -> Option<EventTimeTrace> {
+        let partition_col = full_ctx.source_partition_cols.get(source_name)?;
+        let singleton = BoundContext::new().with_source(source_name, partition_col);
+        Some(trace_event_time(event_time_expr, &singleton))
+    };
+
+    if let Some(qualifier) =
+        find_leaf_column_ref(event_time_expr).and_then(|c| c.qualifier().map(|q| q.to_string()))
+    {
+        return match alias_sources.iter().find(|(alias, _)| alias == &qualifier) {
+            Some((_, source_name)) => {
+                trace_against(source_name).unwrap_or_else(|| EventTimeTrace::NotTraceable {
+                    reason: format!(
+                        "join input aliased '{qualifier}' is not a known timeseries source"
+                    ),
+                })
+            }
+            None => EventTimeTrace::NotTraceable {
+                reason: format!(
+                    "column qualifier '{qualifier}' does not match any FROM/JOIN alias"
+                ),
+            },
+        };
+    }
+
+    let mut traceable: Vec<(String, EventTimeTrace)> = Vec::new();
+    for (_, source_name) in alias_sources {
+        if let Some(trace @ EventTimeTrace::Traceable { .. }) = trace_against(source_name) {
+            traceable.push((source_name.clone(), trace));
+        }
+    }
+
+    let count = traceable.len();
+    let mut iter = traceable.into_iter();
+    match (count, iter.next()) {
+        (1, Some((_, trace))) => trace,
+        (0, _) => EventTimeTrace::NotTraceable {
+            reason: "no join input's source partition column traces the event-time projection"
+                .to_string(),
+        },
+        (n, _) => EventTimeTrace::NotTraceable {
+            reason: format!(
+                "ambiguous driving fact: {n} join inputs trace to the same unqualified column name"
+            ),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,5 +1035,113 @@ mod tests {
             BoundResult::NotDerivable.injection_point(),
             InjectionPoint::OuterClamp
         );
+    }
+
+    // ---- B1: alias-scoped leaf resolution (join driving-fact) ----
+
+    /// Parse `sql`, return the (single) SELECT statement's `FromClause` and
+    /// the first select item's expression.
+    fn from_clause_and_first_expr(sql: &str) -> (smelt_parser::FromClause, smelt_parser::Expr) {
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = smelt_parser::File::cast(root).expect("file cast");
+        let select = file.select_stmt().expect("select stmt");
+        let from_clause = select.from_clause().expect("from clause");
+        let select_list = select.select_list().expect("select list");
+        let expr = select_list
+            .items()
+            .next()
+            .expect("first item")
+            .expression()
+            .expect("item expression");
+        (from_clause, expr)
+    }
+
+    /// Two joined inputs whose partition columns share the bare name
+    /// `event_ts` were, before alias-scoped resolution, ambiguous
+    /// (`resolve_against_ctx` sees two sources matching the name "event_ts"
+    /// and fails closed). A *qualified* reference (`f.event_ts`) now
+    /// resolves unambiguously via the FROM/alias scope: `f` names the
+    /// `fact` input, so only `fact`'s partition column is consulted.
+    #[test]
+    fn test_join_driving_fact_resolves_via_alias_despite_shared_column_name() {
+        let (from_clause, expr) = from_clause_and_first_expr(
+            "SELECT f.event_ts AS event_time FROM smelt.silver.fact f \
+             JOIN smelt.silver.lookup g ON f.id = g.id",
+        );
+        let alias_sources = from_clause_alias_sources(&from_clause);
+        let ctx = BoundContext::new()
+            .with_source("silver.fact", "event_ts")
+            .with_source("silver.lookup", "event_ts");
+
+        match resolve_join_driving_fact(&expr, &alias_sources, &ctx) {
+            EventTimeTrace::Traceable { source, .. } => {
+                assert_eq!(
+                    source, "silver.fact",
+                    "alias 'f' must resolve to silver.fact"
+                );
+            }
+            other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// Without a qualifier, two candidate inputs whose partition columns
+    /// share the same bare name both independently trace `Traceable` —
+    /// ambiguous, fails closed (never guess the driving fact).
+    #[test]
+    fn test_join_driving_fact_ambiguous_without_qualifier() {
+        let (from_clause, expr) = from_clause_and_first_expr(
+            "SELECT event_ts AS event_time FROM smelt.silver.fact f \
+             JOIN smelt.silver.lookup g ON f.id = g.id",
+        );
+        let alias_sources = from_clause_alias_sources(&from_clause);
+        let ctx = BoundContext::new()
+            .with_source("silver.fact", "event_ts")
+            .with_source("silver.lookup", "event_ts");
+
+        assert!(matches!(
+            resolve_join_driving_fact(&expr, &alias_sources, &ctx),
+            EventTimeTrace::NotTraceable { .. }
+        ));
+    }
+
+    /// Exactly one candidate traces (a fact ⋈ lookup join where only the
+    /// fact side has a timeseries partition column matching the traced
+    /// expression) — resolves to that source as the driving fact.
+    #[test]
+    fn test_join_driving_fact_single_candidate_resolves() {
+        let (from_clause, expr) = from_clause_and_first_expr(
+            "SELECT f.event_ts AS event_time FROM smelt.silver.fact f \
+             JOIN smelt.silver.lookup g ON f.user_id = g.user_id",
+        );
+        let alias_sources = from_clause_alias_sources(&from_clause);
+        // Only "fact" is a timeseries source; "lookup" carries no partition
+        // column at all (absent from ctx — a plain lookup).
+        let ctx = BoundContext::new().with_source("silver.fact", "event_ts");
+
+        match resolve_join_driving_fact(&expr, &alias_sources, &ctx) {
+            EventTimeTrace::Traceable { source, .. } => {
+                assert_eq!(source, "silver.fact");
+            }
+            other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// `from_clause_alias_sources` resolves both the base table ref and
+    /// every JOIN's table ref, keyed by alias.
+    #[test]
+    fn test_from_clause_alias_sources_covers_base_and_joins() {
+        let (from_clause, _expr) = from_clause_and_first_expr(
+            "SELECT f.event_ts AS event_time FROM smelt.silver.fact f \
+             JOIN smelt.silver.lookup g ON f.id = g.id",
+        );
+        let alias_sources = from_clause_alias_sources(&from_clause);
+        assert_eq!(alias_sources.len(), 2);
+        assert!(alias_sources
+            .iter()
+            .any(|(alias, source)| alias == "f" && source == "silver.fact"));
+        assert!(alias_sources
+            .iter()
+            .any(|(alias, source)| alias == "g" && source == "silver.lookup"));
     }
 }

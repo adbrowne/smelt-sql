@@ -51,27 +51,21 @@ pub struct SelectAnalysis {
     pub has_cube_split_annotation: bool,
 }
 
-/// Analyze a SELECT statement from SQL text.
+/// Classify the items of an already-parsed `SelectList` into `SelectItemKind`s.
 ///
-/// Parses the SQL (after stripping frontmatter) and extracts structure
-/// needed for optimization decisions.
-pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
-    let stripped = crate::types::Frontmatter::strip(sql);
-    let parse = smelt_parser::parse(stripped);
-    let root = parse.syntax();
-    let file = smelt_parser::File::cast(root)?;
-    let select = file.select_stmt()?;
-
-    // Extract select items with classification
-    let select_list = select.select_list()?;
+/// Factored out of [`analyze_select`] so downstream analyses that already
+/// hold a parsed `smelt_parser::SelectStmt` — a UNION branch, a subquery
+/// body, a CTE body — can classify its items without a second text-level
+/// parse (the event-time monotonicity trace consumers added in this phase;
+/// see `rules::incremental`).
+pub fn classify_select_items(
+    select_list: &smelt_parser::SelectList,
+) -> Option<Vec<SelectItemKind>> {
     let mut items = Vec::new();
-    let mut select_item_exprs: Vec<String> = Vec::new();
-
     for item in select_list.items() {
         let expr = item.expression()?;
         let alias = item.column_name().unwrap_or_default();
         let expr_text = expr.text().trim().to_string();
-        select_item_exprs.push(expr_text.clone());
 
         if let Some(func) = expr.as_function_call() {
             let name = func.name().unwrap_or_default().to_uppercase();
@@ -103,6 +97,71 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
             expr: expr.clone(),
         });
     }
+    Some(items)
+}
+
+/// Classify the items of a parsed `SelectStmt` (any branch — outer query,
+/// UNION branch, subquery/CTE body). Returns `None` if the statement has no
+/// SELECT list (should not happen for a well-formed parse).
+pub fn select_stmt_items(select: &smelt_parser::SelectStmt) -> Option<Vec<SelectItemKind>> {
+    let select_list = select.select_list()?;
+    classify_select_items(&select_list)
+}
+
+/// The alias of a classified select item.
+pub fn item_alias(item: &SelectItemKind) -> &str {
+    match item {
+        SelectItemKind::CountDistinct { alias, .. } => alias,
+        SelectItemKind::OtherAggregate { alias, .. } => alias,
+        SelectItemKind::GroupByKey { alias, .. } => alias,
+    }
+}
+
+/// The parsed expression of a classified select item.
+pub fn item_expr(item: &SelectItemKind) -> &smelt_parser::Expr {
+    match item {
+        SelectItemKind::CountDistinct { expr, .. } => expr,
+        SelectItemKind::OtherAggregate { expr, .. } => expr,
+        SelectItemKind::GroupByKey { expr, .. } => expr,
+    }
+}
+
+/// Find the expression of the item aliased `alias`. Falls back to matching
+/// by ordinal `position` (0-based) among `items` when no alias matches —
+/// used for UNION branches / subquery bodies whose SELECT list does not
+/// repeat the outer alias (SQL takes UNION output column names from the
+/// first branch only).
+pub fn find_item_expr_by_alias_or_position(
+    items: &[SelectItemKind],
+    alias: &str,
+    position: usize,
+) -> Option<smelt_parser::Expr> {
+    items
+        .iter()
+        .find(|item| item_alias(item) == alias)
+        .or_else(|| items.get(position))
+        .map(item_expr)
+        .cloned()
+}
+
+/// Analyze a SELECT statement from SQL text.
+///
+/// Parses the SQL (after stripping frontmatter) and extracts structure
+/// needed for optimization decisions.
+pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let root = parse.syntax();
+    let file = smelt_parser::File::cast(root)?;
+    let select = file.select_stmt()?;
+
+    // Extract select items with classification
+    let select_list = select.select_list()?;
+    let items = classify_select_items(&select_list)?;
+    let select_item_exprs: Vec<String> = items
+        .iter()
+        .map(|item| item_expr(item).text().trim().to_string())
+        .collect();
 
     // Extract FROM clause text
     let from_clause = select.from_clause()?;

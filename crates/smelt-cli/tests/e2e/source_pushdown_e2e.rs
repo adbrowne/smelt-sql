@@ -353,3 +353,378 @@ async fn source_pushdown_preserves_correctness() {
         daily_count_record.row_count
     );
 }
+
+// ── B1: subquery/CTE construct consumer (real-fixture, matches full refresh) ──
+
+/// Stage a project with one timeseries source (`events2`) and a
+/// `refresh: batched` model whose body is a `WITH`-clause CTE — the
+/// subquery/CTE consumer added in this phase.
+fn stage_cte_project(project_dir: &Path, db_path: &Path) {
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    let source_yml = r#"description: Events for CTE-bodied model test
+columns:
+  - name: event_date
+    type: DATE
+  - name: user_id
+    type: INTEGER
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+"#;
+    std::fs::write(project_dir.join("models/sources/events2.yml"), source_yml).unwrap();
+
+    let model_sql = r#"---
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+refresh: batched
+batched:
+  safety_overrides:
+    allow_subqueries: true
+---
+WITH staged AS (
+    SELECT event_date, user_id FROM smelt.sources.events2
+)
+SELECT event_date, COUNT(*) AS cnt FROM staged GROUP BY event_date
+"#;
+    std::fs::write(project_dir.join("models/cte_daily.sql"), model_sql).unwrap();
+
+    let smelt_yml = format!(
+        "name: cte_pushdown_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
+fn seed_cte_events(db_path: &Path) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(db_path)?;
+    conn.execute_batch(
+        r#"
+        CREATE SCHEMA IF NOT EXISTS main;
+        CREATE OR REPLACE TABLE main.sources_events2 AS
+        SELECT * FROM (VALUES
+            (DATE '2024-01-01', 1),
+            (DATE '2024-01-01', 2),
+            (DATE '2024-01-02', 3)
+        ) AS t(event_date, user_id);
+        "#,
+    )?;
+    Ok(())
+}
+
+/// A `WITH`-clause CTE whose body directly projects the model's partition
+/// column from a real timeseries source traces `Traceable`, pushing the
+/// filter into the CTE's underlying source; an incremental run over a
+/// sub-window matches full refresh over the same window.
+#[tokio::test]
+async fn cte_body_pushes_filter_and_matches_full_refresh() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_cte_project(&project_dir, &db_path);
+    seed_cte_events(&db_path).expect("seed cte events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let reporter = SqlCapturingReporter::default();
+    let incremental_request = ExecuteRequest {
+        target: "dev".to_string(),
+        select: vec![],
+        exclude: vec![],
+        start: Some("2024-01-01".to_string()),
+        end: Some("2024-01-02".to_string()),
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: false,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: false,
+        ephemeral_seed_ctes: vec![],
+    };
+    let incremental_outcome = execute_project(
+        "cte-pushdown-test".to_string(),
+        incremental_request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &reporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("incremental execute_project must succeed");
+
+    let all_sqls = reporter.captured_sqls().join("\n---\n");
+    assert!(
+        all_sqls.contains("(SELECT * FROM main.sources_events2 WHERE"),
+        "CTE's underlying source must get a pushdown filter; compiled SQLs:\n{all_sqls}"
+    );
+
+    let cte_record = incremental_outcome
+        .models
+        .get("cte_daily")
+        .or_else(|| incremental_outcome.models.values().next())
+        .expect("cte_daily model must be in outcome");
+    assert_eq!(
+        cte_record.row_count, 1,
+        "incremental run over day 1 must produce exactly 1 day-row; got {}",
+        cte_record.row_count
+    );
+
+    let full_request = ExecuteRequest {
+        target: "dev".to_string(),
+        select: vec![],
+        exclude: vec![],
+        start: Some("2024-01-01".to_string()),
+        end: Some("2024-01-02".to_string()),
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: true,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: true,
+        ephemeral_seed_ctes: vec![],
+    };
+    let full_outcome = execute_project(
+        "cte-pushdown-full-refresh-test".to_string(),
+        full_request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("full-refresh execute_project must succeed");
+    let full_record = full_outcome
+        .models
+        .get("cte_daily")
+        .or_else(|| full_outcome.models.values().next())
+        .expect("cte_daily model must be in full-refresh outcome");
+    assert_eq!(
+        full_record.row_count, cte_record.row_count,
+        "full refresh over the same window must match the incremental run's row count \
+         (per-partition equivalence)"
+    );
+}
+
+// ── B1: UNION ALL construct consumer (real-fixture, matches full refresh) ────
+//
+// This fixture was previously blocked by a pre-existing, unconditional
+// diagnostic — `rule_diagnostics::check_event_time_injectable`'s "Case 1: set
+// operation" arm (`RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect`)
+// rejected *any* model with a declared `event_time_column` whose SQL had a set
+// operation (`UNION`/`INTERSECT`/`EXCEPT`), before this phase's per-branch
+// tracing (`rules::incremental::trace_union_branches`) ever ran. That
+// diagnostic is now relaxed (`rule_diagnostics::check_union_all_injectable`)
+// to reuse the same per-branch trace the pushdown-scoping walk uses: only
+// UNION ALL is eligible, and only when every branch's projection of
+// `event_time_column` traces `Traceable` — the model below is exactly that
+// case, so it now reaches `execute_project` and this test exercises the real
+// end-to-end path.
+
+/// Stage a project with two timeseries sources (`events_a`, `events_b`) and a
+/// `refresh: batched` model whose body is a UNION ALL over both — the
+/// per-branch construct consumer added in this phase. Each branch directly
+/// projects the model's declared `event_time_column`/`partition_column`
+/// (`event_date`) from its own source, so both branches trace `Traceable`.
+fn stage_union_all_project(project_dir: &Path, db_path: &Path) {
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    let source_yml = |desc: &str| {
+        format!(
+            "description: {desc}\n\
+             columns:\n\
+             \x20 - name: event_date\n\
+             \x20   type: DATE\n\
+             \x20 - name: user_id\n\
+             \x20   type: INTEGER\n\
+             timeseries:\n\
+             \x20 event_time_column: event_date\n\
+             \x20 partition_column: event_date\n\
+             \x20 granularity: day\n"
+        )
+    };
+    std::fs::write(
+        project_dir.join("models/sources/events_a.yml"),
+        source_yml("Events source A for UNION ALL fixture"),
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/sources/events_b.yml"),
+        source_yml("Events source B for UNION ALL fixture"),
+    )
+    .unwrap();
+
+    let model_sql = r#"---
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+refresh: batched
+---
+SELECT event_date, user_id FROM smelt.sources.events_a
+UNION ALL
+SELECT event_date, user_id FROM smelt.sources.events_b
+"#;
+    std::fs::write(project_dir.join("models/all_events.sql"), model_sql).unwrap();
+
+    let smelt_yml = format!(
+        "name: union_pushdown_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
+/// Seed both sources with 2 days of data, distinct row counts per day per
+/// source, so an incorrectly-scoped branch (e.g. one source's full history
+/// leaking into a single-day incremental run) would change the observed row
+/// count.
+fn seed_union_all_events(db_path: &Path) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(db_path)?;
+    conn.execute_batch(
+        r#"
+        CREATE SCHEMA IF NOT EXISTS main;
+        CREATE OR REPLACE TABLE main.sources_events_a AS
+        SELECT * FROM (VALUES
+            (DATE '2024-01-01', 1),
+            (DATE '2024-01-01', 2),
+            (DATE '2024-01-02', 3)
+        ) AS t(event_date, user_id);
+        CREATE OR REPLACE TABLE main.sources_events_b AS
+        SELECT * FROM (VALUES
+            (DATE '2024-01-01', 10),
+            (DATE '2024-01-02', 11),
+            (DATE '2024-01-02', 12)
+        ) AS t(event_date, user_id);
+        "#,
+    )?;
+    Ok(())
+}
+
+/// A UNION ALL model whose branches each directly project the partition
+/// column from a distinct real timeseries source traces `Traceable` per
+/// branch, licensing per-source pushdown; an incremental run over a
+/// sub-window matches full refresh over the same window.
+#[tokio::test]
+async fn union_all_pushes_filter_and_matches_full_refresh() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_union_all_project(&project_dir, &db_path);
+    seed_union_all_events(&db_path).expect("seed union-all events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let reporter = SqlCapturingReporter::default();
+    let incremental_request = ExecuteRequest {
+        target: "dev".to_string(),
+        select: vec![],
+        exclude: vec![],
+        start: Some("2024-01-01".to_string()),
+        end: Some("2024-01-02".to_string()),
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: false,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: false,
+        ephemeral_seed_ctes: vec![],
+    };
+    let incremental_outcome = execute_project(
+        "union-pushdown-test".to_string(),
+        incremental_request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &reporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("incremental execute_project must succeed");
+
+    let all_sqls = reporter.captured_sqls().join("\n---\n");
+    assert!(
+        all_sqls.contains("(SELECT * FROM main.sources_events_a WHERE"),
+        "events_a must get a per-branch pushdown filter; compiled SQLs:\n{all_sqls}"
+    );
+    assert!(
+        all_sqls.contains("(SELECT * FROM main.sources_events_b WHERE"),
+        "events_b must get a per-branch pushdown filter; compiled SQLs:\n{all_sqls}"
+    );
+
+    let incremental_record = incremental_outcome
+        .models
+        .get("all_events")
+        .or_else(|| incremental_outcome.models.values().next())
+        .expect("all_events model must be in outcome");
+    // Day 1 only: 2 rows from events_a + 1 row from events_b.
+    assert_eq!(
+        incremental_record.row_count, 3,
+        "incremental run over day 1 must produce exactly 3 rows (2 from events_a, \
+         1 from events_b); got {}",
+        incremental_record.row_count
+    );
+
+    let full_request = ExecuteRequest {
+        target: "dev".to_string(),
+        select: vec![],
+        exclude: vec![],
+        start: Some("2024-01-01".to_string()),
+        end: Some("2024-01-02".to_string()),
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: true,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: true,
+        ephemeral_seed_ctes: vec![],
+    };
+    let full_outcome = execute_project(
+        "union-pushdown-full-refresh-test".to_string(),
+        full_request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("full-refresh execute_project must succeed");
+    let full_record = full_outcome
+        .models
+        .get("all_events")
+        .or_else(|| full_outcome.models.values().next())
+        .expect("all_events model must be in full-refresh outcome");
+    assert_eq!(
+        full_record.row_count, incremental_record.row_count,
+        "full refresh over the same window must match the incremental run's row count \
+         (per-partition equivalence)"
+    );
+}

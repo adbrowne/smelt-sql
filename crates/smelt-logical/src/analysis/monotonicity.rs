@@ -21,7 +21,7 @@
 //! are conservative/sound, so no special-case is implemented here.
 
 use serde::Serialize;
-use smelt_parser::{BinaryExpr, CastExpr, Expr, FunctionCall};
+use smelt_parser::{BinaryExpr, CastExpr, ColumnRef, Expr, FunctionCall};
 
 use crate::analysis::source_bounds::{BoundContext, Seconds};
 
@@ -121,6 +121,47 @@ fn resolve_against_ctx(chain: Chain, ctx: &BoundContext) -> EventTimeTrace {
             ),
         },
     }
+}
+
+/// Find the single column reference `expr` traces down to, if any — a
+/// call-site addition (not part of the `classify`/`Traceable` decision
+/// logic above) used by join-input driving-fact resolution
+/// (`analysis::source_bounds::resolve_join_driving_fact`) to read off the
+/// leaf column's qualifier (e.g. the `f` in `f.event_ts`) so a candidate
+/// join input can be scoped by its FROM/alias identity rather than by
+/// column name alone. Walks the same shapes `classify`/`expr_contains_column`
+/// recognise; returns `None` for anything with zero or ambiguous
+/// column-bearing structure (fail-closed — callers must treat `None` as "no
+/// qualifier available", not "assume unqualified").
+pub fn find_leaf_column_ref(expr: &Expr) -> Option<ColumnRef> {
+    if let Some(col) = expr.as_column_ref() {
+        return Some(col);
+    }
+    if let Some(bin) = expr.as_binary() {
+        let left = bin.left().and_then(|e| find_leaf_column_ref(&e));
+        let right = bin.right().and_then(|e| find_leaf_column_ref(&e));
+        return match (left, right) {
+            (Some(l), None) => Some(l),
+            (None, Some(r)) => Some(r),
+            _ => None,
+        };
+    }
+    if let Some(func) = expr.as_function_call() {
+        let mut found = None;
+        for arg in func.arguments() {
+            if let Some(col) = find_leaf_column_ref(&arg) {
+                if found.is_some() {
+                    return None; // ambiguous — more than one column-bearing arg
+                }
+                found = Some(col);
+            }
+        }
+        return found;
+    }
+    if let Some(cast) = expr.as_cast() {
+        return cast.expression().and_then(|e| find_leaf_column_ref(&e));
+    }
+    None
 }
 
 /// Base-case monotonicity: a bare column reference is trivially strictly
@@ -774,6 +815,30 @@ mod tests {
             trace_event_time(&expr, &ctx),
             EventTimeTrace::NotTraceable { .. }
         ));
+    }
+
+    #[test]
+    fn find_leaf_column_ref_qualified() {
+        let expr = first_select_expr("SELECT f.event_ts AS event_time FROM t f");
+        let col = find_leaf_column_ref(&expr).expect("expected a leaf column ref");
+        assert_eq!(col.qualifier(), Some("f"));
+        assert_eq!(col.name(), "event_ts");
+    }
+
+    #[test]
+    fn find_leaf_column_ref_through_function_and_interval() {
+        let expr = first_select_expr(
+            "SELECT DATE_TRUNC('day', f.event_ts + INTERVAL '1 day') AS event_time FROM t f",
+        );
+        let col = find_leaf_column_ref(&expr).expect("expected a leaf column ref");
+        assert_eq!(col.qualifier(), Some("f"));
+        assert_eq!(col.name(), "event_ts");
+    }
+
+    #[test]
+    fn find_leaf_column_ref_none_for_two_column_arithmetic() {
+        let expr = first_select_expr("SELECT end_ts - start_ts AS event_time FROM t");
+        assert!(find_leaf_column_ref(&expr).is_none());
     }
 
     #[test]

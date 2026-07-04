@@ -1,12 +1,17 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::info;
 
+use crate::analysis::monotonicity::{trace_event_time, EventTimeTrace};
 use crate::analysis::source_bounds::{
-    derive_model_bounds, BoundContext, BoundResult, InjectionPoint,
+    derive_model_bounds, from_clause_alias_sources, resolve_join_driving_fact, BoundContext,
+    BoundResult, InjectionPoint,
 };
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
-use crate::analysis::{analyze_select, SelectItemKind};
+use crate::analysis::{
+    analyze_select, find_item_expr_by_alias_or_position, item_alias, item_expr, select_stmt_items,
+    SelectItemKind,
+};
 use crate::graph::{ModelGraph, ModelInfo};
 use crate::types::{Opportunity, OpportunityData, Transformation};
 
@@ -271,16 +276,27 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         }
     }
 
-    // 2d: Subqueries in FROM
+    // 2d: Subqueries in FROM — parse-based structural gate (replaces the
+    // old textual `(` check with an AST walk of the same shape: a derived
+    // table nested inside FROM/JOIN). Deliberately **not** extended to
+    // WITH-clause CTEs (the "CTE bypass"): existing models such as
+    // `examples/web_analytics/models/silver/sessions.sql` already rely on a
+    // CTE body whose Form A/B temporal pattern `derive_model_bounds` derives
+    // textually, entirely independent of this phase's monotonicity trace —
+    // gating on CTE *presence* here (without being able to prove
+    // `Traceable`, since that requires the upstream refs' partition
+    // columns, only known to `derive_model_source_bounds` via `ModelGraph`)
+    // would regress every such model to requiring the override. Instead,
+    // `derive_model_source_bounds` classifies CTE bodies unconditionally
+    // (see `restrict_ctx_for_derived_tables`): `Traceable` licenses pushdown
+    // to the real source, `StaticSeed` is rejected outright, and anything
+    // else is left exactly as it was pre-B1 (the existing Form A/B textual
+    // walk over the full SQL, CTE body included, is unaffected).
     if !overrides.allow_subqueries {
-        // Check for '(' in FROM clause text (indicates subquery)
-        if analysis.from_text.contains('(')
-            && !analysis.from_text.contains("smelt.ref(")
-            && !analysis.from_text.contains("smelt.source(")
-        {
+        if let Some(construct) = find_first_derived_table_construct(stripped_sql) {
             return Err(format!(
-                "Model '{}': subqueries in FROM clause are not yet supported with incremental \
-                 materialization",
+                "Model '{}': {construct} is not yet supported with incremental materialization \
+                 without safety_overrides.allow_subqueries: true",
                 model.name
             ));
         }
@@ -342,6 +358,36 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
 ///
 /// Returns `None` when every OVER clause in the SQL is admissible (or there
 /// are none).
+/// Find the first subquery-in-FROM/JOIN construct in `sql`, for the blunt
+/// `detect()` structural gate (see call site — deliberately not extended to
+/// WITH-clause CTEs). Requires `safety_overrides.allow_subqueries: true`;
+/// `derive_model_source_bounds` does the real per-construct monotonicity
+/// classification once a model is past this gate.
+fn find_first_derived_table_construct(sql: &str) -> Option<String> {
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+
+    if let Some(from_clause) = select.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if table_ref.subquery().is_some() {
+                let label = table_ref.alias().unwrap_or_else(|| "<unnamed>".to_string());
+                return Some(format!("a subquery in FROM ('{label}')"));
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                if table_ref.subquery().is_some() {
+                    let label = table_ref.alias().unwrap_or_else(|| "<unnamed>".to_string());
+                    return Some(format!("a subquery in a JOIN ('{label}')"));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn find_inadmissible_over(sql: &str, partition_col: &str) -> Option<String> {
     let upper_sql = sql.to_uppercase();
     let partition_col_upper = partition_col.to_uppercase();
@@ -578,6 +624,17 @@ pub fn derive_model_source_bounds(
     }
 
     let stripped = crate::types::Frontmatter::strip(&model.sql);
+
+    // Extend the derivation to look inside UNION branches, subquery/CTE
+    // bodies, and join inputs (event-time monotonicity trace consumers,
+    // `batched_models.md` §"Event-time monotonicity trace") rather than only
+    // the single outer SELECT's FROM clause. `restrict_ctx_for_constructs`
+    // narrows `ctx` down to the sources whose pushdown is actually licensed
+    // by a `Traceable` verdict for the construct that references them —
+    // `derive_model_bounds` below still does the existing per-source Form
+    // A/B textual bound walk, just over the (possibly narrowed) source set.
+    let ctx = restrict_ctx_for_constructs(model, &ctx, stripped)?;
+
     let bounds = derive_model_bounds(stripped, &ctx);
 
     // Check for NotDerivable — refuse the model.
@@ -602,6 +659,336 @@ pub fn derive_model_source_bounds(
             (source_name, (injection_point, bound))
         })
         .collect())
+}
+
+/// Narrow `ctx` (all upstream timeseries refs) down to the sources whose
+/// pushdown is actually licensed by the model's event-time monotonicity
+/// trace, when the model's outer SELECT is a UNION, has a join over more
+/// than one candidate timeseries source, or projects its event-time column
+/// through a subquery/CTE. Returns `ctx` unchanged (cloned) when none of
+/// those constructs apply — the existing single-SELECT, single-source
+/// behaviour is untouched.
+fn restrict_ctx_for_constructs(
+    model: &ModelInfo,
+    ctx: &BoundContext,
+    stripped_sql: &str,
+) -> Result<BoundContext, String> {
+    let unchanged = || BoundContext {
+        source_partition_cols: ctx.source_partition_cols.clone(),
+    };
+
+    let Some(ts_config) = &model.timeseries_config else {
+        return Ok(unchanged());
+    };
+    let parse = smelt_parser::parse(stripped_sql);
+    let Some(file) = smelt_parser::File::cast(parse.syntax()) else {
+        return Ok(unchanged());
+    };
+    let Some(select) = file.select_stmt() else {
+        return Ok(unchanged());
+    };
+    let Some(items) = select_stmt_items(&select) else {
+        return Ok(unchanged());
+    };
+    let Some(position) = items
+        .iter()
+        .position(|item| item_alias(item) == ts_config.partition_column)
+    else {
+        // `detect()` already validated this for models that go through it;
+        // `derive_model_source_bounds` can also be called directly (e.g. for
+        // `smelt explain`) — conservatively leave ctx untouched.
+        return Ok(unchanged());
+    };
+
+    // UNION ALL: trace each branch independently.
+    if select.has_union() && select.is_union_all() {
+        return restrict_ctx_for_union(model, &select, &ts_config.partition_column, position, ctx);
+    }
+
+    // JOIN: only resolve a driving fact when the FROM clause actually joins
+    // more than one candidate timeseries source — otherwise there is no
+    // ambiguity to resolve and the existing single-source path is unchanged.
+    if let Some(from_clause) = select.from_clause() {
+        let alias_sources = from_clause_alias_sources(&from_clause);
+        let candidate_sources: HashSet<&String> = alias_sources
+            .iter()
+            .map(|(_, source)| source)
+            .filter(|source| ctx.source_partition_cols.contains_key(source.as_str()))
+            .collect();
+        if from_clause.joins().next().is_some() && candidate_sources.len() > 1 {
+            let expr = item_expr(&items[position]).clone();
+            return restrict_ctx_for_join(model, &expr, &alias_sources, ctx);
+        }
+    }
+
+    // Subquery/CTE bodies.
+    restrict_ctx_for_derived_tables(model, &select, &ts_config.partition_column, ctx)
+}
+
+/// Trace every branch of a UNION-ALL `select` for the item matched by
+/// `target_col` (by alias, falling back to ordinal `position` — UNION output
+/// column names come from branch 1 only), scoping each branch's trace to
+/// just its own FROM-clause source(s) when resolvable (`smelt.<path>` refs)
+/// — different branches commonly share a partition-column *name* across
+/// distinct sources (e.g. every event table calls it `event_date`), which
+/// the full-model `ctx` alone cannot disambiguate (a name-based match would
+/// see every such source and fail closed on ambiguity). Falls back to the
+/// full `ctx` when a branch's FROM clause isn't in `smelt.<path>` form
+/// (nothing to scope by).
+///
+/// Returns the ordered per-branch verdicts (branch 1 first) rather than
+/// deciding a policy for a non-`Traceable` one — that decision differs by
+/// caller: pushdown scoping (`restrict_ctx_for_union`) treats `NotTraceable`
+/// as "stay at the outer clamp" and rejects only `StaticSeed`, while
+/// outer-select injectability checking
+/// (`rule_diagnostics::check_event_time_injectable`) fails closed on
+/// *either* verdict. Factoring the branch walk out here means the two
+/// policies can never disagree about what a given branch actually traces to
+/// (design decision 1, Phase B1; diagnostic-parity extension).
+pub fn trace_union_branches(
+    select: &smelt_parser::SelectStmt,
+    target_col: &str,
+    position: usize,
+    ctx: &BoundContext,
+) -> Result<Vec<EventTimeTrace>, String> {
+    let mut traces = Vec::new();
+    let mut current = select.clone();
+    let mut branch_no = 1usize;
+    loop {
+        let items = select_stmt_items(&current)
+            .ok_or_else(|| format!("UNION branch {branch_no} has no SELECT list"))?;
+        let expr =
+            find_item_expr_by_alias_or_position(&items, target_col, position).ok_or_else(|| {
+                format!(
+                    "UNION branch {branch_no} has no item at the '{target_col}' position to trace"
+                )
+            })?;
+        let branch_ctx = current.from_clause().and_then(|from_clause| {
+            let alias_sources = from_clause_alias_sources(&from_clause);
+            let mut scoped = BoundContext::new();
+            for (_, source_name) in &alias_sources {
+                if let Some(partition_col) = ctx.source_partition_cols.get(source_name) {
+                    scoped.add_source(source_name, partition_col);
+                }
+            }
+            if scoped.source_partition_cols.is_empty() {
+                None
+            } else {
+                Some(scoped)
+            }
+        });
+        traces.push(trace_event_time(&expr, branch_ctx.as_ref().unwrap_or(ctx)));
+        match current.union_select() {
+            Some(next) => {
+                current = next;
+                branch_no += 1;
+            }
+            None => break,
+        }
+    }
+    Ok(traces)
+}
+
+/// UNION ALL branch tracing (design decision 1, Phase B1): trace each
+/// branch's item at `position` via [`trace_union_branches`]. An
+/// all-`Traceable` set unlocks pushdown to each branch's named source
+/// (merged into one restricted ctx); a `StaticSeed` branch is the NULL/constant
+/// hazard and is rejected, naming the branch and construct; a `NotTraceable`
+/// branch is the conservative "stay at the outer clamp" case for the union
+/// as a whole.
+fn restrict_ctx_for_union(
+    model: &ModelInfo,
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+    position: usize,
+    ctx: &BoundContext,
+) -> Result<BoundContext, String> {
+    let traces = trace_union_branches(select, partition_col, position, ctx)
+        .map_err(|e| format!("Model '{}': {e}", model.name))?;
+    let mut new_ctx = BoundContext::new();
+    for (i, trace) in traces.into_iter().enumerate() {
+        let branch_no = i + 1;
+        match trace {
+            EventTimeTrace::Traceable {
+                source,
+                source_column,
+                ..
+            } => {
+                new_ctx.add_source(&source, &source_column);
+            }
+            EventTimeTrace::StaticSeed { reason } => {
+                return Err(format!(
+                    "Model '{}': UNION branch {branch_no} projects a static/NULL seed for \
+                     '{partition_col}' ({reason}) — not a partitionable stream, so batched \
+                     pushdown cannot be proven safe for this UNION",
+                    model.name
+                ));
+            }
+            EventTimeTrace::NotTraceable { .. } => {
+                // Conservative: no per-source pushdown licensed by this
+                // UNION; stay at the outer clamp for the whole model.
+                return Ok(BoundContext::new());
+            }
+        }
+    }
+    Ok(new_ctx)
+}
+
+/// Join driving-fact resolution (design decision 3, Phase B1): resolve the
+/// single driving fact among a join's timeseries inputs via
+/// `resolve_join_driving_fact` (alias-scoped leaf resolution), then restrict
+/// `ctx` to just that source — every other joined source gets no bound
+/// entry (full scan, matching how lookup sources already behave when absent
+/// from `ctx`), so the misfilter hazard of pushing a filter onto a
+/// non-driving lookup input is zero by construction.
+fn restrict_ctx_for_join(
+    model: &ModelInfo,
+    event_time_expr: &smelt_parser::Expr,
+    alias_sources: &[(String, String)],
+    ctx: &BoundContext,
+) -> Result<BoundContext, String> {
+    match resolve_join_driving_fact(event_time_expr, alias_sources, ctx) {
+        EventTimeTrace::Traceable {
+            source,
+            source_column,
+            ..
+        } => Ok(BoundContext::new().with_source(&source, &source_column)),
+        EventTimeTrace::StaticSeed { reason } => Err(format!(
+            "Model '{}': join driving-fact resolution hit a static/NULL seed ({reason}) — not a \
+             partitionable stream",
+            model.name
+        )),
+        EventTimeTrace::NotTraceable { reason } => Err(format!(
+            "Model '{}': cannot resolve a single driving fact among this model's joined \
+             timeseries sources ({reason}); batched pushdown requires exactly one join input to \
+             trace the event-time projection back to its source partition column",
+            model.name
+        )),
+    }
+}
+
+/// Subquery/CTE body tracing (design decision 2, Phase B1): classify every
+/// derived table (subquery in FROM/JOIN, or a WITH-clause CTE) whose own
+/// SELECT list projects an item aliased `partition_col`. `Traceable`
+/// licenses pushdown to the real underlying source (already present in
+/// `ctx`, so no narrowing needed); `StaticSeed` is rejected outright —
+/// unconditionally, not just when `allow_subqueries` is unset, since a
+/// static/NULL seed is a genuine correctness hazard, not a safety
+/// trade-off. `NotTraceable` is a no-op: it neither narrows nor rejects,
+/// leaving `ctx` exactly as it already was. This preserves the pre-B1
+/// behaviour for CTE bodies that were never gated at all (the "CTE
+/// bypass") and already derive a bound via the existing Form A/B textual
+/// walk in `derive_model_bounds` — e.g.
+/// `examples/web_analytics/models/silver/sessions.sql`'s `sessionized` CTE
+/// projects `session_start_date` from a `TableExpr`-returning function
+/// call, which this trace cannot resolve to a source partition column
+/// (`NotTraceable`, not `StaticSeed`), but the model's own `WHERE ...
+/// BETWEEN session_start_date - INTERVAL '1 day' AND ... + INTERVAL '1
+/// day'` clause already gives `derive_model_bounds` everything it needs —
+/// gating that model on this trace's inability to prove monotonicity would
+/// be a regression, not a safety improvement. A derived table whose body
+/// doesn't project `partition_col` at all is not relevant to event-time
+/// tracing and is likewise left untouched.
+fn restrict_ctx_for_derived_tables(
+    model: &ModelInfo,
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+    ctx: &BoundContext,
+) -> Result<BoundContext, String> {
+    let mut derived: Vec<(String, EventTimeTrace)> = Vec::new();
+
+    if let Some(with_clause) = select.with_clause() {
+        for cte in with_clause.ctes() {
+            let name = cte.name().unwrap_or_else(|| "<unnamed>".to_string());
+            if let Some(inner) = cte.query().and_then(|q| q.select_stmt()) {
+                if let Some(items) = select_stmt_items(&inner) {
+                    if let Some(item) = items.iter().find(|i| item_alias(i) == partition_col) {
+                        let expr = item_expr(item).clone();
+                        derived.push((format!("CTE '{name}'"), trace_event_time(&expr, ctx)));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(from_clause) = select.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if let Some(subq) = table_ref.subquery() {
+                if let Some(inner) = subq.select_stmt() {
+                    if let Some(items) = select_stmt_items(&inner) {
+                        if let Some(item) = items.iter().find(|i| item_alias(i) == partition_col) {
+                            let expr = item_expr(item).clone();
+                            let label =
+                                table_ref.alias().unwrap_or_else(|| "<unnamed>".to_string());
+                            derived.push((
+                                format!("subquery '{label}'"),
+                                trace_event_time(&expr, ctx),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for join in from_clause.joins() {
+            let Some(table_ref) = join.table_ref() else {
+                continue;
+            };
+            let Some(subq) = table_ref.subquery() else {
+                continue;
+            };
+            let Some(inner) = subq.select_stmt() else {
+                continue;
+            };
+            let Some(items) = select_stmt_items(&inner) else {
+                continue;
+            };
+            if let Some(item) = items.iter().find(|i| item_alias(i) == partition_col) {
+                let expr = item_expr(item).clone();
+                let label = table_ref.alias().unwrap_or_else(|| "<unnamed>".to_string());
+                derived.push((
+                    format!("joined subquery '{label}'"),
+                    trace_event_time(&expr, ctx),
+                ));
+            }
+        }
+    }
+
+    if derived.is_empty() {
+        // No derived table projects the event-time column — nothing to
+        // classify; keep ctx untouched (unchanged behaviour).
+        return Ok(BoundContext {
+            source_partition_cols: ctx.source_partition_cols.clone(),
+        });
+    }
+
+    let new_ctx = BoundContext {
+        source_partition_cols: ctx.source_partition_cols.clone(),
+    };
+    for (label, trace) in derived {
+        match trace {
+            EventTimeTrace::Traceable { .. } => {
+                // Already licensed via the existing ctx entry for that source.
+            }
+            EventTimeTrace::StaticSeed { reason } => {
+                return Err(format!(
+                    "Model '{}': {label} projects a static/NULL seed for '{partition_col}' \
+                     ({reason}) — not a partitionable stream; batched pushdown cannot be proven \
+                     safe",
+                    model.name
+                ));
+            }
+            EventTimeTrace::NotTraceable { reason } => {
+                tracing::debug!(
+                    model = %model.name,
+                    %label,
+                    %reason,
+                    "derived table does not trace to a source partition column; \
+                     leaving ctx unrestricted (falls back to the existing Form A/B textual walk)"
+                );
+            }
+        }
+    }
+    Ok(new_ctx)
 }
 
 /// Produce a SetIncremental transformation for a model.
@@ -1404,6 +1791,269 @@ mod tests {
         assert!(
             result.unwrap().is_some(),
             "partition-aligned OVER (equality) model must classify as incremental"
+        );
+    }
+
+    // --- B1: UNION branch tracing ---
+
+    fn upstream_ts_model(name: &str, event_time_column: &str, partition_column: &str) -> ModelInfo {
+        ModelInfo {
+            name: name.to_string(),
+            sql: String::new(),
+            refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: event_time_column.to_string(),
+                partition_column: partition_column.to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: None,
+        }
+    }
+
+    /// Every UNION ALL branch traces `Traceable` to its own named source —
+    /// each branch's source gets its own pushdown entry.
+    #[test]
+    fn test_union_all_traceable_branches_each_push_to_named_source() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("web_events", "event_ts", "event_date"));
+        graph.add_model(upstream_ts_model("mobile_events", "event_ts", "event_date"));
+
+        let m = ModelInfo {
+            name: "all_events".to_string(),
+            sql: "SELECT event_date, user_id FROM smelt.web_events \
+                  UNION ALL \
+                  SELECT event_date, user_id FROM smelt.mobile_events"
+                .to_string(),
+            refs: vec!["web_events".to_string(), "mobile_events".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        assert!(
+            bounds.contains_key("web_events"),
+            "keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            bounds.contains_key("mobile_events"),
+            "keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A `StaticSeed` UNION branch (NULL literal for the event-time column)
+    /// is named and rejected.
+    #[test]
+    fn test_union_all_static_seed_branch_rejected_naming_branch() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("web_events", "event_ts", "event_date"));
+
+        let m = ModelInfo {
+            name: "all_events".to_string(),
+            sql: "SELECT event_date, user_id FROM smelt.web_events \
+                  UNION ALL \
+                  SELECT NULL AS event_date, user_id FROM smelt.backfill_seed"
+                .to_string(),
+            refs: vec!["web_events".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let result = derive_model_source_bounds(&m, &graph);
+        assert!(result.is_err(), "StaticSeed UNION branch must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("UNION branch 2"),
+            "error must name the branch: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("static"),
+            "error must name the construct: {err}"
+        );
+    }
+
+    /// A `NotTraceable` UNION branch (not `StaticSeed`) is the conservative
+    /// "stay at the outer clamp" case: the union as a whole gets no
+    /// per-source pushdown entries, but is not rejected outright.
+    #[test]
+    fn test_union_all_not_traceable_branch_stays_at_outer_clamp() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("web_events", "event_ts", "event_date"));
+
+        let m = ModelInfo {
+            name: "all_events".to_string(),
+            sql:
+                "SELECT event_date, user_id FROM smelt.web_events \
+                  UNION ALL \
+                  SELECT CAST(event_date AS VARCHAR) AS event_date, user_id FROM smelt.other_events"
+                    .to_string(),
+            refs: vec!["web_events".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("must not be rejected");
+        assert!(
+            bounds.is_empty(),
+            "NotTraceable branch must yield no per-source pushdown entries; got: {:?}",
+            bounds
+        );
+    }
+
+    // --- B1: subquery/CTE body tracing ---
+
+    /// A CTE body that projects the model's partition column as a direct,
+    /// traceable image of an upstream timeseries source's partition column
+    /// licenses pushdown to that real source.
+    #[test]
+    fn test_cte_body_traceable_pushes_to_named_source() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("upstream", "event_date", "event_date"));
+
+        let m = ModelInfo {
+            name: "cte_model".to_string(),
+            sql: "WITH staged AS (SELECT event_date, user_id FROM upstream) \
+                  SELECT event_date, user_id FROM staged"
+                .to_string(),
+            refs: vec!["upstream".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides {
+                    allow_subqueries: true,
+                    ..Default::default()
+                },
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        assert!(
+            bounds.contains_key("upstream"),
+            "keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A CTE body that projects the partition column through a non-monotone
+    /// cast (`CAST(... AS VARCHAR)`, per the blacklist) is `NotTraceable`.
+    /// Unlike `StaticSeed`, `NotTraceable` is a no-op here — it neither
+    /// narrows nor refuses — so the model still gets whatever bound the
+    /// existing Form A/B textual walk derives for `upstream` (a transparent,
+    /// zero-margin slice here, since the SQL has no RANGE/BETWEEN INTERVAL
+    /// pattern). This preserves the pre-B1 "CTE bypass" behaviour for
+    /// models the monotonicity trace cannot (yet) prove, rather than
+    /// regressing them to a hard refusal (see `restrict_ctx_for_derived_tables`
+    /// doc comment for the `sessions.sql` real-fixture case this protects).
+    #[test]
+    fn test_cte_body_not_traceable_is_a_no_op_not_a_refusal() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("upstream", "event_date", "event_date"));
+
+        let m = ModelInfo {
+            name: "cte_model".to_string(),
+            sql: "WITH staged AS (SELECT CAST(event_date AS VARCHAR) AS event_date, user_id \
+                  FROM upstream) \
+                  SELECT event_date, user_id FROM staged"
+                .to_string(),
+            refs: vec!["upstream".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph)
+            .expect("NotTraceable CTE body must not refuse the model");
+        assert!(
+            bounds.contains_key("upstream"),
+            "keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // --- B1: join driving-fact resolution ---
+
+    /// A fact ⋈ lookup join where exactly one input (`fact`) traces its
+    /// partition column resolves as the driving fact and gets the pushdown
+    /// entry; the other (`lookup`) gets none — full-scanned, so the
+    /// misfilter hazard of pushing a filter onto a non-driving input is
+    /// zero by construction.
+    #[test]
+    fn test_join_exactly_one_traceable_input_is_driving_fact_others_full_scan() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("silver.fact", "event_ts", "event_date"));
+        graph.add_model(upstream_ts_model(
+            "silver.lookup",
+            "updated_at",
+            "snapshot_date",
+        ));
+
+        let m = ModelInfo {
+            name: "joined".to_string(),
+            sql: "SELECT f.event_date, f.user_id, g.attribute \
+                  FROM smelt.silver.fact f \
+                  JOIN smelt.silver.lookup g ON f.user_id = g.user_id"
+                .to_string(),
+            refs: vec!["silver.fact".to_string(), "silver.lookup".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        assert!(
+            bounds.contains_key("silver.fact"),
+            "driving fact must get a bound entry; keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !bounds.contains_key("silver.lookup"),
+            "non-driving lookup input must be full-scanned (no entry); keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
         );
     }
 }

@@ -16,9 +16,13 @@ use std::collections::BTreeSet;
 
 use smelt_core::config::TimeseriesConfig;
 
+use crate::analysis::monotonicity::EventTimeTrace;
+use crate::analysis::source_bounds::BoundContext;
+use crate::analysis::{item_alias, select_stmt_items};
 use crate::graph::ModelInfo;
 use crate::rules::cumulative::{classify_cumulative, CumulativeDiagnostic, SourceTimeseriesMap};
 use crate::rules::incremental;
+use crate::rules::incremental::trace_union_branches;
 use crate::types::BatchedConfig;
 
 // ── Parser imports for event-time injectability check ──────────────────────
@@ -137,9 +141,7 @@ impl PlannerRule for IncrementalRule {
         // reachable at the outermost SELECT (UNION query or subquery-FROM that
         // doesn't project it), return an Error immediately — no point running
         // batch-safety checks on a query that can't be time-filtered at all.
-        if let Some(diag) =
-            check_event_time_injectable(ctx.sql, &ts.event_time_column, ctx.model_name)
-        {
+        if let Some(diag) = check_event_time_injectable(ctx, &ts.event_time_column) {
             return vec![diag];
         }
 
@@ -162,28 +164,48 @@ impl PlannerRule for IncrementalRule {
 }
 
 /// Returns `Some(Error)` when the `event_time_column` cannot be injected at
-/// the outermost SELECT of `sql`, `None` when it is safe (or when we cannot
-/// determine safety, to be conservative).
+/// the outermost SELECT of `ctx.sql`, `None` when it is safe (or when we
+/// cannot determine safety, to be conservative).
 ///
 /// Two cases trigger the error:
 /// 1. The query is a set operation (UNION/INTERSECT/EXCEPT) — injecting a
-///    WHERE clause would only filter the first branch, producing incorrect
-///    data.
+///    WHERE clause at the outer query text only filters the first branch,
+///    producing incorrect data, **unless** every branch's projection of
+///    `event_time_column` traces back to a real upstream source's own
+///    partition column (`Traceable`, per
+///    `smelt_logical::analysis::monotonicity::trace_event_time`) — the same
+///    per-branch classification the pushdown-scoping walk
+///    (`rules::incremental::trace_union_branches`) already performs for
+///    batched-model bound derivation, reused here so the two can never
+///    reach different verdicts about the same UNION. Only UNION **ALL** is
+///    eligible for this relaxation (plain UNION/INTERSECT/EXCEPT keep the
+///    unconditional error — their row-combining semantics are not the
+///    simple per-branch append `trace_union_branches` assumes). Any branch
+///    that isn't `Traceable` (a `StaticSeed` hazard, or genuinely
+///    `NotTraceable`) keeps the model rejected.
 /// 2. The FROM clause is a bare subquery that does **not** project
 ///    `event_time_column` — the column is therefore invisible to a WHERE
 ///    clause added to the outer SELECT.
 fn check_event_time_injectable(
-    sql: &str,
+    ctx: &RuleContext,
     event_time_column: &str,
-    model_name: &str,
 ) -> Option<RuleDiagnostic> {
-    let stripped = crate::types::Frontmatter::strip(sql);
+    let model_name = ctx.model_name;
+    let stripped = crate::types::Frontmatter::strip(ctx.sql);
     let parse_result = parse(stripped);
     let file = File::cast(parse_result.syntax())?;
     let stmt = file.select_stmt()?;
 
     // Case 1: set operation (UNION/INTERSECT/EXCEPT)
     if stmt.has_set_operation() {
+        if stmt.is_union_all() {
+            if let Some(diag) =
+                check_union_all_injectable(ctx, &stmt, event_time_column, model_name)
+            {
+                return Some(diag);
+            }
+            return None;
+        }
         return Some(RuleDiagnostic {
             code: RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect,
             severity: RuleSeverity::Error,
@@ -227,6 +249,80 @@ fn check_event_time_injectable(
     }
 
     None
+}
+
+/// Case 1 (UNION ALL) of [`check_event_time_injectable`]: returns
+/// `Some(Error)` unless every branch of `stmt` traces its projected
+/// `event_time_column` back to a real upstream source's own partition
+/// column. Fails closed (returns the same diagnostic as the unconditional
+/// pre-B1 check) whenever the outer SELECT doesn't project
+/// `event_time_column` at all, or the per-branch trace can't be run —
+/// there is nothing to prove injectability from in that case.
+fn check_union_all_injectable(
+    ctx: &RuleContext,
+    stmt: &smelt_parser::SelectStmt,
+    event_time_column: &str,
+    model_name: &str,
+) -> Option<RuleDiagnostic> {
+    let reject = || {
+        Some(RuleDiagnostic {
+            code: RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect,
+            severity: RuleSeverity::Error,
+            message: format!(
+                "Model '{}': `event_time_column` '{}' cannot be injected into a \
+                 UNION ALL query — a WHERE clause on the outer query only filters \
+                 the first branch, and not every branch's projection of '{}' \
+                 traces back to a real upstream source's own partition column. \
+                 Rewrite as a CTE or subquery that projects '{}' through all \
+                 branches, or ensure each branch directly projects an upstream \
+                 timeseries source's partition column.",
+                model_name, event_time_column, event_time_column, event_time_column
+            ),
+        })
+    };
+
+    let Some(items) = select_stmt_items(stmt) else {
+        return reject();
+    };
+    let Some(position) = items
+        .iter()
+        .position(|item| item_alias(item) == event_time_column)
+    else {
+        return reject();
+    };
+
+    // Build the same BoundContext `derive_model_source_bounds` builds from
+    // the model's upstream refs — only refs with a declared `timeseries:`
+    // participate (lookup sources have no partition column to trace to).
+    // Keys are stored *without* the `smelt.` prefix `ctx.refs` carries
+    // (`collect_path_refs` keeps it, matching `source_timeseries`'s own
+    // keying), because `trace_union_branches`'s per-branch FROM-clause
+    // scoping looks sources up by `resolve_table_ref_source_name`'s
+    // dot-joined path — which strips the leading `smelt` segment (e.g.
+    // `smelt.orders` → `"orders"`). A key mismatch here would silently
+    // defeat that scoping and fall back to the unscoped ctx, which can turn
+    // a same-named-partition-column UNION branch ambiguous instead of
+    // resolving to its own source.
+    let mut bound_ctx = BoundContext::new();
+    for ref_name in ctx.refs {
+        if let Some(ts) = ctx.source_timeseries.get(ref_name) {
+            let source_name = ref_name.strip_prefix("smelt.").unwrap_or(ref_name);
+            bound_ctx.add_source(source_name, &ts.partition_column);
+        }
+    }
+
+    let Ok(traces) = trace_union_branches(stmt, event_time_column, position, &bound_ctx) else {
+        return reject();
+    };
+
+    if traces
+        .iter()
+        .all(|trace| matches!(trace, EventTimeTrace::Traceable { .. }))
+    {
+        None
+    } else {
+        reject()
+    }
 }
 
 /// Returns `true` if `sql` projects `col` (case-insensitive) in its outermost
@@ -547,8 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn event_time_not_injectable_into_union_model() {
-        // UNION model: inject_time_filter only touches first branch → wrong data
+    fn event_time_injectable_into_union_all_when_every_branch_traceable() {
+        // UNION ALL model: each branch projects a bare `event_date` column
+        // directly from its own declared upstream timeseries source
+        // (`smelt.orders`, `smelt.returns`). Per-branch tracing
+        // (`trace_union_branches`, shared with pushdown-bound derivation)
+        // proves every branch's projection resolves to a real source's own
+        // partition column — the simplest `Traceable` case — so the
+        // outer-select injectability check no longer rejects this UNION
+        // (`batched_models.md` §"Event-time monotonicity trace"). Before B1
+        // wired this trace into the diagnostic, *any* set-operation query
+        // with a declared `event_time_column` was unconditionally rejected
+        // here, regardless of whether its branches were actually traceable.
         let sql = "SELECT event_date, COUNT(*) AS n \
                    FROM smelt.orders GROUP BY event_date \
                    UNION ALL \
@@ -562,7 +668,59 @@ mod tests {
             week_start: None,
         };
         let inc_cfg = inc_config();
-        let ts_map: SourceTimeseriesMap = HashMap::new();
+        let mut ts_map: SourceTimeseriesMap = HashMap::new();
+        ts_map.insert("smelt.orders".to_string(), ts_cfg.clone());
+        ts_map.insert("smelt.returns".to_string(), ts_cfg.clone());
+        let ctx = RuleContext {
+            model_name: "union_mart",
+            materialization: "incremental",
+            sql,
+            refs: &refs,
+            source_timeseries: &ts_map,
+            timeseries_config: Some(&ts_cfg),
+            incremental_config: Some(&inc_cfg),
+        };
+        let diags = detect_builtin_rules(&ctx);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect),
+            "every UNION ALL branch traces Traceable — must not fire; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn event_time_not_injectable_into_union_all_when_a_branch_is_not_traceable() {
+        // Same shape as the Traceable case above, but branch 2 projects
+        // `MAX(event_ts)` for the partition-column position — a GROUP-BY
+        // aggregate, not a per-row monotone image of a source column.
+        // `trace_event_time` classifies an unrecognised aggregate function
+        // call as `NotTraceable`, so the relaxed check must still reject the
+        // UNION (fail closed — not every branch proves traceable).
+        let sql = "SELECT event_date, COUNT(*) AS n \
+                   FROM smelt.orders GROUP BY event_date \
+                   UNION ALL \
+                   SELECT MAX(event_ts) AS event_date, COUNT(*) AS n \
+                   FROM smelt.returns GROUP BY event_ts";
+        let refs = collect_path_refs(sql);
+        let ts_cfg = smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+        };
+        let inc_cfg = inc_config();
+        let mut ts_map: SourceTimeseriesMap = HashMap::new();
+        ts_map.insert("smelt.orders".to_string(), ts_cfg.clone());
+        ts_map.insert(
+            "smelt.returns".to_string(),
+            smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_ts".to_string(),
+                granularity: smelt_core::config::Granularity::Day,
+                week_start: None,
+            },
+        );
         let ctx = RuleContext {
             model_name: "union_mart",
             materialization: "incremental",
@@ -577,7 +735,8 @@ mod tests {
             diags.iter().any(|d| d.code
                 == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
                 && d.severity == RuleSeverity::Error),
-            "UNION incremental model must produce EventTimeColumnNotVisibleAtOuterSelect Error; got: {diags:?}"
+            "UNION ALL with a NotTraceable branch must still produce \
+             EventTimeColumnNotVisibleAtOuterSelect Error; got: {diags:?}"
         );
     }
 

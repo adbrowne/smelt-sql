@@ -373,6 +373,14 @@ WITH sessionized AS (
 
 Lookup sources (those without `timeseries:`) are never pushdown candidates — they are read in full each run. Pushdown is per-reference: a self-join on a timeseries source receives the same widened filter on each occurrence.
 
+**Below the outer SELECT.** Pushdown is not limited to a single top-level `FROM` clause. smelt traces whether the model's projected `event_time`/`partition_column` value is a monotone image of a real source's time column — a bare column, a truncation like `DATE_TRUNC`/`time_bucket`, a `CAST` to a temporal type, or a constant `INTERVAL` shift are all traceable; an arithmetic combination of two columns, `CASE`, `COALESCE`, or an unrecognised function are not. When that trace succeeds, the pushdown filter can relocate past constructs that would otherwise keep it stuck at the outer clamp:
+
+- **`UNION ALL` branches** are traced independently, so a model that appends several timeseries sources still gets a pushdown filter on each source individually.
+- **Subquery and CTE bodies** that re-project the partition column get the filter pushed to the real underlying source inside the derived table, not just at the outer query.
+- **Joins** resolve which input is the "driving fact" (the one whose column the partition value traces back to) and window only that input — every other joined input (lookup tables, dimension joins) is read in full, so there is no risk of a lookup input being incorrectly time-filtered.
+
+When the trace cannot prove monotonicity for a construct — an ambiguous join input, a non-monotone re-projection — the model falls back to the always-correct outer clamp rather than guessing.
+
 Sources declared in per-entity source YAML files (with a `timeseries:` block — see [Sources guide](sources.md#time-dimension)) are automatically pushdown candidates for every downstream incremental model that reads them. No additional configuration is required on the incremental model.
 
 > **Current scope:** pushdown applies the bound derived from the **outer SQL body**. `smelt.define` function bodies are not yet expanded before bound derivation, so a source whose only INTERVAL pattern is inside a function body receives a partition-local (`PT0S`) filter. The exact run-window filter is still correct for correctness; it may read more data than necessary if the function body introduces a wider lookback. Full expansion-before-derivation is tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.

@@ -106,6 +106,36 @@ fn non_null_leaf_stays_traceable() {
     }
 }
 
+/// Phase B1 (`batched_models.md` §"Event-time monotonicity trace") wires
+/// `trace_event_time`/`trace_event_time_checked` into join-input
+/// driving-fact resolution (`smelt_logical::analysis::source_bounds::resolve_join_driving_fact`)
+/// and UNION-branch/subquery-body classification — all of which can trace a
+/// *qualified* column reference (e.g. `f.event_ts`, an aliased FROM/JOIN
+/// input) rather than only a bare one. The nullability gate must downgrade
+/// a `Traceable` verdict on a nullable leaf exactly the same way regardless
+/// of whether the traced expression carried a qualifier — the gate reads
+/// off the resolved `(source, source_column)`, not the expression's surface
+/// shape.
+#[test]
+fn qualified_join_style_leaf_nullable_downgraded_to_not_traceable() {
+    let tmp = stage_files(&[
+        ("smelt.yml", SMELT_YML),
+        ("models/sources/raw/events.yml", &events_source_yaml(true)),
+    ]);
+    let (db, ws) = ingest(&tmp);
+
+    // Shape a join/UNION consumer would trace: a column qualified by its
+    // FROM/JOIN alias (the alias itself is irrelevant to nullability
+    // resolution — only the resolved source_column name is).
+    let expr = bare_column_expr("f.event_ts");
+    let trace = trace_event_time_checked(&db, ws, &expr, &events_ctx());
+
+    assert!(
+        matches!(trace, EventTimeTrace::NotTraceable { .. }),
+        "nullable leaf traced through a qualified (join-style) reference must downgrade, got {trace:?}"
+    );
+}
+
 #[test]
 fn unresolvable_leaf_fails_closed() {
     // No source YAML declares `sources.raw.events` at all: the leaf column's

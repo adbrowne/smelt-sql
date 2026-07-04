@@ -1115,6 +1115,7 @@ fn remap_pipe_parse_error_code(message: &str) -> DiagnosticCode {
 fn ref_timeseries_config(
     db: &dyn salsa::Database,
     workspace: Workspace,
+    project: Option<ProjectInput>,
     ref_str: &str,
 ) -> Option<smelt_core::config::TimeseriesConfig> {
     let segments: Vec<String> = ref_str
@@ -1123,7 +1124,19 @@ fn ref_timeseries_config(
         .map(|s| s.to_string())
         .collect();
     let leaf = segments.last()?.clone();
-    let resolved = resolve_ref_path(db, workspace, segments)?;
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    // Per-entity source YAML (`RefKind::Source`) has no `source_file` — its
+    // `timeseries:` block lives on the `SourceInfo` the project's source scan
+    // already parsed, not on a frontmatter-bearing model file. Look it up by
+    // `address_segments` before falling through to the model-file path below
+    // (which only applies to `RefKind::Model`/generator refs).
+    if resolved.kind == RefKind::Source {
+        let project = project?;
+        return project_sources(db, project)
+            .iter()
+            .find(|s| s.address_segments == segments)
+            .and_then(|s| s.timeseries.clone());
+    }
     let file = resolved.source_file?;
     let text = file.text(db);
     match extract_file_metadata(text) {
@@ -1530,13 +1543,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             let stripped = smelt_parser::strip_frontmatter(text);
             let refs = smelt_logical::collect_path_refs(&stripped);
             // The cumulative classifier resolves its driving source by looking
-            // each ref up in this map; the incremental rule does not use it.
+            // each ref up in this map. The incremental rule's UNION-ALL
+            // injectability check (`rule_diagnostics::check_union_all_injectable`)
+            // also needs it — it builds the same per-ref `BoundContext` the
+            // pushdown-scoping walk (`rules::incremental::derive_model_source_bounds`)
+            // builds from `RuleContext.refs`/`source_timeseries`, so both rules
+            // populate this map for every ref regardless of materialization.
             let mut source_timeseries: smelt_logical::SourceTimeseriesMap = HashMap::new();
-            if materialization == "cumulative_aggregate" {
-                for r in &refs {
-                    if let Some(ts) = ref_timeseries_config(db, workspace, r) {
-                        source_timeseries.insert(r.clone(), ts);
-                    }
+            for r in &refs {
+                if let Some(ts) = ref_timeseries_config(db, workspace, project, r) {
+                    source_timeseries.insert(r.clone(), ts);
                 }
             }
             let model_name = path
