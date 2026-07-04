@@ -1,3 +1,4 @@
+pub mod decomposed_state;
 pub mod discriminants;
 pub mod input_delta;
 pub mod join_shape;

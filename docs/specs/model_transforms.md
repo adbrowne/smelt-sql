@@ -48,7 +48,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Outer output-clamp | event-time projection (needs no proof) | filter the outermost `SELECT` on the projected `event_time` to the write window | **built** |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[start − k − offset, end)`, clamp output to `[start, end)`: read the margin, never re-write it | *partial* (redesign) |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
-| Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | unbuilt |
+| Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
 | Compile-time pinning | run-determinism (`NOW`/`CURRENT_*`) | resolve a run-deterministic function to a single literal once per run, before emit | unbuilt |
@@ -222,10 +222,19 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
-- **Unbuilt:** UNION-branch wrap-and-filter, decomposed-state-plus-view,
-  retraction via delta history, bounded-domain multiset, compile-time pinning,
-  targeted column backfill, dimension-driven horizon MERGE. Idempotent re-scan vs
-  delta probe is partial (input-delta discovery is partial).
+- **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
+  bounded-domain multiset, compile-time pinning, targeted column backfill,
+  dimension-driven horizon MERGE. Idempotent re-scan vs delta probe is partial
+  (input-delta discovery is partial).
+- **Hidden decomposed state + presentation view is built as a mechanism**
+  (`crates/smelt-logical/src/analysis/decomposed_state.rs`
+  `decompose_to_state`): given a decomposable combiner (F4) it derives the
+  hidden state columns and a presentation expression, refusing (never
+  approximating) a holistic combiner, an unencoded state shape, or a
+  presentation expression that fails the purity proof (F7). Only `AVG`'s
+  `(sum, count)` state shape is encoded so far; wiring it as the driver
+  (`merge_into`) for a live refresh mode (cumulative rung-2) is a later,
+  mode-composition phase.
 - **Duplicated licensing analyses.** Several transforms are licensed by proofs that
   exist in duplicate in the tree (two driving-fact resolvers); the licences these
   transforms read are being consolidated in `model_properties.md`. The interval-reach
