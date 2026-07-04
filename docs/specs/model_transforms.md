@@ -42,7 +42,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Transform | Licensed by (property / world-fact) | Mechanism | Maturity |
 |---|---|---|---|
 | Keyed `merge_into` (target-as-replica) | inverse-free / monoid rung | fold a keyed delta into stored state; matched keys update, unmatched insert; never re-read history | **built** |
-| Windowed-keyed-maintenance driver | driving-fact / anchor + monoid rung | sequence `merge_into` across driving partitions: classify → step over partitions in temporal order → per-partition pushdown → create-or-merge | *partial* (cumulative-orchestration today) |
+| Windowed-keyed-maintenance driver | driving-fact / anchor + monoid rung | sequence `merge_into` across driving partitions: classify → step over partitions in temporal order → per-partition pushdown → create-or-merge | **built** |
 | Source-filter pushdown (window-an-input) | monotonicity trace + derived bound | wrap each bounded input ref in a `partition_column` subquery so the scan reads only its window | **built** |
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
 | Outer output-clamp | event-time projection (needs no proof) | filter the outermost `SELECT` on the projected `event_time` to the write window | **built** |
@@ -237,11 +237,12 @@ by `docs/plans/20260704-model-updates.md` (design:
   §"Windowed maintenance and the horizon"), the forward-reach settle/tail-rewrite
   mechanism is catalogued above rather than deferred; only its implementation is
   outstanding, tracked by the same plan.
-- The **windowed-keyed-maintenance driver** is catalogued above but only *partially*
-  built: the loop that sequences `merge_into` across driving partitions is exercised
-  today only by `cumulative`, whose implementation is the reference path. It generalises
-  to the other keyed modes as they land; the mechanism's normative home is this spec,
-  not the mode that first implements it.
+- The **windowed-keyed-maintenance driver** is a standalone mechanism (mode-agnostic
+  classify → step over driving partitions in temporal order → per-partition pushdown →
+  create-or-merge loop, fail-closed on a non-monoid combiner) with `cumulative` as its
+  first named consumer. The other keyed modes (`latest_value`, `versioned`) compose the
+  same driver as they land; the mechanism's normative home is this spec, not the mode
+  that first implements it.
 
 ## References
 

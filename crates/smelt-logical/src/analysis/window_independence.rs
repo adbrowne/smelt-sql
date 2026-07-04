@@ -68,9 +68,7 @@ pub fn window_independence(
         .unwrap_or(BoundResult::NotDerivable);
 
     match bound {
-        BoundResult::Bounded { after, .. } if after == Seconds::ZERO => {
-            WindowIndependence::Ordered
-        }
+        BoundResult::Bounded { after, .. } if after == Seconds::ZERO => WindowIndependence::Ordered,
         BoundResult::Bounded { after, .. } => WindowIndependence::Refused {
             reason: format!(
                 "model '{model_name}' self-edge reads {} forward of the current partition \
@@ -118,12 +116,7 @@ mod tests {
                    WHERE bal.partition_date >= t.partition_date - INTERVAL '1 day' \
                      AND bal.partition_date < t.partition_date";
         assert_eq!(
-            window_independence(
-                "marts.running_balance",
-                &refs,
-                Some("partition_date"),
-                sql
-            ),
+            window_independence("marts.running_balance", &refs, Some("partition_date"), sql),
             WindowIndependence::Ordered
         );
     }

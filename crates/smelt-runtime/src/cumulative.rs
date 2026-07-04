@@ -12,18 +12,41 @@
 //!    run) or emits a combiner-aware `MERGE INTO`.
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
+use crate::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance, WindowedKeyedRule};
 use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
-use smelt_core::config::TimeseriesConfig;
 use smelt_core::ModelFile;
 use smelt_planner::{
-    classify_cumulative, AggregatorColumn, CumulativeClassification, CumulativeDiagnostic,
-    SourceTimeseriesMap,
+    classify_cumulative, combiner_for, AggregatorColumn, CumulativeClassification,
+    CumulativeDiagnostic, SourceTimeseriesMap,
 };
 use std::collections::HashMap;
-use std::time::Instant;
-use tracing::{debug, info};
+use tracing::info;
+
+/// `cumulative`'s [`WindowedKeyedRule`] impl: its classification already
+/// gated every aggregator column through `combiner_for` (the monoid-only
+/// allowlist) at classify time, but the driver re-checks independently —
+/// defense in depth against a future classifier bug ever handing the driver
+/// an unsafe combiner (`model_transforms.md` §Constraints "Equivalence or
+/// refusal").
+impl WindowedKeyedRule for CumulativeClassification {
+    fn refuse(&self) -> Option<String> {
+        for col in &self.aggregator_columns {
+            if combiner_for(&col.per_partition_agg).is_none() {
+                return Some(format!(
+                    "aggregator `{}` on column `{}` is not a monoid combiner",
+                    col.per_partition_agg, col.output_name
+                ));
+            }
+        }
+        None
+    }
+
+    fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String {
+        build_cumulative_merge_sql(schema, table, delta_sql, self)
+    }
+}
 
 /// Execute a single cumulative_aggregate model over the given run window.
 ///
@@ -45,7 +68,6 @@ pub async fn execute_cumulative_aggregate(
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
     let _ = (target, compiler); // reserved for future per-target compiler dispatch
-    let start = Instant::now();
 
     // 1. Classify the model SQL.
     let clean_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
@@ -86,17 +108,17 @@ pub async fn execute_cumulative_aggregate(
     //    placeholder for future stricter checks once we have a watermark
     //    store.
 
-    // 3. Generate partition values from the run window in temporal order.
-    let partitions =
-        generate_partitions(&time_range.start, &time_range.end, &driving_ts.granularity)
-            .with_context(|| {
-                format!(
-                    "Failed to generate partition values for {} over [{}, {})",
-                    model_name, time_range.start, time_range.end
-                )
-            })?;
+    // 3. Step over the driving source's partitions in temporal order via the
+    //    mode-agnostic windowed-keyed-maintenance driver.
+    let steps = driving_steps(&time_range.start, &time_range.end, &driving_ts.granularity)
+        .with_context(|| {
+            format!(
+                "Failed to generate partition values for {} over [{}, {})",
+                model_name, time_range.start, time_range.end
+            )
+        })?;
 
-    if partitions.is_empty() {
+    if steps.is_empty() {
         anyhow::bail!(
             "Run window [{}, {}) covers no partitions of granularity {:?}",
             time_range.start,
@@ -105,101 +127,46 @@ pub async fn execute_cumulative_aggregate(
         );
     }
 
-    debug!(
-        "Stepping over {} partition(s) of {} (granularity = {:?})",
-        partitions.len(),
-        driving_source_name,
-        driving_ts.granularity
-    );
-
-    let mut total_rows = 0;
-
-    for (idx, partition_value) in partitions.iter().enumerate() {
-        let partition_range = single_partition_range(partition_value, &driving_ts);
-
-        let mut bound_map = HashMap::new();
-        bound_map.insert(
-            driving_source_name.clone(),
-            SourceBound {
-                partition_col: driving_ts.partition_column.clone(),
-                before_secs: 0,
-                after_secs: 0,
-            },
-        );
-
-        let pushed = inject_source_filters(&clean_sql, &bound_map, &partition_range);
-
-        // Compile the per-partition SQL (resolves smelt.<path> refs to
-        // schema.table_name, inlines ephemerals).
-        let compiled = compiler
-            .get(target)
-            .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
-            .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-        if verbose {
-            debug!(
-                "-- {} (partition {})\n{}",
-                model_name, partition_value, compiled.sql
+    run_windowed_keyed_maintenance(
+        backend,
+        model_name,
+        schema,
+        db_table_name,
+        &steps,
+        &classification,
+        |step| {
+            // 4. Per-partition pushdown: inject the driving source's
+            //    `[step.start, step.end)` filter, then compile (resolves
+            //    smelt.<path> refs to schema.table_name, inlines ephemerals).
+            let mut bound_map = HashMap::new();
+            bound_map.insert(
+                driving_source_name.clone(),
+                SourceBound {
+                    partition_col: driving_ts.partition_column.clone(),
+                    before_secs: 0,
+                    after_secs: 0,
+                },
             );
-        }
+            let pushed = inject_source_filters(&clean_sql, &bound_map, &step.range);
 
-        // First partition (table doesn't yet exist): CREATE TABLE AS the
-        // delta SELECT. Subsequent partitions: MERGE INTO with combiners.
-        let table_exists = backend
-            .table_exists(schema, db_table_name)
-            .await
-            .unwrap_or(false);
+            let compiled = compiler
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
+                .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
-        if !table_exists {
-            backend
-                .create_table_as(schema, db_table_name, &compiled.sql)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
-                        model_name,
-                        compiled.sql,
-                        e
-                    )
-                })?;
-            debug!(
-                "  partition {} ({}/{}) created target table",
-                partition_value,
-                idx + 1,
-                partitions.len()
-            );
-        } else {
-            let merge_sql =
-                build_cumulative_merge_sql(schema, db_table_name, &compiled.sql, &classification);
-            backend.execute_sql(&merge_sql).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+            if verbose {
+                tracing::debug!(
+                    "-- {} (partition {})\n{}",
                     model_name,
-                    merge_sql,
-                    e
-                )
-            })?;
-            debug!(
-                "  partition {} ({}/{}) merged",
-                partition_value,
-                idx + 1,
-                partitions.len()
-            );
-        }
+                    step.partition_value,
+                    compiled.sql
+                );
+            }
 
-        let row_count = backend
-            .get_row_count(schema, db_table_name)
-            .await
-            .unwrap_or(0);
-        total_rows = row_count;
-    }
-
-    Ok(ExecutionResult {
-        model_name: model_name.to_string(),
-        duration: start.elapsed(),
-        row_count: total_rows,
-        preview: None,
-    })
+            Ok(compiled.sql)
+        },
+    )
+    .await
 }
 
 /// Build a `MERGE INTO` statement that combines target and delta values
@@ -248,95 +215,6 @@ pub fn build_cumulative_merge_sql(
     )
 }
 
-/// Generate partition values from `[start, end)` at the given granularity.
-///
-/// v1 supports `Day` granularity (the motivator). Coarser granularities are
-/// passed through but produce only the start value; refining is reserved for
-/// later work.
-fn generate_partitions(
-    start: &str,
-    end: &str,
-    granularity: &smelt_core::config::Granularity,
-) -> Result<Vec<String>> {
-    use chrono::{Duration as ChronoDuration, NaiveDate};
-    use smelt_core::config::Granularity;
-
-    let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
-        .with_context(|| format!("Invalid start date: {}", start))?;
-    let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
-        .with_context(|| format!("Invalid end date: {}", end))?;
-    if start_date >= end_date {
-        anyhow::bail!("Start date ({}) must be before end date ({})", start, end);
-    }
-
-    let mut values = Vec::new();
-    match granularity {
-        Granularity::Day => {
-            let mut current = start_date;
-            while current < end_date {
-                values.push(current.format("%Y-%m-%d").to_string());
-                current += ChronoDuration::days(1);
-            }
-        }
-        Granularity::Week => {
-            let mut current = start_date;
-            while current < end_date {
-                values.push(current.format("%Y-%m-%d").to_string());
-                current += ChronoDuration::days(7);
-            }
-        }
-        other => {
-            anyhow::bail!(
-                "cumulative_aggregate v1 supports day and week granularity; got {:?}",
-                other
-            );
-        }
-    }
-    Ok(values)
-}
-
-/// Compute the single-partition [start, end) range from a partition value
-/// and the driving source's granularity.
-fn single_partition_range(partition_value: &str, ts: &TimeseriesConfig) -> TimeRange {
-    use chrono::{Duration as ChronoDuration, NaiveDate};
-    use smelt_core::config::Granularity;
-
-    // For day granularity, partition_value is YYYY-MM-DD and the end is the
-    // next day. Other granularities follow similar arithmetic.
-    let start = partition_value.to_string();
-    let end = match ts.granularity {
-        Granularity::Day => {
-            let d = NaiveDate::parse_from_str(partition_value, "%Y-%m-%d")
-                .expect("partition value is YYYY-MM-DD");
-            (d + ChronoDuration::days(1)).format("%Y-%m-%d").to_string()
-        }
-        Granularity::Hour => {
-            // Partition value is "YYYY-MM-DD HH:00:00"; end is next hour.
-            // For simplicity, parse the date and add 1 hour by reformatting.
-            let dt = chrono::NaiveDateTime::parse_from_str(partition_value, "%Y-%m-%d %H:%M:%S")
-                .expect("partition value is YYYY-MM-DD HH:MM:SS");
-            (dt + ChronoDuration::hours(1))
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        }
-        Granularity::Week => {
-            let d = NaiveDate::parse_from_str(partition_value, "%Y-%m-%d")
-                .expect("partition value is YYYY-MM-DD");
-            (d + ChronoDuration::days(7)).format("%Y-%m-%d").to_string()
-        }
-        Granularity::Month | Granularity::Quarter | Granularity::Year => {
-            // For these coarser granularities, the run-window arithmetic
-            // is delegated to the partition iterator — single-partition
-            // pushdown isn't materially different from the run-window
-            // pushdown. Keep this branch a placeholder that returns the
-            // same value; cumulative for month+ is not a v1 motivator.
-            partition_value.to_string()
-        }
-    };
-
-    TimeRange { start, end }
-}
-
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
 ///
 /// Delegates to [`smelt_planner::collect_path_refs`] — the single shared
@@ -381,6 +259,7 @@ fn format_classifier_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_core::config::TimeseriesConfig;
     use smelt_planner::{AggregatorColumn, CrossPartitionCombiner, DrivingSource};
 
     fn dummy_ts() -> TimeseriesConfig {
@@ -433,12 +312,44 @@ mod tests {
         assert!(sql.contains("WHEN NOT MATCHED THEN INSERT *"));
     }
 
+    /// The `WindowedKeyedRule` impl must refuse a non-monoid combiner
+    /// independently of the classifier that produced it — defense in depth
+    /// against ever merging one approximately (`model_transforms.md`
+    /// §Constraints "Equivalence or refusal").
     #[test]
-    fn test_single_partition_range_day() {
-        let ts = dummy_ts();
-        let r = single_partition_range("2024-01-15", &ts);
-        assert_eq!(r.start, "2024-01-15");
-        assert_eq!(r.end, "2024-01-16");
+    fn refuses_non_monoid_combiner_independently_of_classifier() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "median_latency".to_string(),
+                per_partition_agg: "MEDIAN".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        let reason = classification.refuse();
+        assert!(reason.is_some(), "MEDIAN is not a monoid combiner");
+        assert!(reason.unwrap().contains("MEDIAN"));
+    }
+
+    #[test]
+    fn admits_monoid_combiner() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        assert!(classification.refuse().is_none());
     }
 
     #[test]

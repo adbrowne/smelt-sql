@@ -22,6 +22,7 @@ pub mod cumulative;
 pub mod execute;
 pub mod fn_bodies;
 pub mod gate;
+pub mod maintenance_driver;
 pub mod meta_eval;
 pub mod python;
 pub mod reporter;
