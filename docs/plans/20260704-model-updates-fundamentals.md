@@ -151,7 +151,7 @@ L3 (declaration surfaces) and L4 (mode compositions) are out of scope entirely â
 |-------|---------|--------|------|
 | F1    | done    | 09927bc6 | 2026-07-04 |
 | F2    | done    | dcbdccab | 2026-07-05 |
-| F3    | done    | TBD    | 2026-07-05 |
+| F3    | done    | 787f9bc0 | 2026-07-05 |
 | F4    | pending |        |      |
 | F5    | pending |        |      |
 | F6    | pending |        |      |
