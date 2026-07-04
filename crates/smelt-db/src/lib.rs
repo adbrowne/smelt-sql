@@ -118,6 +118,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::BatchedRequiresRefreshBatched => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
         MetadataError::MaterializedViewForbidsBatched => None,
+        MetadataError::MalformedFunctionalDependency { .. } => None,
     }
 }
 
@@ -1478,6 +1479,21 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 })
                 .accumulate(db);
             }
+        }
+
+        // Functional-dependency (`key -> determines`) declaration structural
+        // validation (DC2, `model_properties.md` §"Model-scoped declarations").
+        if let Err(fd_err) =
+            smelt_core::metadata::validate_functional_dependencies(metadata, sql_body)
+        {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: fd_err.to_string(),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::MalformedFunctionalDependency),
+                data: None,
+            })
+            .accumulate(db);
         }
 
         // Timeseries schema invariants (D-52 rules 7 and 8).

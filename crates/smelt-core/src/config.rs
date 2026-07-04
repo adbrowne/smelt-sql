@@ -511,6 +511,26 @@ pub struct TimeseriesConfig {
     pub assert_monotonic: bool,
 }
 
+/// Model-scoped functional-dependency declaration: the modeller's assertion
+/// that `determines` is a per-key constant for the given `key` columns — a
+/// world-fact the model's own SQL cannot always decide statically. Licenses
+/// once-write `COALESCE`/1:1-after-dedup enrichment (`model_properties.md`
+/// §"Model-scoped declarations" row "Functional dependency (`key → column`)").
+///
+/// Widens only the *undecidable* per-key-constancy verdict: a `determines`
+/// column that the fan-out/cardinality proof (`analysis::join_shape::fan_out`)
+/// positively proves multi-valued per key is refused regardless of this
+/// declaration (`model_properties.md` §Constraints "Declared escape hatches
+/// may only widen").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionalDependency {
+    /// Columns that functionally determine `determines` (the key side).
+    pub key: Vec<String>,
+    /// The column asserted to be a per-key constant under `key`.
+    pub determines: String,
+}
+
 /// The `batched:` block — configuration layered on top of the `refresh: batched`
 /// selector. Selection itself is `refresh: batched`; this struct carries only
 /// the optional knobs (`unique_key`, `safety_overrides`).
@@ -1231,6 +1251,27 @@ targets:
             config.nondeterministic_columns,
             vec!["inserted_at".to_string(), "batch_id".to_string()]
         );
+    }
+
+    #[test]
+    fn test_functional_dependency_deserialization() {
+        let yaml = r#"
+            key: [customer_id]
+            determines: customer_region
+        "#;
+        let fd: FunctionalDependency = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(fd.key, vec!["customer_id".to_string()]);
+        assert_eq!(fd.determines, "customer_region");
+    }
+
+    #[test]
+    fn test_functional_dependency_rejects_unknown_fields() {
+        let yaml = r#"
+            key: [customer_id]
+            determines: customer_region
+            narrows: true
+        "#;
+        assert!(serde_yaml::from_str::<FunctionalDependency>(yaml).is_err());
     }
 
     #[test]

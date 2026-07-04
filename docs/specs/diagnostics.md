@@ -104,6 +104,7 @@ Owned by `docs/specs/timeseries.md`.
 |------|----------|---------|
 | `TimeseriesRequiredForBatched` | Error | A model declares `refresh: batched` but has no `timeseries:` block. |
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
+| `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
 
 ---
 

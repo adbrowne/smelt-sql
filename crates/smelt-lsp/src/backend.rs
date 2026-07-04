@@ -404,6 +404,7 @@ impl Backend {
                 // Timeseries frontmatter validation diagnostic codes.
                 DbCode::TimeseriesRequiredForBatched => "timeseries-required-for-batched",
                 DbCode::MalformedTimeseries => "malformed-timeseries",
+                DbCode::MalformedFunctionalDependency => "malformed-functional-dependency",
                 // VALUES / CTE alias-column-list diagnostic codes.
                 DbCode::AliasColumnArityMismatch => "alias-column-arity-mismatch",
                 DbCode::EmptyValuesClause => "empty-values-clause",

@@ -643,6 +643,12 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
     MalformedTimeseries,
+    /// A `functional_dependencies:` entry is structurally invalid: an empty
+    /// `key`/`determines`, a `determines` column also listed in `key`, or a
+    /// `key`/`determines` column absent from the model's SQL body.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "MalformedFunctionalDependency: {message}"
+    MalformedFunctionalDependency,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or

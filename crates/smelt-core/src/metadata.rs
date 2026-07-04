@@ -218,6 +218,12 @@ pub struct ModelMetadata {
     /// `docs/specs/cumulative_aggregate.md` §Surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
+
+    /// Model-scoped functional-dependency declarations (`key → determines`).
+    /// See `crate::config::FunctionalDependency` and `model_properties.md`
+    /// §"Model-scoped declarations".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functional_dependencies: Vec<crate::config::FunctionalDependency>,
 }
 
 impl ModelMetadata {
@@ -362,6 +368,13 @@ pub enum MetadataError {
     /// smelt-driven batch loop to configure.
     #[error("MaterializedViewForbidsBatched: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
     MaterializedViewForbidsBatched,
+
+    /// A `functional_dependencies:` entry is structurally invalid: an empty
+    /// `key`/`determines`, a `determines` column also listed in `key`
+    /// (self-contradictory), or a `key`/`determines` column absent from the
+    /// model's SQL body.
+    #[error("MalformedFunctionalDependency: {message}")]
+    MalformedFunctionalDependency { message: String },
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -552,6 +565,69 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
+    Ok(())
+}
+
+/// Validate `functional_dependencies:` entries on parsed metadata.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata` and the
+/// SQL body text (for the column-presence check, mirroring
+/// [`validate_timeseries`]'s partition-column heuristic). Emits the first
+/// constraint violation found, or `Ok(())` when all entries pass (including
+/// the common case of no `functional_dependencies:` at all).
+///
+/// Rules checked (`model_properties.md` §"Model-scoped declarations",
+/// §Constraints "Declared escape hatches may only widen"):
+/// - `key` must be non-empty and `determines` must be non-empty (a
+///   self-contradictory / empty declaration is a configuration error).
+/// - `determines` must not also appear in `key` (an FD cannot determine
+///   itself — self-contradictory).
+/// - Every `key` column and `determines` must appear in the model's SQL body
+///   (a fast presence heuristic, same limitation as `validate_timeseries`'s
+///   `partition_column` check — a full SELECT-list resolution is the
+///   planner's job).
+pub fn validate_functional_dependencies(
+    metadata: &ModelMetadata,
+    sql_body: &str,
+) -> Result<(), MetadataError> {
+    let upper_body = sql_body.to_uppercase();
+    for fd in &metadata.functional_dependencies {
+        if fd.key.is_empty() {
+            return Err(MetadataError::MalformedFunctionalDependency {
+                message: format!(
+                    "functional dependency determining '{}' has an empty key — a functional \
+                     dependency must name at least one key column",
+                    fd.determines
+                ),
+            });
+        }
+        if fd.determines.trim().is_empty() {
+            return Err(MetadataError::MalformedFunctionalDependency {
+                message: "functional dependency has an empty `determines` column".to_string(),
+            });
+        }
+        if fd.key.iter().any(|k| k == &fd.determines) {
+            return Err(MetadataError::MalformedFunctionalDependency {
+                message: format!(
+                    "functional dependency is self-contradictory: '{}' cannot determine itself \
+                     (it appears in both `key` and `determines`)",
+                    fd.determines
+                ),
+            });
+        }
+        if !sql_body.trim().is_empty() {
+            for col in fd.key.iter().chain(std::iter::once(&fd.determines)) {
+                if !upper_body.contains(&col.to_uppercase()) {
+                    return Err(MetadataError::MalformedFunctionalDependency {
+                        message: format!(
+                            "functional dependency names column '{col}' which does not appear \
+                             in the model's SQL body"
+                        ),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1745,6 +1821,90 @@ FROM smelt.orders_raw"#;
             "SELECT order_ts, order_date, order_id, inserted_at FROM foo",
         )
         .expect("payload-only nondeterministic_columns must pass validation");
+    }
+
+    // ── functional_dependencies: validation (DC2) ────────────────────────────
+
+    fn fd(key: &[&str], determines: &str) -> crate::config::FunctionalDependency {
+        crate::config::FunctionalDependency {
+            key: key.iter().map(|s| s.to_string()).collect(),
+            determines: determines.to_string(),
+        }
+    }
+
+    /// A valid FD naming columns present in the SQL body parses cleanly.
+    #[test]
+    fn test_functional_dependencies_accepts_valid_declaration() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(&["customer_id"], "customer_region")],
+            ..Default::default()
+        };
+        validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect("a valid functional dependency must pass validation");
+    }
+
+    /// An empty `key` is a self-contradictory declaration — fail-loud, not a
+    /// silent default.
+    #[test]
+    fn test_functional_dependencies_rejects_empty_key() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(&[], "customer_region")],
+            ..Default::default()
+        };
+        let err = validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect_err("an empty key must be a configuration error");
+        assert!(matches!(
+            err,
+            MetadataError::MalformedFunctionalDependency { .. }
+        ));
+    }
+
+    /// A `determines` column also listed in `key` cannot determine itself —
+    /// self-contradictory, refused.
+    #[test]
+    fn test_functional_dependencies_rejects_self_contradictory() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(
+                &["customer_id", "customer_region"],
+                "customer_region",
+            )],
+            ..Default::default()
+        };
+        let err = validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect_err("determines column also in key must be a configuration error");
+        assert!(matches!(
+            err,
+            MetadataError::MalformedFunctionalDependency { .. }
+        ));
+    }
+
+    /// An FD naming a column absent from the model's SQL body is a
+    /// configuration error (fail-loud, not silently accepted).
+    #[test]
+    fn test_functional_dependencies_rejects_absent_column() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(&["customer_id"], "phone_number")],
+            ..Default::default()
+        };
+        let err = validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect_err("a determines column absent from the SQL body must error");
+        assert!(matches!(
+            err,
+            MetadataError::MalformedFunctionalDependency { .. }
+        ));
+        assert!(err.to_string().contains("phone_number"));
     }
 
     /// A `.sql` file declaring the retired `incremental:` block is a hard error

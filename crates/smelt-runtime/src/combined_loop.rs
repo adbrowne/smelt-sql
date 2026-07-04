@@ -340,6 +340,7 @@ fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String) ->
         reuse: None,
         forward_only: false,
         state: None,
+        functional_dependencies: Vec::new(),
     });
 
     // Virtual path: generator_file path with model name appended as a virtual

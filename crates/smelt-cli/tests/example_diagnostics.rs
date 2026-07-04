@@ -156,6 +156,17 @@ fn incremental_declared_monotonic_no_diagnostics() {
     check_workspace_no_diagnostics("examples/incremental_declared_monotonic");
 }
 
+/// `functional_dependencies` declaration fixture (DC2): a plain pass-through
+/// column asserted to be a per-key constant. Verifies the workspace loads
+/// without any diagnostics (structural validation of the declaration passes;
+/// the widening/guard proof it feeds is exercised by
+/// `smelt-logical::analysis::functional_dependency` unit tests, not through
+/// `file_diagnostics`).
+#[test]
+fn functional_dependency_declared_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/functional_dependency_declared");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that
