@@ -110,7 +110,7 @@ Best for:
 - Tables consumed downstream as a lookup (no `partition_column` on the output)
 
 !!! warning "Forbidden combinations"
-    Cumulative models cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare an `incremental:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` error. Using `refresh: cumulative` on an `ephemeral` model is also a hard error.
+    Cumulative models cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare a `batched:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsBatched` error. Using `refresh: cumulative` on an `ephemeral` model is also a hard error.
 
 !!! note "Reprocessing"
     v1 does not support per-partition reprocessing for already-merged source partitions. If a past partition's data changes, run with `--full-refresh` to truncate and rebuild from scratch.

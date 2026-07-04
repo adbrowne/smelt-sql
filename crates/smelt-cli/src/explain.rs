@@ -3,7 +3,7 @@ use anyhow::Result;
 use serde::Serialize;
 use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
-use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
+use smelt_core::{BatchedConfig, Granularity, Materialization, ModelOriginKind};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
 use std::collections::BTreeMap;
 
@@ -314,7 +314,7 @@ fn compute_batch_safety_label(
     name: &str,
     sql: &str,
     model_file: &ModelFile,
-    inc: &IncrementalConfig,
+    inc: &BatchedConfig,
     ts: &TimeseriesConfig,
 ) -> String {
     let model_info = ModelInfo {
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn test_batch_safety_uses_expanded_function_body() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{Granularity, IncrementalConfig};
+        use smelt_core::{BatchedConfig, Granularity};
 
         // A model whose only lookback lives inside a `smelt.define` body must
         // classify as `bounded_safe` — but only when the explain path expands
@@ -432,7 +432,7 @@ mod tests {
                     week_start: None,
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Batched),
-                batched: Some(IncrementalConfig {
+                batched: Some(BatchedConfig {
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn test_explain_with_incremental() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{Granularity, IncrementalConfig};
+        use smelt_core::{BatchedConfig, Granularity};
 
         let models = vec![
             make_model("orders", vec![], "SELECT * FROM raw_orders"),
@@ -532,7 +532,7 @@ mod tests {
                     week_start: None,
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Batched),
-                batched: Some(IncrementalConfig {
+                batched: Some(BatchedConfig {
                     unique_key: vec![],
                     safety_overrides: Default::default(),
                 }),

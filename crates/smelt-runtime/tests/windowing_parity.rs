@@ -5,7 +5,7 @@
 //! various model configurations and request options.
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
+use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 use smelt_runtime::windowing::{compute_incremental_windows, validate_run_window_alignment};
 use smelt_runtime::TimeRange;
 
@@ -18,10 +18,10 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
     }
 }
 
-fn make_inc() -> IncrementalConfig {
-    IncrementalConfig {
+fn make_inc() -> BatchedConfig {
+    BatchedConfig {
         unique_key: vec![],
-        safety_overrides: IncrementalSafetyOverrides::default(),
+        safety_overrides: BatchedSafetyOverrides::default(),
     }
 }
 

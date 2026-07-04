@@ -19,7 +19,7 @@ use smelt_core::config::TimeseriesConfig;
 use crate::graph::ModelInfo;
 use crate::rules::cumulative::{classify_cumulative, CumulativeDiagnostic, SourceTimeseriesMap};
 use crate::rules::incremental;
-use crate::types::IncrementalConfig;
+use crate::types::BatchedConfig;
 
 // ── Parser imports for event-time injectability check ──────────────────────
 use smelt_parser::{parse, File};
@@ -47,7 +47,7 @@ pub enum RuleDiagnosticCode {
     CumulativeNoDrivingSource,
     CumulativeMultipleDrivingSources,
     CumulativeSqlNotParseable,
-    IncrementalNotBatchSafe,
+    BatchedNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
@@ -83,7 +83,7 @@ pub struct RuleContext<'a> {
     /// Frontmatter `timeseries:` block, if any.
     pub timeseries_config: Option<&'a TimeseriesConfig>,
     /// Frontmatter `incremental:` block, if any.
-    pub incremental_config: Option<&'a IncrementalConfig>,
+    pub incremental_config: Option<&'a BatchedConfig>,
 }
 
 /// A planner rule that surfaces its rejections as diagnostics.
@@ -120,7 +120,7 @@ impl PlannerRule for CumulativeRule {
 /// dispatch uses `analyze_batch_safety`, which always yields a buildable
 /// classification — so they never block the build (Diagnostic parity rule:
 /// only `Error` blocks). A missing `timeseries:` block is already surfaced by
-/// the frontmatter validator (`TimeseriesRequiredForIncremental`), so this rule
+/// the frontmatter validator (`TimeseriesRequiredForBatched`), so this rule
 /// stays silent in that case to avoid double-reporting.
 pub struct IncrementalRule;
 
@@ -153,7 +153,7 @@ impl PlannerRule for IncrementalRule {
         match incremental::detect(&model) {
             Ok(_) => Vec::new(),
             Err(message) => vec![RuleDiagnostic {
-                code: RuleDiagnosticCode::IncrementalNotBatchSafe,
+                code: RuleDiagnosticCode::BatchedNotSafe,
                 severity: RuleSeverity::Warning,
                 message,
             }],
@@ -465,8 +465,8 @@ mod tests {
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
 
-    fn inc_config() -> IncrementalConfig {
-        IncrementalConfig {
+    fn inc_config() -> BatchedConfig {
+        BatchedConfig {
             unique_key: vec!["event_date".to_string()],
             safety_overrides: Default::default(),
         }
@@ -496,9 +496,9 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.code == RuleDiagnosticCode::IncrementalNotBatchSafe
+                .any(|d| d.code == RuleDiagnosticCode::BatchedNotSafe
                     && d.severity == RuleSeverity::Warning),
-            "expected IncrementalNotBatchSafe Warning, got {diags:?}"
+            "expected BatchedNotSafe Warning, got {diags:?}"
         );
     }
 
@@ -595,7 +595,7 @@ mod tests {
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
         };
-        let inc_cfg = IncrementalConfig {
+        let inc_cfg = BatchedConfig {
             unique_key: vec!["month_start".to_string()],
             safety_overrides: Default::default(),
         };
@@ -660,7 +660,7 @@ mod tests {
             granularity: smelt_core::config::Granularity::Day,
             week_start: None,
         };
-        let inc_cfg = IncrementalConfig {
+        let inc_cfg = BatchedConfig {
             unique_key: vec!["event_ts".to_string()],
             safety_overrides: Default::default(),
         };
@@ -674,7 +674,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
         };
-        // Note: IncrementalNotBatchSafe Warning may fire (subquery in FROM),
+        // Note: BatchedNotSafe Warning may fire (subquery in FROM),
         // but EventTimeColumnNotVisibleAtOuterSelect must NOT fire.
         let diags = detect_builtin_rules(&ctx);
         assert!(

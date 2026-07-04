@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::types::IncrementalConfig;
+use crate::types::BatchedConfig;
 pub use smelt_core::config::TimeseriesConfig;
 
 /// Information about a single model for the optimizer.
@@ -14,7 +14,7 @@ pub struct ModelInfo {
     /// Time-dimension declaration (event_time_column, partition_column, granularity).
     pub timeseries_config: Option<TimeseriesConfig>,
     /// Incremental configuration parsed from frontmatter, if any.
-    pub incremental_config: Option<IncrementalConfig>,
+    pub incremental_config: Option<BatchedConfig>,
 }
 
 /// A collection of models the optimizer can analyze.

@@ -30,6 +30,6 @@ pub use rules::rule_diagnostics::{
     RuleContext, RuleDiagnostic, RuleDiagnosticCode, RuleSeverity,
 };
 pub use types::{
-    ExecutionStep, Frontmatter, Granularity, IncrementalConfig, IncrementalSafetyOverrides,
+    BatchedConfig, BatchedSafetyOverrides, ExecutionStep, Frontmatter, Granularity,
     IncrementalStrategy, Opportunity, OpportunityData, Transformation, Weekday,
 };

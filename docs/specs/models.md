@@ -255,7 +255,6 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
 - **Keyed refresh modes beyond `cumulative` are not yet implemented.** The refresh axis names `versioned`, `latest_value`, and `materialized_view` as normative peers (each with its own spec), but only `full`, `batched`, and `cumulative` are built today. Declaring `versioned` / `latest_value` / `materialized_view` currently produces an unknown-refresh-value error; each is delivered by a phase of `docs/plans/20260704-model-updates.md`.
-- **Diagnostics still spell the batched mode `incremental` internally.** The user-facing surface is `refresh: batched` + the `batched:` block (landed); diagnostic codes (`TimeseriesRequiredForIncremental`, …), the internal config type name, and CLI plumbing retain the `incremental` spelling until the rename phase of `docs/plans/20260704-model-updates.md` lands. See `batched_models.md` §Known Divergences.
 
 ## References
 

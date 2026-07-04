@@ -37,7 +37,7 @@ use crate::{
 pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{IncrementalConfig, SeedInfo, SourceInfo, SourcesConfig};
+use smelt_core::{BatchedConfig, SeedInfo, SourceInfo, SourcesConfig};
 use smelt_types::signatures::{FunctionSig, SmeltType};
 
 /// YAML parse error with location information
@@ -659,7 +659,7 @@ pub struct EmittedModelDef {
     /// the file-wide `incremental:` frontmatter is shared by all incremental
     /// emissions from that generator; per-`ModelDef` overrides are not supported
     /// in v1.
-    pub incremental_config: Option<IncrementalConfig>,
+    pub incremental_config: Option<BatchedConfig>,
     /// Inherited `timeseries:` block from the generator file's frontmatter,
     /// when `materialization == "incremental"`.  `None` for non-incremental
     /// emissions or when the generator's frontmatter has no `timeseries:` block.
@@ -814,7 +814,7 @@ fn materialise_emitted_model_def(
     generator_file: &Path,
     literal: &RecordLiteral,
     frontmatter_tags: &[String],
-    frontmatter_incremental: Option<&IncrementalConfig>,
+    frontmatter_incremental: Option<&BatchedConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
 ) -> Option<EmittedModelDef> {
     let (name, name_span) = extract_modeldef_field_text(literal, "name")?;
@@ -953,7 +953,7 @@ fn evaluate_body_emissions(
     generator_file: &Path,
     body_expr: &Expr,
     frontmatter_tags: &[String],
-    frontmatter_incremental: Option<&IncrementalConfig>,
+    frontmatter_incremental: Option<&BatchedConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
     loader_values: &[(String, crate::loader::MetaValue)],
     ctx: &TypeContext,
@@ -1194,7 +1194,7 @@ fn materialise_modeldef_from_lambda_body(
     body: &Expr,
     record_val: &crate::loader::MetaValue,
     frontmatter_tags: &[String],
-    frontmatter_incremental: Option<&IncrementalConfig>,
+    frontmatter_incremental: Option<&BatchedConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
     lambda_bindings: Vec<(String, SmeltType)>,
 ) -> Option<EmittedModelDef> {

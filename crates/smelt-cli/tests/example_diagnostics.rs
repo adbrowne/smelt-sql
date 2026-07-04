@@ -2146,7 +2146,7 @@ fn meta_polish_broken_reducer_arity() {
 //   — one broken model that declares `incremental:` without `timeseries:`
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `TimeseriesRequiredForIncremental` or `MalformedTimeseries` diagnostic fires
+/// `TimeseriesRequiredForBatched` or `MalformedTimeseries` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any
 /// other file in the workspace.
 fn check_workspace_emits_timeseries_diagnostic(
@@ -2159,7 +2159,7 @@ fn check_workspace_emits_timeseries_diagnostic(
     use std::path::Path;
 
     const TIMESERIES_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::TimeseriesRequiredForIncremental,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
         smelt_db::DiagnosticCode::MalformedTimeseries,
     ];
 
@@ -2265,7 +2265,7 @@ fn check_workspace_emits_timeseries_diagnostic(
 }
 
 /// Timeseries TDD: `examples/timeseries_broken_incremental_without_timeseries/` produces
-/// exactly one `TimeseriesRequiredForIncremental` diagnostic anchored at
+/// exactly one `TimeseriesRequiredForBatched` diagnostic anchored at
 /// `models/incremental_without_timeseries.sql`.
 ///
 /// This test verifies that `validate_timeseries` is wired into the production
@@ -2275,21 +2275,21 @@ fn timeseries_broken_incremental_without_timeseries() {
     check_workspace_emits_timeseries_diagnostic(
         "examples/timeseries_broken_incremental_without_timeseries",
         "models/incremental_without_timeseries.sql",
-        smelt_db::DiagnosticCode::TimeseriesRequiredForIncremental,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
     );
 }
 
-// ===== BUG-006: CumulativeForbidsTimeseries / CumulativeForbidsIncremental regression =====
+// ===== BUG-006: CumulativeForbidsTimeseries / CumulativeForbidsBatched regression =====
 //
 // Before the fix, `validate_timeseries` returned these errors but `file_diagnostics`
 // silently dropped them via the `_ => None` catch-all in the match block.
 //
 // Fixtures:
 //   - `examples/timeseries_broken_cumulative_with_timeseries/`   — CumulativeForbidsTimeseries
-//   - `examples/timeseries_broken_cumulative_with_incremental/`  — CumulativeForbidsIncremental
+//   - `examples/timeseries_broken_cumulative_with_incremental/`  — CumulativeForbidsBatched
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` diagnostic fires
+/// `CumulativeForbidsTimeseries` or `CumulativeForbidsBatched` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any other
 /// file in the workspace.
 fn check_workspace_emits_cumulative_frontmatter_diagnostic(
@@ -2303,7 +2303,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
 
     const CUMULATIVE_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
         smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
-        smelt_db::DiagnosticCode::CumulativeForbidsIncremental,
+        smelt_db::DiagnosticCode::CumulativeForbidsBatched,
     ];
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2425,10 +2425,10 @@ fn timeseries_broken_cumulative_with_timeseries() {
 }
 
 /// BUG-006 regression: `examples/timeseries_broken_cumulative_with_incremental/` produces
-/// exactly one `CumulativeForbidsIncremental` diagnostic from
+/// exactly one `CumulativeForbidsBatched` diagnostic from
 /// `models/cumulative_with_incremental.sql`.
 ///
-/// Before the fix, `validate_timeseries` returned `CumulativeForbidsIncremental`
+/// Before the fix, `validate_timeseries` returned `CumulativeForbidsBatched`
 /// but `file_diagnostics` silently dropped it, so the LSP showed no error even
 /// though cumulative models must not declare `incremental:` (cumulative_aggregate.md
 /// §"Constraints & Invariants" #2).
@@ -2437,7 +2437,7 @@ fn timeseries_broken_cumulative_with_incremental() {
     check_workspace_emits_cumulative_frontmatter_diagnostic(
         "examples/timeseries_broken_cumulative_with_incremental",
         "models/cumulative_with_incremental.sql",
-        smelt_db::DiagnosticCode::CumulativeForbidsIncremental,
+        smelt_db::DiagnosticCode::CumulativeForbidsBatched,
     );
 }
 

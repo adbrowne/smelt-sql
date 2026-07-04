@@ -93,7 +93,7 @@ Reordering merges across source partitions does not change the final state. This
 | `CumulativeNoDrivingSource` | No source in the FROM clause declares `timeseries:` |
 | `CumulativeMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
 | `CumulativeForbidsTimeseries` | Model declares both `refresh: cumulative` and a `timeseries:` block |
-| `CumulativeForbidsIncremental` | Model declares both `refresh: cumulative` and an `incremental:` block |
+| `CumulativeForbidsBatched` | Model declares both `refresh: cumulative` and a `batched:` block |
 
 There is no `safety_overrides:` block for cumulative models. Rejected constructs break the cross-partition equivalence contract, not partial correctness — there is no opt-in escape hatch.
 

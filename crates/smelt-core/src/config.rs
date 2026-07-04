@@ -325,7 +325,7 @@ pub struct ModelConfig {
     /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
     /// itself is `refresh: batched`, not the presence of this block.
     #[serde(default)]
-    pub batched: Option<IncrementalConfig>,
+    pub batched: Option<BatchedConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
     /// Target to execute this model on (overrides CLI --target)
@@ -442,7 +442,7 @@ pub enum Granularity {
 /// Each flag allows a specific pattern that is normally rejected
 /// because it can produce different results on partial vs full data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct IncrementalSafetyOverrides {
+pub struct BatchedSafetyOverrides {
     #[serde(default)]
     pub allow_window_functions: bool,
     #[serde(default)]
@@ -477,7 +477,7 @@ pub enum IncrementalStrategy {
 
 /// Time-dimension declaration for a model or source output.
 ///
-/// Factored out of `IncrementalConfig` so that views, non-batched tables,
+/// Factored out of `BatchedConfig` so that views, non-batched tables,
 /// and external sources can declare a time dimension without opting into
 /// batched execution. `refresh: batched` consumes this block; any model
 /// declaring `refresh: batched` must also declare `timeseries:`.
@@ -500,13 +500,13 @@ pub struct TimeseriesConfig {
 /// the optional knobs (`unique_key`, `safety_overrides`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct IncrementalConfig {
+pub struct BatchedConfig {
     /// Columns that uniquely identify a row (backend uses presence to choose strategy)
     #[serde(default)]
     pub unique_key: Vec<String>,
     /// Safety overrides for patterns that may diverge on partial data
     #[serde(default)]
-    pub safety_overrides: IncrementalSafetyOverrides,
+    pub safety_overrides: BatchedSafetyOverrides,
 }
 
 /// Parse the `unstable_schema:` flag from the text of a `smelt.yml` file.
@@ -692,7 +692,7 @@ impl Config {
     /// block — a batched model with no block returns `Some(default)`.
     ///
     /// **Precedence**: smelt.yml only (for now).
-    pub fn get_incremental(&self, model_name: &str) -> Option<IncrementalConfig> {
+    pub fn get_incremental(&self, model_name: &str) -> Option<BatchedConfig> {
         if !matches!(self.get_refresh(model_name), RefreshStrategy::Batched) {
             return None;
         }
@@ -823,7 +823,7 @@ impl Config {
         &self,
         model_name: &str,
         sql_metadata: Option<&ModelMetadata>,
-    ) -> Option<IncrementalConfig> {
+    ) -> Option<BatchedConfig> {
         if !matches!(
             self.get_refresh_with_metadata(model_name, sql_metadata),
             RefreshStrategy::Batched
@@ -854,10 +854,8 @@ impl Config {
         let mut errors = Vec::new();
 
         // Collect all model names and their effective materialization + config
-        let mut all_models: HashMap<
-            &str,
-            (Materialization, Option<&IncrementalConfig>, Option<&str>),
-        > = HashMap::new();
+        let mut all_models: HashMap<&str, (Materialization, Option<&BatchedConfig>, Option<&str>)> =
+            HashMap::new();
 
         // From smelt.yml
         for (name, model_config) in &self.models {
@@ -1062,23 +1060,23 @@ models:
     /// this test uses the new surface (`materialization: table` + `refresh: cumulative`).
     #[test]
     fn test_validate_refresh_cumulative_forbids_incremental_via_metadata() {
-        use crate::config::{IncrementalConfig, IncrementalSafetyOverrides, RefreshStrategy};
+        use crate::config::{BatchedConfig, BatchedSafetyOverrides, RefreshStrategy};
         use crate::metadata::{validate_timeseries, MetadataError, ModelMetadata};
 
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
             refresh: Some(RefreshStrategy::Cumulative),
-            batched: Some(IncrementalConfig {
+            batched: Some(BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: cumulative + batched: must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsIncremental),
-            "Expected CumulativeForbidsIncremental, got: {}",
+            matches!(err, MetadataError::CumulativeForbidsBatched),
+            "Expected CumulativeForbidsBatched, got: {}",
             err
         );
     }
@@ -1143,11 +1141,8 @@ targets:
         let yaml = r#"
             unique_key: []
         "#;
-        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.safety_overrides,
-            IncrementalSafetyOverrides::default()
-        );
+        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.safety_overrides, BatchedSafetyOverrides::default());
         assert!(!config.safety_overrides.allow_window_functions);
     }
 
@@ -1156,7 +1151,7 @@ targets:
         let yaml = r#"
             safety_overrides: {}
         "#;
-        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.unique_key.is_empty());
     }
 
@@ -1167,7 +1162,7 @@ targets:
               - id
               - source
         "#;
-        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.unique_key, vec!["id", "source"]);
     }
 
@@ -1354,9 +1349,9 @@ models:
             "my_model".to_string(),
             ModelMetadata {
                 materialization: Some(Materialization::Ephemeral),
-                batched: Some(IncrementalConfig {
+                batched: Some(BatchedConfig {
                     unique_key: vec![],
-                    safety_overrides: IncrementalSafetyOverrides::default(),
+                    safety_overrides: BatchedSafetyOverrides::default(),
                 }),
                 ..Default::default()
             },
@@ -1504,9 +1499,9 @@ targets:
             "my_model".to_string(),
             ModelMetadata {
                 materialization: Some(Materialization::Table),
-                batched: Some(IncrementalConfig {
+                batched: Some(BatchedConfig {
                     unique_key: vec![],
-                    safety_overrides: IncrementalSafetyOverrides::default(),
+                    safety_overrides: BatchedSafetyOverrides::default(),
                 }),
                 ..Default::default()
             },
@@ -1517,7 +1512,7 @@ targets:
     }
 
     /// BUG-056: `event_time_column`/`partition_column`/`granularity` are fields
-    /// on `timeseries:`, not `batched:`. Because `IncrementalConfig` uses
+    /// on `timeseries:`, not `batched:`. Because `BatchedConfig` uses
     /// `deny_unknown_fields`, putting them under `batched:` must fail at
     /// parse time rather than silently being dropped.
     #[test]

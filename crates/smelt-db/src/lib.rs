@@ -114,7 +114,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::TimeseriesRequiredForBatched => None,
         MetadataError::MalformedTimeseries { .. } => None,
         MetadataError::CumulativeForbidsTimeseries => None,
-        MetadataError::CumulativeForbidsIncremental => None,
+        MetadataError::CumulativeForbidsBatched => None,
         MetadataError::BatchedRequiresRefreshBatched => None,
     }
 }
@@ -1073,7 +1073,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::CumulativeNoDrivingSource => DiagnosticCode::CumulativeNoDrivingSource,
         R::CumulativeMultipleDrivingSources => DiagnosticCode::CumulativeMultipleDrivingSources,
         R::CumulativeSqlNotParseable => DiagnosticCode::CumulativeSqlNotParseable,
-        R::IncrementalNotBatchSafe => DiagnosticCode::IncrementalNotBatchSafe,
+        R::BatchedNotSafe => DiagnosticCode::BatchedNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
         }
@@ -1422,12 +1422,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let sql_body = &text[sql_offset..];
         if let Err(ts_err) = smelt_core::metadata::validate_timeseries(metadata, sql_body) {
             let maybe_diag = match &ts_err {
-                // `TimeseriesRequiredForBatched` maps to the existing
-                // `DiagnosticCode::TimeseriesRequiredForIncremental` code for now;
-                // renaming the emitted diagnostic code is a downstream rename.
                 smelt_core::metadata::MetadataError::TimeseriesRequiredForBatched => Some((
                     ts_err.to_string(),
-                    DiagnosticCode::TimeseriesRequiredForIncremental,
+                    DiagnosticCode::TimeseriesRequiredForBatched,
                 )),
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
@@ -1436,10 +1433,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     ts_err.to_string(),
                     DiagnosticCode::CumulativeForbidsTimeseries,
                 )),
-                smelt_core::metadata::MetadataError::CumulativeForbidsIncremental => Some((
-                    ts_err.to_string(),
-                    DiagnosticCode::CumulativeForbidsIncremental,
-                )),
+                smelt_core::metadata::MetadataError::CumulativeForbidsBatched => {
+                    Some((ts_err.to_string(), DiagnosticCode::CumulativeForbidsBatched))
+                }
                 // `batched:` without `refresh: batched` maps to the generic
                 // YamlParseError code — no dedicated code exists yet.
                 smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
@@ -1541,7 +1537,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // The opt-in is `refresh: batched`, not the presence of the optional
             // `batched:` block — default to an empty config when the block is
             // absent so a bare `refresh: batched` model still reaches the rule.
-            let default_batched_config = smelt_core::config::IncrementalConfig::default();
+            let default_batched_config = smelt_core::config::BatchedConfig::default();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,

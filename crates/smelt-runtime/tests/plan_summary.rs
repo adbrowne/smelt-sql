@@ -199,7 +199,7 @@ async fn test_plan_summary_lists_strategies() {
 #[tokio::test]
 async fn test_planner_override_applied() {
     use smelt_core::config::{ModelConfig, TimeseriesConfig};
-    use smelt_core::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
+    use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 
     let project_dir = tempfile::tempdir().expect("tempdir");
     let project_dir = project_dir.path();
@@ -229,9 +229,9 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
                 week_start: None,
             }),
             refresh: Some(smelt_core::config::RefreshStrategy::Batched),
-            batched: Some(IncrementalConfig {
+            batched: Some(BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
             tags: vec![],
             target: None,

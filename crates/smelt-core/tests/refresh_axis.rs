@@ -132,26 +132,26 @@ fn refresh_cumulative_forbids_timeseries() {
     );
 }
 
-/// `refresh: cumulative` + `batched:` → `CumulativeForbidsIncremental`.
+/// `refresh: cumulative` + `batched:` → `CumulativeForbidsBatched`.
 #[test]
 fn refresh_cumulative_forbids_incremental() {
-    use smelt_core::config::{IncrementalConfig, IncrementalSafetyOverrides};
+    use smelt_core::config::{BatchedConfig, BatchedSafetyOverrides};
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
         refresh: Some(RefreshStrategy::Cumulative),
-        batched: Some(IncrementalConfig {
+        batched: Some(BatchedConfig {
             unique_key: vec![],
-            safety_overrides: IncrementalSafetyOverrides::default(),
+            safety_overrides: BatchedSafetyOverrides::default(),
         }),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
         .expect_err("refresh: cumulative + batched: must error");
     assert!(
-        matches!(err, MetadataError::CumulativeForbidsIncremental),
-        "Expected CumulativeForbidsIncremental, got: {}",
+        matches!(err, MetadataError::CumulativeForbidsBatched),
+        "Expected CumulativeForbidsBatched, got: {}",
         err
     );
 }
@@ -235,12 +235,12 @@ fn refresh_batched_without_timeseries_errors() {
 /// A `batched:` block without `refresh: batched` is a hard error.
 #[test]
 fn batched_block_without_refresh_batched_errors() {
-    use smelt_core::config::IncrementalConfig;
+    use smelt_core::config::BatchedConfig;
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        batched: Some(IncrementalConfig::default()),
+        batched: Some(BatchedConfig::default()),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT 1")

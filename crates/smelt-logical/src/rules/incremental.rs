@@ -613,7 +613,7 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
 mod tests {
     use super::*;
     use crate::graph::TimeseriesConfig;
-    use crate::types::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
+    use crate::types::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 
     fn model(name: &str, sql: &str, partition_column: &str) -> ModelInfo {
         model_with_event_time(name, sql, partition_column, "event_timestamp")
@@ -635,9 +635,9 @@ mod tests {
                 granularity: Granularity::Day,
                 week_start: None,
             }),
-            incremental_config: Some(IncrementalConfig {
+            incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
         }
     }
@@ -646,7 +646,7 @@ mod tests {
         name: &str,
         sql: &str,
         partition_column: &str,
-        overrides: IncrementalSafetyOverrides,
+        overrides: BatchedSafetyOverrides,
     ) -> ModelInfo {
         ModelInfo {
             name: name.to_string(),
@@ -658,7 +658,7 @@ mod tests {
                 granularity: Granularity::Day,
                 week_start: None,
             }),
-            incremental_config: Some(IncrementalConfig {
+            incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
                 safety_overrides: overrides,
             }),
@@ -734,9 +734,9 @@ mod tests {
                 granularity: Granularity::Hour,
                 week_start: None,
             }),
-            incremental_config: Some(IncrementalConfig {
+            incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
         let opp = detect(&m).unwrap().unwrap();
@@ -788,7 +788,7 @@ mod tests {
             "windowed",
             "SELECT date_trunc('day', event_timestamp) as event_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_timestamp) as rn FROM events GROUP BY 1",
             "event_date",
-            IncrementalSafetyOverrides {
+            BatchedSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },
@@ -845,7 +845,7 @@ mod tests {
             "having_model",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2 HAVING COUNT(*) > 10",
             "event_date",
-            IncrementalSafetyOverrides {
+            BatchedSafetyOverrides {
                 allow_having: true,
                 ..Default::default()
             },
@@ -955,9 +955,9 @@ mod tests {
                 granularity: Granularity::Week,
                 week_start: Some(Weekday::Monday),
             }),
-            incremental_config: Some(IncrementalConfig {
+            incremental_config: Some(BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
         let opp = detect(&m).unwrap().unwrap();
@@ -1031,9 +1031,9 @@ mod tests {
                 granularity: Granularity::Day,
                 week_start: None,
             }),
-            incremental_config: Some(IncrementalConfig {
+            incremental_config: Some(BatchedConfig {
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
         let result = detect(&m);
@@ -1053,9 +1053,9 @@ mod tests {
                 granularity: Granularity::Day,
                 week_start: None,
             }),
-            incremental_config: Some(IncrementalConfig {
+            incremental_config: Some(BatchedConfig {
                 unique_key: vec!["nonexistent_col".to_string()],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
         };
         let result = detect(&m);
@@ -1086,7 +1086,7 @@ mod tests {
             "lagged",
             "SELECT user_id, event_timestamp, LAG(amount, 3) OVER (ORDER BY event_timestamp) as prev FROM events",
             "event_date",
-            IncrementalSafetyOverrides {
+            BatchedSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },
@@ -1111,7 +1111,7 @@ mod tests {
             "running",
             "SELECT user_id, event_timestamp, SUM(amount) OVER (ORDER BY event_timestamp RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as running FROM events",
             "event_date",
-            IncrementalSafetyOverrides {
+            BatchedSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },

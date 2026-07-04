@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 pub use smelt_core::config::{
-    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
-    Materialization, TimeseriesConfig, Weekday,
+    BatchedConfig, BatchedSafetyOverrides, Granularity, IncrementalStrategy, Materialization,
+    TimeseriesConfig, Weekday,
 };
 
 /// A transformation the optimizer wants to apply to a model.
@@ -90,14 +90,14 @@ pub struct Frontmatter {
     #[serde(default)]
     pub refresh: Option<smelt_core::config::RefreshStrategy>,
     #[serde(default)]
-    pub batched: Option<IncrementalConfig>,
+    pub batched: Option<BatchedConfig>,
 }
 
 impl Frontmatter {
     /// The `batched:` block, defaulted to empty, when this frontmatter opts
     /// into `refresh: batched` — the opt-in is the `refresh:` selector, not
     /// the presence of the optional `batched:` block.
-    pub fn batched_config(&self) -> Option<IncrementalConfig> {
+    pub fn batched_config(&self) -> Option<BatchedConfig> {
         if self.refresh == Some(smelt_core::config::RefreshStrategy::Batched) {
             Some(self.batched.clone().unwrap_or_default())
         } else {

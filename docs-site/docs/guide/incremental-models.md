@@ -20,7 +20,7 @@ Incremental behavior is configured by selecting `refresh: batched`, plus one req
 - **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
 - **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`).
 
-`timeseries:` is required when `refresh: batched` is set. Declaring `refresh: batched` without `timeseries:` is a validation error (`TimeseriesRequiredForIncremental`). A `batched:` block without `refresh: batched` is also a validation error.
+`timeseries:` is required when `refresh: batched` is set. Declaring `refresh: batched` without `timeseries:` is a validation error (`TimeseriesRequiredForBatched`). A `batched:` block without `refresh: batched` is also a validation error.
 
 ### Frontmatter example
 

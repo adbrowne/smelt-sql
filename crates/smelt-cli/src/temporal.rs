@@ -11,7 +11,7 @@ pub use smelt_runtime::windowing::{
 };
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{DataLatency, IncrementalConfig, SourcesConfig};
+use smelt_core::{BatchedConfig, DataLatency, SourcesConfig};
 use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days,
 };
@@ -37,7 +37,7 @@ pub struct SingleIncrementalWindow {
 /// the requested range by the derived lookback/lookahead.
 pub fn compute_single_window(
     sql: &str,
-    _config: &IncrementalConfig,
+    _config: &BatchedConfig,
     timeseries: &TimeseriesConfig,
     sources: Option<&SourcesConfig>,
     model_metadata_latency: Option<&DataLatency>,
@@ -128,11 +128,11 @@ mod tests {
         }
     }
 
-    fn make_inc() -> IncrementalConfig {
-        use smelt_core::IncrementalSafetyOverrides;
-        IncrementalConfig {
+    fn make_inc() -> BatchedConfig {
+        use smelt_core::BatchedSafetyOverrides;
+        BatchedConfig {
             unique_key: vec![],
-            safety_overrides: IncrementalSafetyOverrides::default(),
+            safety_overrides: BatchedSafetyOverrides::default(),
         }
     }
 

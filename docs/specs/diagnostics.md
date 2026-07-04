@@ -102,19 +102,19 @@ Owned by `docs/specs/timeseries.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `TimeseriesRequiredForIncremental` | Error | A model declares `incremental:` but has no `timeseries:` block. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: batched` but has no `timeseries:` block. |
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
 
 ---
 
-### Incremental
+### Batched
 
 Owned by `docs/specs/batched_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `IncrementalNotBatchSafe` | Warning | An `incremental` model's SQL is not batch-safe under the planner's incremental safety classifier; execution falls back to a safe chunking strategy. |
-| `EventTimeColumnNotVisibleAtOuterSelect` | Error | An incremental model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
+| `BatchedNotSafe` | Warning | A `refresh: batched` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
+| `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 
 ---
 
@@ -133,7 +133,7 @@ Owned by `docs/specs/cumulative_aggregate.md`.
 | `CumulativeMultipleDrivingSources` | Error | Multiple timeseries-tagged sources in a `refresh: cumulative` model's FROM (v1 supports exactly one). |
 | `CumulativeSqlNotParseable` | Error | A `refresh: cumulative` model's SELECT could not be parsed for aggregator classification. |
 | `CumulativeForbidsTimeseries` | Error | A `refresh: cumulative` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
-| `CumulativeForbidsIncremental` | Error | A `refresh: cumulative` model incorrectly declares an `incremental:` block. Anchored at offset 0. |
+| `CumulativeForbidsBatched` | Error | A `refresh: cumulative` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 
 ---
 

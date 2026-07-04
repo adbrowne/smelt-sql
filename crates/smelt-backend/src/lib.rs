@@ -10,7 +10,7 @@ mod types;
 
 pub use error::BackendError;
 pub use smelt_core::config::{
-    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
+    BatchedConfig, BatchedSafetyOverrides, Granularity, IncrementalStrategy,
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use types::{
@@ -253,9 +253,9 @@ pub trait Backend: Send + Sync {
     /// longer an incremental strategy — it is the physical primitive of the
     /// `cumulative_aggregate` materialization (see
     /// `docs/specs/cumulative_aggregate.md`). The `unique_key` field on
-    /// `IncrementalConfig` is reserved for backends that may want to use it
+    /// `BatchedConfig` is reserved for backends that may want to use it
     /// for diagnostics or audit; it does not change strategy selection here.
-    fn resolve_strategy(&self, _config: &IncrementalConfig) -> IncrementalStrategy {
+    fn resolve_strategy(&self, _config: &BatchedConfig) -> IncrementalStrategy {
         IncrementalStrategy::DeleteInsert
     }
 

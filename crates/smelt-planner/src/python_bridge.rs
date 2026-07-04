@@ -45,7 +45,7 @@ fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'
     let types = py.import("smelt_sdk.types")?;
 
     // Timeseries config provides the incremental config that Python sees.
-    // IncrementalConfig (Rust) only carries unique_key + safety_overrides;
+    // BatchedConfig (Rust) only carries unique_key + safety_overrides;
     // partition_column / event_time_column / granularity live in TimeseriesConfig.
     let inc_config = match &model.timeseries_config {
         Some(ts) => {
@@ -325,7 +325,7 @@ pub fn run_python_rules(models: &[&ModelInfo]) -> (Vec<Transformation>, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{IncrementalConfig, TimeseriesConfig};
+    use crate::types::{BatchedConfig, TimeseriesConfig};
 
     #[test]
     fn test_discover_rules_without_packages() {
@@ -352,10 +352,10 @@ mod tests {
                     granularity: crate::types::Granularity::Day,
                     week_start: None,
                 }),
-                incremental_config: Some(IncrementalConfig {
+                incremental_config: Some(BatchedConfig {
                     enabled: true,
                     unique_key: vec![],
-                    safety_overrides: crate::types::IncrementalSafetyOverrides::default(),
+                    safety_overrides: crate::types::BatchedSafetyOverrides::default(),
                 }),
             };
 

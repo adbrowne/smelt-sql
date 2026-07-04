@@ -24,7 +24,7 @@
 //!    ```
 
 use crate::config::{
-    DataLatency, IncrementalConfig, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
+    BatchedConfig, DataLatency, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::de::Error as _;
@@ -152,7 +152,7 @@ pub struct ModelMetadata {
     /// Selection itself is `refresh: batched` (`refresh` field below), not the
     /// presence of this block.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batched: Option<IncrementalConfig>,
+    pub batched: Option<BatchedConfig>,
 
     /// Target to execute this model on (overrides smelt.yml and CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,8 +334,8 @@ pub enum MetadataError {
 
     /// A model declares `refresh: cumulative` (or another keyed-output mode)
     /// and a `batched:` block.
-    #[error("CumulativeForbidsIncremental: cumulative and batched are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
-    CumulativeForbidsIncremental,
+    #[error("CumulativeForbidsBatched: cumulative and batched are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
+    CumulativeForbidsBatched,
 
     /// A model declares a `batched:` block without `refresh: batched`.
     #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: batched` — add `refresh: batched` or remove the `batched:` block")]
@@ -374,7 +374,7 @@ fn frontmatter_has_generates(source: &str) -> bool {
 /// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
 /// - Legacy nested form (`event_time_column` inside `batched:`) was removed;
 ///   its presence in the YAML block now produces a YAML parse error (unknown field)
-///   rather than a custom diagnostic, because `IncrementalConfig` no longer
+///   rather than a custom diagnostic, because `BatchedConfig` no longer
 ///   declares those fields.
 /// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
@@ -384,7 +384,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // fires alongside the other materialization-block constraints.
     // Triggered by `refresh: cumulative`.
     if metadata.is_cumulative() && metadata.batched.is_some() {
-        return Err(MetadataError::CumulativeForbidsIncremental);
+        return Err(MetadataError::CumulativeForbidsBatched);
     }
 
     // Rule: cumulative forbids timeseries: — the cumulative output
@@ -1535,7 +1535,7 @@ FROM smelt.orders_raw"#;
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
             }),
-            batched: Some(crate::config::IncrementalConfig::default()),
+            batched: Some(crate::config::BatchedConfig::default()),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
@@ -1572,7 +1572,7 @@ SELECT dt FROM foo"#;
     }
 
     /// A `.sql` file declaring `event_time_column` inside `batched:` has a
-    /// bad nested value (IncrementalConfig has deny_unknown_fields). The recovery
+    /// bad nested value (BatchedConfig has deny_unknown_fields). The recovery
     /// path strips `batched:` and returns Ok with partial metadata.
     /// Discovery is resilient; smelt-db surfaces a MalformedTimeseries diagnostic.
     #[test]
@@ -1733,23 +1733,23 @@ GROUP BY device_id, user_id"#;
     }
 
     /// A model with `refresh: cumulative` + a `batched:` block
-    /// emits `CumulativeForbidsIncremental`.
+    /// emits `CumulativeForbidsBatched`.
     #[test]
     fn test_cumulative_aggregate_forbids_incremental() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::Cumulative),
-            batched: Some(crate::config::IncrementalConfig {
+            batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: cumulative + batched: must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsIncremental),
-            "Expected CumulativeForbidsIncremental, got: {}",
+            matches!(err, MetadataError::CumulativeForbidsBatched),
+            "Expected CumulativeForbidsBatched, got: {}",
             err
         );
     }

@@ -8,7 +8,7 @@
 use super::*;
 use smelt_cli::TimeRange;
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{Granularity, IncrementalConfig};
+use smelt_core::{BatchedConfig, Granularity};
 
 fn batch_safe_filtered(start: &str, end: &str) -> String {
     format!(
@@ -34,9 +34,9 @@ fn _unused_range_ref() -> TimeRange {
 }
 
 #[allow(dead_code)]
-fn _unused_config_ref() -> (IncrementalConfig, TimeseriesConfig) {
+fn _unused_config_ref() -> (BatchedConfig, TimeseriesConfig) {
     (
-        IncrementalConfig {
+        BatchedConfig {
             unique_key: vec![],
             safety_overrides: Default::default(),
         },

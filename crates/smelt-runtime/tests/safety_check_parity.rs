@@ -11,7 +11,7 @@
 //!    unless `allow_column_removal = true`.
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
+use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 use smelt_planner::{ModelGraph, ModelInfo};
 use smelt_runtime::safety::{
     check_bound_derivation, check_planner_safety, should_force_full_refresh,
@@ -29,10 +29,10 @@ fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {
     }
 }
 
-fn make_inc() -> IncrementalConfig {
-    IncrementalConfig {
+fn make_inc() -> BatchedConfig {
+    BatchedConfig {
         unique_key: vec![],
-        safety_overrides: IncrementalSafetyOverrides::default(),
+        safety_overrides: BatchedSafetyOverrides::default(),
     }
 }
 

@@ -635,10 +635,10 @@ pub enum DiagnosticCode {
     UnclosedFrontmatter,
 
     // ── Timeseries diagnostic codes ──────────────────────────────────────────
-    /// A model declares `incremental:` without a sibling `timeseries:` block.
+    /// A model declares `refresh: batched` without a sibling `timeseries:` block.
     /// Anchored at the top of the file (line 0, column 0).
-    /// Message: "TimeseriesRequiredForIncremental: model declares `incremental:` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
-    TimeseriesRequiredForIncremental,
+    /// Message: "TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
+    TimeseriesRequiredForBatched,
     /// The `timeseries:` block parses but violates a structural rule.
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
@@ -694,14 +694,14 @@ pub enum DiagnosticCode {
     /// The cumulative output has no partition column; the rule reads it from the
     /// driving source. Anchored at offset 0. Error severity.
     CumulativeForbidsTimeseries,
-    /// A `cumulative_aggregate` model incorrectly declares an `incremental:` block.
+    /// A `cumulative_aggregate` model incorrectly declares a `batched:` block.
     /// The two materializations have different equivalence contracts; pick one.
     /// Anchored at offset 0. Error severity.
-    CumulativeForbidsIncremental,
-    /// Advisory (`Warning`): an `incremental` model's SQL is not batch-safe
-    /// under the planner's incremental safety classifier (the build does not
+    CumulativeForbidsBatched,
+    /// Advisory (`Warning`): a `batched` model's SQL is not batch-safe
+    /// under the planner's batch safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).
-    IncrementalNotBatchSafe,
+    BatchedNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM

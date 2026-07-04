@@ -64,7 +64,7 @@ A source that declares `timeseries:` must declare the named `event_time_column` 
 | Code | Severity | Trigger |
 |---|---|---|
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule (missing required key, unknown key, `granularity` not in the enum, `partition_column` absent from the model's output / source's columns, `event_time_column` has an incompatible type). |
-| `TimeseriesRequiredForIncremental` | Error | A model declares `incremental:` without `timeseries:`. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: batched` without `timeseries:`. |
 
 ### `smelt.yml` (project-level overrides)
 
@@ -97,9 +97,9 @@ A model or source **without** `timeseries:` is non-timeseries — it has no decl
 | `ephemeral` | No — ephemeral models have no persisted output; declaring `timeseries:` is `MalformedTimeseries`. |
 | `test` | No — test models are not persistent outputs; declaring `timeseries:` is `MalformedTimeseries`. |
 
-### Interaction with `incremental:`
+### Interaction with `refresh: batched`
 
-A model that declares `incremental:` (per `batched_models.md`) must also declare `timeseries:`. The two blocks have independent surfaces — `timeseries:` declares the time dimension, `incremental:` opts the model into incremental execution and carries strategy-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `incremental:` without `timeseries:` is `TimeseriesRequiredForIncremental`.
+A model that declares `refresh: batched` (per `batched_models.md`) must also declare `timeseries:`. The two blocks have independent surfaces — `timeseries:` declares the time dimension, the optional `batched:` block carries strategy-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `refresh: batched` without `timeseries:` is `TimeseriesRequiredForBatched`.
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
@@ -117,7 +117,7 @@ A source declaring `timeseries:` opts in to being a pushdown target for downstre
 ### LSP surface
 
 - **Hover** on a `smelt.<path>` reference whose target carries `timeseries:` shows the declared partition column and granularity alongside the column list.
-- **Diagnostics** for `MalformedTimeseries` and `TimeseriesRequiredForIncremental` follow the standard diagnostic format (`lsp.md`).
+- **Diagnostics** for `MalformedTimeseries` and `TimeseriesRequiredForBatched` follow the standard diagnostic format (`lsp.md`).
 - **Goto-definition** for a `timeseries:` field navigates to the column declaration in the model's output or the source YAML.
 
 ### Granularity arithmetic
@@ -160,15 +160,15 @@ This section captures the load-bearing rationale.
 ## References
 
 - **Code**:
-  - `crates/smelt-core/src/config.rs` — `IncrementalConfig` (today's home of the fields; will be split into `TimeseriesConfig` + a slimmer `IncrementalConfig`)
+  - `crates/smelt-core/src/config.rs` — `BatchedConfig`, `TimeseriesConfig`
   - `crates/smelt-core/src/metadata.rs` — frontmatter parsing (`ModelMetadata`)
   - `crates/smelt-core/src/sources.rs` — `SourceInfo` (will gain a `timeseries:` parser path)
-- **Tests**: schema validation, `MalformedTimeseries` diagnostic coverage, `TimeseriesRequiredForIncremental` coverage (to be added with the migration plan)
+- **Tests**: schema validation, `MalformedTimeseries` diagnostic coverage, `TimeseriesRequiredForBatched` coverage (to be added with the migration plan)
 - **User docs**: to be authored alongside the migration plan; will live at `docs-site/docs/reference/timeseries.md`
 - **Plans (history)**:
   - `docs/research/20260521-incremental-as-planner-rule.md` — research doc that proposed factoring `timeseries:` out of `incremental:`
 - **Related specs**:
-  - `batched_models.md` — consumes `timeseries:`; carries incremental-rule-specific keys
+  - `batched_models.md` — consumes `timeseries:`; carries batched-rule-specific keys
   - `sources.md` — host for `timeseries:` on external sources
   - `models.md` — host for `timeseries:` on model frontmatter; lists the key in the frontmatter table
   - `types.md` — the date/timestamp/integer type vocabulary used for type constraints

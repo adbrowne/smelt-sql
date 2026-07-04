@@ -11,7 +11,7 @@
 use chrono::{Duration, NaiveDate};
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{Granularity, IncrementalConfig};
+use smelt_core::{BatchedConfig, Granularity};
 use smelt_planner::{
     analyze_batch_safety, analyze_temporal_dependencies, compute_effective_window,
     granularity_period_days, BatchSafety, ModelInfo,
@@ -62,7 +62,7 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 /// sources configuration.
 pub fn compute_incremental_windows(
     timeseries: &TimeseriesConfig,
-    inc_config: &IncrementalConfig,
+    inc_config: &BatchedConfig,
     sql: &str,
     data_latency_days: u32,
     full_range: &TimeRange,
