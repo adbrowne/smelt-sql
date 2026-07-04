@@ -130,7 +130,7 @@ done and consumed here, not redone.
 | B0    | done    | 18a0f0cd | 2026-07-04 |
 | B1    | done    | 6186a9c2 | 2026-07-04 |
 | B2    | done    | 0c4e3439 | 2026-07-04 |
-| B3    | done    | TBD | 2026-07-04 |
+| B3    | done    | 9018ce4b | 2026-07-04 |
 | B4    | pending |        |      |
 | B5    | pending |        |      |
 | B6    | pending |        |      |
