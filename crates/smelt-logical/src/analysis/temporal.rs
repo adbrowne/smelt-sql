@@ -8,6 +8,8 @@
 use serde::Serialize;
 use smelt_parser::{parse, File, FrameUnit, SelectStmt};
 
+use crate::analysis::source_bounds;
+
 /// How much temporal context a query needs beyond its requested time range.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TemporalDependency {
@@ -336,26 +338,49 @@ fn extract_bound_number(text: &str) -> Option<u32> {
         .find_map(|word| word.parse::<u32>().ok())
 }
 
-/// Extract days from an interval expression like "INTERVAL '3' DAY" or "INTERVAL '3 days'".
+/// Extract days from an interval expression like "INTERVAL '3' DAY" or
+/// "INTERVAL '3 days'", by routing the recognised unit through the shared
+/// [`source_bounds::parse_interval`] — the single interval-literal parser
+/// used everywhere in this crate (see `docs/specs/model_properties.md`
+/// "Unified bound / reach derivation"). Month/year fold to
+/// `Offset::Symbolic` there, since a month/year has no fixed length in
+/// seconds — but this module's `EffectiveWindow` is an advisory
+/// day-granular estimate consumed to widen the actual filter/DELETE range
+/// for real incremental runs (unlike `source_bounds`'s fail-closed pushdown
+/// proof), so silently falling through to the caller's bare-number fallback
+/// would under-widen the lookback by ~30-90x. Apply the same calendar
+/// approximation this estimate has always used: month → 30 days/period,
+/// year → 365 days/period.
 fn extract_interval_days(text: &str) -> Option<u32> {
-    // Try to find a number in the text
     let n = extract_bound_number(text)?;
-
     let upper = text.to_uppercase();
-    if upper.contains("DAY") {
-        Some(n)
+    let unit = if upper.contains("DAY") {
+        "DAY"
     } else if upper.contains("WEEK") {
-        Some(n * 7)
+        "WEEK"
     } else if upper.contains("MONTH") {
-        Some(n * 30) // Approximate
+        "MONTH"
     } else if upper.contains("YEAR") {
-        Some(n * 365) // Approximate
+        "YEAR"
     } else if upper.contains("HOUR") {
-        // Less than a day — round up to 1
-        Some(if n > 0 { 1 } else { 0 })
+        "HOUR"
     } else {
-        // Default: assume days
-        Some(n)
+        // Default: assume days.
+        "DAY"
+    };
+
+    match source_bounds::parse_interval(&format!("{n} {unit}"))? {
+        source_bounds::Offset::Seconds(s) => {
+            // Round up to whole days — a sub-day duration (e.g. HOUR) still
+            // needs at least 1 day of lookback/lookahead margin.
+            let days = s.0.div_ceil(86400) as u32;
+            Some(if n > 0 { days.max(1) } else { 0 })
+        }
+        source_bounds::Offset::Symbolic(_) => Some(match unit {
+            "MONTH" => n * 30,
+            "YEAR" => n * 365,
+            _ => n,
+        }),
     }
 }
 
@@ -438,22 +463,39 @@ fn find_interval_in_text(text: &str) -> Option<u32> {
     max_days
 }
 
-/// Given a combined interval text and the numeric value, determine days.
+/// Given a combined interval text (the quoted value plus any unit text that
+/// followed the closing quote, e.g. `"3 " + "DAY"` for `INTERVAL '3' DAY`)
+/// and the numeric value, determine days — routed through the shared
+/// [`source_bounds::parse_interval`] (see `extract_interval_days`'s doc for
+/// why month/year apply a calendar approximation here rather than folding
+/// through to `Offset::Symbolic`/`None`).
 fn extract_interval_days_from_combined(text: &str, n: u32) -> Option<u32> {
     let upper = text.to_uppercase();
-    if upper.contains("DAY") {
-        Some(n)
+    let unit = if upper.contains("DAY") {
+        "DAY"
     } else if upper.contains("WEEK") {
-        Some(n * 7)
+        "WEEK"
     } else if upper.contains("MONTH") {
-        Some(n * 30)
+        "MONTH"
     } else if upper.contains("YEAR") {
-        Some(n * 365)
+        "YEAR"
     } else if upper.contains("HOUR") {
-        Some(if n > 0 { 1 } else { 0 })
+        "HOUR"
     } else {
-        // Default: assume days
-        Some(n)
+        // Default: assume days.
+        "DAY"
+    };
+
+    match source_bounds::parse_interval(&format!("{n} {unit}"))? {
+        source_bounds::Offset::Seconds(s) => {
+            let days = s.0.div_ceil(86400) as u32;
+            Some(if n > 0 { days.max(1) } else { 0 })
+        }
+        source_bounds::Offset::Symbolic(_) => Some(match unit {
+            "MONTH" => n * 30,
+            "YEAR" => n * 365,
+            _ => n,
+        }),
     }
 }
 
@@ -798,6 +840,20 @@ mod tests {
         };
         let window = compute_effective_window(&dep, 3, 1);
         assert!(window.is_unbounded);
+    }
+
+    #[test]
+    fn test_range_interval_months_preceding_approximates_30_days_per_month() {
+        let sql = "SELECT user_id, SUM(amount) OVER (PARTITION BY user_id ORDER BY day RANGE BETWEEN INTERVAL '3 months' PRECEDING AND CURRENT ROW) as rolling_3mo FROM events";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(90));
+    }
+
+    #[test]
+    fn test_range_interval_years_preceding_approximates_365_days_per_year() {
+        let sql = "SELECT user_id, SUM(amount) OVER (PARTITION BY user_id ORDER BY day RANGE BETWEEN INTERVAL '2 years' PRECEDING AND CURRENT ROW) as rolling_2yr FROM events";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(730));
     }
 
     #[test]

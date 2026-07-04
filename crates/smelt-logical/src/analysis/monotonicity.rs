@@ -23,15 +23,15 @@
 use serde::Serialize;
 use smelt_parser::{BinaryExpr, CastExpr, ColumnRef, Expr, FunctionCall};
 
-use crate::analysis::source_bounds::{BoundContext, Seconds};
+use crate::analysis::source_bounds::{self, BoundContext, Seconds};
 
 /// Constant temporal shift folded out of a monotone chain (col ± INTERVAL const).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum Offset {
-    Seconds(Seconds),
-    /// Non-uniform unit (month/year) — not folded to seconds.
-    Symbolic(String),
-}
+///
+/// Re-exported from `source_bounds` — the unified interval-literal parser
+/// (`source_bounds::parse_interval`) lives there and is shared by every
+/// interval-literal call site in this crate; see
+/// `docs/specs/model_properties.md` "Unified bound / reach derivation".
+pub use source_bounds::Offset;
 
 /// ClickHouse-style verdict for the traced chain (cf. ClickHouse getMonotonicityForRange).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -484,36 +484,7 @@ fn parse_interval_literal(expr: &Expr) -> Option<Offset> {
     let string_tok = tokens.iter().find(|t| t.kind() == STRING)?;
     let raw = string_tok.text();
     let value = raw.trim_matches(|c| c == '\'' || c == '"');
-    parse_interval_value(value)
-}
-
-/// Parse an interval value string like "1 day", "30 minutes", "1 month".
-/// seconds/minutes/hours/days/weeks fold to `Offset::Seconds`; month/year
-/// (non-uniform durations) fold to `Offset::Symbolic`.
-fn parse_interval_value(value: &str) -> Option<Offset> {
-    let trimmed = value.trim();
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let n: u64 = parts[0].parse().ok()?;
-    let unit = parts.get(1).copied().unwrap_or("SECOND").to_uppercase();
-
-    if unit.starts_with("SECOND") {
-        Some(Offset::Seconds(Seconds(n)))
-    } else if unit.starts_with("MINUTE") {
-        Some(Offset::Seconds(Seconds::minutes(n)))
-    } else if unit.starts_with("HOUR") {
-        Some(Offset::Seconds(Seconds::hours(n)))
-    } else if unit.starts_with("DAY") {
-        Some(Offset::Seconds(Seconds::days(n)))
-    } else if unit.starts_with("WEEK") {
-        Some(Offset::Seconds(Seconds::weeks(n)))
-    } else if unit.starts_with("MONTH") || unit.starts_with("YEAR") {
-        Some(Offset::Symbolic(trimmed.to_string()))
-    } else {
-        None
-    }
+    source_bounds::parse_interval(value)
 }
 
 /// Fold a newly-parsed constant shift into the chain's running offset.

@@ -227,10 +227,11 @@ by `docs/plans/20260704-model-updates.md` (design:
   targeted column backfill, dimension-driven horizon MERGE. Idempotent re-scan vs
   delta probe is partial (input-delta discovery is partial).
 - **Duplicated licensing analyses.** Several transforms are licensed by proofs that
-  exist in duplicate in the tree (two interval-reach analyses, two driving-fact
-  resolvers, two bound-derivation orchestration sites); the licences these
-  transforms read are being consolidated in `model_properties.md`. Until then a
-  transform may read the derived bound from more than one code path.
+  exist in duplicate in the tree (two driving-fact resolvers); the licences these
+  transforms read are being consolidated in `model_properties.md`. The interval-reach
+  bound (`derive_model_bounds`) now has a single interval-literal parser and a single
+  bound-derivation orchestration entry point (`derive_and_classify_bounds`), so a
+  transform reads the derived bound from exactly one code path.
 - **Horizon settled-delay / tail-rewrite is now catalogued (unbuilt).** Because the
   derived horizon is a core part of the maintenance contract (`model_maintenance.md`
   §"Windowed maintenance and the horizon"), the forward-reach settle/tail-rewrite

@@ -4,8 +4,7 @@ use tracing::info;
 
 use crate::analysis::monotonicity::{trace_event_time, EventTimeTrace};
 use crate::analysis::source_bounds::{
-    derive_model_bounds, from_clause_alias_sources, resolve_join_driving_fact, BoundContext,
-    BoundResult, InjectionPoint,
+    from_clause_alias_sources, resolve_join_driving_fact, BoundContext, BoundResult, InjectionPoint,
 };
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
 use crate::analysis::{
@@ -1012,10 +1011,10 @@ pub fn derive_model_source_bounds(
     // A/B textual bound walk, just over the (possibly narrowed) source set.
     let ctx = restrict_ctx_for_constructs(model, &ctx, stripped)?;
 
-    let bounds = derive_model_bounds(stripped, &ctx);
+    let bounds = crate::analysis::source_bounds::derive_and_classify_bounds(stripped, &ctx);
 
     // Check for NotDerivable — refuse the model.
-    for (source_name, bound) in &bounds {
+    for (source_name, (_, bound)) in &bounds {
         if *bound == BoundResult::NotDerivable {
             return Err(format!(
                 "Model '{}': cannot derive a temporal bound for source '{}'. \
@@ -1029,13 +1028,7 @@ pub fn derive_model_source_bounds(
         }
     }
 
-    Ok(bounds
-        .into_iter()
-        .map(|(source_name, bound)| {
-            let injection_point = bound.injection_point();
-            (source_name, (injection_point, bound))
-        })
-        .collect())
+    Ok(bounds)
 }
 
 /// Narrow `ctx` (all upstream timeseries refs) down to the sources whose

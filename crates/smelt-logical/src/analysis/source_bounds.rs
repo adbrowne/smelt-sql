@@ -73,6 +73,58 @@ impl Seconds {
     }
 }
 
+/// The single, unified representation of a parsed `INTERVAL '<value>'`
+/// literal, shared by every interval-literal call site in this crate
+/// (`source_bounds` Form A/B extraction, `monotonicity`'s constant-shift
+/// classifier, and `temporal`'s day-granular scan). Seconds/minutes/hours/
+/// days/weeks are uniform durations and fold to `Offset::Seconds`; month and
+/// year are *not* uniform durations (a month is 28-31 days; a year is
+/// 365-366) so they fold to `Offset::Symbolic` rather than an approximate
+/// (and previously divergent — 30d here, 30d there, but computed twice)
+/// day count. See `docs/specs/model_properties.md` "Unified bound / reach
+/// derivation".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Offset {
+    Seconds(Seconds),
+    /// Non-uniform unit (month/year) — not folded to seconds.
+    Symbolic(String),
+}
+
+/// Parse an interval-literal value string (e.g. `"1 day"`, `"30 minutes"`,
+/// `"1 month"`, or a bare `"5"` with no unit) into the unified [`Offset`]
+/// representation. Returns `None` when `value` has no parseable leading
+/// integer.
+pub(crate) fn parse_interval(value: &str) -> Option<Offset> {
+    let trimmed = value.trim();
+    let upper = trimmed.to_uppercase();
+    let parts: Vec<&str> = upper.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let n: u64 = parts[0].parse().ok()?;
+    let Some(unit) = parts.get(1).copied() else {
+        // No unit — assume the bare number is already seconds.
+        return Some(Offset::Seconds(Seconds(n)));
+    };
+
+    if unit.starts_with("SECOND") {
+        Some(Offset::Seconds(Seconds(n)))
+    } else if unit.starts_with("MINUTE") {
+        Some(Offset::Seconds(Seconds::minutes(n)))
+    } else if unit.starts_with("HOUR") {
+        Some(Offset::Seconds(Seconds::hours(n)))
+    } else if unit.starts_with("DAY") {
+        Some(Offset::Seconds(Seconds::days(n)))
+    } else if unit.starts_with("WEEK") {
+        Some(Offset::Seconds(Seconds::weeks(n)))
+    } else if unit.starts_with("MONTH") || unit.starts_with("YEAR") {
+        Some(Offset::Symbolic(trimmed.to_string()))
+    } else {
+        Some(Offset::Seconds(Seconds(n)))
+    }
+}
+
 /// The derived bound for one source reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -224,6 +276,34 @@ pub fn derive_model_bounds(sql: &str, ctx: &BoundContext) -> HashMap<String, Bou
     result
 }
 
+/// The single bound-derivation orchestration entry point: derive every
+/// source's [`BoundResult`] from `sql`/`ctx` and pair it with its
+/// [`InjectionPoint`] classification in the same walk, so the value used to
+/// widen a source's scan and the value that decides whether the outer output
+/// clamp is still needed can never disagree.
+///
+/// Both consumers that need "SQL + source list → bound + injection point"
+/// call this rather than re-deriving it independently:
+/// - the planner's pushdown-eligibility rule
+///   (`rules::incremental::derive_model_source_bounds`), which first narrows
+///   `ctx` for UNION/JOIN/derived-table constructs and then refuses the
+///   model on any `NotDerivable` result;
+/// - the runtime's SQL compiler (`smelt_runtime::compile::build_source_bound_map`),
+///   which extracts only the `Bounded` results (an already-refused-or-allowed
+///   model has nothing left to reject by the time it reaches compilation).
+pub fn derive_and_classify_bounds(
+    sql: &str,
+    ctx: &BoundContext,
+) -> HashMap<String, (InjectionPoint, BoundResult)> {
+    derive_model_bounds(sql, ctx)
+        .into_iter()
+        .map(|(source_name, bound)| {
+            let injection_point = bound.injection_point();
+            (source_name, (injection_point, bound))
+        })
+        .collect()
+}
+
 /// Derive a bound for a single source given its partition column.
 ///
 /// Returns `None` for lookup sources (no timeseries). For timeseries sources,
@@ -246,6 +326,18 @@ fn derive_bound_for_source(sql: &str, partition_col: &str) -> Option<BoundResult
     // old `UNBOUNDED PRECEDING`-only check lived.
     if has_unbounded_forward_reach(&upper) {
         return Some(BoundResult::Unbounded);
+    }
+
+    // Fail-closed: an `INTERVAL '<n> month|year'` literal folds to
+    // `Offset::Symbolic` (see `parse_interval`) — a calendar-relative unit
+    // has no fixed length in seconds without a reference date, so it cannot
+    // populate a `Bounded{before,after}` value. Per the proof discipline
+    // (absence of a proof is a rejection, never an optimistic default —
+    // `docs/specs/model_properties.md` §Constraints), refuse the whole
+    // source rather than silently treating the symbolic literal as
+    // zero-margin or approximating it to a fixed day count.
+    if has_symbolic_interval_in_bound_position(&upper) {
+        return Some(BoundResult::NotDerivable);
     }
 
     // Collect all Form A and Form B windows; merge them.
@@ -350,6 +442,35 @@ fn has_bare_lag_lead_over(upper_sql: &str) -> bool {
 /// Check for RANGE BETWEEN UNBOUNDED PRECEDING in the SQL.
 fn has_unbounded_preceding_range(upper_sql: &str) -> bool {
     upper_sql.contains("UNBOUNDED PRECEDING")
+}
+
+/// True if any `INTERVAL '...'` literal in the SQL parses to
+/// `Offset::Symbolic` (a month/year literal) — a calendar-relative unit that
+/// cannot populate a `Bounded{before,after}` value at all. A single scan
+/// over every `INTERVAL` occurrence in the whole statement, rather than
+/// scoping to the specific Form A/B position it was found at: over-refusing
+/// a source that happens to use a symbolic interval anywhere (even one that
+/// doesn't participate in a bound-relevant position) is the fail-closed
+/// direction, consistent with the rest of this text-scanning walk (e.g.
+/// [`has_unbounded_preceding_range`]).
+fn has_symbolic_interval_in_bound_position(upper_sql: &str) -> bool {
+    if !upper_sql.contains("INTERVAL") {
+        return false;
+    }
+    let mut search_from = 0;
+    let kw = "INTERVAL";
+    while let Some(rel) = upper_sql[search_from..].find(kw) {
+        let abs = search_from + rel;
+        let after = &upper_sql[abs + kw.len()..];
+        if matches!(
+            parse_quoted_interval_offset(after),
+            Some(Offset::Symbolic(_))
+        ) {
+            return true;
+        }
+        search_from = abs + 1;
+    }
+    false
 }
 
 /// Check whether any `RANGE BETWEEN` frame in the SQL has an unbounded or
@@ -563,8 +684,9 @@ fn extract_interval_seconds_in_text(text: &str) -> Option<Seconds> {
     None
 }
 
-/// Parse a quoted interval like " '1 day'" or " '30 minutes'" and return Seconds.
-fn parse_quoted_interval(text: &str) -> Option<Seconds> {
+/// Parse a quoted interval like " '1 day'" or " '30 minutes'" into the
+/// unified [`Offset`] representation (see `parse_interval`).
+fn parse_quoted_interval_offset(text: &str) -> Option<Offset> {
     let trimmed = text.trim();
     // Find the quoted value
     let quote_start = trimmed.find('\'')?;
@@ -572,43 +694,19 @@ fn parse_quoted_interval(text: &str) -> Option<Seconds> {
     let quote_end = rest.find('\'')?;
     let value = &rest[..quote_end];
 
-    parse_interval_value_str(value)
+    parse_interval(value)
 }
 
-/// Parse interval value string like "1 day", "30 minutes", "1" + context.
-fn parse_interval_value_str(value: &str) -> Option<Seconds> {
-    let upper = value.to_uppercase();
-    let parts: Vec<&str> = upper.split_whitespace().collect();
-    if parts.is_empty() {
-        return None;
-    }
-
-    // Could be "30 minutes" or "1 day" or "1" (with unit after the closing quote)
-    let n: u64 = parts[0].parse().ok()?;
-    let unit = if parts.len() >= 2 {
-        parts[1]
-    } else {
-        // No unit in the value — assume seconds or days based on magnitude
-        return Some(Seconds(n));
-    };
-
-    if unit.starts_with("SECOND") {
-        Some(Seconds(n))
-    } else if unit.starts_with("MINUTE") {
-        Some(Seconds::minutes(n))
-    } else if unit.starts_with("HOUR") {
-        Some(Seconds::hours(n))
-    } else if unit.starts_with("DAY") {
-        Some(Seconds::days(n))
-    } else if unit.starts_with("WEEK") {
-        Some(Seconds::weeks(n))
-    } else if unit.starts_with("MONTH") {
-        // Approximate: 30 days
-        Some(Seconds::days(n * 30))
-    } else if unit.starts_with("YEAR") {
-        Some(Seconds::days(n * 365))
-    } else {
-        Some(Seconds(n))
+/// Parse a quoted interval like " '1 day'" or " '30 minutes'" and return
+/// `Seconds`. Returns `None` both when no interval is present and when the
+/// interval is present but `Offset::Symbolic` (month/year) — the caller
+/// cannot distinguish "absent" from "symbolic" here, which is why
+/// [`has_symbolic_interval_in_bound_position`] runs its own dedicated,
+/// fail-closed scan *before* Form A/B accumulation ever calls this.
+fn parse_quoted_interval(text: &str) -> Option<Seconds> {
+    match parse_quoted_interval_offset(text)? {
+        Offset::Seconds(s) => Some(s),
+        Offset::Symbolic(_) => None,
     }
 }
 
@@ -1287,5 +1385,110 @@ mod tests {
         assert!(alias_sources
             .iter()
             .any(|(alias, source)| alias == "g" && source == "silver.lookup"));
+    }
+
+    // ---- Unified interval-reach walk (F1: fold temporal.rs's EffectiveWindow
+    // walk and the divergent parsers into this single `derive_model_bounds`
+    // spine) ----
+
+    /// A `DATE_TRUNC('day', …)`-style Form B backfill window — the same
+    /// day-granular case `temporal.rs::compute_effective_window` used to
+    /// classify independently via its own text scan — now derives through
+    /// `derive_model_bounds`, and its seconds-granular `before`/`after`
+    /// equal the former `EffectiveWindow.lookback_days` / `.lookahead_days`
+    /// span (2 days back, 1 day forward) converted to seconds.
+    #[test]
+    fn test_day_granular_backfill_window_matches_former_effective_window() {
+        let sql = "SELECT * FROM sessions s \
+                   WHERE s.event_date BETWEEN m.partition_date - INTERVAL '2 days' \
+                     AND m.partition_date + INTERVAL '1 days'";
+        let ctx = BoundContext::new().with_source("silver.sessions", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.sessions").unwrap();
+        match bound {
+            BoundResult::Bounded { before, after, .. } => {
+                let former_lookback_days: u64 = 2;
+                let former_lookahead_days: u64 = 1;
+                assert_eq!(before.0, former_lookback_days * 86400);
+                assert_eq!(after.0, former_lookahead_days * 86400);
+            }
+            other => panic!("Expected Bounded, got {:?}", other),
+        }
+    }
+
+    /// One interval parser (`parse_interval`), shared by every call site in
+    /// this module: `'1 month'` folds to `Offset::Symbolic` (not an
+    /// approximate ≈30-day count — see `has_symbolic_interval_in_bound_position`),
+    /// while `'120 minutes'` and `'2 hours'` — both routed through the same
+    /// parser — fold to the same seconds magnitude (7200s). (Neither the
+    /// former nor the unified parser supports a fractional leading number
+    /// like `'1.5 hours'` — `parts[0].parse::<u64>()` rejects it — so this
+    /// pre-existing limitation is exercised with whole-unit equivalents
+    /// instead of invented fractional support.)
+    #[test]
+    fn test_unified_parser_month_is_symbolic_not_approximate_days() {
+        let sql_month = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW) AS x \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events", "event_date");
+        let bounds = derive_model_bounds(sql_month, &ctx);
+        assert_eq!(
+            *bounds.get("silver.events").unwrap(),
+            BoundResult::NotDerivable,
+            "a symbolic (month/year) interval must refuse fail-closed, \
+             not silently approximate to ~30 days"
+        );
+    }
+
+    #[test]
+    fn test_unified_parser_minutes_and_hours_fold_to_same_seconds_magnitude() {
+        let sql_minutes = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '120 minutes' PRECEDING AND CURRENT ROW) AS x \
+                   FROM source_table";
+        let sql_hours = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '2 hours' PRECEDING AND CURRENT ROW) AS x \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events", "event_date");
+
+        let bounds_minutes = derive_model_bounds(sql_minutes, &ctx);
+        let bounds_hours = derive_model_bounds(sql_hours, &ctx);
+
+        let extract_before =
+            |bounds: &HashMap<String, BoundResult>| match bounds.get("silver.events").unwrap() {
+                BoundResult::Bounded { before, .. } => *before,
+                other => panic!("Expected Bounded, got {:?}", other),
+            };
+
+        assert_eq!(extract_before(&bounds_minutes), Seconds::hours(2));
+        assert_eq!(extract_before(&bounds_hours), Seconds::hours(2));
+    }
+
+    /// Fail-closed regression guard (unchanged by the unification): a
+    /// `NotDerivable` source (bare LAG/LEAD with no RANGE frame) still
+    /// refuses — it is not silently treated as a zero-margin bound.
+    #[test]
+    fn test_not_derivable_still_fail_closed_after_unification() {
+        let sql = "SELECT id, ts, LEAD(x) OVER (PARTITION BY id ORDER BY ts) AS next_x \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        assert_eq!(
+            *bounds.get("silver.events").unwrap(),
+            BoundResult::NotDerivable
+        );
+    }
+
+    /// Fail-closed regression guard: `Unbounded` still forbids a pushed
+    /// filter — `injection_point()` never resolves to `Source` for it.
+    #[test]
+    fn test_unbounded_still_forbids_pushed_filter_after_unification() {
+        let sql = "SELECT id, ts, SUM(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running \
+                   FROM source_table";
+        let ctx = BoundContext::new().with_source("silver.events", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events").unwrap();
+        assert_eq!(*bound, BoundResult::Unbounded);
+        assert_eq!(bound.injection_point(), InjectionPoint::OuterClamp);
     }
 }

@@ -34,7 +34,9 @@ pub fn build_source_bound_map(
     model_sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
 ) -> HashMap<String, crate::transformer::SourceBound> {
-    use smelt_planner::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
+    use smelt_planner::analysis::source_bounds::{
+        derive_and_classify_bounds, BoundContext, BoundResult,
+    };
 
     if dep_timeseries.is_empty() {
         return HashMap::new();
@@ -46,11 +48,14 @@ pub fn build_source_bound_map(
         ctx.add_source(dep_name, partition_col);
     }
 
-    let raw_bounds = derive_model_bounds(model_sql, &ctx);
+    // The single bound-derivation orchestration entry point (also used by
+    // `rules::incremental::derive_model_source_bounds` on the planner side) —
+    // one `derive_model_bounds` walk feeds both consumers.
+    let raw_bounds = derive_and_classify_bounds(model_sql, &ctx);
 
     let mut result = HashMap::new();
     for (dep_name, (segs, partition_col)) in dep_timeseries {
-        let bound_result = raw_bounds.get(dep_name).cloned();
+        let bound_result = raw_bounds.get(dep_name).map(|(_, bound)| bound.clone());
 
         let (before_secs, after_secs) = match bound_result {
             Some(BoundResult::Bounded { before, after, .. }) => (before.0, after.0),
