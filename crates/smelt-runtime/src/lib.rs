@@ -20,6 +20,7 @@ pub mod backfill;
 pub mod combined_loop;
 pub mod compile;
 pub mod cumulative;
+pub mod dimension_horizon_merge;
 pub mod execute;
 pub mod fn_bodies;
 pub mod gate;
@@ -44,6 +45,7 @@ pub use compile::{
 pub use cumulative::{
     build_cumulative_merge_sql, classify_cumulative_sql, execute_cumulative_aggregate,
 };
+pub use dimension_horizon_merge::dimension_horizon_merge;
 pub use execute::{build_source_timeseries_map, execute_project, BackendFactory, BackendFuture};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use gate::{format_gate_errors, gate_diagnostics, GateDiagnostic};

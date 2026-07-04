@@ -53,7 +53,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
 | Compile-time pinning | run-determinism (`NOW`/`CURRENT_*`) | resolve a run-deterministic function to a single literal once per run, before emit | unbuilt |
 | Targeted column backfill | additive-only model diff | `UPDATE`/dimension-merge only the added columns in place, never a full rebuild | **built** |
-| Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact | unbuilt (new) |
+| Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact | **built** |
 | Horizon settled-delay / tail-rewrite | maintained-window / horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value | unbuilt |
 | Idempotent window re-scan vs delta-driven probe | idempotent monoid + source mutation profile | unconditional CDF-free re-scan when the fold is idempotent; a per-run changed-set probe when a change feed is available | *partial* |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
@@ -222,7 +222,13 @@ by `docs/plans/20260704-model-updates.md` (design:
   cross-engine Parquet); targeted column backfill
   (`crates/smelt-runtime/src/backfill.rs::targeted_column_backfill`), which
   builds the `UPDATE ... FROM (...) AS src` statement licensed by an
-  additive-only model diff and a non-empty `unique_key`.
+  additive-only model diff and a non-empty `unique_key`; dimension-driven
+  horizon-bounded MERGE
+  (`crates/smelt-runtime/src/dimension_horizon_merge.rs::dimension_horizon_merge`),
+  which clamps a dimension batch's recompute `SELECT` to `[conv_ts − H,
+  conv_ts]` and hands it to `Backend::merge_into`, licensed by a monotone
+  join contribution (`join_contribution_monotone`) and a bounded horizon `H`
+  (the forward `after` reach from `derive_model_bounds`).
 - **The output clamp is injected at the model's own SELECT level.** The clamp
   is added as a `WHERE` condition on the model body itself, at the same query
   level the model's outermost `SELECT` runs at. For a model whose outermost
@@ -239,9 +245,8 @@ by `docs/plans/20260704-model-updates.md` (design:
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
-  bounded-domain multiset, compile-time pinning, dimension-driven horizon
-  MERGE. Idempotent re-scan vs delta probe is partial (input-delta discovery
-  is partial).
+  bounded-domain multiset, compile-time pinning. Idempotent re-scan vs delta
+  probe is partial (input-delta discovery is partial).
 - **Hidden decomposed state + presentation view is built as a mechanism**
   (`crates/smelt-logical/src/analysis/decomposed_state.rs`
   `decompose_to_state`): given a decomposable combiner (F4) it derives the
