@@ -1,5 +1,6 @@
 pub mod discriminants;
 pub mod join_shape;
+pub mod model_diff;
 pub mod monotonicity;
 pub mod presentation;
 pub mod source_bounds;
