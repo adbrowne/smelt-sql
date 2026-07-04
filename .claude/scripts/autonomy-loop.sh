@@ -413,7 +413,12 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # not anywhere in the streamed log. Plan files document the sentinel strings,
   # so reading them produces tool_use_result payloads that contain the literals
   # verbatim — grepping the whole log false-positives. Extract just .result.
-  final_result="$(jq -r 'select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
+  # -R/fromjson?: tolerate non-JSON lines interleaved into the --output-format
+  # json stream (e.g. "Background tasks still running after 600s; terminating.",
+  # emitted when the agent spawns async background work and returns). Without
+  # this a single stray line makes jq abort before the result envelope, yielding
+  # a spurious no_result_envelope pause instead of the real "no sentinel" path.
+  final_result="$(jq -Rr 'fromjson? | select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
 
   if [ -z "${final_result}" ]; then
     echo "===== Could not extract final .result from log — pausing loop ====="
