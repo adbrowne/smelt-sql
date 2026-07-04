@@ -186,7 +186,7 @@ keys**, and **per-source clamp observability**.
 |-------|-----------|-------------|--------|
 | BL1 | F1, F13, Group A (A1) | `batched_models.md` §"Composition", §"Batch safety classification", §"Execution model", §"Event-time outer-visibility" | done |
 | BL2 | BL1 | `batched_models.md` §"First-run and backfill"; `model_transforms.md` §"Transforms that stay in a mode spec" | done |
-| BL3 | F3, Group A (A1) | `batched_models.md` §"Non-determinism and the payload rule", Constraint 12; `model_transforms.md` "Compile-time pinning" | pending |
+| BL3 | F3, Group A (A1) | `batched_models.md` §"Non-determinism and the payload rule", Constraint 12; `model_transforms.md` "Compile-time pinning" | done |
 | BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | pending |
 | BL5 | F1, Group A (A1) | `batched_models.md` §"Run window vs partition granularity"; `timeseries.md` §"Granularity arithmetic" | pending |
 | BL6 | F1 | `batched_models.md` §Surface (monotone integer `partition_column`), §"Observing the per-source clamp" | pending |

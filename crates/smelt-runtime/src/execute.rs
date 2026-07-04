@@ -38,7 +38,8 @@ use crate::schema_evolution::{
 };
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{
-    inject_source_filters, inject_time_filter, is_transparent_single_source, TimeRange,
+    inject_source_filters, inject_time_filter, is_transparent_single_source,
+    pin_run_deterministic_clocks, TimeRange,
 };
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 use crate::windowing::{compute_incremental_windows, IncrementalBatch};
@@ -990,6 +991,21 @@ pub async fn execute_project(
                         )?;
                         inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range)
                     };
+
+                    // Compile-time pinning (`docs/specs/model_transforms.md`
+                    // §"Compile-time pinning of run-deterministic clocks"):
+                    // freeze `NOW()`/`CURRENT_TIMESTAMP()`/`CURRENT_DATE()` to
+                    // a single literal derived from `run_start` — the time this
+                    // whole `execute_project` call began, not the wall clock at
+                    // each chunk's compile time. Every batch/chunk of this run
+                    // shares the same `run_start`, so a backfill spanning many
+                    // internal chunks still produces exactly one literal for
+                    // the run, matching the "one literal per run" invariant
+                    // the non-determinism admission gate
+                    // (`smelt_logical::rules::incremental::check_nondeterminism`)
+                    // assumes when it admits a direct SELECT-list projection
+                    // of a run-deterministic function into an unlisted column.
+                    let filtered_sql = pin_run_deterministic_clocks(&filtered_sql, run_start);
 
                     let compiler = compilers.get(model_target);
                     let resolver = &ephemeral_resolvers[model_target];

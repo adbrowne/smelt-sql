@@ -4,7 +4,9 @@
 //! for incremental materialization. It uses the smelt-parser to find the correct
 //! insertion points and modifies the SQL string accordingly.
 
-use smelt_parser::{parse, File};
+use chrono::{DateTime, Utc};
+use smelt_logical::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
+use smelt_parser::{parse, File, FunctionCall};
 use thiserror::Error;
 
 /// Time range for filtering (inclusive start, exclusive end)
@@ -335,6 +337,112 @@ pub fn inject_time_filter(
     } else {
         Err(TransformError::NoFromClause)
     }
+}
+
+/// Freeze every run-deterministic clock call (`NOW()`, `CURRENT_TIMESTAMP()`,
+/// `CURRENT_DATE()`) in `sql` to a single literal derived from
+/// `run_timestamp` — the compile-time pinning transform described in
+/// `docs/specs/model_transforms.md` §"Compile-time pinning of run-deterministic
+/// clocks".
+///
+/// This is what makes the non-determinism admission gate
+/// (`smelt_logical::rules::incremental::check_nondeterminism`) sound: that
+/// gate admits a direct SELECT-list projection of a run-deterministic
+/// function even into an unlisted column, on the assumption that the value
+/// is frozen once per run. Without this transform each per-chunk backfill
+/// query would evaluate `NOW()` independently at execution time, producing a
+/// different literal per chunk and breaking that assumption.
+///
+/// Only calls classified [`FunctionDeterminism::RunDeterministic`] by
+/// [`classify_function_determinism`] are touched — row-nondeterministic
+/// calls (`RANDOM()`, `UUID()`, ...) and ordinary function calls are left
+/// exactly as written. Uses the parsed AST (not text scanning) to find each
+/// call's byte range, so a substring match inside a string literal or an
+/// identifier (e.g. a column named `now_flag`, or a string literal
+/// containing the text `NOW()`) is never touched — only nodes the parser
+/// actually recognises as a function-call expression are replaced.
+///
+/// `sql` that fails to parse is returned unchanged (fail-soft here; the
+/// compiler's own parse step is the authoritative gate for malformed SQL —
+/// this transform runs on SQL that has already round-tripped through the
+/// planner).
+///
+/// Idempotent: since the literal is derived solely from `run_timestamp`
+/// (never from the current wall clock), calling this twice with the same
+/// `run_timestamp` on semantically equivalent SQL yields the same literal
+/// both times.
+pub fn pin_run_deterministic_clocks(sql: &str, run_timestamp: DateTime<Utc>) -> String {
+    let parse_result = parse(sql);
+    let Some(file) = File::cast(parse_result.syntax()) else {
+        return sql.to_string();
+    };
+
+    // Use `CAST('...' AS <type>)` rather than the bare `TIMESTAMP '...'` /
+    // `DATE '...'` typed-literal shorthand. The parser *does* have a
+    // dedicated typed-literal production for that shorthand
+    // (`smelt-parser::parser::expr::is_typed_literal`), and
+    // `smelt-db/src/type_inference/literal.rs` does have an explicit
+    // `TIMESTAMP '...'`/`DATE '...'`/etc. case — but that case is
+    // unreachable for `TIMESTAMP '...'`/`TIMESTAMPTZ '...'` literals whose
+    // string portion contains a decimal point (as our fractional-seconds
+    // format `%.f` always produces): `infer_literal_type`
+    // (`smelt-db/src/type_inference/literal.rs`) runs its numeric-literal
+    // fast path (`infer_numeric_literal_type`) *before* the typed-literal
+    // keyword checks, and that fast path treats any literal text containing
+    // `.` as decimal/double *unless* it also contains `e`/`E`, in which case
+    // it short-circuits straight to `DataType::Double` — and the word
+    // "TIMESTAMP" (and "TIMESTAMPTZ") itself contains an `E`. So a bare
+    // `TIMESTAMP '2026-07-05 12:00:00.000000'` literal is misinferred as
+    // `Double` before the dedicated typed-literal case ever runs, corrupting
+    // the type-conforming CAST that `SqlCompiler::apply_type_casts`
+    // (`smelt-runtime/src/compile.rs`) wraps around every SELECT column
+    // (verified empirically: swapping this function to emit bare typed
+    // literals reproduces `Conversion Error: Unimplemented type for cast
+    // (TIMESTAMP -> DOUBLE)` in the `nondeterministic_columns` e2e tests).
+    // `CAST(expr AS type)` is a first-class AST node the inferencer already
+    // understands (it is the mechanism `apply_type_casts` itself emits), so
+    // this sidesteps the bug and stays self-consistent. The underlying
+    // ordering bug in `infer_numeric_literal_type`/`infer_literal_type`
+    // belongs to `smelt-db` and is tracked separately, not fixed here.
+    let timestamp_literal = format!(
+        "CAST('{}' AS TIMESTAMP)",
+        run_timestamp.format("%Y-%m-%d %H:%M:%S%.f")
+    );
+    let date_literal = format!("CAST('{}' AS DATE)", run_timestamp.format("%Y-%m-%d"));
+
+    // Collect (start, end, literal) for every run-deterministic call, then
+    // splice back-to-front so earlier byte offsets stay valid after later
+    // (higher-offset) replacements have already changed the string length.
+    let mut ranges: Vec<(usize, usize, String)> = file
+        .syntax()
+        .descendants()
+        .filter_map(FunctionCall::cast)
+        .filter_map(|call| {
+            let name = call.name()?;
+            if classify_function_determinism(&name) != FunctionDeterminism::RunDeterministic {
+                return None;
+            }
+            let literal = if name.eq_ignore_ascii_case("CURRENT_DATE") {
+                date_literal.clone()
+            } else {
+                timestamp_literal.clone()
+            };
+            let range = call.syntax().text_range();
+            Some((
+                usize::from(range.start()),
+                usize::from(range.end()),
+                literal,
+            ))
+        })
+        .collect();
+
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.0));
+
+    let mut result = sql.to_string();
+    for (start, end, literal) in ranges {
+        result.replace_range(start..end, &literal);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -739,5 +847,83 @@ GROUP BY 1, 2
         ));
         // JOINs should still be there
         assert!(result.contains("INNER JOIN"));
+    }
+
+    // ─── pin_run_deterministic_clocks tests ────────────────────────────────
+
+    #[test]
+    fn test_pin_run_deterministic_clocks_stable_across_calls() {
+        let sql = "SELECT NOW() AS inserted_at, CURRENT_DATE() AS d, RANDOM() AS r FROM events";
+        let run_ts = DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = pin_run_deterministic_clocks(sql, run_ts);
+        let second = pin_run_deterministic_clocks(sql, run_ts);
+
+        assert_eq!(
+            first, second,
+            "pinning must be idempotent for the same run_timestamp"
+        );
+        assert!(
+            first.contains("CAST('2026-07-05 12:00:00"),
+            "NOW() must be pinned to a literal timestamp: {first}"
+        );
+        assert!(
+            first.contains("CAST('2026-07-05' AS DATE)"),
+            "CURRENT_DATE() must be pinned to a literal date: {first}"
+        );
+        // RANDOM() is row-nondeterministic and must never be pinned.
+        assert!(
+            first.contains("RANDOM()"),
+            "RANDOM() must be left untouched: {first}"
+        );
+        assert!(!first.contains("NOW()"), "NOW() call must be replaced");
+    }
+
+    #[test]
+    fn test_pin_run_deterministic_clocks_multiple_occurrences() {
+        let sql = "SELECT NOW() AS a, NOW() AS b, NOW() AS c FROM events";
+        let run_ts = DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = pin_run_deterministic_clocks(sql, run_ts);
+
+        assert!(
+            !result.contains("NOW()"),
+            "every NOW() occurrence must be replaced: {result}"
+        );
+        let occurrences = result.matches("CAST('2026-07-05 12:00:00").count();
+        assert_eq!(
+            occurrences, 3,
+            "all three NOW() calls must resolve to the same literal, byte offsets must not corrupt: {result}"
+        );
+    }
+
+    #[test]
+    fn test_pin_run_deterministic_clocks_ignores_lookalike_text() {
+        // `now_flag` is a bare identifier (no call parens) and must not be
+        // touched; the string literal containing "NOW()" text must not be
+        // touched either — only actual FUNCTION_CALL AST nodes are pinned.
+        let sql = "SELECT now_flag, 'call NOW() later' AS note, NOW() AS inserted_at FROM events";
+        let run_ts = DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = pin_run_deterministic_clocks(sql, run_ts);
+
+        assert!(
+            result.contains("now_flag"),
+            "bare identifier must be untouched: {result}"
+        );
+        assert!(
+            result.contains("'call NOW() later'"),
+            "string literal must be untouched: {result}"
+        );
+        assert!(
+            result.contains("CAST('2026-07-05 12:00:00"),
+            "the real NOW() call must still be pinned: {result}"
+        );
     }
 }

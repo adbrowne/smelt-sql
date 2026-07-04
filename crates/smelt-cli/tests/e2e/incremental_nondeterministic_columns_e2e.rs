@@ -105,6 +105,121 @@ fn run_window(project_dir: &Path, db_path: &Path, start: &str, end: &str, label:
     }
 }
 
+/// Like [`run_window`] but forces `--batch-size` days per internal chunk,
+/// so a single invocation spanning a wide window internally executes
+/// multiple `IncrementalBatch` chunks (multiple separate per-chunk compiled
+/// SQL statements / DELETE+INSERT transactions), rather than one batch.
+fn run_window_with_batch_size(
+    project_dir: &Path,
+    db_path: &Path,
+    start: &str,
+    end: &str,
+    batch_size_days: u32,
+    label: &str,
+) {
+    let output = Command::new(smelt_bin())
+        .args([
+            "run",
+            "--project-dir",
+            project_dir.to_str().unwrap(),
+            "--database",
+            db_path.to_str().unwrap(),
+            "--select",
+            "daily_events",
+            "--event-time-start",
+            start,
+            "--event-time-end",
+            end,
+            "--batch-size",
+            &batch_size_days.to_string(),
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` ({label}): {e}"));
+    if !output.status.success() {
+        panic!(
+            "`smelt run` ({label}) failed (exit {:?});\nstderr:\n{}\nstdout:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+}
+
+/// Seed four days of event data (2024-03-01..2024-03-04), 3 users each, 2
+/// events per user per day — wide enough that `--batch-size 1` forces four
+/// internal chunks for a single `smelt run` invocation spanning the whole
+/// range.
+fn seed_events_four_days(db_path: &Path) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(db_path)?;
+    conn.execute_batch("CREATE SCHEMA IF NOT EXISTS main;")?;
+    conn.execute_batch(
+        r#"CREATE OR REPLACE TABLE main.sources_events AS
+           SELECT
+               CAST(day * 100 + i AS INTEGER)                                        AS event_id,
+               TIMESTAMP '2024-03-01 08:00:00' + INTERVAL (day) DAY + INTERVAL (i) MINUTE
+                                                                                       AS event_ts,
+               CAST(DATE '2024-03-01' + INTERVAL (day) DAY AS DATE)                   AS event_date,
+               CAST(i % 3 AS INTEGER)                                                 AS user_id
+           FROM range(4) AS d(day), range(6) AS t(i);"#,
+    )?;
+    Ok(())
+}
+
+/// Read every non-null `inserted_at` value as a string, one per row.
+fn read_inserted_at_values(db_path: &Path) -> Vec<String> {
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    let mut stmt = conn
+        .prepare("SELECT CAST(inserted_at AS VARCHAR) FROM main.daily_events ORDER BY event_date, user_id")
+        .expect("prepare query");
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .expect("query rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect rows")
+}
+
+/// A single `smelt run` invocation spanning a run window wide enough to
+/// force multiple internal `IncrementalBatch` chunks (`--batch-size 1` over
+/// a 4-day window) must still pin `NOW()` to exactly one literal for the
+/// whole run — compile-time pinning
+/// (`docs/specs/model_transforms.md` §"Compile-time pinning of
+/// run-deterministic clocks") freezes the run clock once per
+/// `execute_project` call, not once per chunk, so every chunk's compiled SQL
+/// shares the same literal even though each chunk is compiled and executed
+/// separately.
+#[test]
+fn nondeterministic_columns_single_run_multiple_chunks_share_one_pinned_clock() {
+    let tmp = TempDir::new().expect("create tempdir");
+
+    let workspace = tmp.path().join("workspace");
+    copy_dir_all(&workspace_template_dir(), &workspace).expect("copy example workspace");
+    let db = tmp.path().join("chunked.duckdb");
+    seed_events_four_days(&db).expect("seed events");
+
+    run_window_with_batch_size(
+        &workspace,
+        &db,
+        "2024-03-01",
+        "2024-03-05",
+        1,
+        "chunked (batch-size=1)",
+    );
+
+    let inserted_at_values = read_inserted_at_values(&db);
+    assert!(
+        !inserted_at_values.is_empty(),
+        "the chunked run must have produced rows"
+    );
+    let distinct: std::collections::HashSet<_> = inserted_at_values.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "all rows across every internal chunk of one `smelt run` invocation must share the \
+         same pinned NOW() literal, got distinct values: {:?}",
+        distinct
+    );
+}
+
 /// Read the deterministic columns as (event_date, user_id, event_count),
 /// deliberately excluding `inserted_at` — the opted-in non-deterministic
 /// payload column is expected to vary between separate `smelt run`
