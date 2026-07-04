@@ -260,13 +260,23 @@ The equality holds for **local** columns of the output — columns whose value d
 The optimizer rejects a batched model if its SQL uses constructs that break the partition-DELETE-then-INSERT contract or produce non-deterministic output:
 
 - Window functions (`OVER (...)`), **unless** the window is partition-aligned (see below).
-- `HAVING`
-- `LIMIT`
+- `HAVING`, **unless** its own scope's `GROUP BY` key is a superset of `partition_column` (see below).
+- `LIMIT` — always rejected. A row-count cap never commutes with the partition filter: which rows survive the cap depends on which other rows are present in the query, and that set differs between a batched run (one partition's rows) and a full refresh (all rows) even when the cap's *value* is unchanged. No superset test licenses it.
 - Subqueries (`SELECT ... FROM (SELECT ...)`)
 - Non-deterministic functions (`RANDOM()`, `NOW()` outside of stable contexts, etc.), **unless** confined to an opted-in output column (see below).
-- `DISTINCT`
+- `DISTINCT`, **unless** `partition_column` is projected in the same scope (see below).
 
 Each check can be individually disabled via `batched.safety_overrides.allow_<check>: true`. Disabling is opt-in and recorded.
+
+#### Group-aligned `HAVING` and `DISTINCT`
+
+A `HAVING` clause is admissible without a safety override when the enclosing scope's own `GROUP BY` key is a **superset** of `partition_column`. The DELETE+INSERT contract deletes and re-inserts whole partitions, so once every group is scoped to a single partition value, `HAVING`'s post-aggregation filter sees the exact same groups on a batched run (one partition) as on a full refresh restricted to that partition — group composition cannot change between the two.
+
+A `SELECT DISTINCT` is admissible without a safety override when `partition_column` is projected in the same scope. `DISTINCT`'s dedup key is the whole projected row; once `partition_column` is part of that row, two rows can only collide (and be deduped together) when they agree on `partition_column` — i.e. only within the same partition. A batched run therefore dedups exactly the way a full refresh would within that partition.
+
+Both checks are evaluated **per scope**: a `UNION` branch's own `HAVING`/`DISTINCT` is judged against that branch's own `GROUP BY`/select list, not the outer query's or another branch's. A branch that is not itself aligned is rejected by name even when a sibling branch is aligned — the admission never inherits alignment across scopes.
+
+`LIMIT` has no analogous relaxation: it is rejected unconditionally regardless of `GROUP BY`/`DISTINCT` alignment (see above).
 
 #### Non-determinism and the equivalence contract
 

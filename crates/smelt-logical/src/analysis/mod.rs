@@ -144,6 +144,110 @@ pub fn find_item_expr_by_alias_or_position(
         .cloned()
 }
 
+/// The verdict for whether a SELECT scope's own `GROUP BY` / `DISTINCT` key
+/// is a superset of the model's `partition_column` — the shared
+/// partition-alignment signal (`batched_models.md` §"Safety checks") that
+/// licenses group-aligned `HAVING`/`DISTINCT` admission
+/// (`rules::incremental`) and is available to other per-scope consumers
+/// (UNION-branch / window admission) as the same reusable check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionAlignment {
+    /// The scope's own key is a superset of `partition_column` — safe.
+    Aligned,
+    /// The scope's own key does not contain `partition_column`; `reason`
+    /// names why (no `GROUP BY` in this scope, `partition_column` not
+    /// projected here, or the key omits it).
+    NotAligned { reason: String },
+}
+
+impl PartitionAlignment {
+    pub fn is_aligned(&self) -> bool {
+        matches!(self, PartitionAlignment::Aligned)
+    }
+}
+
+/// Resolve `select`'s own `GROUP BY` expressions against **its own**
+/// select-list `items` — ordinal references (`GROUP BY 1, 2`) resolve to
+/// this scope's projections, not an outer query's. Returns an empty `Vec`
+/// when the scope has no `GROUP BY` clause.
+pub fn resolve_scope_group_by(
+    select: &smelt_parser::SelectStmt,
+    items: &[SelectItemKind],
+) -> Vec<String> {
+    let Some(group_by) = select.group_by_clause() else {
+        return Vec::new();
+    };
+    group_by
+        .expressions()
+        .map(|expr| {
+            let text = expr.text().trim().to_string();
+            if let Ok(ordinal) = text.parse::<usize>() {
+                if ordinal >= 1 {
+                    if let Some(item) = items.get(ordinal - 1) {
+                        return item_expr(item).text().trim().to_string();
+                    }
+                }
+            }
+            text
+        })
+        .collect()
+}
+
+/// Partition-alignment verdict for a `HAVING` clause living in `select`:
+/// `Aligned` when this scope's own resolved `GROUP BY` keys are a superset
+/// containing the projected `partition_col` expression — found among
+/// `select`'s **own** select-list items, so a subquery/UNION-branch body is
+/// judged by its own projections and its own `GROUP BY`, never the outer
+/// query's (`batched_models.md` §"Safety checks").
+pub fn scope_group_by_alignment(
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+) -> PartitionAlignment {
+    let items = select_stmt_items(select).unwrap_or_default();
+    let Some(partition_item) = items.iter().find(|item| item_alias(item) == partition_col) else {
+        return PartitionAlignment::NotAligned {
+            reason: format!("partition_column '{partition_col}' is not projected in this scope"),
+        };
+    };
+    let partition_expr = item_expr(partition_item).text().trim().to_string();
+    let group_by_keys = resolve_scope_group_by(select, &items);
+    if group_by_keys.is_empty() {
+        return PartitionAlignment::NotAligned {
+            reason: "this scope has no GROUP BY".to_string(),
+        };
+    }
+    if group_by_keys.iter().any(|k| k == &partition_expr) {
+        PartitionAlignment::Aligned
+    } else {
+        PartitionAlignment::NotAligned {
+            reason: format!(
+                "GROUP BY ({}) does not include the partition_column '{partition_col}' expression '{partition_expr}'",
+                group_by_keys.join(", ")
+            ),
+        }
+    }
+}
+
+/// Partition-alignment verdict for a `SELECT DISTINCT` living in `select`:
+/// the dedup key is the whole projected row, so it is `Aligned` whenever
+/// `partition_col` is itself projected in this scope's own select list
+/// (`timeseries.md`'s partition-column-projection rule already requires
+/// this at the outer scope; checked independently here so an inner scope
+/// that does *not* project `partition_col` is not erroneously admitted).
+pub fn scope_distinct_alignment(
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+) -> PartitionAlignment {
+    let items = select_stmt_items(select).unwrap_or_default();
+    if items.iter().any(|item| item_alias(item) == partition_col) {
+        PartitionAlignment::Aligned
+    } else {
+        PartitionAlignment::NotAligned {
+            reason: format!("partition_column '{partition_col}' is not projected in this scope"),
+        }
+    }
+}
+
 /// Analyze a SELECT statement from SQL text.
 ///
 /// Parses the SQL (after stripping frontmatter) and extracts structure
@@ -515,6 +619,74 @@ mod tests {
                 .contains(&"s.session_start_date".to_string()),
             "expected s.session_start_date in group_by_exprs; got: {:?}",
             analysis.group_by_exprs
+        );
+    }
+
+    fn parse_select(sql: &str) -> smelt_parser::SelectStmt {
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::File::cast(parse.syntax()).expect("file");
+        file.select_stmt().expect("select stmt")
+    }
+
+    #[test]
+    fn test_scope_group_by_alignment_aligned() {
+        let select = parse_select(
+            "SELECT event_date, user_id, COUNT(*) as cnt FROM events \
+             GROUP BY event_date, user_id HAVING COUNT(*) > 1",
+        );
+        assert_eq!(
+            scope_group_by_alignment(&select, "event_date"),
+            PartitionAlignment::Aligned
+        );
+    }
+
+    #[test]
+    fn test_scope_group_by_alignment_not_aligned_fails_closed() {
+        // GROUP BY omits the partition_column entirely.
+        let select = parse_select(
+            "SELECT event_date, user_id, COUNT(*) as cnt FROM events \
+             GROUP BY user_id HAVING COUNT(*) > 1",
+        );
+        assert!(!scope_group_by_alignment(&select, "event_date").is_aligned());
+    }
+
+    #[test]
+    fn test_scope_group_by_alignment_no_group_by_fails_closed() {
+        let select = parse_select("SELECT a, b FROM t");
+        assert!(!scope_group_by_alignment(&select, "a").is_aligned());
+    }
+
+    #[test]
+    fn test_scope_distinct_alignment_aligned_when_projected() {
+        let select = parse_select("SELECT DISTINCT event_date, user_id FROM events");
+        assert!(scope_distinct_alignment(&select, "event_date").is_aligned());
+    }
+
+    #[test]
+    fn test_scope_distinct_alignment_not_aligned_when_not_projected() {
+        let select = parse_select("SELECT DISTINCT user_id FROM events");
+        assert!(!scope_distinct_alignment(&select, "event_date").is_aligned());
+    }
+
+    /// The alignment verdict is computed **per-scope**: a UNION's second
+    /// branch has its own `GROUP BY` (omitting the partition_column), which
+    /// must be judged on its own terms — not the first branch's (aligned)
+    /// `GROUP BY`.
+    #[test]
+    fn test_alignment_is_per_scope_not_outer() {
+        let outer = parse_select(
+            "SELECT event_date, user_id, COUNT(*) as cnt FROM events_a \
+             GROUP BY event_date, user_id \
+             UNION ALL \
+             SELECT event_date, user_id, COUNT(*) as cnt FROM events_b \
+             GROUP BY user_id",
+        );
+        assert!(scope_group_by_alignment(&outer, "event_date").is_aligned());
+
+        let branch2 = outer.union_select().expect("second UNION branch");
+        assert!(
+            !scope_group_by_alignment(&branch2, "event_date").is_aligned(),
+            "branch 2's own GROUP BY (user_id only) must not inherit branch 1's alignment"
         );
     }
 }

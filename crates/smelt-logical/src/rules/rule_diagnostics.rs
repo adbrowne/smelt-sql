@@ -572,10 +572,13 @@ mod tests {
     #[test]
     fn incremental_rule_flags_not_batch_safe_as_warning() {
         // Structurally valid incremental model (partition column `event_date`
-        // is a SELECT alias and a GROUP BY key), but a HAVING clause makes it
+        // is a SELECT alias and a GROUP BY key), but a LIMIT clause makes it
         // not batch-safe → the incremental safety classifier rejects it.
+        // (A group-aligned HAVING here would now be legitimately admitted —
+        // `batched_models.md` §"Safety checks" — so LIMIT, which never
+        // commutes with the partition filter, is used instead.)
         let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.src \
-                   GROUP BY event_date HAVING COUNT(*) > 1";
+                   GROUP BY event_date LIMIT 10";
         let refs = collect_path_refs(sql);
         let ts: SourceTimeseriesMap = HashMap::new();
         let tsc = day_ts();

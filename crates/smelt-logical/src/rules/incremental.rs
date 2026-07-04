@@ -9,7 +9,8 @@ use crate::analysis::source_bounds::{
 };
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
 use crate::analysis::{
-    analyze_select, find_item_expr_by_alias_or_position, item_alias, item_expr, select_stmt_items,
+    analyze_select, find_item_expr_by_alias_or_position, item_alias, item_expr,
+    scope_distinct_alignment, scope_group_by_alignment, select_stmt_items, PartitionAlignment,
     SelectItemKind,
 };
 use crate::graph::{ModelGraph, ModelInfo};
@@ -182,24 +183,38 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         SelectItemKind::OtherAggregate { text, .. } => text.clone(),
     };
 
-    // Validate it appears in GROUP BY (only required for aggregate models that have a GROUP BY).
-    // Per-row models (no GROUP BY) are valid for incremental: the partition_column
-    // alias in the SELECT list is sufficient — rows are filtered by partition value.
-    if !analysis.group_by_exprs.is_empty() {
-        let in_group_by = analysis
-            .group_by_exprs
-            .iter()
-            .any(|expr| expr == &partition_expr);
-        if !in_group_by {
-            return Err(format!(
-                "Model '{}': partition_column '{}' (expression: {}) not found in GROUP BY clause",
-                model.name, partition_col, partition_expr
-            ));
+    // Validate event_time_column is referenced in the SQL
+    let stripped_sql = crate::types::Frontmatter::strip(&model.sql);
+
+    // Parsed outer SELECT, shared by the GROUP BY alignment check below and
+    // the per-scope HAVING/DISTINCT walk further down — a single parse for
+    // all AST-based scope checks.
+    let top_select = parse_top_select(stripped_sql);
+
+    // Validate the outer scope's own GROUP BY is a superset of
+    // partition_column (only required for aggregate models that have a
+    // GROUP BY — per-row models with no GROUP BY are valid for incremental:
+    // the partition_column alias in the SELECT list is sufficient, rows are
+    // filtered by partition value). Uses the same per-scope
+    // `scope_group_by_alignment` signal that licenses HAVING/DISTINCT
+    // admission below (`batched_models.md` §"Safety checks") — judged on
+    // this scope's own GROUP BY via the AST, not a whole-model text scan
+    // (which would misattribute a later UNION branch's GROUP BY to the
+    // outer scope).
+    if let Some(select) = &top_select {
+        if select.group_by_clause().is_some() {
+            if let PartitionAlignment::NotAligned { reason } =
+                scope_group_by_alignment(select, partition_col)
+            {
+                return Err(format!(
+                    "Model '{}': partition_column '{}' (expression: {}) not found in GROUP BY \
+                     clause ({reason})",
+                    model.name, partition_col, partition_expr
+                ));
+            }
         }
     }
 
-    // Validate event_time_column is referenced in the SQL
-    let stripped_sql = crate::types::Frontmatter::strip(&model.sql);
     if !stripped_sql.contains(event_time_column.as_str()) {
         return Err(format!(
             "Model '{}': event_time_column '{}' not found in SQL",
@@ -251,16 +266,18 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         }
     }
 
-    // 2b: HAVING clause
+    // 2b: HAVING clause — admitted per-scope when that scope's own GROUP BY
+    // is a superset of partition_column (`scope_group_by_alignment`,
+    // `batched_models.md` §"Safety checks"): the DELETE+INSERT contract
+    // deletes and re-inserts whole partitions, so a HAVING that only filters
+    // groups already scoped to a single partition cannot see a different
+    // group composition on a partial (batched) run than on a full refresh.
+    // Walked across every UNION branch (not just the outer SELECT) so a
+    // HAVING living in a later branch is judged by *that* branch's own
+    // GROUP BY, never the outer/first-branch one.
     if !overrides.allow_having {
-        let upper_sql = stripped_sql.to_uppercase();
-        // Check for HAVING keyword at word boundary (not inside a string or identifier)
-        if has_keyword_at_boundary(&upper_sql, "HAVING") {
-            return Err(format!(
-                "Model '{}': HAVING clause is not compatible with incremental materialization \
-                 — groups may change eligibility between incremental and full runs",
-                model.name
-            ));
+        if let Some(select) = &top_select {
+            check_having_alignment_all_scopes(select, partition_col, &model.name)?;
         }
     }
 
@@ -321,19 +338,17 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         )?;
     }
 
-    // 2f: SELECT DISTINCT
+    // 2f: SELECT DISTINCT — admitted per-scope when partition_column is
+    // projected in that scope (`scope_distinct_alignment`): the DISTINCT
+    // dedup key is the whole projected row, so it always contains
+    // partition_column once projected, and two rows can only collide when
+    // they agree on partition_column — i.e. only within the same partition.
+    // A DISTINCT computed on a partial (batched) run therefore dedups
+    // exactly the same way a full refresh would within that partition.
+    // Walked across every UNION branch, same as HAVING.
     if !overrides.allow_distinct {
-        let upper_sql = stripped_sql.trim().to_uppercase();
-        // Check for SELECT DISTINCT (not COUNT(DISTINCT ...))
-        if upper_sql.starts_with("SELECT DISTINCT")
-            || upper_sql.starts_with("SELECT  DISTINCT")
-            || upper_sql.contains("\nSELECT DISTINCT")
-        {
-            return Err(format!(
-                "Model '{}': SELECT DISTINCT is not compatible with incremental materialization \
-                 — deduplication results may differ on partial data",
-                model.name
-            ));
+        if let Some(select) = &top_select {
+            check_distinct_alignment_all_scopes(select, partition_col, &model.name)?;
         }
     }
 
@@ -368,6 +383,75 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
 /// WITH-clause CTEs). Requires `safety_overrides.allow_subqueries: true`;
 /// `derive_model_source_bounds` does the real per-construct monotonicity
 /// classification once a model is past this gate.
+/// Parse `sql` and return its outermost `SelectStmt`, if it parses to one.
+/// Shared entry point for the per-scope `HAVING`/`DISTINCT` alignment walk.
+fn parse_top_select(sql: &str) -> Option<smelt_parser::SelectStmt> {
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    file.select_stmt()
+}
+
+/// Walk `select` and every subsequent UNION branch, rejecting (fail-closed)
+/// the first scope whose own `HAVING` is not licensed by
+/// `scope_group_by_alignment` — the shared partition-alignment signal
+/// (`batched_models.md` §"Safety checks").
+fn check_having_alignment_all_scopes(
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+    model_name: &str,
+) -> Result<(), String> {
+    let mut current = select.clone();
+    loop {
+        if current.having_clause().is_some() {
+            if let PartitionAlignment::NotAligned { reason } =
+                scope_group_by_alignment(&current, partition_col)
+            {
+                return Err(format!(
+                    "Model '{model_name}': HAVING clause is not compatible with incremental \
+                     materialization unless its own GROUP BY includes the partition_column \
+                     '{partition_col}' ({reason}) — set safety_overrides.allow_having: true \
+                     to override"
+                ));
+            }
+        }
+        match current.union_select() {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Walk `select` and every subsequent UNION branch, rejecting (fail-closed)
+/// the first scope whose own `SELECT DISTINCT` is not licensed by
+/// `scope_distinct_alignment`.
+fn check_distinct_alignment_all_scopes(
+    select: &smelt_parser::SelectStmt,
+    partition_col: &str,
+    model_name: &str,
+) -> Result<(), String> {
+    let mut current = select.clone();
+    loop {
+        if current.is_distinct() {
+            if let PartitionAlignment::NotAligned { reason } =
+                scope_distinct_alignment(&current, partition_col)
+            {
+                return Err(format!(
+                    "Model '{model_name}': SELECT DISTINCT is not compatible with incremental \
+                     materialization unless the partition_column '{partition_col}' is projected \
+                     in this scope ({reason}) — set safety_overrides.allow_distinct: true to \
+                     override"
+                ));
+            }
+        }
+        match current.union_select() {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
 fn find_first_derived_table_construct(sql: &str) -> Option<String> {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
@@ -1553,16 +1637,40 @@ mod tests {
         assert!(find_inadmissible_over(sql, "session_start_date").is_some());
     }
 
+    /// A `HAVING` whose own scope's `GROUP BY` is a superset of
+    /// `partition_column` is group-aligned and must build without an
+    /// override (`batched_models.md` §"Safety checks").
     #[test]
-    fn test_detect_rejects_having() {
+    fn test_detect_admits_group_aligned_having() {
         let m = model(
             "having_model",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2 HAVING COUNT(*) > 10",
             "event_date",
         );
         let result = detect(&m);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("HAVING"));
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(result.unwrap().is_some());
+    }
+
+    /// A `HAVING` living in a UNION branch whose *own* `GROUP BY` omits
+    /// `partition_column` must still refuse — fail-closed — even though the
+    /// first branch (and the outer alignment check that runs on it) is
+    /// aligned. Proves the alignment verdict is computed per-scope, not just
+    /// on the outer/first-branch `GROUP BY`.
+    #[test]
+    fn test_detect_rejects_having_not_group_aligned_in_union_branch() {
+        let m = model_with_event_time(
+            "having_union_model",
+            "SELECT event_date, user_id, COUNT(*) as cnt FROM events_a GROUP BY 1, 2 \
+             UNION ALL \
+             SELECT event_date, user_id, COUNT(*) as cnt FROM events_b GROUP BY 2 HAVING COUNT(*) > 10",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("HAVING"), "err: {err}");
     }
 
     #[test]
@@ -1781,16 +1889,39 @@ mod tests {
         assert!(result.unwrap().is_some());
     }
 
+    /// A `SELECT DISTINCT` that projects `partition_column` is aligned (the
+    /// dedup key is the whole row, which always contains partition_column
+    /// once projected) and must build without an override.
     #[test]
-    fn test_detect_rejects_select_distinct() {
+    fn test_detect_admits_group_aligned_distinct() {
         let m = model(
             "distinct_model",
             "SELECT DISTINCT date_trunc('day', event_timestamp) as event_date, user_id FROM events GROUP BY 1, 2",
             "event_date",
         );
         let result = detect(&m);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("SELECT DISTINCT"));
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(result.unwrap().is_some());
+    }
+
+    /// A `DISTINCT` living in a UNION branch that does *not* project
+    /// `partition_column` in its own select list must still refuse —
+    /// fail-closed — even though the outer/first branch does project it.
+    /// Proves the alignment verdict is computed per-scope.
+    #[test]
+    fn test_detect_rejects_distinct_not_aligned_in_union_branch() {
+        let m = model_with_event_time(
+            "distinct_union_model",
+            "SELECT event_date, user_id FROM events_a \
+             UNION ALL \
+             SELECT DISTINCT user_id FROM events_b",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("DISTINCT"), "err: {err}");
     }
 
     #[test]

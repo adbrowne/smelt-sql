@@ -185,11 +185,31 @@ smelt statically analyzes your SQL for patterns that can produce incorrect resul
 | Pattern | Why it is unsafe |
 |---|---|
 | Window functions with unbounded frames | A `ROW_NUMBER() OVER (ORDER BY ts)` computed on one day's data gives different results than the same function on the full dataset. |
-| HAVING with aggregates | `HAVING COUNT(*) > 10` may filter out groups that would pass if all data were present. |
-| LIMIT | `LIMIT 100` on partial data returns different rows than on the full table. |
+| HAVING with aggregates | `HAVING COUNT(*) > 10` may filter out groups that would pass if all data were present — **unless** the `GROUP BY` already groups by `partition_column` (see below). |
+| LIMIT | `LIMIT 100` on partial data returns different rows than on the full table. Always blocked — there is no group-alignment relaxation for it. |
 | Non-deterministic functions | `RANDOM()`, `NOW()`, and similar functions produce different results on each run. |
 | Subqueries | Subqueries may reference data outside the filtered time range. |
-| DISTINCT | `SELECT DISTINCT` on partial data may miss duplicates that span partition boundaries. |
+| DISTINCT | `SELECT DISTINCT` on partial data may miss duplicates that span partition boundaries — **unless** `partition_column` is projected in the same scope (see below). |
+
+### Group-aligned HAVING and DISTINCT
+
+`HAVING` and `DISTINCT` are admitted without a safety override when they are **group-aligned** to `partition_column`:
+
+- A `HAVING` clause is admitted when its own `GROUP BY` is a superset of `partition_column` — every group is already scoped to one partition, so a partial run and a full refresh see the same group composition within that partition.
+- A `SELECT DISTINCT` is admitted when `partition_column` is projected in the same scope — the dedup key is the whole row, so two rows can only collide when they share the same partition value.
+
+```sql
+-- Admitted without an override: GROUP BY includes partition_column (revenue_date).
+SELECT
+    transaction_timestamp::DATE as revenue_date,
+    user_id,
+    SUM(amount) as total_revenue
+FROM raw.transactions
+GROUP BY 1, 2
+HAVING SUM(amount) > 100
+```
+
+This alignment check runs per scope: in a model whose SQL is a `UNION ALL` of several branches, each branch's own `HAVING`/`DISTINCT` is checked against that branch's own `GROUP BY`/select list — a branch that is not itself aligned is refused by name even if another branch is aligned. `LIMIT` has no equivalent relaxation and is always blocked.
 
 ### When a model is refused
 
