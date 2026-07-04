@@ -302,18 +302,23 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         }
     }
 
-    // 2e: Non-deterministic functions
+    // 2e: Non-deterministic functions — flow/taint check (batched_models.md
+    // §"Non-determinism and the equivalence contract"): a non-deterministic
+    // value is admitted only when it flows exclusively into a column listed
+    // in `batched.nondeterministic_columns`, and never into the
+    // event_time_column/partition_column/unique_key roles or a row-set
+    // membership/grouping position. See `check_nondeterminism` for the full
+    // analysis.
     if !overrides.allow_nondeterministic {
-        let upper_sql = stripped_sql.to_uppercase();
-        for func_name in NONDETERMINISTIC_FUNCTIONS {
-            if has_keyword_at_boundary(&upper_sql, func_name) {
-                return Err(format!(
-                    "Model '{}': non-deterministic function '{}' is not compatible with \
-                     incremental materialization — results will differ between runs",
-                    model.name, func_name
-                ));
-            }
-        }
+        check_nondeterminism(
+            &model.name,
+            &analysis,
+            stripped_sql,
+            partition_col,
+            &partition_expr,
+            event_time_column,
+            inc_config,
+        )?;
     }
 
     // 2f: SELECT DISTINCT
@@ -590,6 +595,294 @@ fn has_keyword_at_boundary(upper_sql: &str, keyword: &str) -> bool {
         }
     }
     false
+}
+
+/// Find the first name in [`NONDETERMINISTIC_FUNCTIONS`] that appears at a
+/// word boundary in `text_upper` (already uppercased). Returns the matched
+/// function name for use in diagnostics.
+fn find_nondeterministic_fn(text_upper: &str) -> Option<&'static str> {
+    NONDETERMINISTIC_FUNCTIONS
+        .iter()
+        .find(|f| has_keyword_at_boundary(text_upper, f))
+        .copied()
+}
+
+/// True for the run-nondeterministic class (`NOW()`, `CURRENT_TIMESTAMP`,
+/// `CURRENT_DATE`) — frozen once per run at compile time, so a direct payload
+/// projection carries no cross-run variance risk and is admitted even when
+/// the target column is not listed in `nondeterministic_columns` (still
+/// subject to the same hard-exclusion roles as every other class).
+fn is_run_clock_pinning_fn(func: &str) -> bool {
+    matches!(func, "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE")
+}
+
+/// Build the rejection message for a non-deterministic value reaching a
+/// position that is deterministic-only regardless of any opt-in.
+fn reject_nondeterministic_position(model_name: &str, func: &str, position: &str) -> String {
+    format!(
+        "Model '{model_name}': non-deterministic function '{func}' is not compatible with \
+         incremental materialization — it reaches {position}, which must be deterministic \
+         regardless of any `batched.nondeterministic_columns` opt-in"
+    )
+}
+
+/// Collect the content of every `OVER (...)` window spec in `upper_sql`
+/// (already uppercased), regardless of PARTITION BY alignment. Used to check
+/// whether a non-deterministic function reaches a window's PARTITION BY /
+/// ORDER BY / frame — a hard exclusion independent of the window-alignment
+/// check in `find_inadmissible_over` (2a).
+fn collect_over_contents(upper_sql: &str) -> Vec<String> {
+    let mut contents = Vec::new();
+    let mut search_from = 0;
+    while let Some(over_pos) = find_over_keyword(upper_sql, search_from) {
+        search_from = over_pos + 4;
+        let rest = &upper_sql[search_from..];
+        let paren_offset = match rest.find('(') {
+            Some(p) => p,
+            None => continue,
+        };
+        let between = &rest[..paren_offset];
+        if !between.trim().is_empty() {
+            continue;
+        }
+        let paren_start = search_from + paren_offset;
+        let over_content = match extract_balanced_parens(upper_sql, paren_start) {
+            Some(c) => c,
+            None => continue,
+        };
+        search_from = paren_start + over_content.len() + 2;
+        contents.push(over_content);
+    }
+    contents
+}
+
+/// The non-determinism flow/taint check (batched_models.md §"Non-determinism
+/// and the equivalence contract"; Constraint 13).
+///
+/// A non-deterministic function is admitted only when its value flows
+/// exclusively into a column listed in `batched.nondeterministic_columns` — a
+/// *payload* column, never read back to place, filter, group, or dedup a
+/// row. Three hard exclusions reject the value regardless of the opt-in,
+/// naming the offending position: the `event_time_column` / `partition_column`
+/// expression, any `unique_key` column, and any row-set-membership or
+/// grouping position (`WHERE`/`HAVING`/`JOIN … ON`/`DISTINCT`/`GROUP BY`/a
+/// window's `PARTITION BY`/`ORDER BY`/frame).
+///
+/// The run-nondeterministic class (`NOW()`/`CURRENT_*`) is additionally
+/// admitted as a direct SELECT-list projection even when the target column is
+/// not listed: it is frozen once per run at compile time, so pinning removes
+/// the cross-run variance the opt-in exists to gate — there is no analogous
+/// exception for the row-nondeterministic class (`RANDOM()`/`UUID()`), which
+/// still requires the target column to be listed.
+///
+/// Anything that cannot be confidently attributed to a single SELECT-list
+/// column (nested inside a CTE, a subquery, or an expression combining
+/// several things) is rejected — fail closed on indirection.
+#[allow(clippy::too_many_arguments)]
+fn check_nondeterminism(
+    model_name: &str,
+    analysis: &crate::analysis::SelectAnalysis,
+    stripped_sql: &str,
+    partition_col: &str,
+    partition_expr: &str,
+    event_time_column: &str,
+    inc_config: &crate::types::BatchedConfig,
+) -> Result<(), String> {
+    // 1. Hard exclusion: the partition_column expression.
+    if let Some(func) = find_nondeterministic_fn(&partition_expr.to_uppercase()) {
+        return Err(reject_nondeterministic_position(
+            model_name,
+            func,
+            &format!("the partition_column '{partition_col}' expression"),
+        ));
+    }
+
+    // 1. Hard exclusion: the event_time_column expression (when it is itself
+    // a computed SELECT-list alias rather than a bare source column).
+    if let Some(item) = analysis
+        .items
+        .iter()
+        .find(|i| item_alias(i) == event_time_column)
+    {
+        if let Some(func) = find_nondeterministic_fn(&item_expr(item).text().to_uppercase()) {
+            return Err(reject_nondeterministic_position(
+                model_name,
+                func,
+                &format!("the event_time_column '{event_time_column}' expression"),
+            ));
+        }
+    }
+
+    // 1. Hard exclusion: unique_key columns.
+    for key_col in &inc_config.unique_key {
+        if let Some(item) = analysis
+            .items
+            .iter()
+            .find(|i| item_alias(i) == key_col.as_str())
+        {
+            if let Some(func) = find_nondeterministic_fn(&item_expr(item).text().to_uppercase()) {
+                return Err(reject_nondeterministic_position(
+                    model_name,
+                    func,
+                    &format!("unique_key column '{key_col}'"),
+                ));
+            }
+        }
+    }
+
+    // 2. Hard exclusion: row-set-membership / grouping positions — WHERE,
+    // HAVING, JOIN ... ON, GROUP BY.
+    if let Some(where_text) = &analysis.where_text {
+        if let Some(func) = find_nondeterministic_fn(&where_text.to_uppercase()) {
+            return Err(reject_nondeterministic_position(
+                model_name,
+                func,
+                "a WHERE clause",
+            ));
+        }
+    }
+    for group_by_expr in &analysis.group_by_exprs {
+        if let Some(func) = find_nondeterministic_fn(&group_by_expr.to_uppercase()) {
+            return Err(reject_nondeterministic_position(
+                model_name,
+                func,
+                "a GROUP BY key",
+            ));
+        }
+    }
+
+    let parse = smelt_parser::parse(stripped_sql);
+    if let Some(file) = smelt_parser::File::cast(parse.syntax()) {
+        if let Some(select) = file.select_stmt() {
+            if let Some(having) = select.having_clause() {
+                if let Some(expr) = having.expression() {
+                    if let Some(func) = find_nondeterministic_fn(&expr.text().to_uppercase()) {
+                        return Err(reject_nondeterministic_position(
+                            model_name,
+                            func,
+                            "a HAVING clause",
+                        ));
+                    }
+                }
+            }
+            if let Some(from_clause) = select.from_clause() {
+                for join in from_clause.joins() {
+                    if let Some(condition) = join.condition() {
+                        if let Some(on_expr) = condition.on_expression() {
+                            if let Some(func) =
+                                find_nondeterministic_fn(&on_expr.text().to_uppercase())
+                            {
+                                return Err(reject_nondeterministic_position(
+                                    model_name,
+                                    func,
+                                    "a JOIN ... ON clause",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Hard exclusion: any CTE body. None of the clause-scoped checks
+            // above descend into `WITH ... AS (...)` bodies — they only look at
+            // the outer `SelectStmt`'s own WHERE/GROUP BY/HAVING/JOIN clauses.
+            // A CTE's WHERE clause can filter row-set membership just as much
+            // as the outer query's WHERE, so a non-deterministic function
+            // anywhere inside a CTE body is rejected outright, fail-closed —
+            // regardless of what the outer query does with the CTE's output or
+            // whether the same function name is also used safely elsewhere
+            // (e.g. an outer `NOW() AS inserted_at` payload projection does not
+            // excuse a `WHERE NOW() - event_ts < INTERVAL '1 day'` inside a CTE).
+            if let Some(with_clause) = select.with_clause() {
+                for cte in with_clause.ctes() {
+                    let cte_text_upper = cte.syntax().text().to_string().to_uppercase();
+                    if let Some(func) = find_nondeterministic_fn(&cte_text_upper) {
+                        let cte_name = cte.name().unwrap_or_else(|| "<unnamed>".to_string());
+                        return Err(reject_nondeterministic_position(
+                            model_name,
+                            func,
+                            &format!("a CTE ('{cte_name}') body"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Hard exclusion: a window's PARTITION BY / ORDER BY / frame.
+    let upper_sql = stripped_sql.to_uppercase();
+    for over_content in collect_over_contents(&upper_sql) {
+        if let Some(func) = find_nondeterministic_fn(&over_content) {
+            return Err(reject_nondeterministic_position(
+                model_name,
+                func,
+                "a window's PARTITION BY / ORDER BY / frame",
+            ));
+        }
+    }
+
+    // 2. Hard exclusion: SELECT DISTINCT — the whole row is the dedup key, so
+    // any non-deterministic value in the SELECT list reaches a
+    // row-set-membership position regardless of which column it lands in.
+    let trimmed_upper = stripped_sql.trim().to_uppercase();
+    let is_distinct_select = trimmed_upper.starts_with("SELECT DISTINCT")
+        || trimmed_upper.starts_with("SELECT  DISTINCT")
+        || trimmed_upper.contains("\nSELECT DISTINCT");
+
+    // 3/4. Direct SELECT-list projection: admitted when the value flows only
+    // into a listed payload column (or, for the run-nondeterministic class,
+    // any direct projection — pinning removes the cross-run variance risk).
+    for item in &analysis.items {
+        let alias = item_alias(item);
+        let expr_upper = item_expr(item).text().to_uppercase();
+        if let Some(func) = find_nondeterministic_fn(&expr_upper) {
+            if is_distinct_select {
+                return Err(reject_nondeterministic_position(
+                    model_name,
+                    func,
+                    "SELECT DISTINCT (the whole row is the dedup key)",
+                ));
+            }
+            let listed = inc_config
+                .nondeterministic_columns
+                .iter()
+                .any(|c| c == alias);
+            if listed || is_run_clock_pinning_fn(func) {
+                continue;
+            }
+            return Err(format!(
+                "Model '{model_name}': non-deterministic function '{func}' flows into column \
+                 '{alias}', which is not listed in `batched.nondeterministic_columns` — add \
+                 '{alias}' to `batched.nondeterministic_columns` to accept the variation, or set \
+                 `safety_overrides.allow_nondeterministic: true`"
+            ));
+        }
+    }
+
+    // 5. Fail closed on indirection: any remaining occurrence not
+    // attributable to a single SELECT-list column (nested inside a CTE, a
+    // subquery, or an expression this analysis cannot confidently attribute).
+    for func in NONDETERMINISTIC_FUNCTIONS {
+        if has_keyword_at_boundary(&upper_sql, func) {
+            let accounted_for = analysis
+                .items
+                .iter()
+                .any(|item| has_keyword_at_boundary(&item_expr(item).text().to_uppercase(), func));
+            if !accounted_for {
+                return Err(format!(
+                    "Model '{model_name}': non-deterministic function '{func}' is used in a \
+                     position this analysis cannot attribute to a single SELECT-list column \
+                     (e.g. inside a CTE, subquery, or derived-table expression) — incremental \
+                     materialization requires the non-determinism to flow directly into one \
+                     listed payload column; rewrite the model so the call is a direct \
+                     SELECT-list projection, or set `safety_overrides.allow_nondeterministic: \
+                     true`"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Derive per-source bounds *and* their pushdown-depth injection point for an
@@ -1070,6 +1363,33 @@ mod tests {
         }
     }
 
+    /// Build a model with a `batched.nondeterministic_columns` list (and
+    /// optional `unique_key`) for the non-determinism flow/taint tests.
+    fn model_with_nondeterministic_columns(
+        name: &str,
+        sql: &str,
+        partition_column: &str,
+        nondeterministic_columns: Vec<String>,
+        unique_key: Vec<String>,
+    ) -> ModelInfo {
+        ModelInfo {
+            name: name.to_string(),
+            sql: sql.to_string(),
+            refs: vec![],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_timestamp".to_string(),
+                partition_column: partition_column.to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key,
+                nondeterministic_columns,
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        }
+    }
+
     #[test]
     fn test_detect_incremental() {
         let m = model(
@@ -1297,6 +1617,168 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("non-deterministic"));
         assert!(err.contains("RANDOM"));
+    }
+
+    // --- Non-determinism flow/taint tests (batched.nondeterministic_columns) ---
+
+    #[test]
+    fn test_nondeterministic_now_listed_column_admitted() {
+        // NOW() flowing only into a listed payload column builds cleanly.
+        let m = model_with_nondeterministic_columns(
+            "audit_stamped",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
+             NOW() as inserted_at FROM events GROUP BY 1, 2",
+            "event_date",
+            vec!["inserted_at".to_string()],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_nondeterministic_now_unlisted_column_admitted_pinned_clock() {
+        // Run-clock pinning: NOW() as a direct SELECT-list projection is
+        // admitted even when the target column is NOT listed in
+        // nondeterministic_columns — it is frozen once per run, so there is
+        // no cross-run variance for the guardrail to gate.
+        let m = model_with_nondeterministic_columns(
+            "audit_stamped_unlisted",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
+             NOW() as inserted_at FROM events GROUP BY 1, 2",
+            "event_date",
+            vec![],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(
+            result.is_ok(),
+            "expected Ok (pinned clock), got {:?}",
+            result
+        );
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_nondeterministic_now_in_cte_where_rejects_despite_outer_pinned_projection() {
+        // Fail-closed-on-indirection: the outer SELECT's `NOW() as inserted_at`
+        // is a legitimately admitted pinned-clock projection (see the
+        // `_pinned_clock` test above), but a *separate* NOW() call inside a
+        // CTE's own WHERE clause varies row-set membership across separate
+        // `smelt run` invocations. The catch-all must not treat the CTE
+        // occurrence as "accounted for" just because the same function name
+        // appears safely elsewhere in the outer SELECT list.
+        let m = model_with_nondeterministic_columns(
+            "cte_now_in_where",
+            "WITH staged AS (\
+                 SELECT event_timestamp, user_id FROM events \
+                 WHERE NOW() - event_timestamp < INTERVAL '1 day'\
+             ) \
+             SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
+             NOW() as inserted_at FROM staged GROUP BY 1, 2",
+            "event_date",
+            vec!["inserted_at".to_string()],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("non-deterministic"), "err: {err}");
+        assert!(err.contains("CTE"), "err: {err}");
+    }
+
+    #[test]
+    fn test_nondeterministic_random_where_rejects() {
+        let m = model_with_nondeterministic_columns(
+            "random_in_where",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt \
+             FROM events WHERE RANDOM() > 0.5 GROUP BY 1, 2",
+            "event_date",
+            vec![],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("non-deterministic"), "err: {err}");
+        assert!(err.contains("WHERE"), "err: {err}");
+    }
+
+    #[test]
+    fn test_nondeterministic_random_group_by_rejects() {
+        let m = model_with_nondeterministic_columns(
+            "random_in_group_by",
+            "SELECT date_trunc('day', event_timestamp) as event_date, RANDOM() as grp, \
+             COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "event_date",
+            vec![],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("non-deterministic"), "err: {err}");
+        assert!(err.contains("GROUP BY"), "err: {err}");
+    }
+
+    #[test]
+    fn test_nondeterministic_random_partition_by_window_rejects() {
+        // RANDOM() aligned so the 2a window-alignment check admits it (the
+        // PARTITION BY keys are a superset that includes the partition
+        // column), isolating the assertion to the non-determinism check.
+        let m = model_with_nondeterministic_columns(
+            "random_in_window_partition_by",
+            "SELECT date_trunc('day', event_timestamp) as event_date, \
+             SUM(amount) OVER (PARTITION BY event_date, RANDOM() ORDER BY event_timestamp) \
+             as running_total FROM events",
+            "event_date",
+            vec![],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("non-deterministic"), "err: {err}");
+        assert!(err.contains("PARTITION BY"), "err: {err}");
+    }
+
+    #[test]
+    fn test_nondeterministic_random_unlisted_column_still_rejects() {
+        // Flow/taint case: RANDOM() flowing into a column NOT listed in
+        // nondeterministic_columns is still rejected (unchanged from the
+        // pre-opt-in behaviour) — only the run-nondeterministic class gets
+        // the unlisted pinned-clock exception.
+        let m = model_with_nondeterministic_columns(
+            "random_unlisted",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
+             RANDOM() as foo FROM events GROUP BY 1, 2",
+            "event_date",
+            vec![],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("non-deterministic"), "err: {err}");
+        assert!(err.contains("foo") || err.contains("RANDOM"), "err: {err}");
+    }
+
+    #[test]
+    fn test_nondeterministic_random_listed_column_admitted() {
+        // The opt-in also covers the row-nondeterministic class when the
+        // target column is explicitly listed.
+        let m = model_with_nondeterministic_columns(
+            "random_listed",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
+             RANDOM() as foo FROM events GROUP BY 1, 2",
+            "event_date",
+            vec!["foo".to_string()],
+            vec![],
+        );
+        let result = detect(&m);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(result.unwrap().is_some());
     }
 
     #[test]

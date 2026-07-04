@@ -219,6 +219,7 @@ models:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
+| `nondeterministic_columns` | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
 | `safety_overrides` | object | no | _(all false)_ | Override safety checks for patterns that may produce different results on partial data (see [Safety Overrides](#safety-overrides)) |
 
 #### Safety Overrides

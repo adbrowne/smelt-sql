@@ -134,6 +134,17 @@ fn fn_incremental_ts_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_incremental_ts");
 }
 
+/// `batched.nondeterministic_columns` opt-in fixture: an incremental model
+/// stamping every row with `NOW()` into a listed payload column. Verifies
+/// the workspace loads without any diagnostics (the non-determinism
+/// flow/taint check runs at build time in `smelt-logical::rules::incremental`,
+/// not through `file_diagnostics`, but the workspace itself must still be
+/// diagnostic-clean).
+#[test]
+fn incremental_nondeterministic_columns_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/incremental_nondeterministic_columns");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that

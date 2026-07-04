@@ -19,6 +19,7 @@ mod fn_body_wiring;
 mod fn_incremental_ts_e2e;
 mod functions_e2e;
 mod incremental_idempotency;
+mod incremental_nondeterministic_columns_e2e;
 mod incremental_not_derivable;
 mod incremental_refusal;
 mod meta_columns_e2e;

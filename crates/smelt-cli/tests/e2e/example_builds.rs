@@ -193,6 +193,13 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          verified e2e via fn_incremental_ts_e2e.rs)",
     ),
     (
+        "incremental_nondeterministic_columns",
+        "Catalog Error: Table with name sources_events does not exist \
+         (batched.nondeterministic_columns fixture: the non-determinism flow/taint check \
+         admits the model correctly; source table `main.sources_events` not seeded in \
+         standalone build env; verified e2e via incremental_nondeterministic_columns_e2e.rs)",
+    ),
+    (
         "fn_struct_spread_cte",
         "Catalog Error: Table with name sources_gps_readings does not exist \
          (D2 probe fixture: struct spread inside CTE body schema propagation; \

@@ -64,6 +64,7 @@ models:
 | Field | Required | Description |
 |---|---|---|
 | `unique_key` | No | List of columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
+| `nondeterministic_columns` | No | Output columns exempt from the determinism requirement (e.g. an `inserted_at = NOW()` audit stamp). See [Non-deterministic columns](#non-deterministic-columns). |
 | `safety_overrides` | No | Override safety checks for patterns that may behave differently on partial data. See [Safety analysis](#safety-analysis). |
 
 For the `timeseries:` fields (`event_time_column`, `partition_column`, `granularity`, `week_start`), see the [timeseries reference](../reference/timeseries.md).
@@ -210,6 +211,44 @@ smelt run --event-time-start 2025-01-01 --event-time-end 2025-01-02 --allow-down
 ```
 
 With `--allow-downgrade` set, refused models fall back to a full-table refresh for this run. A warning is emitted for each downgraded model. This flag must be passed explicitly every time; it is not persisted anywhere. Using it regularly means the model is not actually running incrementally — fix the SQL instead.
+
+### Non-deterministic columns
+
+The non-deterministic-function check can be relaxed per column instead of disabled entirely. List the output column in `batched.nondeterministic_columns` and the value is allowed to vary between runs — useful for audit stamps and surrogates such as `inserted_at = NOW()` or `batch_id = UUID()`:
+
+```yaml
+models:
+  audit_stamped:
+    materialization: table
+    refresh: batched
+    timeseries:
+      event_time_column: event_time
+      partition_column: event_date
+      granularity: day
+    batched:
+      nondeterministic_columns:
+        - inserted_at
+```
+
+```sql
+SELECT
+    event_date,
+    user_id,
+    COUNT(*) as event_count,
+    NOW() as inserted_at
+FROM smelt.sources.events
+GROUP BY 1, 2
+```
+
+The non-deterministic value must flow **directly** into a listed column — a bare `NOW() AS inserted_at` or `RANDOM() AS batch_id` in the SELECT list. Three positions are always rejected, regardless of the list:
+
+- the `event_time_column` or `partition_column` expression,
+- any `unique_key` column,
+- a row-set-membership or grouping position — `WHERE`, `HAVING`, `JOIN ... ON`, `DISTINCT`, `GROUP BY` keys, or a window's `PARTITION BY`/`ORDER BY`/frame.
+
+Listing one of these columns in `nondeterministic_columns` is a configuration error, since those columns must stay deterministic no matter what the model opts into.
+
+`NOW()`, `CURRENT_TIMESTAMP`, and `CURRENT_DATE` are frozen once per run, so a direct projection is admitted even when the target column is **not** listed — pinning already removes the variance the list exists to gate. `RANDOM()` and `UUID()` values differ row-to-row within the same run, so their target column must still be listed. If the analysis can't confidently attribute a non-deterministic call to a single output column (for example, it's nested inside a CTE or subquery), the model is rejected — use `safety_overrides.allow_nondeterministic` if you've verified the pattern is safe.
 
 ### Overriding safety checks
 
