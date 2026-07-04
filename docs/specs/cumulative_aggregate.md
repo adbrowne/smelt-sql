@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Cumulative Aggregate Refresh Mode
 
-> **What this is.** A normative spec for the `refresh: cumulative` mode — a stateful-merge planner rule that collapses a timeseries source into one row per key, where each row reflects state across all processed source partitions. Cumulative is a **keyed-output** value of the **refresh axis** (`models.md` §"Refresh axis") on a stored `table`: the stateful counterpart of the partitioned-output `batched` mode, and one of the keyed modes alongside `versioned`, `latest_value`, and `materialized_view`. Covers the frontmatter selector, the classifier, the per-partition delta-SELECT shape, the cross-partition combine semantics, the equivalence contract, the algebraic maintenance boundary, and the rules around what may be expressed. Out of scope: batched DELETE+INSERT (`batched_models.md`), the `timeseries:` declaration this rule consumes from its source (`timeseries.md`), full model frontmatter schema (`models.md`), the backend `merge_into` primitive (described in `architecture.md` §"Backend primitives" — the cumulative rule is one caller).
+> **What this is.** A normative spec for the `refresh: cumulative` mode — a stateful-merge planner rule that collapses a timeseries source into one row per key, where each row reflects state across all processed source partitions. Cumulative is a **keyed-output** value of the **refresh axis** (`models.md` §"Refresh axis") on a stored `table`: the stateful counterpart of the partitioned-output `batched` mode, and one of the keyed modes alongside `versioned`, `latest_value`, and `materialized_view`. Covers the frontmatter selector, the classifier, the per-partition delta-SELECT shape, the cross-partition combine semantics, and the rules around what may be expressed. The **processed-input equivalence invariant** (its end-state specialisation) and the **algebraic maintenance ladder** that govern this mode are owned by `model_maintenance.md`; this spec is their **reference implementation** for the keyed-maintenance path and cites them rather than redefining them. Out of scope: batched DELETE+INSERT (`batched_models.md`), the `timeseries:` declaration this rule consumes from its source (`timeseries.md`), full model frontmatter schema (`models.md`), the backend `merge_into` primitive (described in `architecture.md` §"Backend primitives" — the cumulative rule is one caller).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -88,6 +88,19 @@ Any other aggregate function, or any non-aggregate non-key expression, in the pr
 | `CumulativeMultipleDrivingSources` | Error | More than one timeseries-tagged source appears in the FROM clause. The diagnostic lists the candidate sources. |
 | `CumulativeForbidsNondeterministic` | Error | The SQL uses `NOW()`, `RANDOM()`, or other non-deterministic functions outside stable contexts. Cross-partition combine requires deterministic per-partition output. |
 
+## Composition
+
+Per `model_maintenance.md` §"The composition contract", cumulative is composed from capabilities owned by the framework specs; this table states what it draws from each. The mode's own local machinery (classifier, allowlist, reprocessing, driving-source resolution, `unique_key` derivation) is defined in full in §Semantics below.
+
+| Composition slot | What cumulative uses | Owner |
+|---|---|---|
+| **Properties required** | algebraic discriminants (is-monoid / needs-inverse / decomposable / value-vs-order-monotone — the combiner algebra); driving-fact / anchor resolution (pick the single timeseries-tagged source); event-time monotonicity trace (the driving source's clock is monotone) | `model_properties.md` |
+| **World-facts consumed** | the **timeseries clock** (`partition_column` / `granularity`) of the driving source; the **source mutation profile** (append-only vs mutable — gates whether reprocessing is even reachable) | `timeseries.md`, `sources.md` |
+| **Transforms driven** | keyed `merge_into` via the **windowed-keyed-maintenance driver** + **source-filter pushdown**; for the higher rungs, **hidden decomposed state + presentation view** (rung 2), **retraction via delta history** (rung 3), and **explicit bounded-domain multiset** (rung 4) | `model_transforms.md` |
+| **Output shape** | **keyed** — one row per `unique_key`, no `partition_column` | `models.md` §"Refresh axis" |
+
+The correctness contract (end-state equivalence) and the ladder that orders these transforms are owned by `model_maintenance.md` (§"The equivalence invariant", §"The algebraic maintenance ladder"); cumulative validates its declared mode against the derived properties and refuses fail-loud — it never chooses or downgrades the mode (`model_maintenance.md` §"Validator, not chooser").
+
 ## Semantics
 
 ### Execution model
@@ -118,17 +131,15 @@ Downstream consumers see the cumulative output as a lookup table — there is no
 
 ### Driving source
 
-The classifier walks the inlined outer SELECT's FROM clause (after function expansion, per `expansion.md`) and collects every `smelt.<path>` reference whose resolved target declares a `timeseries:` block. The result must be exactly one such source — the **driving source**.
+The single driving input is resolved by the shared **driving-fact / anchor resolution** proof (`model_properties.md`): among the inlined outer SELECT's FROM references (after function expansion, per `expansion.md`), exactly one must be the anchor — for cumulative, the one `smelt.<path>` whose resolved target declares a `timeseries:` block. The proof's exactly-one verdict maps to cumulative's diagnostics:
 
-| Cardinality of timeseries-tagged sources | Outcome |
+| Driving-source cardinality | Outcome |
 |---|---|
 | 0 | Rejected: `CumulativeNoDrivingSource`. The error message suggests declaring `timeseries:` on the source or switching the materialization. |
 | 1 | Accepted. The driving source's `partition_column` and `granularity` parameterise the per-partition step loop and the source-filter pushdown. |
 | ≥ 2 | Rejected: `CumulativeMultipleDrivingSources`. A future plan may add explicit `driven_by:` disambiguation for same-granularity sources (Known Divergences). |
 
-The driving source's `granularity` must be `day` or `week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime by the per-partition step loop (see Known Divergences).
-
-Non-timeseries sources in the FROM clause (lookups) are allowed and are read in full on every partition step.
+The driving source's `granularity` must be `day` or `week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime by the per-partition step loop (see Known Divergences). Non-timeseries sources in the FROM clause (lookups) are allowed and are read in full on every partition step. (The current implementation resolves the driving source with a mode-local ref-count over `timeseries:`-tagged refs rather than the shared alias-scoped proof; consolidating the two onto one resolver is tracked in `docs/plans/20260704-model-updates.md` — see Known Divergences.)
 
 ### Classifier checks
 
@@ -146,29 +157,18 @@ There is no `safety_overrides:` block for the cumulative rule. The rejected cons
 
 ### Cross-partition equivalence
 
-For any set of source partitions `S = {D₁, …, Dₙ}` and any ordering π over `S`:
+Cumulative upholds the **end-state specialisation** of the processed-input equivalence invariant, defined once in `model_maintenance.md` §"The equivalence invariant": for any set `S = {D₁, …, Dₙ}` of processed source partitions and any ordering π over `S`, the maintained state equals `full_refresh(model, source.where(partition_col ∈ S))` — the result depends only on the *set* processed, not the order. This spec does not redefine the invariant; it is the load-bearing property the cumulative classifier upholds locally by admitting only commutative-and-associative combiners (Surface §"Aggregator allowlist") over a stable `GROUP BY` key, so reordering merges cannot change the final state. (Contrast batched's per-partition specialisation: cumulative has no `partition_column` to slice by, so it promises end-state equality, not per-slice equality.)
 
-```
-cumulative_aggregate_run(model, π(S))  ==  full_refresh(model, source.where(partition_col ∈ S))
-```
+### The maintenance boundary
 
-The output state depends only on the *set* of processed source partitions, not on the order they were processed in. This is the load-bearing property the classifier upholds: every allowlisted aggregator has a commutative and associative combiner, and `GROUP BY` produces a stable key, so reordering merges does not change the final state.
+What a `refresh: cumulative` model can maintain is decided by the **algebra of its combiners**, laid out as the four-rung **algebraic maintenance ladder** owned by `model_maintenance.md` §"The algebraic maintenance ladder" (which also owns the rung ordering, the maintainable-vs-delegated cutoff, and the derivation). This spec does not restate the ladder; it records **where cumulative sits on it**:
 
-This contract is **structurally different** from batched's per-partition equivalence (`batched_models.md` §"Per-partition equivalence"). Batched promises that slicing the output by `partition_column = p` matches a full refresh's slice; cumulative has no `partition_column` to slice by, so it promises end-state equality after processing a set of source partitions.
+- The Surface §"Aggregator allowlist" is exactly the closed set of **rung-1 direct commutative monoids** over scalar columns (`SUM`/`COUNT`, `MIN`/`MAX`, `BOOL_*`, `BIT_*`) — the whole of what the rule maintains today.
+- The deferred **`AVG` rewrite** grows into **rung 2** (a decomposed monoid `(sum, count)` behind a presentation view — Known Divergences).
+- **Reprocessing via delta history** for the reversible aggregators (`SUM`, `COUNT`, `BIT_XOR`) is **rung 3** (a commutative group; `MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR` are monoids but **not** groups, which is why reprocessing them requires a full refresh — Semantics §"Reprocessing semantics").
+- **Opt-in exact holistic aggregates** (`MEDIAN`/`PERCENTILE`/`MODE`, exact `COUNT(DISTINCT)`) grow into **rung 4** (an opt-in, fail-loud bounded-domain multiset — Known Divergences).
 
-### The maintenance boundary (algebraic ladder)
-
-What a `refresh: cumulative` model can maintain is decided by the **algebra of its combiners**, not by any backend feature. Every combiner is an operation on stored state; its algebraic structure is exactly what fixes whether — and how cheaply — smelt can keep the value current. The ladder has four rungs, three of which need no user opt-in:
-
-1. **Direct monoid — implemented.** The stored column *is* the answer, and the combiner is a commutative monoid (associative, commutative, with an identity = the empty partition). The Surface §"Aggregator allowlist" is exactly the closed set of directly-presentable commutative monoids over scalar columns: `SUM`/`COUNT` (`+`, 0), `MIN`/`MAX` (min/max, ±∞), `BOOL_*`, `BIT_AND`/`BIT_OR`/`BIT_XOR`. This is the whole of what the rule maintains today.
-
-2. **Decomposed monoid — future.** The user value is `π(state)` where `state` is a monoid element in a richer space and `π` a *presentation map*. `AVG` is state `(sum, count)` under componentwise `+`, presented `sum/count`; variance is a Welford triple; approximate `COUNT(DISTINCT)` is an HLL register vector under register-wise `max`. smelt keeps the intermediate in an ordinary state table and exposes the user value through a presentation view — the same hidden-state trick native engines use, kept portably. This is the enabling mechanism behind the deferred `AVG` rewrite (Known Divergences).
-
-3. **Group — future.** When inputs can change (late corrections, a reprocessed partition, a true delete) the combiner must be *invertible*: a commutative group. `SUM`, `COUNT`, `BIT_XOR` are groups (`x ⊕ y ⊖ y = x`) — these are precisely the reversible aggregators whose subtract-then-add reprocessing is the deferred delta-history mechanism (Semantics §"Reprocessing semantics"). `MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR` are monoids but **not** groups — you cannot un-see a maximum without the underlying multiset — which is exactly why reprocessing them requires a full refresh today.
-
-4. **Opt-in multiset (bounded-domain) — future, opt-in.** The holistic single-column aggregates that need *all rows* to compute — exact `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`, `DISTINCT`-modified aggregates — are maintainable by storing the per-key **value→count multiset** (merged by componentwise count addition; a bounded-domain Z-set). One multiset state serves any distribution functional through its own `π`, and its signed form makes retraction free even for `MIN`/`MAX`. This rung is **opt-in and fail-loud** because its state is `O(active domain)`, unbounded for a high-cardinality column: by default the classifier refuses an unbounded-state aggregate and suggests either the bounded *approximate* form (a t-digest/HLL decomposed monoid at rung 2) or `refresh: full`; the user opts in with a bounded-domain space-budget assertion, and the runtime caps the multiset with a full-refresh fallback. The opt-in is a space assertion, never a strategy knob that changes the contract — the SQL still just says `MEDIAN`.
-
-The **maintained-relation equivalence contract (Cross-partition equivalence, above) holds unconditionally for every rung** — what changes across rungs is the state representation and its size, never the fidelity of the user-visible value. Rungs 1–4 are exactly what smelt can maintain itself (a `merge_into` loop, optionally with a presentation view). The part beyond — general-operator retraction over joins, `DISTINCT`, and non-additive aggregates whose state is unbounded in a dimension the user cannot cap — is not smelt-driven-maintainable; that is delegated to the engine's native incremental-view maintenance via `refresh: materialized_view` (`materialized_view.md`). Full derivation: `docs/research/20260703-model-updates.md` (Part 14).
+Beyond the ladder — general-operator retraction over joins, non-additive state unbounded in a dimension the user cannot cap — is not smelt-driven-maintainable and is delegated to the engine's native incremental-view maintenance via `refresh: materialized_view` (`materialized_view.md`). The end-state equivalence contract (§"Cross-partition equivalence") holds unconditionally on every rung; only the state representation and its size change across rungs, never the fidelity of the user-visible value.
 
 ### Reprocessing semantics
 
@@ -183,14 +183,14 @@ Subtract-then-add (keeping per-partition deltas in a side table) is a candidate 
 
 ### Source-filter pushdown
 
-For the **driving source**, the rule injects a per-partition WHERE filter equivalent to:
+Cumulative drives the shared **source-filter pushdown** transform (`model_transforms.md`) with a cumulative-specific parameterization: it is applied **per partition step**, not once per run. For the **driving source**, the rule injects a per-partition WHERE filter equivalent to:
 
 ```
 WHERE <driving_source>.<partition_column> >= D
   AND <driving_source>.<partition_column> <  D + granularity
 ```
 
-on the source reference in the inlined SELECT, where `D` ranges over the source partitions covered by the run window. The injection happens once per partition step, not once per run.
+on the source reference in the inlined SELECT, where `D` ranges over the source partitions covered by the run window. The injection happens once per partition step, not once per run (this per-step application is cumulative's distinguishing use of the transform, vs batched's single run-window clamp).
 
 For **non-driving timeseries sources** (forbidden by the v1 multiple-driving-source rule), no pushdown happens — but the configuration is rejected before pushdown runs.
 
@@ -248,7 +248,7 @@ This section captures the load-bearing rationale.
 
 ## Known Divergences / Open Questions
 
-- **Only the direct-monoid rung is implemented.** The maintenance boundary (Semantics §"The maintenance boundary") describes four rungs; only rung 1 (direct commutative monoids — the current allowlist) is built. Rungs 2–4 (decomposed monoid with a presentation view, group retraction, opt-in bounded-domain multiset) are specified ahead of implementation; each is delivered by a phase of `docs/plans/20260704-model-updates.md`. The three deferred features below — `AVG` rewrite, reprocessing via delta history, `--auto` staleness fidelity — are the same hidden-state mechanism (rungs 2–3) seen three times.
+- **Only the direct-monoid rung is implemented.** The algebraic ladder (`model_maintenance.md` §"The algebraic maintenance ladder") has four rungs; cumulative implements only rung 1 (direct commutative monoids — the current allowlist). Cumulative's placement on rungs 2–4 (decomposed monoid with a presentation view, group retraction, opt-in bounded-domain multiset) is recorded in Semantics §"The maintenance boundary" and specified ahead of implementation; each is delivered by a phase of `docs/plans/20260704-model-updates.md`. The three deferred features below — `AVG` rewrite, reprocessing via delta history, `--auto` staleness fidelity — are the same hidden-state mechanism (rungs 2–3) seen three times.
 - **`AVG` rewrite (rung 2).** Out of scope today. The classifier refuses `AVG(...)`. A future phase stores `(sum, count)` state and presents `sum/count` through a presentation view (the decomposed-monoid rung), rather than a planning-time `SUM/COUNT` rewrite.
 - **Multi-source disambiguation (`driven_by:`).** A cumulative model reading multiple timeseries-tagged sources is rejected in v1 (`CumulativeMultipleDrivingSources`). A future plan may add an explicit `driven_by: smelt.<source>` field on the frontmatter to pick among same-granularity candidates. Different-granularity sources are deferred indefinitely.
 - **Self-referential cumulative.** A SELECT that joins to its own cumulative target (e.g., `cumulative_state += sum(new_partition) - decay`) reads "prior cumulative value" and is recursive. Rejected in v1 by the general "exactly one driving source" rule when the target itself is in the FROM clause. A future plan may admit this pattern with explicit input/state distinction.
@@ -279,6 +279,9 @@ This section captures the load-bearing rationale.
   - `docs/research/20260521-incremental-as-planner-rule.md` — sibling research; the "derive from SQL, not YAML" principle this spec inherits
   - `docs/research/2026-05-20-incremental-gaps-from-web-analytics.md` — Gap #5, the original motivation
 - **Related specs**:
+  - `model_maintenance.md` — owns the processed-input equivalence invariant (end-state specialisation) and the algebraic maintenance ladder this mode cites; cumulative is their reference implementation
+  - `model_properties.md` — owns the algebraic discriminants, driving-fact resolution, and monotonicity trace this mode requires
+  - `model_transforms.md` — owns the keyed `merge_into`, windowed-keyed-maintenance driver, source-filter pushdown, and higher-rung transforms this mode drives
   - `batched_models.md` — the partitioned-output peer (per-partition equivalence, timeseries output)
   - `versioned_models.md`, `latest_value_models.md`, `materialized_view.md` — the other keyed-output refresh modes
   - `timeseries.md` — the source-side declaration this rule consumes

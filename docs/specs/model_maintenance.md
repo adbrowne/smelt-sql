@@ -29,9 +29,9 @@ Every refresh-mode spec must present a **composition table** stating, for that m
 
 ## Semantics
 
-### The equivalence invariant (parent contract)
+### The equivalence invariant
 
-Every non-`full` refresh mode upholds one invariant: **an incremental run produces the result a full refresh would, restricted to the inputs it has processed so far.** Two specialisations exist, one per output shape:
+This is the parent contract of the whole family. Every non-`full` refresh mode upholds one invariant: **an incremental run produces the result a full refresh would, restricted to the inputs it has processed so far.** Two specialisations exist, one per output shape:
 
 - **Per-partition equivalence** (partitioned output — `batched`): for every partition `p`, the incremental output sliced by `partition_column = p` equals a full refresh's slice for `p`.
 - **End-state equivalence** (keyed output — `cumulative`, `latest_value`, `versioned`, `accumulating_snapshot`, `materialized_view`): for any set `S` of processed source partitions and any ordering π over `S`, the maintained state equals `full_refresh(model, source.where(partition ∈ S))`. The result depends only on the *set* processed, not the order.
@@ -45,7 +45,7 @@ What a keyed mode can maintain is fixed by the **algebra of its combiners**, not
 1. **Direct monoid.** The stored column *is* the answer; the combiner is a commutative monoid (associative, commutative, identity = empty partition): `SUM`/`COUNT` (`+`, 0), `MIN`/`MAX` (±∞), `BOOL_*`, `BIT_*`.
 2. **Decomposed monoid.** The user value is `π(state)` for a richer monoid element and a pure presentation map `π`: `AVG` = `(sum, count)` presented `sum/count`; variance = a Welford triple; approximate distinct = an HLL register vector. Kept in a state table, exposed through a presentation view.
 3. **Group.** When inputs can change (corrections, reprocessing, deletes) the combiner must be **invertible** — a commutative group (`SUM`, `COUNT`, `BIT_XOR`). Monoids that are not groups (`MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR`) cannot un-see a contribution and so cannot be reprocessed without a full refresh.
-4. **Opt-in bounded-domain multiset.** Holistic aggregates needing all rows (exact `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`) are maintained by storing the per-key value→count multiset (a bounded-domain Z-set). **Opt-in and fail-loud**: state is `O(active domain)`, so an unbounded-state aggregate is default-refused (suggesting the approximate form or `refresh: full`) unless the modeller supplies a bounded-domain budget, and the runtime caps the multiset with a full-refresh fallback.
+4. **Opt-in bounded-domain multiset.** Holistic aggregates needing all rows (exact `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`, and `DISTINCT`-modified aggregates) are maintained by storing the per-key value→count multiset (a bounded-domain Z-set). Its **signed** (Z-set) form makes retraction free even for the otherwise-irreversible `MIN`/`MAX` — the multiset carries the underlying values a bare monoid discards. **Opt-in and fail-loud**: state is `O(active domain)`, so an unbounded-state aggregate is default-refused (suggesting the approximate form or `refresh: full`) unless the modeller supplies a bounded-domain budget, and the runtime caps the multiset with a full-refresh fallback.
 
 The ladder is the boundary: rungs 1–4 are what smelt maintains itself (a `merge_into` loop, optionally with a presentation view). Beyond it — general-operator retraction over joins, unbounded non-additive state — is **not** smelt-driven-maintainable and is delegated to the engine's native incremental-view maintenance via `refresh: materialized_view`.
 

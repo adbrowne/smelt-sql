@@ -7,15 +7,29 @@ owners: [andrew]
 
 # Batched Models
 
-> **What this is.** The `refresh: batched` mode for time-partitioned models: the optional `batched:` frontmatter block, the partition-based DELETE+INSERT execution strategy on DuckDB, safety checks the optimizer enforces, per-source lookback derivation from the model's SQL, source-filter pushdown, how the derived per-source clamp is surfaced (explain output and editor hover), and the rules around what may be expressed in a logical batched model. Batched is the **partitioned-output** member of the refresh axis (`models.md` §"Refresh axis"): a plain complete `table` that differs from `refresh: full` only in *build method* — it processes new data forward along a monotone `partition_column` in batches rather than recomputing everything. Its keyed-output counterparts (`cumulative` and the other one-row-per-key modes) reflect state across all inputs instead. The time-dimension declaration (`event_time_column`, `partition_column`, `granularity`) lives in `timeseries.md` — this spec consumes it; `partition_column` must be monotone (a timestamp *or* an ever-increasing integer), which is what licenses "earlier partitions are settled."
+> **What this is.** The `refresh: batched` mode: the partitioned-output member of the refresh axis (`models.md` §"Refresh axis"). A plain complete `table` that differs from `refresh: full` only in *build method* — it processes new data forward along a monotone `partition_column` in batches instead of recomputing everything. This spec is a **composition** of the maintenance framework (`model_maintenance.md`): it states which shared **properties** (`model_properties.md`) it requires, which **transforms** (`model_transforms.md`) it drives, and its **output shape** (partitioned), then defines in full the machinery that is batched-*local*. It does **not** re-specify a shared capability. Out of scope, with their own homes: the equivalence invariant and composition contract (`model_maintenance.md`); every reusable property it names — monotonicity trace, bound/reach derivation, partition alignment, determinism predicate, and the rest (`model_properties.md`); every physical mechanism it drives — pushdown, DELETE+INSERT, the clamps, pinning (`model_transforms.md`); the time-dimension declaration `event_time_column`/`partition_column`/`granularity` (`timeseries.md`); the keyed-output refresh modes that reflect state across all inputs (`cumulative_aggregate.md` and siblings).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
-> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
+> **Timeless-oracle rule.** This spec describes the feature as if it has always existed. Implementation status that needs naming goes in §Known Divergences (behaviour + plan link) or §References → Plans (history). See the Timeless-oracle rule in `CLAUDE.md`.
 >
-> **Status: experimental.** The DuckDB DELETE+INSERT path is implemented and tested. MERGE on Spark/Databricks, schema-evolution, state tracking with gap detection, and per-column `data_latency` are planned (see `docs/plans/20260322-incremental-model-support.md`) and recorded under Known Divergences below.
+> **Status: experimental.** The DuckDB DELETE+INSERT path is implemented and tested. MERGE on Spark/Databricks, schema-evolution, state tracking with gap detection, and per-column `data_latency` are planned and recorded under Known Divergences.
 
 ## Surface
+
+### Composition
+
+Per the composition contract (`model_maintenance.md` §"The composition contract"), batched is composed as:
+
+| Kind | What batched composes | Home |
+|---|---|---|
+| **Output shape** | partitioned (a complete table with a monotone `partition_column`) | `models.md` §"Refresh axis" |
+| **Properties (required)** | event-time monotonicity trace; column nullability gate; unified bound/reach derivation; frame-reach taxonomy; injection-point / pushdown-depth; partition alignment (scoped); driving-fact / anchor resolution; determinism (run vs row) + nondeterminism predicate + taint; body-structure classifier; set-operation distribution; static-seed detection; window-independence / ordered-execution | `model_properties.md` |
+| **World-facts (consumed)** | the timeseries clock (`event_time_column`/`partition_column`/`granularity`); source-lateness margin; the `nondeterministic_columns` declaration | `timeseries.md`, `sources.md`, `model_properties.md` |
+| **Transforms (driven)** | source-filter pushdown; partition DELETE+INSERT; outer output-clamp; two-layer widened-scan + exact output clamp; compile-time pinning | `model_transforms.md` |
+| **Invariant upheld** | per-partition equivalence (the partitioned specialisation of the framework's processed-input equivalence invariant) | `model_maintenance.md` §"The equivalence invariant" |
+
+The normative content of this spec is that table plus the batched-**local** machinery defined below: the batch-safety roll-up, column-locality of the equivalence, event-time outer-visibility, backfill chunking, run/partition granularity alignment, and the batched surface (the `batched:` block, `timeseries:` requirement, `safety_overrides`, per-source-clamp observability).
 
 ### YAML frontmatter (in `.sql` files)
 
@@ -41,11 +55,11 @@ FROM smelt.orders
 GROUP BY order_date, customer_id
 ```
 
-`refresh: batched` is the entire opt-in; it implies a stored `table` (the modeller does not restate `materialization: table`). The `batched:` block is optional and carries only configuration — `unique_key`, `nondeterministic_columns`, `safety_overrides`. A `batched:` block without `refresh: batched` is a configuration error (`models.md` §"Constraint violations"); `refresh: batched` on a `view`/`ephemeral` model is a warning (the config is ignored).
+`refresh: batched` is the entire opt-in; it implies a stored `table`. The `batched:` block is optional and carries only configuration — `unique_key`, `nondeterministic_columns`, `safety_overrides`. A `batched:` block without `refresh: batched` is a configuration error (`models.md` §"Constraint violations"); `refresh: batched` on a `view`/`ephemeral` model is a warning (the config is ignored).
 
-A model with `refresh: batched` must also declare `timeseries:` (`timeseries.md`). Missing the `timeseries:` block produces a `TimeseriesRequiredForBatched` diagnostic at workspace load. The declared `partition_column` must be **monotone** — validated against the event-time monotonicity trace (Semantics §"Event-time monotonicity trace").
+A model with `refresh: batched` must also declare `timeseries:` (`timeseries.md`). Missing the block produces a `TimeseriesRequiredForBatched` diagnostic at workspace load. The declared `partition_column` must be **monotone** — validated by the event-time monotonicity trace (`model_properties.md` §"Event-time monotonicity trace").
 
-`nondeterministic_columns` (optional) lists **output columns exempt from the determinism requirement** — audit stamps and surrogates the modeller accepts may vary, such as `inserted_at = NOW()` or `batch_id = UUID()`. It admits non-deterministic SQL that would otherwise be rejected (Semantics § "Non-determinism and the equivalence contract"), but only when the non-deterministic value flows *exclusively* into a listed column. Listing `event_time_column`, `partition_column`, or a `unique_key` column is a configuration error: those govern windowing, partition placement, and dedup identity and can never tolerate non-determinism.
+`nondeterministic_columns` is the `model_properties.md` model-scoped declaration of the same name: output columns exempt from the determinism requirement (audit stamps and surrogates the modeller accepts may vary). Listing `event_time_column`, `partition_column`, or a `unique_key` column is a configuration error.
 
 ### `smelt.yml` (project-level overrides)
 
@@ -70,16 +84,16 @@ smelt backbuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selec
 
 - Both flags are required for any batched execution. Format: ISO-8601 (`2026-03-20`, `2026-03-20T00:00:00Z`).
 - The end bound is exclusive: `--event-time-end 2026-03-25` does not include `2026-03-25`.
-- The supplied `[start, end)` range is the **run window**. It must be a positive integer multiple of `timeseries.granularity` aligned to granularity boundaries (`timeseries.md` § "Granularity arithmetic"). Run-window size may exceed partition granularity — a `--event-time-start 2026-03-20 --event-time-end 2026-04-19` run on a daily-partitioned model covers 30 partitions in one engine query and 30 partition writes (Semantics § "Run window vs partition granularity").
-- `backbuild` uses the model's classified batch safety (see Semantics) to expand or split the requested range.
+- The supplied `[start, end)` range is the **run window**. It must be a positive integer multiple of `timeseries.granularity` aligned to granularity boundaries (`timeseries.md` §"Granularity arithmetic"). Run-window size may exceed partition granularity (Semantics §"Run window vs partition granularity").
+- `backbuild` uses the model's classified batch safety (Semantics §"Batch safety classification") to expand or split the requested range.
 
 ### Granularity values
 
-See `timeseries.md` § "Granularity values" for the closed enum. `batched:` consumes the granularity declared in the model's `timeseries:` block.
+See `timeseries.md` §"Granularity values" for the closed enum. `batched:` consumes the granularity declared in the model's `timeseries:` block.
 
 ### Strategy enum (backend-internal)
 
-Strategy is **not** declared on the model. Backends pick a strategy given the model's config and their capabilities:
+Strategy is **not** declared on the model. Backends pick a strategy from the model's config and their capabilities:
 
 ```rust
 enum IncrementalStrategy {
@@ -89,101 +103,28 @@ enum IncrementalStrategy {
 }
 ```
 
-DuckDB currently always uses `DeleteInsert`. UPSERT (`MERGE`) is **not** a batched strategy — it is the physical primitive used by the keyed-output refresh modes (`cumulative_aggregate.md` and its siblings), which have a different equivalence contract.
+DuckDB currently always uses `DeleteInsert`. UPSERT (`MERGE`) is **not** a batched strategy — it is the keyed `merge_into` transform (`model_transforms.md`) used by the keyed-output refresh modes, which have the end-state (not per-partition) equivalence contract.
 
 ## Semantics
 
 ### Execution model (DuckDB, current)
 
-For a batched run with `[start, end)` (the **run window**):
+For a batched run with run window `[start, end)`, batched drives four transforms from `model_transforms.md`:
 
-1. **DELETE** from the output table where `partition_column` falls in the **write window**, using the `partition_column` declared in the model's `timeseries:` block. The write window is the run window widened by the model's derived lookback/lookforward bound (§ "Per-source bound derivation"). For a model with no bound it equals the run window; for a write-rebasing model — one whose `partition_column` is *derived* and can skew earlier than the events that update it, e.g. a session keyed by `session_start_date` that gains events the day after it started — the write window is wider, so the DELETE covers **every** partition the INSERT will write. (Deleting only the run window would leave the lookback partitions' prior rows in place and accumulate duplicates across consecutive runs.)
-2. **Inject** an AST-level `WHERE partition_column >= write_start AND partition_column < write_end` filter on the model's logical SQL at the outermost SELECT. The injection is per-model (whole-query); it constrains the model's *output* to the same write window the DELETE covers. DELETE range and output clamp are derived from one window so the contract stays idempotent for any write-window width. **This step is skipped for the transparent slice** (a model with exactly one timeseries source and a zero-margin bound — `Bounded(_, 0, 0)`, no lookback/lookforward): the per-source filter from step 3 already constrains that source to the exact run window, so it *is* the output clamp, and adding a second, textually identical `WHERE` at the outer SELECT would be redundant. A model with a genuine lookback margin, or with more than one timeseries source, keeps this step — the outer clamp and the per-source scan window are then two distinct windows and both are load-bearing. The DELETE (step 1) is always computed from the write window regardless of which of these injection shapes is used, so the idempotence contract does not change.
-3. **Push down** per-source filters onto each `smelt.<path>` reference inside the body, derived from the model's SQL (Semantics § "Source-filter pushdown"). Sources without a `timeseries:` declaration are not pushdown candidates — they are read in full.
+1. **Partition DELETE** from the output table where `partition_column` falls in the **write window** — the run window widened by the model's derived reach (Property: *unified bound/reach derivation*). For a write-rebasing model (a `partition_column` *derived* and skewing earlier than the events that update it, e.g. a session keyed by `session_start_date` gaining events the next day) the write window is wider, so the DELETE covers **every** partition the INSERT will write. Deleting only the run window would accumulate duplicates across runs.
+2. **Outer output-clamp** — inject `WHERE partition_column >= write_start AND partition_column < write_end` at the outermost SELECT, constraining the model's *output* to the same window the DELETE covers. This step is **dropped for the transparent slice** (exactly one timeseries source, zero-margin bound `Bounded(_, 0, 0)`): the per-source pushdown filter already *is* the output clamp, so a second textually identical outer `WHERE` is redundant (Injection-point / pushdown-depth property; `model_transforms.md` §"Source-filter pushdown + the two clamps"). A genuine lookback margin, or more than one timeseries source, keeps the outer clamp: scan window and output window are then two distinct, load-bearing windows.
+3. **Source-filter pushdown** — inject a per-source `partition_column` filter on each `smelt.<path>` reference, derived from the model's SQL. Sources without a `timeseries:` declaration are lookups: no bound, read in full.
 4. **INSERT** the resulting query's output into the output table.
 
-This is idempotent under fixed input: re-running the same `[start, end)` produces the same final state. Per-partition equivalence holds: for any partition `p ∈ [start, end)`, the rows of the output where `partition_column = p` equal the rows a full-refresh run would produce filtered to the same partition (Semantics § "Per-partition equivalence").
+DELETE range and output clamp are derived from **one** window so the contract stays idempotent for any write-window width. Re-running the same `[start, end)` under fixed input converges to the same final state (Constraint: idempotence). Per-partition equivalence holds (Semantics §"Per-partition equivalence").
 
 ### Run window vs partition granularity
 
-The CLI's `[--event-time-start, --event-time-end)` declares a **run window**, not a per-partition invocation. The run window must be a positive integer multiple of `timeseries.granularity` aligned to granularity boundaries (`timeseries.md` § "Granularity arithmetic"); inside that constraint, the run-window size and the partition-granularity unit are independent.
-
-For a daily-partitioned model run with a 30-day window:
-
-- The engine query is **one** query covering the whole 30-day range. Source FROMs are filtered to the union of the run window and any per-source pushdown bounds; the outermost WHERE constrains the output to the 30-day run window.
-- The backend write is **one** DELETE over the 30 partitions followed by INSERT of the engine result. Per-partition idempotence is preserved by partition-aligned DELETE.
-
-Backfilling 60 days of a daily-partitioned model is one `smelt run --event-time-start D --event-time-end D+60d` invocation, not 60 successive daily invocations. The per-partition equivalence property (below) holds regardless of run-window size.
-
-### First-run and backfill
-
-A first run (no existing output table) and a backfill (a re-run of a range that has already been written) follow the same DELETE+INSERT contract — the DELETE is a no-op when the partition is absent. The planner picks a chunking shape from the model's batch-safety class (§"Batch safety classification"):
-
-| Class                | Chunking                                                                                   |
-|----------------------|--------------------------------------------------------------------------------------------|
-| `FullyBatchSafe`     | A single DELETE+INSERT pair covers any `[start, end)`. No chunking.                        |
-| `BoundedSafe(n)`     | Auto-sized sub-ranges (the existing 3× context, clamped 7–90 partitions rule). Each sub-range is one DELETE+INSERT pair, executed sequentially in temporal order. |
-| `PerPartitionOnly`   | One partition per iteration, sequential, temporal order. Each partition is one DELETE+INSERT pair. |
-
-**Per-partition batching is calendar-aligned for Month/Quarter/Year.** When the model's batch-safety class forces per-partition execution (or `smelt backbuild --per-partition` is requested), batches for `Month`/`Quarter`/`Year` granularities advance by true calendar units — 1 calendar month, 3 calendar months, or 1 calendar year respectively — rather than a fixed number of days. This ensures every batch lands exactly on a month/quarter/year boundary regardless of month length (February has 28 or 29 days; some months have 31). `Day` and `Week` granularities continue to use fixed 1-day / 7-day steps.
-
-**Output grain may be finer than partition grain.** A model whose `partition_column` holds monthly boundaries (e.g., `month_start`) may emit rows at daily or hourly granularity within those boundaries. The batch-splitting logic operates on the *partition* grain; rows at a finer grain are written and read in their entirety within each partition batch. A `--per-partition` run over 24 months with a daily-grain output table therefore writes all daily rows for each month in a single DELETE+INSERT — not one DELETE+INSERT per day.
-
-**Per-chunk transaction boundary.** Each chunk's DELETE+INSERT is one backend transaction. INSERT failure rolls back the chunk's DELETE. Earlier committed chunks **do not** roll back — partial-progress is intentional, since each chunk is idempotent under the same `[start, end)`.
-
-**Failure mode.** A run halts at the first failed chunk and exits non-zero. Re-running the same `[start, end)` resumes correctly because every committed chunk is idempotent: the next attempt will re-DELETE+INSERT the failed (or any later) range from the same input data and converge to the same final state.
-
-**Late-arriving data (interim guidance).** smelt does **not** automatically re-run partitions when data arrives late. Two interim mitigations:
-
-1. Trail `--event-time-end` behind real-time by the source's known latency window — i.e., always run with an end bound far enough in the past that late-arriving rows are already present.
-2. Run with overlapping ranges — e.g., a daily run that always re-processes the last 7 days' partitions — accepting the redundant work for the correctness guarantee.
-
-A planned automated mechanism is the per-column `data_latency:` annotation (Known Divergences below); until that lands, the two mitigations above are the only options.
-
-### Per-source bound derivation
-
-For each `smelt.<path>` reference inside the model body (after function expansion — see § "Functions inside batched bodies"), the optimizer derives a **bound tuple** describing the inverse image of the run window in the source's partition-column space:
-
-```
-BoundResult =
-  | Bounded { source_partition_col, before: Duration, after: Duration }
-  | Unbounded                  -- analyzable but ∞ (cumulative-across-history)
-  | NotDerivable               -- analyzer can't read this pattern
-```
-
-`source_partition_col` is the source's declared `timeseries.partition_column` (or, when narrower, a column the source declares as partition-aligned). `before` and `after` are durations expressed in that column's unit. A `Bounded(c, 0, 0)` source has no lookback or lookforward — it is read partition-by-partition. A `Bounded(c, 1d, 0)` source has a 1-day lookback. A `Bounded(c, 24h, 24h)` source spans 24 hours either side — the pattern that arises when a model rebases UTC timestamps into local-date partitions.
-
-**Two forms the optimizer reads, both standard SQL:**
-
-- **Form A — window-frame `RANGE BETWEEN INTERVAL '…' PRECEDING/FOLLOWING`.** The literal `INTERVAL` is the lookback (or lookforward) for the source backing the projected column.
-
-  ```sql
-  LAG(event_ts) OVER (
-      PARTITION BY device_id ORDER BY event_ts
-      RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW
-  ) AS prev_ts
-  ```
-
-- **Form B — explicit WHERE/JOIN time filters with literal `INTERVAL` offsets.** The offset is the lookback (or lookforward) on the named source column. Supports both same-column lookback and cross-column rebasing (the source's time column differs from the model's partition column):
-
-  ```sql
-  FROM bronze.events b
-  JOIN users u ON b.user_id = u.user_id
-  WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL '1 day'
-                           AND m.event_date_local + INTERVAL '1 day'
-  ```
-
-`BETWEEN` and paired `>=` / `<` forms are equivalent and both read.
-
-**Aggregation across multiple references to the same source** — take the union: `before = max(before_i)`, `after = max(after_i)`. Any `Unbounded` reference forces the union to `Unbounded`; any `NotDerivable` reference forces the union to `NotDerivable`.
-
-**Aggregation across distinct sources** — each source independent. A model referencing two timeseries sources and a lookup table produces two bound entries (one per timeseries source) and one no-entry (the lookup, read in full).
-
-**Sources without `timeseries:` are lookups.** No bound is derived; pushdown skips them; they are read in full each run.
+The CLI `[--event-time-start, --event-time-end)` declares a **run window**, not a per-partition invocation. It must be a positive integer multiple of `timeseries.granularity` aligned to granularity boundaries (`timeseries.md` §"Granularity arithmetic"); within that, run-window size and partition-granularity unit are independent. A daily-partitioned model run with a 30-day window is **one** engine query (sources filtered to the union of the run window and each source's pushdown bound; output clamped to the run window) and **one** partition-aligned DELETE over the 30 partitions followed by one INSERT. Backfilling 60 days is one `smelt run --event-time-start D --event-time-end D+60d`, not 60 daily invocations. Per-partition equivalence holds regardless of run-window size.
 
 ### Batch safety classification
 
-The optimizer rolls the per-source bound map into a single class per batched model:
+The optimizer rolls the per-source bound map (Property: *unified bound/reach derivation*, `BoundResult` per source) into a single **batched-local** class per model. This roll-up is meaningful only inside batched execution and is owned here:
 
 | Class               | Meaning                                                                 | Execution                                                |
 |---------------------|-------------------------------------------------------------------------|----------------------------------------------------------|
@@ -191,44 +132,76 @@ The optimizer rolls the per-source bound map into a single class per batched mod
 | `BoundedSafe(n)`    | All timeseries sources `Bounded`, with `n = max(before + after)` > 0    | Auto-sized chunks (3× context, clamped 7–90 partitions)  |
 | `PerPartitionOnly`  | One or more timeseries sources `Unbounded` (cumulative-across-history)  | One partition at a time, sequential                      |
 
-`n` for `BoundedSafe` is rendered in the source's partition-column unit and is the same value pushed to source-filter ranges (Semantics § "Source-filter pushdown").
+`n` for `BoundedSafe` is rendered in the source's partition-column unit and is the same value the source-filter pushdown transform reads.
 
-**Wide single-batch builds.** When `FullyBatchSafe` causes a single-batch build spanning more than 30 partition periods, smelt emits a warning recommending `--per-partition` or `--batch-size <n>`. No default is changed; the warning is informational. The per-partition batching path (`--per-partition`) and the manual batch-size path (`--batch-size`) both suppress the warning because the user has already opted into a safe batching shape.
+A model with **any** `NotDerivable` source is **refused at planning time**, not assigned a class — the optimizer cannot prove the partition-DELETE+INSERT contract is safe (`BatchedNotSafe`). The diagnostic names the offending construct and the source-map points at the original SQL. The author rewrites into a derivable form or removes the dependency. There is **no silent downgrade to full-refresh** (`model_maintenance.md` §"Validator, not chooser").
 
-A model with **any** `NotDerivable` source is **refused at planning time**, not assigned to a class — the optimizer cannot prove the partition-DELETE+INSERT contract is safe. The diagnostic names the offending construct (the bare `LAG` without a RANGE clause, the un-bounded computed-expression join, the projection through a non-catalog operation) and the source-map points at the original SQL location. The author rewrites using Form A or Form B (above) or removes the dependency. There is no silent downgrade to full-refresh.
+**Wide single-batch builds.** When `FullyBatchSafe` causes a single-batch build spanning more than 30 partition periods, smelt warns and recommends `--per-partition` or `--batch-size <n>`. The warning is informational; both `--per-partition` and `--batch-size` suppress it (the user has opted into a safe batching shape).
 
-**Window functions and the partition_column.** A window function whose `PARTITION BY` keys do not include the model's `partition_column` is normally refused (its result could depend on rows outside the partition being rewritten). It is **admitted** when the `OVER` clause carries a bounded `RANGE BETWEEN INTERVAL '…' PRECEDING [AND …]` frame with no `UNBOUNDED` bound: the finite frame is a Form A lookback that the source-bound deriver picks up and the source read is widened to cover, so the window is provably partition-local up to that bound. This is what lets a sessionization model partition its windows by `device_id` (ordered by event time, framed to a bounded lookback) while the model itself is partitioned by a derived `session_start_date`. An `UNBOUNDED PRECEDING` frame reads across all history and is **not** admitted this way — it forces `PerPartitionOnly` or refusal. `safety_overrides.allow_window_functions: true` remains an explicit escape hatch.
+### First-run and backfill
 
-### Source-filter pushdown
+A first run (no output table) and a backfill (re-run of a written range) follow the same DELETE+INSERT contract — the DELETE is a no-op when the partition is absent. The planner picks a **backfill-chunking** shape (a batched-local transform, `model_transforms.md` §"Transforms that stay in a mode spec") from the batch-safety class:
 
-For each `Bounded(c, before, after)` source reference in the model body, the optimizer injects:
+| Class                | Chunking                                                                                   |
+|----------------------|--------------------------------------------------------------------------------------------|
+| `FullyBatchSafe`     | A single DELETE+INSERT pair covers any `[start, end)`. No chunking.                        |
+| `BoundedSafe(n)`     | Auto-sized sub-ranges (3× context, clamped 7–90 partitions). Each sub-range is one DELETE+INSERT pair, executed sequentially in temporal order. |
+| `PerPartitionOnly`   | One partition per iteration, sequential, temporal order. Each partition is one DELETE+INSERT pair. |
+
+**Per-partition batching is calendar-aligned for Month/Quarter/Year.** When per-partition execution is forced (or `smelt backbuild --per-partition` is requested), batches for `Month`/`Quarter`/`Year` advance by true calendar units, so every batch lands on a month/quarter/year boundary regardless of month length. `Day` and `Week` use fixed 1-day / 7-day steps.
+
+**Output grain may be finer than partition grain.** A model whose `partition_column` holds monthly boundaries may emit daily/hourly rows within them; batch-splitting operates on the *partition* grain and writes/reads finer rows in their entirety within each partition batch.
+
+**Per-chunk transaction boundary.** Each chunk's DELETE+INSERT is one backend transaction. INSERT failure rolls back the chunk's DELETE; earlier committed chunks do **not** roll back — partial progress is intentional since each chunk is idempotent.
+
+**Failure mode.** A run halts at the first failed chunk and exits non-zero. Re-running the same `[start, end)` resumes correctly because every committed chunk is idempotent.
+
+**Late-arriving data (interim guidance).** smelt does **not** auto-re-run partitions when data arrives late. Two interim mitigations: (1) trail `--event-time-end` behind real-time by the source's known latency; (2) run overlapping ranges (e.g. always re-process the last 7 days). A planned automated mechanism is per-column `data_latency:` (Known Divergences).
+
+### Per-partition equivalence
+
+For every partition `p` in the run window `[run_start, run_end)`:
 
 ```
-WHERE c >= run_start - before
-  AND c <  run_end + after
+batched_run(model, [run_start, run_end)).where(partition_column = p)
+  == full_refresh(model).where(partition_column = p)
 ```
 
-on that source's FROM clause. `run_start` and `run_end` come from the run window (Semantics § "Run window vs partition granularity"); the WHERE is added to the same source reference's compiled SQL, not duplicated at the outer query.
+This is the partitioned specialisation of the framework's processed-input equivalence invariant (`model_maintenance.md` §"The equivalence invariant"). It is independent of run-window size.
 
-The outer WHERE injection (Execution model step 2) and source-filter pushdown are independent:
+**Column-locality (batched-local).** The equality holds for **local** columns — those whose value depends only on source rows visible within the model's source-filter ranges. A column depending on history outside those ranges (a cumulative aggregation such as connected-components or backward-fill) is **not equivalent**: its per-partition value reflects state at run time, not the final cumulative state. Such a column forces its source to `Unbounded` and the model to `PerPartitionOnly`; the run is correct as-of-the-run, just not equal to a full refresh that re-runs every partition with the final input.
 
-- The outer WHERE constrains the **model's output** to the run window, using the model's own `timeseries.partition_column`.
-- Source-filter pushdown constrains each **source read** to the union of the run window and the source's `(before, after)` bound, using the source's own `timeseries.partition_column`.
+**Equivalence is up to full-refresh non-determinism.** The equality is bit-identical on **deterministic** columns. A column opted into `nondeterministic_columns` need only be a *plausible full-refresh value*. This never extends to a column that governs *which* rows exist, *where* they are partitioned, or *how* they are deduplicated (Semantics §"Safety checks").
 
-Sources without `timeseries:` are not pushdown candidates — they are read in full each run.
+### Safety checks (batched application of shared properties)
 
-**Pushdown is per-reference.** A model that joins the same source twice (a self-join, or two references reaching the same source through inlined function bodies) emits a pushdown filter on each reference; the filter on each is the union bound from § "Per-source bound derivation".
+The optimizer rejects a batched model whose SQL uses constructs that break the partition-DELETE-then-INSERT contract. Each check applies a shared `model_properties.md` proof; the *admission decision* is the batched-local composition of that proof with the DELETE+INSERT contract. Each check is individually disabled via `batched.safety_overrides.allow_<check>: true` (opt-in, recorded).
 
-**One walk derives both windows.** The per-source bound (this section) and the outer output-clamp window (Execution model step 2) are derived from a single per-source pass over the model's SQL, not two independent analyses — so the two windows can never disagree with each other for the same source. That same pass classifies each source's *injection point*: a zero-margin bound (`Bounded(_, 0, 0)`) pushes all the way to the source scan with no outer wrap (Execution model step 2); any other bound keeps both the per-source scan filter and the outer clamp, because a real lookback/lookforward margin makes the scan window genuinely wider than the output window.
+- **Window functions** — rejected unless partition-aligned. A window `OVER (PARTITION BY <keys>)` is admitted when `<keys>` is a **superset** of `partition_column` (Property: *partition alignment*, scoped over window `OVER`): every window then evaluates within a single partition, so the DELETE+INSERT of whole partitions cannot change its result. A window whose `PARTITION BY` omits `partition_column` is additionally admitted when the `OVER` clause carries a bounded `RANGE BETWEEN INTERVAL '…' PRECEDING` frame with no `UNBOUNDED` bound: the finite frame is a derivable reach (Property: *frame-reach taxonomy*) that the source read is widened to cover, so the window is provably partition-local. `UNBOUNDED PRECEDING` is **not** admitted this way — it forces `PerPartitionOnly` or refusal. An `OVER (...)` with no `PARTITION BY` is always rejected. Escape hatch: `safety_overrides.allow_window_functions: true`.
+- **`HAVING`** — rejected unless the enclosing scope's own `GROUP BY` key is a **superset** of `partition_column` (Property: *partition alignment*, scoped over `GROUP BY`): every group is then scoped to a single partition value, so group composition is identical between a batched run and a full refresh restricted to that partition.
+- **`DISTINCT`** — rejected unless `partition_column` is projected in the same scope (Property: *partition alignment*, scoped over the select list): two rows can only collide on a `partition_column`-bearing row when they agree on the partition, so dedup matches a full refresh within that partition.
+- **`LIMIT`** — always rejected, no relaxation. A row-count cap never commutes with the partition filter: which rows survive depends on which other rows are present, and that set differs between a batched run and a full refresh even when the cap value is unchanged.
+- **Subqueries** (`SELECT ... FROM (SELECT ...)`) — rejected unless overridden. (A `WITH`-clause CTE is *not* gated by this structural check; only a subquery nested in FROM/JOIN is — CTE bodies flow through bound derivation via the *body-structure classifier* property.)
+- **Non-deterministic functions** — rejected unless confined to an opted-in payload column (below).
 
-### Observing the per-source clamp
+All partition-alignment checks are evaluated **per scope**: a `UNION` branch's own `HAVING`/`DISTINCT`/window is judged against that branch's own key set, never inheriting alignment from a sibling or the outer query (Property: *partition alignment* is a per-scope containment fact; *set-operation distribution* governs how the framework distributes over branches).
 
-The per-source clamp — the window `partition_col ∈ [run_start − before, run_end + after)` each `smelt.<path>` reference is read under (§ "Source-filter pushdown") — is **observable**, not merely an internal injection. Because lookback is *derived from the model's SQL rather than declared* (Design § "Derive lookback from the model's SQL"), the author has no declaration to read back; the derived clamp is surfaced instead, so they can confirm the analyzer read their SQL the way they intended. Two surfaces expose it, both using the ISO-8601 duration rendering of the bound machinery (`Seconds::to_iso8601`):
+**Non-determinism and the payload rule.** batched consumes the *determinism (run vs row) + nondeterminism predicate + taint* property (`model_properties.md`). A non-deterministic value is admitted only when it flows **exclusively** into a column listed in `nondeterministic_columns` — a payload written once per window and never read back to place, filter, group, or dedup a row. The taint check enforces three **hard exclusions**, rejecting regardless of the opt-in and naming the offending position: the `event_time_column`/`partition_column` expression; any `unique_key` column; any row-set-membership or grouping position (`WHERE`, `HAVING`, `JOIN … ON`, `DISTINCT`, `GROUP BY`, or a window's `PARTITION BY`/`ORDER BY`/frame). The run-nondeterministic class (`NOW()`/`CURRENT_*`) is additionally admitted as a **direct** SELECT-list projection even into an unlisted column, because compile-time pinning (`model_transforms.md`) freezes it once per run — every row of a run sees one value, so a direct projection carries no cross-run variance. The row-nondeterministic class (`RANDOM()`/`UUID()`) still requires the target column to be listed. Listing an excluded column in `nondeterministic_columns` is a configuration error. The blunt `safety_overrides.allow_nondeterministic` drops the guardrail wholesale and is discouraged.
 
-- **`smelt explain` (`--json`).** The `source_bounds` map reports, per referenced source, its `source_partition_col` and the derived `(before, after)` offsets. When explain is invoked with a concrete run window (`--event-time-start/--event-time-end`), it additionally resolves the clamp against it, reporting the concrete scan window `[run_start − before, run_end + after)` alongside the offsets; without a run window it reports the symbolic offsets only.
-- **Editor hover (LSP).** Hovering a `smelt.<path>` source reference inside a batched model shows that reference's clamp **alongside the existing schema/column readout** — the derived lookback/lookforward and the window shape `partition_col ∈ [run_start − before, run_end + after)`. This makes visible, at edit time, exactly how far beyond the run window each source read reaches, and which sources are read in full versus bounded.
+### Event-time outer-visibility (batched-local)
 
-The four bound outcomes render distinctly, so the readout also communicates *why* a source is read the way it is:
+The outer output-clamp injects a `WHERE event_time_column >= start AND event_time_column < end` at the outermost SELECT. For that to bind correctly, `event_time_column` must be **accessible** there. A plain `UNION`/`INTERSECT`/`EXCEPT`, or a `UNION ALL` whose branches cannot be proven traceable, would bind the clamp to only the first branch and produce wrong results; a subquery FROM that does not project `event_time_column` references an inaccessible column. Either case is rejected with `EventTimeColumnNotVisibleAtOuterSelect` (Error) before execution.
+
+A `UNION ALL` is **exempt** when every branch's projection of `event_time_column` traces `Traceable` (Property: *event-time monotonicity trace*; distributed by *set-operation distribution*) back to a real source's own partition column: per-source pushdown then narrows each branch's scan independently and the outer clamp's placement is immaterial. A `StaticSeed` branch is named and rejected; a `NotTraceable` branch conservatively keeps the whole-model outer clamp.
+
+### Observing the per-source clamp (batched-local surface)
+
+Because lookback is *derived from the model's SQL rather than declared* (Design), the author has no declaration to read back; the derived clamp — the window `partition_col ∈ [run_start − before, run_end + after)` each `smelt.<path>` reference is read under — is surfaced instead, so the author can confirm the analyzer read their SQL as intended. Two surfaces expose it, both using the ISO-8601 duration rendering of the bound:
+
+- **`smelt explain` (`--json`).** The `source_bounds` map reports, per source, its `source_partition_col` and derived `(before, after)` offsets. With a concrete run window it additionally resolves the scan window `[run_start − before, run_end + after)`.
+- **Editor hover (LSP).** Hovering a `smelt.<path>` reference in a batched model shows that reference's clamp alongside the existing schema/column readout.
+
+The bound outcomes render distinctly so the readout communicates *why* a source is read the way it is:
 
 | Outcome | Readout |
 |---|---|
@@ -237,275 +210,111 @@ The four bound outcomes render distinctly, so the readout also communicates *why
 | `Unbounded` | read across all history (cumulative); forces `PerPartitionOnly` |
 | lookup (no `timeseries:`) | read in full; not a pushdown candidate |
 
-A `NotDerivable` source is refused at planning time (§ "Batch safety classification"), so there is no clamp to show — the model surfaces the existing refusal diagnostic instead of a per-source window.
-
-### Per-partition equivalence
-
-For every partition `p` in the model's run window `[run_start, run_end)`:
-
-```
-batched_run(model, [run_start, run_end))
-  .where(partition_column = p)
-== full_refresh(model).where(partition_column = p)
-```
-
-This is the formal contract the batched rule upholds. It is independent of run-window size — a 60-day run window and 60 successive single-day runs produce equivalent per-partition output.
-
-The equality holds for **local** columns of the output — columns whose value depends only on source rows visible within the model's source-filter ranges. Columns whose value depends on history outside the source-filter ranges (cumulative aggregations such as connected-components or backward-fill) are **not equivalent** — the per-partition value reflects state at the time the partition was run, not the final cumulative state after all partitions are processed. Such columns force the source to `Unbounded` and the model to `PerPartitionOnly`; running them remains correct as-of-the-run, just not equivalent to a full refresh that re-runs every partition with the final cumulative input.
-
-**Equivalence is up to full-refresh non-determinism.** The equality above is bit-identical on the model's **deterministic** columns. A column explicitly opted into non-determinism (Semantics § "Non-determinism and the equivalence contract") is exempt: it need only be a *plausible full-refresh value*, not the same value a particular full refresh produced. The governing principle: a sequence of batched runs must produce the same output as a full refresh, **and** non-determinism that already differs between two full refreshes may differ across batched runs. This never extends to a column that governs *which* rows exist, *where* they are partitioned, or *how* they are deduplicated — those stay deterministic regardless of any opt-in.
-
-### Safety checks (rejected by default)
-
-The optimizer rejects a batched model if its SQL uses constructs that break the partition-DELETE-then-INSERT contract or produce non-deterministic output:
-
-- Window functions (`OVER (...)`), **unless** the window is partition-aligned (see below).
-- `HAVING`, **unless** its own scope's `GROUP BY` key is a superset of `partition_column` (see below).
-- `LIMIT` — always rejected. A row-count cap never commutes with the partition filter: which rows survive the cap depends on which other rows are present in the query, and that set differs between a batched run (one partition's rows) and a full refresh (all rows) even when the cap's *value* is unchanged. No superset test licenses it.
-- Subqueries (`SELECT ... FROM (SELECT ...)`)
-- Non-deterministic functions (`RANDOM()`, `NOW()` outside of stable contexts, etc.), **unless** confined to an opted-in output column (see below).
-- `DISTINCT`, **unless** `partition_column` is projected in the same scope (see below).
-
-Each check can be individually disabled via `batched.safety_overrides.allow_<check>: true`. Disabling is opt-in and recorded.
-
-#### Group-aligned `HAVING` and `DISTINCT`
-
-A `HAVING` clause is admissible without a safety override when the enclosing scope's own `GROUP BY` key is a **superset** of `partition_column`. The DELETE+INSERT contract deletes and re-inserts whole partitions, so once every group is scoped to a single partition value, `HAVING`'s post-aggregation filter sees the exact same groups on a batched run (one partition) as on a full refresh restricted to that partition — group composition cannot change between the two.
-
-A `SELECT DISTINCT` is admissible without a safety override when `partition_column` is projected in the same scope. `DISTINCT`'s dedup key is the whole projected row; once `partition_column` is part of that row, two rows can only collide (and be deduped together) when they agree on `partition_column` — i.e. only within the same partition. A batched run therefore dedups exactly the way a full refresh would within that partition.
-
-Both checks are evaluated **per scope**: a `UNION` branch's own `HAVING`/`DISTINCT` is judged against that branch's own `GROUP BY`/select list, not the outer query's or another branch's. A branch that is not itself aligned is rejected by name even when a sibling branch is aligned — the admission never inherits alignment across scopes.
-
-`LIMIT` has no analogous relaxation: it is rejected unconditionally regardless of `GROUP BY`/`DISTINCT` alignment (see above).
-
-#### Non-determinism and the equivalence contract
-
-The equivalence contract is *equivalence up to full-refresh non-determinism* (Semantics § "Per-partition equivalence"): batched output must match a full refresh, except on columns that a full refresh would itself populate non-deterministically. This licenses a **scoped, opted-in** relaxation of the non-determinism rejection above.
-
-A non-deterministic function is admitted when its value flows **only** into a column named in `batched.nondeterministic_columns` — a *payload* column, written once per window and never read back to place, filter, group, or dedup a row. The opt-in covers both the run-nondeterministic (`NOW()`, `CURRENT_*`) and the row-nondeterministic (`RANDOM()`, `UUID()`) classes; the modeller has declared they accept the variation.
-
-The run-nondeterministic class is admitted as a direct SELECT-list projection **even when the target column is not listed** in `nondeterministic_columns`: `NOW()`/`CURRENT_*` are frozen once per run at compile time, so every row in a given run sees the same value — a direct projection carries no cross-run variance for the guardrail to gate, and pinning already solves the whole problem for this class. This exception does not extend to the row-nondeterministic class: `RANDOM()`/`UUID()` still require the target column to be listed, since two rows in the same run can get different values with no pinning to reconcile them.
-
-The admission is gated by a flow check with three hard exclusions — a non-deterministic value reaching any of these is rejected regardless of the opt-in, naming the offending position:
-
-- the `event_time_column` or `partition_column` expression (governs windowing and partition placement — a non-deterministic clock could scan or write a row into a different partition on rebuild, which the partition-scoped DELETE+INSERT cannot reconcile);
-- any `unique_key` column (governs dedup identity — a non-deterministic key breaks the idempotency the DELETE+INSERT contract rests on);
-- any row-set-membership or grouping position — `WHERE`, `HAVING`, `JOIN … ON`, `DISTINCT`, `GROUP BY` keys, or a window's `PARTITION BY` / `ORDER BY` / frame (changes *which* rows exist or *how* they aggregate, not a stored value).
-
-Listing an excluded column in `nondeterministic_columns` is a configuration error. The blunt `safety_overrides.allow_nondeterministic` remains available but is discouraged: it disables the check wholesale, dropping these guardrails, whereas `nondeterministic_columns` keeps them and still proves the non-determinism did not leak into the deterministic skeleton.
-
-#### Partition-aligned window functions
-
-A window function `OVER (PARTITION BY <keys>)` is admissible without a safety override when `<keys>` is a **superset** of the model's `timeseries.partition_column`. For a model with `partition_column: event_date`, both `OVER (PARTITION BY event_date)` and `OVER (PARTITION BY event_date, session_seq)` are admitted; `OVER (PARTITION BY user_id)` (which does not contain `event_date`) is rejected.
-
-The superset requirement ensures every window is evaluated within a single partition: the DELETE+INSERT contract deletes and re-inserts whole partitions, so a window whose scope crosses partition boundaries can produce different results on partial data. A partition-aligned `PARTITION BY` prevents cross-partition scope.
-
-An `OVER (...)` with **no** `PARTITION BY` clause is always rejected by this check.
+A `NotDerivable` source is refused at planning time (§"Batch safety classification"), so it surfaces the refusal diagnostic instead of a per-source window.
 
 ### Functions inside batched bodies
 
-An batched model body may call transparent functions (`smelt.define`-resolved) and opaque calls (`smelt.extern` declarations, canonical built-ins, source references). Function expansion (`expansion.md`) is a logical pass that runs **before** every analysis stage in this spec — per-source bound derivation, source-filter pushdown, and most batch-safety sub-checks all see the expanded CST. From their point of view, a `LAG()` inside a `smelt.define` body and one inlined at the call site are indistinguishable: each is read with the same Form A / Form B vocabulary. **Exception:** the `OVER`-clause admissibility sub-check (`find_inadmissible_over`) scans the outer model SQL before function expansion, so `OVER` clauses written inside a `smelt.define` body are not visible to it; see Known Divergences.
+A batched model body may call transparent functions (`smelt.define`-resolved) and opaque calls (`smelt.extern`, canonical built-ins, source references). Function expansion (`expansion.md`) runs **before** every analysis stage here — bound derivation, source-filter pushdown, and most batch-safety sub-checks all see the expanded CST, so a `LAG()` inside a `smelt.define` body and one inlined at the call site are indistinguishable. The outer output-clamp is injected at the outermost expanded query and so sees columns produced inside expanded bodies; source-filter pushdown reaches `smelt.<path>` references that originated inside a `smelt.define` body via expansion. **Exception:** the `OVER`-clause admissibility sub-check scans the outer model SQL before expansion (Known Divergences).
 
-Two interactions remain:
-
-1. **Per-model WHERE injection happens at the outer expanded query.** The framework's injected `WHERE partition_column >= start AND partition_column < end` clause is applied once at the outermost SELECT (Execution model step 2). Because it is applied *after* function expansion, the filter sees any columns produced inside an expanded function body without a separate pushdown rule for transparent calls.
-
-2. **Source-filter pushdown reaches inside function bodies via expansion.** The pushdown WHEREs (Semantics § "Source-filter pushdown") are added to `smelt.<path>` references in the expanded CST. References that originated inside a `smelt.define` body receive the same pushdown as references in the outer body.
-
-**Opaque calls (`smelt.extern`, canonical built-ins) remain black boxes.** Bound derivation cannot read through them. An batched model whose source-of-time-dependence is hidden behind an `smelt.extern` call is `NotDerivable` and refused at planning time, unless the analyser can prove a bound from the surrounding SQL (a WHERE clause around the opaque call, an explicit RANGE-windowed projection of its result). Authors of opaque calls with hidden temporal dependencies must either expose the dependency in surrounding SQL or accept that the model cannot run in batches.
-
-Cross-link: `planner_integration.md` §"Optimization boundary: transparent vs black-box".
-
-### `partition_column` validation
-
-Partition-column projection is owned by `timeseries.md` §"Constraints & Invariants" rule 1 (Partition column projection): `partition_column` must appear in the model's output `SELECT` list (and in the `GROUP BY` when grouping is present), else `MalformedTimeseries`. The batched rule consumes that guarantee — a model whose SELECT does not project `partition_column` is rejected before execution by that check, not by a separate one defined here.
-
-### Event-time monotonicity trace
-
-Every relaxation that lets the injected time filter reach *below* the outermost SELECT — pushing it onto a source scan, into a `UNION` branch, or onto one side of a join — rests on a single analysis: does the model's projected `event_time` value trace back, **monotonically**, to a real source partition column, and if so to *which* column, on *which* source, under *what* constant offset? The runtime uses `event_time` in two places (Execution model steps 2–3): the outer output-clamp filters output rows on the projected expression directly, and per-source pushdown filters each source on its own `partition_column`. These two filters are equivalent — and the source filter may therefore be relocated below the projection — **only** when the projection is a monotone image of the source clock.
-
-**The exact property required — interval-preimage-is-an-interval.** Let a source `S` carry partition column `p`, and let the model project `event_time` as `e = f(…)` over `S`'s columns. Relocating the window predicate from `e` onto `p` is sound iff, for every window `[lo, hi)` on `e`, the set of source rows with `f(p) ∈ [lo, hi)` is exactly the set with `p ∈ [a, b)` for some thresholds `a, b` — i.e. the preimage of a half-line is a half-line. Equivalently, `f` is **monotone non-decreasing**.
-
-- **Non-decreasing suffices; strict monotonicity is not required.** `DATE_TRUNC` and `CAST(ts AS DATE)` are many-to-one (a whole day of timestamps collapses to one date) yet still push cleanly, because the model's window boundaries are themselves granularity-aligned (`partition_column` is `DATE_TRUNC('day', e)` in the canonical model). A plateau of `f` never straddles a window boundary, so the half-line preimage stays exact. Requiring strict monotonicity would reject the single most common shape.
-- **Window-preserving, not value-preserving.** The outer output-clamp filters on `e` verbatim and is trivially correct whenever `e` is projected. Monotonicity is the *additional* fact that licenses **relocating** that filter onto `p` at the source — it is a prerequisite for the pushdown, never for the bare outer-clamp injection.
-
-**Verdict — the trace.** The analysis returns not a boolean but a trace, so that its result simultaneously answers the eligibility question and names the deepest source column the filter may be written at. The `Traceable` arm additionally carries a ClickHouse-style four-field `Monotonicity` struct (cf. `getMonotonicityForRange`) rather than a bare boolean, so a future descending clock, named-DST-zone, or exact-endpoint relaxation is a *data* difference on an existing field, not a verdict-shape change:
-
-```
-EventTimeTrace =
-  | Traceable   { source, source_column, offset, monotonicity }
-                                                     -- monotone non-decreasing image of source_column
-                                                     --   on source, shifted by a constant offset;
-                                                     --   licenses source-level pushdown (offset folds into the bound)
-  | StaticSeed  { reason }                           -- constant / NULL-injecting: a static seed, not a
-                                                     --   partitionable stream (lands in one partition forever,
-                                                     --   or never passes `e >= start`)
-  | NotTraceable { reason }                          -- cannot prove monotone traceability; the consumer must
-                                                     --   stay at the outer clamp (or reject) — never push
-
-Monotonicity =
-  { is_monotonic: bool          -- chain is monotone over the value range
-  , is_positive: bool           -- direction: non-decreasing (true) vs non-increasing
-  , is_always_monotonic: bool   -- monotone across the whole domain, not just a sub-range
-  , is_strict: bool             -- strictly injective (true) vs weakly monotone with plateaus
-                                 --   (false, e.g. DATE_TRUNC)
-  }
-```
-
-`source_column` is the derived `BoundResult::Bounded.source_partition_col`; `offset` folds a constant `± INTERVAL` shift into the derived bound (`Seconds`, or a symbolic month/year offset). Every whitelist entry below sets `is_monotonic = true, is_positive = true, is_always_monotonic = true`; `is_strict = true` for identity / constant-offset shifts, `false` for many-to-one forms (`DATE_TRUNC`, `CAST(_ AS DATE)`, `time_bucket`-to-grid). The forward-only consumers this spec defines today read only `is_monotonic && is_positive`; the remaining fields exist so the door stays open without a type change.
-
-**Static monotone whitelist.** The projected `event_time` expression is classified by walking it from the projected column toward the leaves. The following forms are provably non-decreasing on every target backend and yield `Traceable`:
-
-| Form | Example | Traces to |
-|---|---|---|
-| transparent alias / bare column | `created_at AS event_time` | the column, offset 0 |
-| qualified column | `f.event_ts AS event_time` | column on the qualified input |
-| `DATE_TRUNC(unit, col)` | `DATE_TRUNC('day', event_ts)` | `col` |
-| `CAST(col AS DATE/TIMESTAMP)` | `CAST(event_ts AS DATE)` | `col` |
-| `date_bin` / `time_bucket` / `FLOOR(col to grid)` | `time_bucket('1 hour', ts)` | `col` |
-| `col ± INTERVAL '<const>'` | `event_ts + INTERVAL '1 day'` | `col`; offset folds into the bound |
-| `col AT TIME ZONE '<fixed-offset const>'` | `ts AT TIME ZONE 'UTC'`, `… '+05:30'` | `col` (constant shift) |
-
-Composition is closed: a composition of monotone non-decreasing forms is monotone non-decreasing, so `DATE_TRUNC('day', CAST(event_ts AS TIMESTAMP) + INTERVAL '2 hours')` traces through all three layers to `event_ts` with a `+2h` offset. The classifier recurses on the single column-bearing argument at each layer and **fails closed** the moment a layer has two column-bearing arguments or an unrecognised head.
-
-**Non-monotone / order-breaking blacklist** — these must yield `NotTraceable` (or `StaticSeed` where noted):
-
-| Form | Why it breaks | Verdict |
-|---|---|---|
-| arithmetic on two columns (`end_ts - start_ts`) | not monotone in either alone; multi-source | `NotTraceable` |
-| `MOD` / `EXTRACT(HOUR/DOW/…)` | periodic — preimage of an interval is a union of intervals | `NotTraceable` |
-| `CASE WHEN …` | piecewise; generally neither monotone nor total | `NotTraceable` |
-| `COALESCE(col, <const>)` | injects a constant for `NULL` rows | `StaticSeed` |
-| `GREATEST/LEAST(col, <const>)` | clamps to a plateau that can straddle a boundary | `NotTraceable` |
-| unknown scalar UDF | monotonicity unknowable from the call site | `NotTraceable` |
-| constant / `NULL` literal | static seed, not a stream | `StaticSeed` |
-| run-nondeterministic clock (`NOW()`, `CURRENT_DATE`) | shifts each run; not source-traceable | `NotTraceable` |
-| `CAST(col AS VARCHAR)` | lexical order ≠ temporal order in general | `NotTraceable` |
-| `col AT TIME ZONE '<named DST zone>'` | instant→local wall clock goes backward at DST fall-back, so an interval's preimage is a union of two intervals | `NotTraceable` |
-
-`CAST` is whitelisted only for date/timestamp target types. The whitelist is deliberately the **intersection** of what is monotone on every target backend (smelt is multi-backend): a per-engine monotonicity table would make eligibility a function of the backend rather than of the plan.
-
-**Declared escape hatch.** Where static classification runs out — an opaque scalar UDF, a `smelt.functions.*` body too large to re-derive, or a genuinely data-dependent monotonicity the SQL does not prove — the modeller may supply the guarantee. The natural home is a declared property on the smelt function alongside the existing `deterministic` / `idempotent` / `append_only` (`FunctionProperties`, `crates/smelt-logical/src/logical.rs`), or a per-model assertion on the `timeseries:` block for a model-specific projection. The governing rule: **a declaration may only *widen* eligibility.** The conservative static default, when no declaration is present, is *reject-the-push* (stay at the outer clamp), never *assume-monotone*.
-
-**Injection target is semantic, not textual.** The trace's `(source, source_column, offset)` names a tree location — a source and column to filter, resolved by identity — not a span of source text to rewrite. A consumer licensed to push (by a `Traceable` verdict) annotates the logical/physical tree at that node with the filter it should carry; the printer that lowers the tree to SQL is what emits the actual `WHERE` clause. No consumer computes a source-text edit from the trace. This keeps the trace reusable across the three below-the-outer-SELECT consumers (`UNION` branches, subquery/CTE bodies, join inputs) without each one re-deriving how to locate its target in source text. The annotation-carrying tree representation and the printer changes that consume it are a separate, deferred piece of work (see Known Divergences); this primitive only guarantees the trace it returns is already expressed the way that future consumer needs.
+**Opaque calls remain black boxes.** Bound derivation cannot read through `smelt.extern`/built-ins. A batched model whose time-dependence is hidden behind an opaque call is `NotDerivable` and refused, unless a bound is provable from the surrounding SQL (a WHERE clause, an explicit RANGE-windowed projection). Cross-link: `planner_integration.md` §"Optimization boundary: transparent vs black-box".
 
 ### Window independence and self-referential models
 
-Whether a batched model's windows may be built **in parallel** or must be built **sequentially in temporal order** is a derived execution property, not a declared one. The discriminator is a single question: does building window `W` read only the *sources*, or does it read the model's *own prior output*?
+Whether windows may be built **in parallel** or must be built **sequentially in temporal order** is the *window-independence / ordered-execution* property (`model_properties.md`), derived from the model's dependency graph, never declared. batched's application:
 
-- **Window-independent (the default).** Every window is a pure function of the source rows in its own scan range (widened by the derived lookback). Windows share no computed state, so a backfill of `[t₀, tₙ)` may split into sub-ranges built in any order — including in parallel — and reassemble to the same table. The entire safe slice this spec admits (per-partition-equivalent models, bounded-`RANGE` lookback windows, partition-aligned window functions) is window-independent: the lookback margin reaches into *sources*, never into the model's own earlier partitions.
+- **Window-independent (the default).** Every window is a pure function of source rows in its own scan range (widened by the derived lookback). The entire safe slice batched admits is window-independent — the lookback reaches into *sources*, never the model's own earlier partitions — so a backfill of `[t₀, tₙ)` may split into sub-ranges built in any order, including in parallel.
+- **Window-dependent → ordered.** A **self-referential** batched model — one reading its own prior partitions via `smelt.<self>` (a running balance, a partition-by-partition state machine) — is **in scope** and still executes as partition DELETE+INSERT (it stays a partitioned table; it does **not** become `refresh: cumulative`), but the runtime must build its windows **sequentially in strict temporal order**, and its backfill may not be parallelised or reordered. A self-edge the planner cannot prove converges partition-by-partition (a self-reference reading *forward* or across all history) is refused at planning time, not silently mis-parallelised.
 
-- **Window-dependent → ordered.** A **self-referential** batched model — one that reads its own prior partitions via `smelt.<self>` (a running balance seeded from yesterday's close, a state machine advanced partition-by-partition) — computes window `W` from window `W−1`'s stored output. Such a model is **in scope** and still executes as partition `DELETE+INSERT` (it is a partitioned table, not a keyed lookup — it does not become `refresh: cumulative`). But its windows are no longer independent: the runtime must build them **sequentially in strict temporal order**, and a backfill may not be parallelised or run out of order. This *ordered* execution property is **derived** from the model's dependency graph (a self-edge in the DAG), never declared, and it is **enforced**: the planner marks a self-referential batched model ordered and the executor refuses to parallelise or reorder its backfill. A self-edge that the planner cannot prove converges partition-by-partition (a self-reference that reads *forward* or across the whole history rather than the immediately-prior partitions) is refused at planning time, not silently mis-parallelised.
-
-The distinction is the same stateless/stateful spine that separates batched from the keyed-output refresh modes (`cumulative_aggregate.md` and siblings): a self-referential batched model is *stateful-ordered* in its execution yet keeps the batched *output shape* (partitioned, per-partition-equivalent within each window's input). Statefulness explains why it must run ordered; it does not change what the model *is* (it stays a partitioned table, not a keyed lookup).
+This is the same stateless/stateful spine that separates batched from the keyed modes: a self-referential batched model is *stateful-ordered* in execution yet keeps the batched *output shape* (partitioned, per-partition-equivalent within each window's input).
 
 ### State ownership
 
-smelt does not track watermarks, offsets, or run history for batched models. The backend owns computational state:
+smelt does not track watermarks, offsets, or run history for batched models — the backend owns computational state (DuckDB: table state + transactions; future Delta/Spark: transaction log + MERGE; future Flink: checkpoints). Optional run-state tracking with gap detection is opt-in via the `state.mode: intervals` posture (`virtual_environments.md`); the on-disk layout is owned by `run_state.md`.
 
-- DuckDB: table state and transaction history.
-- Future Delta/Spark: transaction log; MERGE strategy.
-- Future Flink: checkpoints.
+### `partition_column` validation
 
-Optional run-state tracking with gap detection is an opt-in extension: the `state.mode: intervals` posture (`virtual_environments.md`) enables the persisted interval ledger and gap detection without changing the stateless default. The on-disk layout is owned by `run_state.md`.
+Partition-column projection is owned by `timeseries.md` §"Constraints & Invariants" rule 1: `partition_column` must appear in the model's output `SELECT` (and in the `GROUP BY` when grouping is present), else `MalformedTimeseries`. The batched rule consumes that guarantee rather than re-checking.
 
 ## Design
 
-This section captures the load-bearing rationale behind the batched model surface and the alternatives that were considered and rejected.
+This section captures the batched-**specific** rationale; the rationale for each shared property/transform lives in its owning spec.
 
-**Logical SQL is pure; the framework injects the time filter.** A model body never contains `is_incremental()`, `{% if execution_mode == ... %}`, or any other conditional that branches on whether the run is full or batched. The same SQL is the full-build and the batched-build description, and the framework injects a `WHERE partition_column >= start AND partition_column < end` clause at the per-model boundary. *Jinja-style `is_incremental()` branching* (the dbt shape) was rejected because it splits one model into two implicit ones — the full-build version and the batched version — and they drift: a developer fixes a join in the batched branch and forgets the full-build branch, or a backfill produces different aggregates than a fresh build. Pure logical SQL means there is one source of truth; full and batched are both derivations of it. The trade-off is that batched models must accept the framework's filter shape (per-model, on the outer query); the planner's batch-safety analysis polices the fit.
+**Logical SQL is pure; the framework injects the time filter.** A model body never contains `is_incremental()` or any conditional branching on full-vs-batched. The same SQL is both descriptions; the framework injects the outer clamp and drives pushdown. *Jinja-style `is_incremental()` branching* (dbt) was rejected because it splits one model into two implicit ones that drift. The trade-off — batched models must accept the framework's per-model filter shape — is policed by the batch-safety analysis.
 
-**DELETE+INSERT over partition columns, not MERGE, for v1.** DuckDB's batched strategy is `DeleteInsert` — drop the matching partitions, run the filtered query, insert the result. *MERGE* was rejected as the v1 default for two reasons: it requires a `unique_key` (which not every model has), and the MERGE pathway has cross-engine subtleties (Spark MERGE on Delta vs. Parquet vs. iceberg, DuckDB's late-2024 MERGE quirks) that we do not want to litigate before the simpler DELETE+INSERT shape is widely deployed. DELETE+INSERT is idempotent under fixed input, easy to reason about ("re-run the same range, get the same result"), and aligns with the partition-column safety analysis the planner already does. MERGE remains in the `IncrementalStrategy` enum (Surface §"Strategy enum") for backends that want to opt in; it is not the default for any backend today.
+**DELETE+INSERT over partition columns, not MERGE, for v1.** DuckDB's strategy is `DeleteInsert`. *MERGE* was rejected as the v1 default because it requires a `unique_key` (not every model has one) and carries cross-engine subtleties; it stays in the `IncrementalStrategy` enum for backends that opt in. DELETE+INSERT is idempotent under fixed input and aligns with the partition-column safety analysis.
 
-**smelt does not own state.** Watermarks, run history, gap detection, and offset bookkeeping live in the backend (DuckDB transactions; Delta logs; Flink checkpoints) — the framework only generates SQL. *Owning a watermark store* (a `.smelt/state/<model>.json` of last-run boundaries) was rejected as a v1 requirement because it duplicates state the backend already tracks, opens a sync-correctness window between smelt's view and the engine's view, and locks adoption: a workspace with a half-broken watermark store is harder to migrate than a workspace whose state lives entirely in the database. Optional run-state tracking with gap detection is planned as an opt-in extension; the core stays state-free.
+**Three-class batch-safety taxonomy.** The `FullyBatchSafe` / `BoundedSafe(n)` / `PerPartitionOnly` roll-up (Semantics §"Batch safety classification") is batched-local because it is meaningful only for batched execution shapes. *A binary safe/unsafe flag* was rejected — too many real workloads are bounded-safe and need auto-chunking. *A continuous safety score* was rejected — the user-facing decision is qualitative and maps directly to three backend-execution shapes.
 
-**Three-class batch-safety taxonomy: `FullyBatchSafe` / `BoundedSafe(n)` / `PerPartitionOnly`.** The planner classifies every batched model into exactly one of these classes (Semantics §"Batch safety classification"). *A binary "safe / unsafe" flag* was rejected because too many real workloads are bounded-safe — a `LAG()` over a 7-day window, a self-join with a 24-hour interval — and a binary classifier either rejects them all or accepts them all without the auto-chunking that bounded-safe models need. *A continuous safety score* (a numeric "lookback days") was rejected because the user-facing decision is qualitative ("can I run this in chunks? how big?") and a numeric score is harder to surface in diagnostics. The three classes map directly to backend-execution shapes: `FullyBatchSafe` runs in one query for any range, `BoundedSafe(n)` runs in auto-sized chunks, `PerPartitionOnly` runs one partition at a time.
+**Derive lookback from the model's SQL, not from frontmatter.** The per-source bound is computed by the shared bound/reach derivation over the model's SQL (including inlined `smelt.define` bodies), not a `lookback_days:` YAML annotation, which would let declaration and logic drift (`feedback_derive_dont_declare`). The trade-off — a model with implicit time logic refuses batched eligibility and must be rewritten into a derivable form — is arguably the right outcome. Deriving from SQL removes the artifact the author would read to confirm behaviour, so the derived clamp is made **observable** (Semantics §"Observing the per-source clamp") as the deliberate counterpart. Deeper rationale: `docs/research/20260521-incremental-as-planner-rule.md`.
 
-**Derive lookback from the model's SQL, not from frontmatter.** The per-source bound map (Semantics §"Per-source bound derivation") is computed from window-frame `RANGE BETWEEN INTERVAL` clauses (Form A) and explicit WHERE/JOIN time filters (Form B) in the model's SQL — including SQL inlined from `smelt.define` bodies via expansion. *A per-model `lookback_days:` YAML annotation* was rejected because it puts the time-dependency declaration in metadata, separated from the SQL or function logic that creates the need; declaration and logic can drift, and an author can change a function's time window without remembering to update the YAML. *A function-level `lookback = …` declaration* on `smelt.define` was rejected because function expansion already lets the analyser read the Form A / Form B patterns inside function bodies — the declaration would duplicate information already statically present in the SQL. The trade-off is that models with implicit time logic (a bare `LAG` with no RANGE clause, a computed-expression join with no date filter) refuse batched eligibility and the author must rewrite using a derivable form. This is arguably the right outcome: a model the planner can't analyse for lookback is one it can't reason about for correctness. Deeper rationale: `docs/research/20260521-incremental-as-planner-rule.md`.
+**smelt does not own state.** Watermarks, run history, and offsets live in the backend; *owning a watermark store* was rejected as a v1 requirement because it duplicates engine state and opens a sync-correctness window. Optional run-state tracking is an opt-in extension.
 
-**Derived lookback must be observable (Semantics § "Observing the per-source clamp").** Deriving lookback from SQL instead of a declaration removes the drift failure mode, but it also removes the artifact the author would otherwise read to confirm what the system will do — there is no `lookback_days:` line to inspect. The observability surfaces (explain output and editor hover) are the deliberate counterpart: they render the *derived* clamp back to the author so the analyzer's reading of their SQL is legible, not hidden. *Surfacing nothing and treating the derived bound as purely internal* was rejected because it would make a silent analyzer decision — how far each source is scanned — invisible until a wrong result or a surprising scan cost appeared. The clamp is shown per source (not a single per-model number) for the same reason the bound map is per-source: a model's sources have independent time dependencies, and a per-model roll-up would hide which reference drives the widest read.
-
-**Per-source bounds, not a single per-model lookback.** A model can read multiple sources with independent time dependencies — one with a 1-day lookback, one with no lookback, one a non-timeseries lookup. *A single per-model `lookback_days` value* was rejected because it forces over-reading the sources that don't need lookback to satisfy the source that does, and silently mis-handles cross-column rebasing (UTC source → user-local partition column). The per-source `(before, after)` shape generalises cleanly: same-column lookback, cross-column rebasing, range-joins, and unbounded cumulatives all collapse into the same machinery. Different sources on the same model get independent pushdown.
-
-**Event-time monotonicity is one primitive, inferred where possible, declared where necessary.** The eligibility of every below-the-outer-SELECT relaxation reduces to one question — is the projected `event_time` a monotone image of a source clock? — so the analysis is a single shared primitive (Semantics §"Event-time monotonicity trace"), not a per-construct check. *Growing a private copy of the analysis inside each relaxation* was rejected: it re-introduces the class of syntax-vs-semantics inconsistency where one spelling of the same query is gated and another is not. The verdict is a **trace** (`source, source_column, offset`) rather than a boolean because the same fact that proves eligibility also names the deepest column the filter may be pushed to — eligibility and maximal-pushdown-depth are one computation (the classical `σ∘Q = Q∘σ` predicate-pushdown law). *Returning a bare boolean* was rejected for this reason; the closest production analog, ClickHouse's `getMonotonicityForRange`, likewise returns a verdict struct. The primitive is **sound in one direction only**: it may return `NotTraceable` for a form that is in fact safe (a missed optimisation — the consumer stays at the correct-but-unpushed outer clamp), but it must **never** return `Traceable` for a non-monotone form (an unsound relocated filter). This mirrors the codebase's existing fail-closed discipline (`cardinality_from_str` maps any unknown string to the conservative `OneToMany`). Finally, the primitive *proves* monotonicity where it can and falls back to a *declaration* where it cannot: monotonicity of an arbitrary expression is undecidable (Rice's theorem in general; Richardson's theorem already for elementary real expressions), so a sound static analysis is necessarily a sufficient-condition whitelist plus a declared hatch. Every comparable window-forward engine (Spark, Flink, dbt microbatch, SQLMesh, cube.dev) takes the monotone-event-time column purely as a *declaration* and never proves it; smelt's novelty is to prove it over the whitelist and lean on declaration only where it must. Full derivation and prior-art survey: `docs/research/20260703-model-updates.md` (Part 4, and Part 12 for external validation).
-
-**Non-determinism is opted in per column, and confined by proof.** The equivalence contract is *equivalence up to full-refresh non-determinism* (Semantics § "Per-partition equivalence"): a column a full refresh would populate non-deterministically is free to vary across batched runs. But whether a given column is "acceptable to vary" is a *value judgement only the author holds* — an `inserted_at` stamp is audit-only, an amount is not — so it is **declared** (`batched.nondeterministic_columns`), the one place the derive-don't-declare default correctly yields, because the fact being declared is about acceptable variation, not about the computation. *A whole-model `allow_nondeterministic` boolean* was rejected as the primary mechanism because it drops the guardrail that keeps non-determinism out of the `event_time`/`partition_column`/`unique_key`/membership roles — a random partition key would then pass — and those roles break the DELETE+INSERT mechanism itself, not merely a value. The per-column opt-in keeps the guardrail and still *proves*, by a flow/taint check, that the declared tolerance did not leak into the deterministic skeleton. The blunt override remains only as a discouraged escape hatch. Derivation: `docs/research/20260703-model-updates.md` §9.2.
+**Non-determinism is opted in per column, and confined by proof.** Whether a column is acceptable-to-vary is a value judgement only the author holds, so it is **declared** (`nondeterministic_columns`) — the one place the derive-don't-declare default correctly yields. *A whole-model `allow_nondeterministic` boolean* was rejected as the primary mechanism because it drops the guardrail keeping non-determinism out of the skeleton roles. The per-column opt-in keeps the guardrail and still proves, by the shared taint flow, that the tolerance did not leak into the deterministic skeleton. Derivation: `docs/research/20260703-model-updates.md` §9.2.
 
 ## Constraints & Invariants
 
-1. **Logical model is pure SQL.** No `is_incremental()`, no `{{ ... }}` macros, no conditional branches. The same SQL describes both the full-build and the batched-build behavior; the framework injects the time filter.
-2. **`timeseries:` is required for `batched:`.** A model declaring `batched:` without a `timeseries:` block (per `timeseries.md`) produces `TimeseriesRequiredForBatched` at workspace load. The time-dimension lives in `timeseries:`; the batched rule consumes it.
-3. **Strategy is not on the model.** Frontmatter declares `unique_key`; the time-dimension fields live in `timeseries:`; the backend chooses `DeleteInsert` / `Merge` / etc. Model files do not name a strategy.
-4. **smelt does not manage computational state.** Watermarks, offsets, and run-history live in the backend. The framework only generates SQL artifacts.
-5. **Output-filter injection is per-model; source-filter pushdown is per-reference.** The outer `WHERE` constraining the model's output to the run window is applied once at the outermost SELECT. Source-filter pushdown WHEREs are applied per `smelt.<path>` reference in the expanded body, derived from per-source bounds (Semantics § "Source-filter pushdown").
-6. **Per-partition equivalence with full refresh, up to full-refresh non-determinism.** For every partition `p` in the run window, the batched rule's output `where(partition_column = p)` equals the full-refresh output `where(partition_column = p)`, for all columns whose value depends only on rows visible within the model's source-filter ranges. The equality is bit-identical on deterministic columns; a column opted into `batched.nondeterministic_columns` need only be a plausible full-refresh value (Semantics § "Non-determinism and the equivalence contract"). Globally-dependent columns (cumulative aggregations) are not equivalent — see Semantics § "Per-partition equivalence".
-7. **Idempotence under fixed input.** For a given backend and unchanged source data, running the same run window repeatedly converges to the same output table state.
+1. **Logical model is pure SQL.** No `is_incremental()`, no macros, no conditional branches. The framework injects the time filter.
+2. **`timeseries:` is required for `batched:`.** A model with `refresh: batched` and no `timeseries:` block produces `TimeseriesRequiredForBatched` at workspace load.
+3. **Strategy is not on the model.** Frontmatter declares `unique_key`; the backend chooses `DeleteInsert`/`Merge`/etc.
+4. **smelt does not manage computational state.** Watermarks, offsets, and run-history live in the backend.
+5. **Output-filter injection is per-model; source-filter pushdown is per-reference.** The outer clamp is applied once at the outermost SELECT; pushdown filters are applied per `smelt.<path>` reference in the expanded body.
+6. **Per-partition equivalence with full refresh, up to full-refresh non-determinism.** For every partition `p` in the run window, the batched output `where(partition_column = p)` equals the full-refresh output for `p` on all local, deterministic columns; a `nondeterministic_columns` column need only be a plausible full-refresh value; globally-dependent columns are not equivalent (Semantics §"Per-partition equivalence").
+7. **Idempotence under fixed input.** Re-running the same run window on unchanged sources converges to the same output table state.
 8. **Granularity is closed under partition arithmetic.** A run window must align to whole granularity units; partial-unit ranges are rejected.
-9. **Safety check overrides are explicit.** A safety override must name the specific check it bypasses. There is no global "disable all safety checks" switch.
-10. **No silent downgrade to full-refresh.** A model that the safety classifier rejects or whose bound derivation produces `NotDerivable` is refused at planning time with an explanatory diagnostic; it does not silently fall back to full-table execution.
-11. **`event_time_column` must be accessible at the outermost SELECT, unless every branch of a UNION ALL traces to a real source.** The time-filter injection (`inject_time_filter`) applies a `WHERE event_time_column >= start AND event_time_column < end` clause at the outermost SELECT level, which — for a plain UNION/INTERSECT/EXCEPT, or a UNION ALL where the branches cannot be proven traceable — would only bind to the first branch and produce incorrect results. A UNION ALL is exempted from this rejection when every branch's projection of `event_time_column` traces `Traceable` (the event-time monotonicity trace, Semantics §"Event-time monotonicity trace") back to a real upstream source's own partition column: per-source pushdown then narrows each branch's underlying scan to the run window independently, making the outer clamp's placement immaterial. If the outermost FROM clause is a subquery that does not project `event_time_column`, the injected filter references an inaccessible column. Any case not covered by the UNION ALL exemption is rejected with `EventTimeColumnNotVisibleAtOuterSelect` (Error) at the diagnostic gate before execution begins.
-12. **The monotonicity trace is sound in one direction.** The event-time monotonicity primitive (Semantics §"Event-time monotonicity trace") may under-approximate — returning `NotTraceable` for a form that is in fact safe, costing an optimisation — but must never over-approximate: it must never return `Traceable` for a projection that is not a monotone non-decreasing image of a source partition column. Every unrecognised expression head, every multi-column argument, and every unknown UDF fails closed to `NotTraceable`. A declared monotonicity guarantee may widen what is admitted; the static default without a declaration is always reject-the-push.
-13. **Non-determinism stays in the payload.** Non-deterministic SQL is admitted only when its value flows exclusively into a column listed in `batched.nondeterministic_columns` — except the run-nondeterministic class (`NOW()`/`CURRENT_*`), which is admitted as a direct SELECT-list projection even into an unlisted column, since it is frozen once per run and carries no cross-run variance (Semantics § "Non-determinism and the equivalence contract"). Regardless of class or listing, the value must never reach the `event_time_column`, `partition_column`, a `unique_key` column, or any row-set-membership or grouping position (`WHERE`/`HAVING`/`JOIN … ON`/`DISTINCT`/`GROUP BY`/window spec). These roles determine which rows exist, where they are partitioned, and how they are deduplicated, and must be deterministic regardless of any opt-in. Listing an excluded column in `nondeterministic_columns` is a configuration error.
+9. **Safety-check overrides are explicit.** A `safety_overrides` entry names the specific check it bypasses; there is no global disable.
+10. **No silent downgrade to full-refresh.** A model the safety classifier rejects, or whose bound derivation is `NotDerivable`, is refused at planning time with a diagnostic (`BatchedNotSafe`), never a silent fall back to full-table execution (`model_maintenance.md` §"Validator, not chooser").
+11. **`event_time_column` must be accessible at the outermost SELECT, unless every UNION ALL branch traces `Traceable`.** Otherwise `EventTimeColumnNotVisibleAtOuterSelect` (Error) fires at the diagnostic gate (Semantics §"Event-time outer-visibility").
+12. **Non-determinism stays in the payload.** Non-deterministic SQL is admitted only when its value flows exclusively into a `nondeterministic_columns` column (except the run-nondeterministic class as a direct projection); it must never reach `event_time_column`, `partition_column`, a `unique_key` column, or any membership/grouping position. Listing an excluded column is a configuration error.
 
 ## Known Divergences / Open Questions
 
-- **The rule module file `crates/smelt-logical/src/rules/incremental.rs` still carries the old spelling.** The diagnostic codes (`TimeseriesRequiredForBatched`, `CumulativeForbidsBatched`, `BatchedNotSafe`) and the config type (`BatchedConfig`, `BatchedSafetyOverrides`) are renamed; the physical-write-strategy type `IncrementalStrategy` is a distinct concept (delete-insert/append/insert-overwrite) and keeps its name. A pure internal rename of the rule module's file path is optional and deferred to avoid churning Group B's live files.
-- **Self-referential (ordered) batched models are specified but not yet enforced.** The window-independence / ordered-execution semantics (Semantics §"Window independence and self-referential models") are specified here ahead of a plan. Today the planner does not detect a batched model's self-edge, does not mark it ordered, and the backfill chunker may parallelise or reorder any batched model — so a self-referential model that reads its own prior partitions would be built with the wrong ordering. Derivation of the ordered property from the DAG self-edge and its enforcement in the executor are a phase of `docs/plans/20260704-model-updates.md`.
-- **`-- @materialize: batched` annotation never implemented.** `docs/DESIGN.md` § "Configuration Syntax" still shows the annotation form as an alternative; YAML frontmatter is the only implemented surface. The DESIGN.md prose marks this as a future option but the surface section in this spec is authoritative.
-- **One non-hot classification call site still reads the outer SQL body.** The hot paths all see function bodies now: execution bound derivation, `smelt explain --json`, the `smelt run` and `smelt backbuild` execute paths (via `smelt-runtime/execute.rs`), and the batch-safety analyzer additionally text-scans for `RANGE BETWEEN INTERVAL` frames — so a lookback declared *inside* a function body is honored for source-read widening, reflected in explain `batch_safety` / `source_bounds`, and respected by run/backbuild chunk sizing. One lower-traffic spot still classifies on the outer `model.sql`: the bound-`NotDerivable` **refusal gate** (`derive_model_source_bounds`, which lives in the pure planner and so cannot expand — the CLI would have to pre-expand before calling it). This is benign for every model in the repo: a model whose only lookback lives inside a function body and that carries no outer Form B filter is the sole case that would behave differently, and none exists. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
-- **Window-function batch-safety check also runs on unexpanded outer SQL.** The batched batch-safety check (`find_inadmissible_over`) scans the outer model SQL for `OVER` clauses whose `PARTITION BY` keys do not include the model's `partition_column`. Because this check runs before function expansion, an `OVER` clause written inside a `smelt.define` function body is invisible to it: the safety check sees only the call-site token, not the expanded window expression. A model whose only non-partition-aligned `OVER` clause lives inside a function body will therefore be admitted as batch-safe when it may not be. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
-- **Per-column `data_latency` not implemented.** Plan calls for declaring `data_latency` on upstream sources for late-arriving data; not yet available.
-- **Non-deterministic row-set-membership or grouping is out of scope.** A non-deterministic `WHERE` / `GROUP BY` / `JOIN … ON` / `DISTINCT` / window spec is always rejected, regardless of `batched.nondeterministic_columns` — the sharpened contract could in principle permit it (a value frozen per window would still let each partition dedup/filter consistently against itself), but reconciling frozen-per-window membership against a full refresh needs its own design (research §9.1a Open questions) and is not attempted here.
-- **Per-source clamp observability partly emitted.** Of the two surfaces in Semantics § "Observing the per-source clamp", only part ships today: `smelt explain --json` reports each source's `source_partition_col` and derived `(before, after)` offsets in `source_bounds` (`ExplainIncremental.source_bounds` / `SourceBoundJson`), but does **not** yet resolve the run-relative window `[run_start − before, run_end + after)` even when a run window is supplied. The **editor hover** readout — showing a `smelt.<path>` reference's clamp alongside its schema — is **not yet implemented**: LSP hover today is type/column/ref oriented (`crates/smelt-lsp/src/hover.rs`) and surfaces no batched facts. Both the run-relative explain resolution and the hover readout are specified here ahead of a plan; no implementation plan exists yet. (No warning is specified on the clamp: a "derived lookback exceeds a declared budget" check has no home today — the only declaration, `data_latency`, is a floor combined via `max`, not a ceiling — and is deliberately out of scope.)
-- **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+batched, batched-only paths unified around `BatchedConfig` but the CLI dispatch is still tri-modal. Should converge.
-- **Granularity conversion boilerplate.** A duplicate `Granularity` enum existed in `smelt-planner/src/types.rs` and was reconciled with `smelt-core`; check for residual conversion code in `main.rs` (lines around 669–683 in the plan reference) when next touching this area.
-- **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is opt-in via the `state.mode: intervals` posture (`virtual_environments.md`); the persisted layout is specified in `run_state.md`.
-- **Schema evolution is unspecified.** A `partition_column` rename or an output schema change has no defined handling today.
-- **`event_time_column` visibility check does not yet detect CTE-only references.** Constraint 11 is enforced for direct-subquery FROM clauses and set operations. If the outermost FROM references a CTE name (a `WITH …` alias) that does not project `event_time_column`, the `EventTimeColumnNotVisibleAtOuterSelect` diagnostic is not emitted — the CTE case requires resolving the `WITH` clause body, which is deferred. A model in this shape fails at DuckDB execution time with a "column not found" error. Tracked in `docs/plans/20260616-smelt-feedback-fixes.md`.
-- **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for batched models that consume metrics.
-- **Event-time monotonicity trace consumers.** The monotonicity primitive (Semantics §"Event-time monotonicity trace"; Constraint 12) is implemented and exhaustively tested: the pure structural classifier in `crates/smelt-logical/src/analysis/monotonicity.rs` (`trace_event_time`) returns the `Traceable`/`StaticSeed`/`NotTraceable` verdict against the whitelist/blacklist above, gated by the `smelt-db` nullability check (`trace_event_time_checked`, below), and validated by a generative smelt-sql soundness oracle that compiles generated models through smelt's own backend codegen and searches input data for any `Traceable` verdict that breaks the pushdown commutation identity. All three below-the-outer-SELECT relaxations now call it: `UNION ALL` branches are traced independently (a `Traceable` set merges each branch's named source into the pushdown context; a `StaticSeed` branch is named and rejected; a `NotTraceable` branch conservatively keeps the outer clamp for the whole model); subquery/CTE bodies that project the model's partition column are traced the same way (`Traceable` licenses pushdown to the real source; `StaticSeed` is rejected; `NotTraceable` is a no-op that preserves whatever bound the existing Form A/B textual walk already derives, so a pre-existing model like `examples/web_analytics/models/silver/sessions.sql` — whose CTE body the trace cannot (yet) prove monotone — is unaffected); and joins resolve a single driving fact via alias-scoped leaf resolution (see below), windowing only that input and full-scanning every other one, so the misfilter hazard of pushing a filter onto a non-driving join input is zero by construction. A `WITH`-clause CTE is not itself gated by the blunt `safety_overrides.allow_subqueries` structural check — only a subquery nested in FROM/JOIN is — since CTE bodies were never gated pre-trace and already flow through the existing bound derivation. The annotation-carrying tree representation and printer changes described below remain deferred; today's consumers reuse the existing `derive_model_source_bounds` → `inject_source_filters` mechanism.
-- **Column nullability is gated in `smelt-db`.** The pure `smelt-logical` primitive catches only *syntactic* NULL-injecting forms (a `NULL` literal, `COALESCE(col, <const>)`) and routes them to `StaticSeed`; it cannot see column nullability, which is inferred one layer up in `smelt-db`. `smelt-db::trace_event_time_checked` is the thin Salsa wrapper that calls the pure trace and, when it returns `Traceable`, resolves the leaf `source_column`'s nullability from the model/source `ResolvedSchema` and **downgrades to `NotTraceable`** if the column is nullable or its nullability is unresolvable (fail closed). A merely-nullable leaf column is therefore never pushed on — consistent with Constraint 12's one-directional soundness (the downgrade only narrows, never widens, what is `Traceable`).
-- **`AT TIME ZONE` is whitelisted but not yet reachable.** The static whitelist lists `col AT TIME ZONE '<fixed-offset const>'` as `Traceable` and named DST zones as `NotTraceable`, but `smelt-parser` does not currently parse `AT TIME ZONE` syntax at all. Any such expression therefore fails to become a classifiable select item or falls through the classifier's unrecognised-head arm — both yielding `NotTraceable`. The outcome is sound (fail closed), but the fixed-offset row documents the intended verdict once the parser supports the syntax, not current behaviour; the shipped eligibility surface is narrower than the whitelist reads.
-- **Leaf-column resolution is name-based at the primitive layer; alias-scoped resolution is layered on top for joins.** The pure trace (`trace_event_time`) itself still resolves its leaf column by matching the name (ignoring qualifier) against whatever `BoundContext.source_partition_cols` it is given; a name matching **zero** sources or **more than one** in that context returns `NotTraceable` (fail closed) — the primitive's own decision logic is unchanged. The join driving-fact consumer (`crates/smelt-logical/src/analysis/source_bounds.rs::resolve_join_driving_fact`) closes the ambiguity gap without changing that logic: it walks the model's `FROM`/`JOIN` clauses to build an alias→source map, then calls the primitive once per candidate input against a *singleton* context containing only that one candidate. When the traced expression's leaf column carries an explicit qualifier (e.g. `f.event_ts`) matching a FROM/JOIN alias, only that aliased input is tested — disambiguating two joined inputs whose partition columns share a bare column name, which the name-only primitive alone cannot. Without a qualifier, every candidate is tested independently and exactly one `Traceable` result is required; zero or more than one candidate tracing fails closed to `NotTraceable` (never guess the driving fact).
-- **Per-backend soundness is mechanically validated on DuckDB only.** The whitelist is the intersection of what is monotone on every target backend, but the generative soundness oracle currently executes generated models only on DuckDB — `SparkOracle` supports type introspection, not row-level execution. For non-DuckDB backends the intersection rule is asserted by reasoning until the Spark row-exec seam lands; the oracle is structured to accept it. A whitelist entry monotone on DuckDB but not on another backend would not yet be caught automatically.
-- **Offset folding vs. symbolic offsets.** `col + INTERVAL '1 day'` folds cleanly into a `Seconds` offset that merges with the existing Form-B bound derivation. Month/year intervals are monotone but non-uniform. Open question: carry them as a symbolic offset the runtime rewrites per-engine, or refuse to push them (outer-clamp only)?
-- **Static-vs-declared boundary.** The full static whitelist above ships as classification; a declared monotonicity guarantee (Semantics §"Declared escape hatch") may only *widen* eligibility, never substitute for it. Because the declaration is trusted *for correctness* — a wrong declaration relocates a filter unsoundly, unlike a wrong declared join cardinality, which only costs an optimisation — it warrants a stricter opt-in than the existing `FunctionProperties` booleans. The concrete gate (e.g. a workspace-level `unstable_`-style flag on the declaration) is not yet chosen; it is deferred to the plan that lands the first declared-monotonicity consumer, since the right shape depends on where that consumer needs the declaration read from.
-- **Verdict-struct vs. three-way enum: resolved, four-field struct.** The `Traceable` arm carries the ClickHouse-style `Monotonicity` struct (`is_monotonic`, `is_positive`, `is_always_monotonic`, `is_strict` — Semantics §"Event-time monotonicity trace") rather than a bare boolean, so a descending clock, a named-DST-zone relaxation, or exact-endpoint handling is a data difference on an existing field rather than a verdict-shape change. Every current whitelist entry sets all four fields per the table there; only `is_strict` varies (false for many-to-one forms like `DATE_TRUNC`).
-- **`analyze_select` node retention: resolved, retains the parsed node.** `SelectAnalysis` (`crates/smelt-logical/src/analysis/mod.rs`) retains the parsed `smelt_parser::Expr` alongside each select item's raw `text`; the monotonicity classifier walks the retained node and never re-parses. The fallback (re-parse in isolation) was not needed — retention was not blocked by Rowan lifetime/ownership friction.
-- **Diagnostic code ownership.** This spec owns the *semantics* of the diagnostic codes it lists — when each fires and what it anchors to. [`diagnostics.md`](diagnostics.md) is the cross-feature catalogue that indexes every code's severity and canonical trigger; the two must agree, with the owning feature spec governing semantics and `diagnostics.md` governing the catalogue row.
-- **Generator-emitted batched models are landed.** A `ModelDef` value emitted by a generator file (per `meta_language.md` §"Multi-model production") may carry `refresh: 'batched'`, and the emitted model is subject to every rule in this spec on equal terms with a hand-authored batched model — batch-safety classification, per-source filter injection, DELETE+INSERT execution, the first-run-and-backfill path. The `batched:` block is inherited from the generator file's file-wide frontmatter (`EmittedModelDef.incremental_config`); per-`ModelDef` overrides of `batched.partition_column`, `batched.granularity`, etc. are not part of the closed `ModelDef` field set in v1 (a future spec edit may add them). A single generator emits a single `batched:` configuration shared by every emitted batched model; users who need divergent per-emission batched settings split the generator into multiple files. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Self-referential (ordered) batched models are specified but not yet enforced.** The window-independence / ordered-execution property (Semantics §"Window independence and self-referential models") is specified ahead of a plan; today the planner does not detect a batched model's self-edge, so a self-referential model could be built with the wrong ordering. Tracked in `docs/plans/20260704-model-updates.md`.
+- **Rule module file still carries the old spelling.** `crates/smelt-logical/src/rules/incremental.rs` retains the file path; the diagnostic codes (`TimeseriesRequiredForBatched`, `CumulativeForbidsBatched`, `BatchedNotSafe`) and config types (`BatchedConfig`, `BatchedSafetyOverrides`) are renamed. A pure internal file rename is deferred.
+- **One non-hot classification call site still reads the outer SQL body.** The bound-`NotDerivable` refusal gate (`derive_model_source_bounds`, pure planner) classifies on the outer `model.sql`; a lookback living only inside a function body with no outer Form B filter is the sole case that would behave differently, and none exists in the repo. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
+- **Window-function batch-safety check runs on unexpanded outer SQL.** `find_inadmissible_over` scans the outer model SQL before function expansion, so an `OVER` clause inside a `smelt.define` body is invisible to it. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
+- **Per-source clamp observability partly emitted.** `smelt explain --json` reports `source_partition_col` and `(before, after)` offsets but does not yet resolve the run-relative scan window even when a run window is supplied; the editor-hover readout is not yet implemented (LSP hover is type/column/ref oriented). Both are specified ahead of a plan.
+- **Two-layer widened-scan + exact output clamp is a redesign not yet emitted.** The transform is marked *partial (redesign)* in `model_transforms.md`: today's runtime over-widens the *write* window and under-reads the *scan* margin rather than reading the margin and clamping output to the exact write window. The transparent zero-margin single-source fast path (a single source-level filter, no outer wrap) is built; the read-margin/write-clamp split for lookback models is not. Tracked in `docs/plans/20260704-model-updates.md`.
+- **Compile-time pinning of run-deterministic clocks not yet built.** The payload rule (Semantics §"Non-determinism and the payload rule") admits a direct `NOW()`/`CURRENT_*` projection on the strength of compile-time pinning (`model_transforms.md`), which is marked *unbuilt* there; until it lands, run-deterministic pinning is specified ahead of the emit path. Tracked in `docs/plans/20260704-model-updates.md`.
+- **Per-column `data_latency` not implemented.** Late-arriving-data automation is deferred; the two interim mitigations (Semantics §"First-run and backfill") are the only options.
+- **Non-deterministic row-set-membership or grouping is out of scope.** Always rejected regardless of `nondeterministic_columns`; reconciling frozen-per-window membership against a full refresh needs its own design (research §9.1a).
+- **CTE-only `event_time_column` references not yet detected.** Constraint 11 is enforced for direct-subquery FROM clauses and set operations; a CTE alias that does not project `event_time_column` is not yet caught and fails at DuckDB execution. Tracked in `docs/plans/20260616-smelt-feedback-fixes.md`.
+- **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+batched, and batched-only paths are unified around `BatchedConfig` but the CLI dispatch is still tri-modal; should converge.
+- **Schema evolution is unspecified.** A `partition_column` rename or output schema change has no defined handling today.
+- **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for batched models consuming metrics.
+- **Generator-emitted batched models are landed.** A `ModelDef` emitted by a generator (`meta_language.md`) may carry `refresh: 'batched'` and is subject to every rule here on equal terms. The `batched:` block is inherited from the generator file's frontmatter; per-`ModelDef` overrides are not part of the closed field set in v1. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Diagnostic code ownership.** This spec owns the *semantics* of the diagnostic codes it lists; [`diagnostics.md`](diagnostics.md) is the cross-feature catalogue indexing severity and canonical trigger. The two must agree.
 
 ## References
 
 - **Code**:
   - `crates/smelt-core/src/config.rs` — `BatchedConfig`, `Granularity`, `Weekday`
   - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, `ModelMetadata`
-  - `crates/smelt-core/src/sources.rs` — `SourceColumnDef` (future home of `data_latency`)
-  - `crates/smelt-logical/src/rules/incremental.rs` — detection + safety checks (in `smelt-logical`; `smelt-planner` re-exports — see architecture.md §"Constraints & Invariants" (Layered single-ownership))
+  - `crates/smelt-logical/src/rules/incremental.rs` — batched detection + safety checks (in `smelt-logical`; `smelt-planner` re-exports)
   - `crates/smelt-logical/src/types.rs` — safety-override types
-  - `crates/smelt-cli/src/transformer.rs` — `inject_time_filter()`
-  - `crates/smelt-cli/src/executor.rs` — `execute_model_incremental()`, `execute_plan_incremental()`
-  - `crates/smelt-cli/src/main.rs` — CLI dispatch (batched paths around the `run` / `backbuild` subcommands)
-  - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions()`, `Backend::insert_into_from_query()`
+  - `crates/smelt-runtime/src/transformer.rs` — `inject_time_filter`, `inject_source_filters`, `is_transparent_single_source`
+  - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions`, `Backend::insert_into_from_query`
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
-- **Tests**: 17 optimizer unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; 7 optimizer integration tests; 13 metadata tests
+- **Tests**: batched safety unit tests in `crates/smelt-logical/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; the per-partition full-refresh-equivalence harness
 - **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md)
 - **Plans (history)**:
   - [`docs/plans/20260322-incremental-model-support.md`](../plans/20260322-incremental-model-support.md) — comprehensive plan; many phases still open
   - [`docs/plans/20260325-materialization-types.md`](../plans/20260325-materialization-types.md)
-  - [`docs/plans/20260701-monotonicity-primitive.md`](../plans/20260701-monotonicity-primitive.md) — superseded by the plan below; kept for history
-  - [`docs/plans/20260702-monotonicity-primitive-tested.md`](../plans/20260702-monotonicity-primitive-tested.md) — event-time monotonicity trace primitive, generative soundness oracle, and nullability gate (prerequisite for below-outer-SELECT filter relocation; unwired into any consumer)
+  - [`docs/plans/20260704-model-updates.md`](../plans/20260704-model-updates.md) — the mode-vertical master this spec re-cuts as a composition
 - **Research**:
-  - [`docs/research/2026-05-20-incremental-gaps-from-web-analytics.md`](../research/2026-05-20-incremental-gaps-from-web-analytics.md) — gaps catalogued during web_analytics conversion
   - [`docs/research/20260521-incremental-as-planner-rule.md`](../research/20260521-incremental-as-planner-rule.md) — design direction this spec absorbs
-  - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — model-updates research (batched eligibility audit, keyed/stateful refresh modes, refresh surface); Part 4 derives the event-time monotonicity trace, Part 12 validates it against academic theory and production engines
+  - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — batched eligibility audit; §9.2 non-determinism derivation
+  - [`docs/research/20260704-maintenance-fundamentals.md`](../research/20260704-maintenance-fundamentals.md) — the maintenance-framework design
 - **Related specs**:
-  - [`timeseries.md`](timeseries.md) — declares `event_time_column`, `partition_column`, `granularity` (the time-dimension surface this spec consumes)
-  - [`expansion.md`](expansion.md) — function expansion pass; runs before every analysis stage in this spec
-  - [`sources.md`](sources.md) — host of `timeseries:` on external sources
-  - [`models.md`](models.md) — frontmatter table and the refresh axis; lists `timeseries:` and `batched:` keys
-  - [`cumulative_aggregate.md`](cumulative_aggregate.md), [`versioned_models.md`](versioned_models.md), [`latest_value_models.md`](latest_value_models.md), [`materialized_view.md`](materialized_view.md) — the keyed-output refresh modes (batched's stateful counterparts)
-  - [`architecture.md`](architecture.md) — planner role
-  - future `materializations.md` for the broader materialization surface
-- **Legacy reference**: `docs/DESIGN.md` § "Incremental Table Builds" — superseded by this spec for current behavior; useful for design rationale
+  - [`model_maintenance.md`](model_maintenance.md) — the equivalence invariant, algebraic ladder, and composition contract batched composes
+  - [`model_properties.md`](model_properties.md) — the properties batched requires (monotonicity trace, bound/reach, partition alignment, determinism predicate, …)
+  - [`model_transforms.md`](model_transforms.md) — the transforms batched drives (pushdown, DELETE+INSERT, the clamps, pinning)
+  - [`models.md`](models.md) — the refresh axis, three-state declaration law, input-consumption axis, litmus rule
+  - [`timeseries.md`](timeseries.md) — declares `event_time_column`, `partition_column`, `granularity`
+  - [`expansion.md`](expansion.md) — function expansion; runs before every analysis stage here
+  - [`sources.md`](sources.md) — host of `timeseries:` and source-lateness on external sources
+  - [`cumulative_aggregate.md`](cumulative_aggregate.md), [`versioned_models.md`](versioned_models.md), [`latest_value_models.md`](latest_value_models.md), [`accumulating_snapshot.md`](accumulating_snapshot.md), [`materialized_view.md`](materialized_view.md) — the keyed-output refresh modes (batched's stateful counterparts)
+  - [`multi_backend.md`](multi_backend.md) — backend capability flags a strategy checks
+- **Legacy reference**: `docs/DESIGN.md` §"Incremental Table Builds" — superseded for current behavior; useful for design rationale
+</content>
+</invoke>
