@@ -131,7 +131,7 @@ done and consumed here, not redone.
 | B1    | done    | 6186a9c2 | 2026-07-04 |
 | B2    | done    | 0c4e3439 | 2026-07-04 |
 | B3    | done    | 9018ce4b | 2026-07-04 |
-| B4    | done    |        | 2026-07-04 |
+| B4    | done    | 8241900b | 2026-07-04 |
 | B5    | pending |        |      |
 | B6    | pending |        |      |
 | B7    | pending |        |      |
