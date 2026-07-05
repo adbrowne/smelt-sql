@@ -145,3 +145,32 @@ Block schema:
   schedule `arb_schedule` (declared `AppendOnly`) emits passes the `AppendOnly` check, and every
   schedule `arb_mutable_schedule` (declared `Mutable`) emits both passes its check AND contains at
   least one mutation step, so the `Mutable` label is never an unverified, unexercised claim.
+
+### CELL P0-5 — (infra) × (infra) × Link-A abstract contract-safety scaffold
+- verdict: HOLDS (infra deliverable — not a construct/source/technique cell; "HOLDS" here means
+  the scaffold's own predictions match Link 0 on both arms: idempotent-monoid fold-delta holds
+  under reorder/re-delivery/backfill, and MIN-under-retraction is a deterministic REFUTED witness)
+- P (Link 0): additive monoid (non-idempotent) vs idempotent monoid (`MAX`/`MIN`)
+  skeleton_cols (Link B): n/a — abstract scaffold, no concrete SQL construct/columns yet
+- Link B facts: n/a (Link-A runs before any concrete construct is classified; that is `P0-6`)
+- smelt analyzer: n/a — this cell never touches smelt's analyzer or `execute_project`; it is the
+  abstract pre-filter Link C (real cells) replays against real smelt
+- Link C: n/a for this cell itself; it *produces* the schedule kinds (partition/reorder/
+  re-delivery/backfill/late-arrival/retraction) that `SC-1`/`G-02`/`G-04`/`G-08` will replay
+  through `execute_project`
+- experimental smelt extensions (if any): none — pure abstract Rust model, no smelt-internal
+  extension, so the `EXPERIMENTAL(property-discovery)` tag/gate does not apply to this cell
+- evidence: `smelt-db::tests::proptests::maintenance_link_a::{
+  idempotent_monoid_fold_delta_matches_batch_over_reorder_redeliver_backfill (proptest, 256 cases:
+  MAX/MIN × partition/reorder/re-delivery/backfill schedules all match the batch aggregate — HOLDS),
+  additive_monoid_fold_delta_with_ledger_matches_batch_over_reorder_redeliver_backfill (proptest,
+  256 cases: control proving the ledger, not idempotency, is what keeps SUM correct here),
+  late_arrival_beyond_horizon_makes_fold_delta_diverge_from_batch (proptest, 256 cases: a delta
+  landing beyond a technique's derived horizon is silently dropped by fold-delta but seen by batch
+  — the abstract shape of the `SC-1` hazard),
+  min_fold_delta_diverges_when_the_unique_minimum_is_retracted (deterministic unit test: retracting
+  the unique minimum leaves fold-delta's memory stale while batch recomputes a new minimum — a
+  REFUTED witness matching Link 0's "MIN over retractable? no (non-invertible)" prediction, the
+  abstract shape `G-04` will replay through real smelt)}`. Red-green: the abstract model was built
+  to make exactly these two predictions (idempotent-monoid HOLDS, MIN-under-retraction REFUTED)
+  and both assertions pass as written — this cell is a scaffold, not a discovery about smelt.
