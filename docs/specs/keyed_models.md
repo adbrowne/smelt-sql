@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Keyed Refresh Mode
 
-> **What this is.** A normative spec for `refresh: keyed` — the smelt-owned key-addressed refresh mode: the stored table is keyed state (one row per key), maintained by folding each run's per-key delta into it via `merge_into`. One mode covers the running-aggregate, latest-value, and milestone/retroactive-enrichment patterns; what distinguishes those patterns is the **column family** of each projection, derived from the SQL, never declared. This spec is a **composition** (`model_maintenance.md` §"The composition contract"): it presents the composition table referencing shared capabilities **by name**, then defines the keyed-**local** machinery in full — the column-family catalogue, the derived execution postures, the run ledger, the two run shapes (window-forward and snapshot-reconcile), the admission matrix, and the classifier. Out of scope, with their own homes: the equivalence invariant and algebraic ladder (`model_maintenance.md`); the discriminants, driving-fact resolution, once-write and join-contribution proofs (`model_properties.md`); keyed `merge_into`, the windowed-keyed-maintenance driver, and source-filter pushdown (`model_transforms.md`); the refresh axis, declaration law, and input-consumption axis (`models.md`); the partitioned mode (`batched_models.md`); the version-history mode (`versioned_models.md`); engine-owned maintenance (`materialized_view.md`); the source clock and mutation profile (`timeseries.md`, `sources.md`); the pattern-function surface (`functions.md`).
+> **What this is.** A normative spec for `refresh: keyed` — the smelt-owned key-addressed refresh mode: the stored table is keyed state (one row per key), maintained by folding each run's per-key delta into it via `merge_into`. One mode covers the running-aggregate, latest-value, and milestone/retroactive-enrichment patterns; what distinguishes those patterns is the **column family** of each projection, derived from the SQL, never declared. This spec is a **composition** (`model_maintenance.md` §"The composition contract"): it presents the composition table referencing shared capabilities **by name**, then defines the keyed-**local** machinery in full — the column-family catalogue, the derived execution postures, the run ledger, the two run shapes (window-forward and snapshot-reconcile), the admission matrix, the key-temporal-locality gate for the time-partitioned output, and the classifier. Out of scope, with their own homes: the equivalence invariant and algebraic ladder (`model_maintenance.md`); the discriminants, driving-fact resolution, once-write and join-contribution proofs (`model_properties.md`); keyed `merge_into`, the windowed-keyed-maintenance driver, and source-filter pushdown (`model_transforms.md`); the refresh axis, declaration law, and input-consumption axis (`models.md`); the partitioned mode (`batched_models.md`); the version-history mode (`versioned_models.md`); engine-owned maintenance (`materialized_view.md`); the source clock and mutation profile (`timeseries.md`, `sources.md`); the pattern-function surface (`functions.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -21,10 +21,10 @@ Per the composition contract (`model_maintenance.md`), `refresh: keyed` composes
 
 | Facet | This mode |
 |---|---|
-| **Properties required** | algebraic discriminants (is-monoid / needs-inverse / decomposable / value-vs-order-monotone) — they define the column families below; driving-fact / anchor resolution (the single clocked source under window-forward); event-time monotonicity trace (the driving source's clock); once-write provenance (the `COALESCE` family's licence); join-contribution monotonicity (enrichment joins); input-delta discovery (`model_properties.md`) |
-| **World-facts consumed** | the **timeseries clock** of a clocked driving source (`timeseries.md`); the **source mutation profile** (`sources.md`) |
-| **Transforms driven** | keyed **`merge_into`** (target-as-replica) sequenced by the **windowed-keyed-maintenance driver**, with **source-filter pushdown** on the driving source; the **transactional merge ledger**; for enrichment shapes, the **dimension-driven horizon-bounded MERGE** (all `model_transforms.md`) |
-| **Output shape** | **keyed** — one row per `unique_key`, no `partition_column` (`models.md` §"Refresh axis") |
+| **Properties required** | algebraic discriminants (is-monoid / needs-inverse / decomposable / value-vs-order-monotone) — they define the column families below; driving-fact / anchor resolution (the single clocked source under window-forward); event-time monotonicity trace (the driving source's clock); once-write provenance (the `COALESCE` family's licence); join-contribution monotonicity (enrichment joins); input-delta discovery (`model_properties.md`); **key temporal locality** for a time-partitioned output (keyed-local, §Semantics) |
+| **World-facts consumed** | the **timeseries clock** of a clocked driving source (`timeseries.md`); the **source mutation profile** (`sources.md`); a declared **key-recurrence bound** (`sources.md`) where the recurrence-bounded locality route is declared rather than derived (§Semantics) |
+| **Transforms driven** | keyed **`merge_into`** (target-as-replica) sequenced by the **windowed-keyed-maintenance driver**, with **source-filter pushdown** on the driving source; the **transactional merge ledger**; for enrichment shapes, the **dimension-driven horizon-bounded MERGE** (all `model_transforms.md`); the **slice-pruned merge target** under established key temporal locality (§Semantics) |
+| **Output shape** | **keyed** — one row per `unique_key`; no `partition_column` by default, optionally time-partitioned via an admitted `timeseries:` block (§Semantics "Key temporal locality"; `models.md` §"Refresh axis") |
 | **Invariant upheld** | end-state equivalence — the end-state specialisation of the processed-input equivalence invariant (`model_maintenance.md` §"The equivalence invariant"); the oracle is the model's **own SQL** (§Semantics) |
 
 ### YAML frontmatter (in `.sql` files)
@@ -46,7 +46,27 @@ GROUP BY order_id
 
 `refresh: keyed` is the entire opt-in; it implies a stored `table` (`models.md` §Design — the modeller does not restate `materialization: table`). No rule-specific config block is read or required.
 
-`refresh: keyed` **forbids** a `timeseries:` block on the model — the output has no partition column (§"Output shape"). This forbids *output* partitioning, not event-time-aware *consumption*: a keyed model over a source that carries a `timeseries:` declaration consumes that source window-forward (§Semantics). It also **forbids** a `batched:` block — keyed and `batched` uphold different specialisations of the equivalence invariant on different output shapes.
+By default the output carries no partition column (§"Output shape"). A model **may** declare a `timeseries:` block to time-partition its keyed output — admitted **iff key temporal locality is established** (§Semantics "Key temporal locality"), refused otherwise (`KeyedForbidsTimeseries`, naming the missing route). Output partitioning is independent of event-time-aware *consumption*: a keyed model over a source that carries a `timeseries:` declaration consumes that source window-forward whether or not its own output declares a clock (§Semantics). A `batched:` block is **forbidden** — keyed and `batched` uphold different specialisations of the equivalence invariant on different output shapes.
+
+The time-partitioned form, on the flagship shape it exists for (event-grain dedupe over a bounded redelivery window; the driving source declares `key_recurrence` — `sources.md`):
+
+```sql
+---
+refresh: keyed
+timeseries:
+  event_time_column: first_seen_at
+  partition_column: first_seen_date
+  granularity: day
+---
+
+SELECT
+    event_id,
+    MIN(event_ts)              AS first_seen_at,    -- extremal fold (the output clock)
+    MIN(event_date)            AS first_seen_date,  -- extremal fold (the partition column)
+    MAX_BY(payload, event_ts)  AS payload           -- order-monotone overwrite (latest copy wins)
+FROM smelt.raw_events
+GROUP BY event_id
+```
 
 The body **must** be an aggregated `GROUP BY` query: `unique_key` is the `GROUP BY` column list, and every non-key projection must classify into exactly one column family (below). A bare, un-aggregated projection is not a keyed model — the SQL must itself express the per-key semantics, so that a full refresh of the SQL is the mode's correctness oracle (§Design "The SQL is the oracle").
 
@@ -58,7 +78,7 @@ models:
     refresh: keyed
 ```
 
-Frontmatter wins over `smelt.yml` when both set `refresh`. The same forbid-`timeseries:` / forbid-`batched:` constraints apply.
+Frontmatter wins over `smelt.yml` when both set `refresh`. The same `timeseries:`-admission and forbid-`batched:` constraints apply.
 
 ### CLI
 
@@ -70,7 +90,7 @@ smelt backbuild --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selec
 smelt run       [selectors]                                                             # snapshot-reconcile
 ```
 
-- **Window-forward** (the model's driving source is clocked): both flags are required; they apply to the **driving source's** `partition_column` / `granularity` — not to any column on the keyed output. Format and alignment rules follow `batched_models.md` §CLI.
+- **Window-forward** (the model's driving source is clocked): both flags are required; they apply to the **driving source's** `partition_column` / `granularity` — not to any column on the keyed output, including an admitted output `timeseries:` block (run flags always address the source's clock). Format and alignment rules follow `batched_models.md` §CLI.
 - **Snapshot-reconcile** (no clocked source): the flags are a **hard error** — *"model has no clocked driving source; run without event-time flags"*. Each run is a whole reconciliation.
 
 ### The column-family catalogue
@@ -94,10 +114,10 @@ The pattern functions `smelt.latest(value, ordering)` (→ `MAX_BY`), `smelt.onc
 | Code | Severity | Trigger |
 |---|---|---|
 | `KeyedRequiresGroupBy` | Error | The model SELECT has no `GROUP BY` — there is no unique key to derive. |
-| `KeyedForbidsTimeseries` | Error | The model declares both `refresh: keyed` and a `timeseries:` block. |
+| `KeyedForbidsTimeseries` | Error | The model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (§Semantics "Key temporal locality"; the routes require the window-forward run shape). The message names the three routes and the nearest missing fact. |
 | `KeyedForbidsBatched` | Error | The model declares both `refresh: keyed` and a `batched:` block. |
 | `KeyedUnknownCombiner` | Error | A non-key projection is not a direct call to a catalogued aggregator. Names the offending expression; when the projection is a bare column or `ANY_VALUE` under window-forward, the message names `MAX_BY` + an ordering column as the fix. |
-| `KeyedGroupByContainsPartitionColumn` | Error | The `GROUP BY` contains the driving source's `partition_column` — that is the partitioned (batched) shape; the diagnostic suggests `refresh: batched` + `timeseries:`. |
+| `KeyedGroupByContainsPartitionColumn` | Error | The `GROUP BY` contains the driving source's `partition_column` and the model declares **no** `timeseries:` block — ambiguous between the partitioned (batched) shape and the key-embedded time-partitioned keyed shape. The diagnostic suggests both fixes: `refresh: batched` + `timeseries:`, or declaring `timeseries:` on the model to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | The outer SELECT body uses `OVER (...)`. The keyed state *is* the window. |
 | `KeyedForbidsNondeterministic` | Error | The SQL uses `NOW()`, `RANDOM()`, or other non-deterministic functions. Cross-window merge requires deterministic per-window output. |
 | `KeyedSqlNotParseable` | Error | The model body cannot be parsed into the shape the classifier reads. |
@@ -106,6 +126,7 @@ The pattern functions `smelt.latest(value, ordering)` (→ `MAX_BY`), `smelt.onc
 | `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable — it feeds a decrementing aggregate or a value that must be un-seen. Steers to `refresh: materialized_view` or DAG composition. Does **not** fire on the join spelling alone (§Semantics). |
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (§"Admission matrix") appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window (§"Reprocessing"). Points at `--full-refresh`. |
+| `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; the message reports the violation count and sample keys. Derived locality routes cannot fire it. |
 
 There is **no** `safety_overrides:` block. Every rejection above guards the equivalence invariant itself, not a partial-correctness optimisation — there is nothing safe to waive (§Design).
 
@@ -160,6 +181,30 @@ The three snapshot ✗ cells marked *observer semantics* are not double-count ha
 
 There is **no write-eligibility clamp**: a run merges **every** delta row it scans, into whatever key it names, however old that key is. A derivable forward reach is computed and reported (`smelt explain`) but never gates admission and never bounds which keys a run may touch — so no scanned input is ever silently dropped.
 
+### Key temporal locality (the time-partitioned output)
+
+A keyed model may time-partition its output with a `timeseries:` block (grammar and structural rules: `timeseries.md`; the named columns must be projections of the model, and `event_time_column` may name the partition column itself). Admission requires **key temporal locality** — a guarantee that every stored row a run's deltas can touch lies within a computable **slice** of the output's time axis. Locality is what lets the `merge_into` target scan be pruned to the slice, and what lets downstream consumers window over the output.
+
+Structural preconditions, checked before the routes:
+
+- the run shape is **window-forward** — the partition values derive from the driving source's clock; snapshot-reconcile establishes no locality;
+- `partition_column` names either a `unique_key` column or a non-key projection in the extremal-fold, order-monotone-overwrite, or once-write family, provably NOT NULL from a key's first stored row (`timeseries.md` validation rules);
+- the block's `granularity` equals the driving source's granularity.
+
+Any one of three **routes** establishes locality:
+
+1. **Key-embedded** — `partition_column` is a `unique_key` column. A stored row's partition value is its key's own; a delta touches exactly its own partition values. Slice: the run's scan window, widened by the derived lateness/skew margins.
+2. **Key-determined** — the partition projection is a per-key constant under the once-write provenance proof (`model_properties.md`): a key-derived expression, or a declared functional dependency over a column present non-null on every input row. Every delta row carries its key's fixed partition value, so the slice is the delta's own partition values — exact **regardless of key age** (a years-old key prunes as tightly as a fresh one).
+3. **Recurrence-bounded** — a **key-recurrence bound** `r` holds: every pair of input rows sharing a key lies within `r` of each other on the event-time axis. `r` is derived from the model's SQL where statically decidable; otherwise it is declared on the driving source (`sources.md` §"Source YAML shape", `key_recurrence`). Slice: the scan window widened backward by `r`, plus the derived margins. A **declared** `r` is admitted only **checked**: the run verifies at merge time that no delta row matched (or would duplicate) a stored key outside the slice, and any violation fails the run transactionally (`KeyedRecurrenceBoundViolated`). A declaration can bound work; it can never silently drop data.
+
+**Pruning is not a write clamp.** Slice pruning is no-op elimination on the merge's **target scan**: rows outside the slice provably cannot match a delta key (routes 1–2) or are checked not to (route 3). Every scanned delta row still merges — the no-write-eligibility-clamp rule above is unchanged. The general principle is stated in `model_maintenance.md` §"Windowed maintenance and the horizon": only proofs prune; a declared bound is admitted only checked; no unproven bound ever refuses a write.
+
+**Row movement.** Under routes 1–2 a key's partition value never changes. Under route 3 it may move (an extremal or overwrite partition projection superseded by a late row); the merge updates the stored row in place, partition value included, and both the old and new values lie within the slice by the bound. Movement does not change the derived postures — an overwrite column forces sequential temporal order exactly as before.
+
+**Per-slice equivalence.** With locality established, the invariant is additionally checkable slice-by-slice: for any output slice, the stored rows equal the model SQL evaluated over the source rows within the slice's derived reach — the keyed analogue of batched's per-partition strengthening (`model_maintenance.md` §"The equivalence invariant").
+
+**The output as a clocked source.** An admitted block makes the output a clocked, time-partitioned table: downstream batched models receive source-filter pushdown against it, and a downstream keyed model may take it as its clocked driving source — the clock propagates through the DAG instead of stopping at the keyed stage. The output's **settle bound** — how long a written slice may still change — is derived and surfaced by `smelt explain`: under route 1 a slice settles with the source's lateness margin; under route 3 after `r` plus the margins; under route 2 it never settles (a late delta may touch an arbitrarily old slice). A re-written slice is *changed input* to downstream consumers, handled by the ordinary staleness machinery (§"Interaction with `--auto` / staleness").
+
 ### The maintenance boundary
 
 On the algebraic ladder (`model_maintenance.md` §"The algebraic maintenance ladder") the keyed families sit on the **direct-monoid rung**: every catalogued combiner folds `(state, delta)` with no inverse and no history re-read. The additive family is additionally a **group** (invertible), which is what a future subtract-then-add reprocessing path would exploit; the idempotent families are monoids but not groups (a folded contribution cannot be un-seen), which is why reprocessing is refused for them. Rungs 2–4 (decomposed state + presentation view for `AVG`-class aggregates; group-rung retraction; the opt-in bounded-domain multiset for exact holistic aggregates) grow this mode without changing its contract; the transforms are catalogued in `model_transforms.md` and the `bounded_domain:` budget declaration in `model_properties.md`. Beyond the ladder — general-operator retraction over joins, unbounded non-additive state — is delegated to `refresh: materialized_view`.
@@ -178,7 +223,7 @@ A fact-to-dimension join that brings an enriching event in as a separately-arriv
 
 ### Output shape
 
-One row per `unique_key`; column names are the projection's `AS` aliases (or source column names). **No** `partition_column`, **no** `event_time_column`, **no** `timeseries:` on the model. Downstream consumers see the output as a lookup table read in full each run, identical to any non-timeseries source.
+One row per `unique_key`; column names are the projection's `AS` aliases (or source column names). By default there is no `partition_column`, no `event_time_column`, and no `timeseries:` on the model, and downstream consumers see the output as a lookup table read in full each run, identical to any non-timeseries source. With an admitted `timeseries:` block (§"Key temporal locality") the output is instead a clocked, time-partitioned keyed table — still one row per key — that downstream consumers window over like any clocked source.
 
 ### Functions inside keyed bodies
 
@@ -197,7 +242,9 @@ Function expansion (`expansion.md`) runs **before** the classifier. Projection r
 
 **Derive `unique_key` and combiners from the SQL, not frontmatter.** The `GROUP BY` names the key; each projection names its aggregator; the combiner is a fixed lookup. A config block restating them re-introduces metadata-vs-SQL drift (`docs/research/20260521-incremental-as-planner-rule.md`). If it is in the SQL, it is not also in YAML.
 
-**No write-eligibility clamp.** A horizon-clamped merge (only keys newer than `run_start − H` are eligible) was rejected: it silently drops *scanned* inputs — the one silent-data-loss point in the maintained family — and it is not needed for correctness, since merge work is proportional to delta size. What a clamp would buy (settled-key GC, a work bound) is deferred optimisation and must arrive as a package with late-fact accounting (`docs/research/20260705-keyed-collapse-application.md` D6).
+**No write-eligibility clamp.** A horizon-clamped merge (only keys newer than `run_start − H` are eligible) was rejected: it silently drops *scanned* inputs — the one silent-data-loss point in the maintained family — and it is not needed for correctness, since merge work is proportional to delta size. What a clamp would buy (settled-key GC, a work bound) is deferred optimisation and must arrive as a package with late-fact accounting (`docs/research/20260705-keyed-collapse-application.md` D6). Slice pruning under key temporal locality (§Semantics) is not such a clamp: it removes provably-unmatchable rows from the merge's *read* side — or, on the declared route, checks the bound transactionally — while every scanned delta row still merges. The narrow principle: only proofs prune; declared bounds are checked; no unproven bound refuses a write.
+
+**Time-partitioned keyed output is locality-gated, not a new mode.** The (key, time)-addressed output cell absorbs the shapes that previously fell between the modes — event-grain dedupe over a bounded redelivery window (which partition-local `batched` cannot dedup across partitions, and which an unpruned keyed merge cannot afford at volume), per-(key, period) aggregates, and the clock-sink problem where a keyed stage strips the timeseries property from the DAG so every downstream consumer degrades to full scans. A peer mode was rejected: the cell shares keyed's invariant, oracle, driver, ledger, and column families, differing by one derived/declared world-fact — by the litmus rule (`models.md` §Design) that earns a gate, not a peer. The gate exists because without locality the merge target is the whole key space and an output clock would promise a partition structure the writes do not respect; the declared route is runtime-checked because an over-optimistic recurrence bound would otherwise re-import exactly the silent truncation the no-clamp rule exists to prevent (`docs/research/20260705-model-refresh-review.md` §3.2). Full derivation, including why `batched` remains the honest peer for keyless/multiset bodies: `docs/research/20260705-keyed-time-superset.md`.
 
 **The ledger is the deliberate exception to "smelt does not own state".** The batched-side doctrine (backend owns watermarks/run history; `batched_models.md`) rejected a watermark *store* because it duplicates engine state and opens a sync-correctness window. The keyed ledger has neither defect: it is backend-resident and written in the same transaction as the merge it describes, so it cannot drift from the state it records. Without it, additive-fold models cannot detect a double-counting re-run and any mid-run crash forces a full rebuild — an unacceptable operational cliff for the family's most common combiners (`SUM`/`COUNT`).
 
@@ -212,25 +259,28 @@ Function expansion (`expansion.md`) runs **before** the classifier. Projection r
 ## Constraints & Invariants
 
 1. **Opt-in is `refresh: keyed` alone** (storage implied `table`). No config block; no `safety_overrides:`.
-2. **`timeseries:` and `batched:` blocks are forbidden on the model.** Diagnostics `KeyedForbidsTimeseries`, `KeyedForbidsBatched`.
+2. **A `batched:` block is forbidden on the model** (`KeyedForbidsBatched`). **A `timeseries:` block is admitted iff key temporal locality is established** (§Semantics "Key temporal locality"); otherwise it is refused (`KeyedForbidsTimeseries`).
 3. **The body is an aggregated `GROUP BY` query; `unique_key` is derived from `GROUP BY`; every non-key projection classifies into exactly one column family.** The combiner is a fixed lookup; authors never declare combiners.
 4. **The catalogue is closed and the classifier is fail-closed.** Unrecognised aggregators, composite expressions, unproven once-write columns, and retractable contributions are refused — never approximated, never silently downgraded (`model_maintenance.md` §"Validator, not chooser").
 5. **End-state equivalence holds with the model's own SQL as the oracle**, with exactly two named carve-outs: retained departed keys under snapshot-reconcile, and ordering-key ties on overwrite columns.
-6. **No write-eligibility clamp.** A run merges every delta row it scans; no scanned input is silently dropped. Any future clamp or settled-key GC must ship together with late-fact accounting.
+6. **No write-eligibility clamp.** A run merges every delta row it scans; no scanned input is silently dropped. Target-scan slice pruning under established key temporal locality is no-op elimination (or a transactionally-checked declared bound), never a write clamp. Any future clamp or settled-key GC must ship together with late-fact accounting.
 7. **The run shape is derived from the driving source** (clocked ⇒ window-forward; unclocked ⇒ snapshot-reconcile) and surfaced by `smelt explain`; it is never declared.
 8. **The admission matrix is enforced per column.** Fold and once-write families require a clocked (replayable) driving source; the plain-overwrite family requires the snapshot posture.
 9. **Window-forward models maintain the transactional merge ledger**, written atomically with each window's merge. Additive-fold models must refuse a ledgered window's re-run; re-run-tolerant models may re-merge. Snapshot-reconcile models keep no ledger.
 10. **Ordering and parallelism follow the derived postures.** Out-of-order/parallel/sliced backfill only for order-independent models; overwrite columns force sequential temporal order.
 11. **Reprocessing changed input is refused for every family** when detected; the mitigation is `--full-refresh` (or a manual cascade rebuild).
 12. **Exactly one clocked driving source under window-forward.** Zero clocked sources selects snapshot-reconcile; two or more is refused.
-13. **No `partition_column` on the output.** Downstream consumers treat the keyed table as a lookup.
+13. **Without an admitted `timeseries:` block the output has no `partition_column`** and downstream consumers treat the keyed table as a lookup. With one, the output is a clocked, time-partitioned keyed table (§Semantics "Key temporal locality").
 14. **The windowed step loop is the shared driver**, not a per-pattern copy (`model_transforms.md`).
+15. **Key temporal locality is established only by the three named routes** (key-embedded, key-determined, recurrence-bounded). Derived routes prune by proof; the declared route prunes only under the transactional runtime check (`KeyedRecurrenceBoundViolated`). A violated declaration fails the run; it never silently drops.
 
 ## Known Divergences / Open Questions
 
 - **Nothing named `keyed` parses yet.** `RefreshStrategy` (`crates/smelt-core/src/config.rs`) accepts `full` / `batched` / `cumulative` / `materialized_view`. The shipped `refresh: cumulative` is this mode's built seed: the direct-monoid classifier (`crates/smelt-logical/src/rules/cumulative.rs` — additive + extremal/lattice families only), the windowed-keyed-maintenance driver (`crates/smelt-runtime/src/maintenance_driver.rs`), and the per-window `merge_into` execution (`crates/smelt-runtime/src/cumulative.rs`). The rename (`cumulative` removed with a pointing error, `Keyed*` diagnostic family), the classifier union (overwrite + once-write + plain-overwrite families), and the posture derivation are delivered by the keyed-collapse plan (decision record: `docs/research/20260705-keyed-collapse-application.md`; sub-plan to be registered in `docs/plans/20260704-model-updates.md`).
 - **The ledger is unbuilt.** Today reprocessing detection is best-effort and crash resume of an additive model is not exact; `KeyedReprocessedWindow` semantics require the ledger. Until it lands, the shipped behaviour matches `cumulative` today (refuse when detectable; `--full-refresh` otherwise).
 - **The snapshot-reconcile executor is unbuilt.** Until it lands, an unclocked keyed model is refused fail-loud with a not-yet-supported diagnostic (`KeyedSnapshotPostureUnsupported`) naming the delivering plan — it is not treated as a model error.
+- **The time-partitioned keyed output is unimplemented end-to-end.** Locality establishment (all three routes), the slice-pruned merge target, the `KeyedRecurrenceBoundViolated` runtime check, the settle-bound explain surface, and the `key_recurrence` source declaration are all unbuilt. The shipped interim behaviour is fail-closed and spec-consistent: with no route implemented, every `timeseries:` block on a keyed model is refused via `KeyedForbidsTimeseries` (delivered by the keyed-collapse plan, `docs/plans/20260705-keyed-collapse.md`); the narrowing is follow-up work to be planned against this spec. Design derivation: `docs/research/20260705-keyed-time-superset.md`.
+- **Locality open questions.** Whether a derived recurrence bound can license slice pruning under snapshot-reconcile (v1: window-forward only); relaxing the granularity-equality precondition (e.g. a daily driver with weekly output partitions); slice-scoped deletion (`NOT MATCHED BY SOURCE` over a provably complete slice, e.g. re-dropped duplicates) — interacts with the key-deletion divergence below.
 - **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped**, as is the decision whether they are built-ins or template files; the canonical once-write spelling is fixed alongside them. Tracked in the keyed-collapse plan.
 - **Driver granularity is `day`/`week` only** (`maintenance_driver.rs::driving_steps` refuses others) — a property of the shared driver inherited by every consumer; widening it is driver work, not mode work.
 - **`--auto` staleness fidelity** for all-invertible models ("exactly the changed windows") needs the delta-history mechanism of the group rung; the v1 answer is conservative. Carried from the cumulative-era divergence list.
@@ -245,5 +295,5 @@ Function expansion (`expansion.md`) runs **before** the classifier. Projection r
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`); the keyed end-state-equivalence harness; `smelt-backend-duckdb` `merge_into` tests.
 - **User docs**: `docs-site/docs/guide/materializations.md` (to be replaced by a keyed-models guide with per-pattern recipes).
 - **Plans (history)**: `docs/plans/20260523-cumulative-aggregate.md` (the built seed); `docs/plans/20260704-model-updates.md` (the mode-vertical master; hosts the keyed-collapse sub-plan registration).
-- **Research**: `docs/research/20260705-model-refresh-review.md`; `docs/research/20260705-unified-keyed-refresh.md`; `docs/research/20260705-keyed-collapse-application.md` (the decision record this spec encodes); `docs/research/20260704-monotone-join-maintenance.md` (the monotone-vs-retractable boundary); `docs/research/20260703-model-updates.md`.
+- **Research**: `docs/research/20260705-keyed-time-superset.md` (key temporal locality, the time-partitioned output, per-input scope maps); `docs/research/20260705-model-refresh-review.md`; `docs/research/20260705-unified-keyed-refresh.md`; `docs/research/20260705-keyed-collapse-application.md` (the decision record this spec encodes); `docs/research/20260704-monotone-join-maintenance.md` (the monotone-vs-retractable boundary); `docs/research/20260703-model-updates.md`.
 - **Related specs**: `model_maintenance.md` (invariant, ladder, composition contract, validator-not-chooser); `model_properties.md` (discriminants, anchor resolution, once-write and join-contribution proofs, `bounded_domain:`); `model_transforms.md` (`merge_into`, the driver, pushdown, the ledger, dimension-horizon MERGE); `models.md` (refresh axis, declaration law, litmus rule, input-consumption axis); `batched_models.md` (the partitioned peer); `versioned_models.md` (the version-history keyed peer); `materialized_view.md` (engine-owned maintenance; the retractable-slice fallback); `timeseries.md`, `sources.md` (the clock and mutation-profile world-facts); `expansion.md`, `functions.md` (expansion order; the pattern-function surface).

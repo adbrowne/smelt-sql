@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-05
 owners: [andrew]
 ---
 
@@ -57,6 +57,7 @@ columns:
 | `timeseries` | no | absent | Declares a time dimension on this source (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. When present, the named columns must appear in `columns:` with date/timestamp-compatible types. |
 | `mutation_profile` | no | absent (undeclared) | Declares the source's mutation shape: `append_only` (rows are only ever appended), `mutable` (rows may be updated/deleted in place — only a full re-scan sees every change), or `change_feed` (the source itself exposes a CDC/CDF; a run reads only the rows that changed since the last run). This is the one non-derivable world-fact on the input-consumption axis (`models.md` §"Input-consumption axis"; `model_properties.md` §"Catalogued inputs") — `smelt-logical`'s input-delta discovery reads it via `SourceShape::from_source_info`. An unrecognised value is a fail-loud `MalformedSource` parse error. When absent, the conservative default applies: a clocked source (`timeseries:` present) is window-forward, an unclocked source is snapshot-diff. |
 | `source_lateness` | no | absent (zero) | Declares the source-lateness margin — the term of the reach split (`model_properties.md` §"Unified bound/reach derivation") — as an interval (`'2 hours'`, `'1 day'`, …), parsed via the same fail-loud interval grammar as `horizon_ceiling` (`model_maintenance.md`). A malformed value is a fail-loud `MalformedSource` parse error. |
+| `key_recurrence` | no | absent | Declares a **key-recurrence bound**: every pair of rows sharing the same value(s) of the named key column(s) lies within the stated window of each other on the event-time axis. Shape: `key_recurrence: { key: [<column>, …], window: '<interval>' }` — `key:` names columns of this source; `window:` uses the shared fail-loud interval grammar. Consumed by key temporal locality (`keyed_models.md` §"Key temporal locality") when a downstream keyed model's `unique_key` resolves exactly to the declared columns. **Always runtime-checked, never trusted**: a violation fails the consuming run transactionally (`KeyedRecurrenceBoundViolated`); it never silently drops data. A malformed value (unknown column, missing `window:`, bad interval) is a fail-loud `MalformedSource` parse error. |
 | `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
 The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML — seed-specific keys"). Differences: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path); a source may declare `timeseries:` (a seed sidecar may not — seeds are loaded by smelt and have no externally-imposed partition layout).
@@ -128,7 +129,7 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 
 | Code | Severity | Trigger |
 |---|---|---|
-| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry, a `name:` override whose value is not a `<schema>.<table>` literal / whose per-target map names an undeclared target, an unrecognised `mutation_profile:` value, or a `source_lateness:` value that does not parse as an interval). |
+| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry, a `name:` override whose value is not a `<schema>.<table>` literal / whose per-target map names an undeclared target, an unrecognised `mutation_profile:` value, a `source_lateness:` value that does not parse as an interval, or a malformed `key_recurrence:` — unknown column, missing `window:`, or a bad interval). |
 | `SourceTypeError` | Error | A `columns[].type` value is not a recognised smelt `DataType` (`types.md`). |
 
 ## Semantics
@@ -151,6 +152,8 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 
 **`materialization:` not allowed on sources.** Sources are external by definition — there is no smelt-controlled materialization. A `materialization: ephemeral` source would mean "smelt should not assume this table exists" which is closer to a feature flag than a data shape, and we have no concrete need for it. If one emerges, the spec opens up.
 
+**Why `key_recurrence` is declared on the source and checked at run time.** It is a delivery-contract fact (e.g. an at-least-once feed whose redeliveries land within three days) that no static analysis of consumer SQL can derive — the same derive-else-declare footing as `mutation_profile`. Unlike `source_lateness`, which only *widens* scans and is therefore safe against mis-statement, a recurrence bound *narrows* a consuming merge's target scan — an over-optimistic declaration could silently miss stored rows — so it is admitted only with a fail-loud transactional check on every consuming run (`keyed_models.md` §"Key temporal locality").
+
 ## Constraints & Invariants
 
 1. A `.yml` file with no sibling `.csv` is a source; with a sibling `.csv` it is a sidecar. The kinds are disjoint.
@@ -167,6 +170,7 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
 - **Source-existence verification.** A future `smelt verify` pass could check that every declared source exists in the target database with the declared columns. Out of scope here.
 - **Column-level tests on sources.** Same status as for seeds — column-level tests on the shared YAML grammar are not yet defined; `testing.md` covers `smelt.test` declarations but not per-column assertions on a source's sidecar. The shared YAML grammar will grow uniformly when that surface is added.
 - **Co-location with seeds.** Worth noting: a `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems), since kind-by-content makes the directory layout independent of kind. Style guides may discourage mixing for readability; the resolver does not.
+- **`key_recurrence` has no wired consumer yet.** The keyed locality gate that reads it is specified but unbuilt (`keyed_models.md` §Known Divergences); until it lands, the declaration parses and validates but licenses nothing.
 
 ## References
 
@@ -187,4 +191,5 @@ The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catal
   - `smelt_yml.md` — `paths:` key the discovery layer consumes.
   - `timeseries.md` — declares the `timeseries:` block grammar this spec hosts on external sources.
   - `batched_models.md` — primary consumer of `timeseries:` on sources, via source-filter pushdown.
+  - `keyed_models.md` — consumer of `mutation_profile:` and `key_recurrence:` (key temporal locality).
   - `types.md` — `DataType` vocabulary used by `columns[].type`.

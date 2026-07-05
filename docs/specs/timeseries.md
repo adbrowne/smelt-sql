@@ -1,7 +1,7 @@
 ---
 feature: timeseries
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-05
 owners: [andrew]
 ---
 
@@ -104,9 +104,13 @@ A model that declares `refresh: batched` (per `batched_models.md`) must also dec
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
+### Interaction with `refresh: keyed`
+
+A `refresh: keyed` model may declare `timeseries:` to time-partition its keyed output. Admission is gated on **key temporal locality**, owned by `keyed_models.md` §"Key temporal locality" — this spec owns only the block grammar and the structural rules below. A keyed model without an admitted block has non-timeseries output (a lookup).
+
 ### Validation rules
 
-1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY`). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
+1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY` — except on a `refresh: keyed` model, where it may instead be an aggregate projection admitted by key temporal locality; `keyed_models.md` §"Key temporal locality"). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 2. **Event-time column projection.** For a model, `event_time_column` must appear in the model's output. For a source, it must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 3. **Type constraint on event_time_column.** Must be a date, timestamp, or timestamp-with-timezone type per `types.md`. Violation produces `MalformedTimeseries`.
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.

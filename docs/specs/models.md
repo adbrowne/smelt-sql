@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-07-04
+last_reviewed: 2026-07-05
 owners: [andrew]
 ---
 
@@ -72,7 +72,7 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 | `name` | string | — | Accepted but ignored in single-model files; overridden by delimiter in multi-model files |
 | `materialization` | enum | project default (`view`) | How to store the model's output (the storage axis). See Materialization (storage) modes. |
 | `refresh` | enum | `full` | How stored output is recomputed across runs (the refresh axis). See Refresh axis. |
-| `timeseries` | object | — | Time-dimension declaration (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Required when `refresh: batched`. |
+| `timeseries` | object | — | Time-dimension declaration (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Required when `refresh: batched`; admitted on `refresh: keyed` iff key temporal locality is established (`keyed_models.md` §"Key temporal locality"). |
 | `batched` | object | — | Batched-refresh configuration (`unique_key`, `nondeterministic_columns`, `safety_overrides`). See `batched_models.md`. Only valid with `refresh: batched`, which requires `timeseries:`. |
 | `target` | string | — | Override execution target for this model (overrides `smelt.yml` and `--target`). Not valid on `ephemeral` models. |
 | `tags` | string[] | `[]` | Organization labels. Merged with `smelt.yml` model config tags (union, deduplicated). |
@@ -118,11 +118,11 @@ Two observable properties separate the modes: the **output shape** they produce,
 | `full` | *(default; no key)* | trivial (recompute) | table | smelt (per run) | — |
 | `batched` | `refresh: batched` + `timeseries:` (+ optional `batched:` block) | per-partition slice | partitioned | smelt (per run) | `batched_models.md` |
 
-**Keyed output** — one row per key, no partition column; downstream treats it as a lookup. Each row reflects state across all processed inputs (order-independent end-state), kept behind the user-visible relation.
+**Keyed output** — one row per key; by default no partition column, and downstream treats it as a lookup. A `refresh: keyed` model may additionally declare `timeseries:` where key temporal locality is established (`keyed_models.md` §"Key temporal locality"), making the output a clocked, time-partitioned keyed table downstream consumers window over like any clocked source. Each row reflects state across all processed inputs (order-independent end-state), kept behind the user-visible relation.
 
 | `refresh:` | Surface | Contract | Output shape | Freshness owner | Spec |
 |----------|---------|----------|--------------|-----------------|------|
-| `keyed` | `refresh: keyed` | end-state | keyed (one row per key) | smelt (per run) | `keyed_models.md` |
+| `keyed` | `refresh: keyed` (+ optional locality-gated `timeseries:`) | end-state | keyed (one row per key; optionally time-partitioned) | smelt (per run) | `keyed_models.md` |
 | `versioned` | `refresh: versioned` | end-state (interval-keyed) | keyed + validity interval | smelt (per run) | `versioned_models.md` |
 | `materialized_view` | `refresh: materialized_view` | end-state | keyed (engine-defined) | **engine** (continuous) | `materialized_view.md` |
 
@@ -144,7 +144,7 @@ The axis has exactly three answers:
 
 **Vertical is declared, horizontal is derived.** The refresh mode is the *vertical* choice — an irreversible physical commitment the modeller declares. The input-consumption cell is the *horizontal* choice — **derived from the driving source's shape**: a source carrying a `timeseries:` clock is consumed **window-forward**; a mutable snapshot source (no clock) is re-scanned and diffed. The one non-derivable world-fact on this axis — whether a source is append-only or mutable — belongs to a declaration *on the source*, shared by every consumer, not a per-model knob (see Known Divergences §"Source mutation profile").
 
-Concretely, for a keyed mode (`keyed`, `versioned`) over a source that carries a `timeseries:` clock, the model is consumed **window-forward**: the `--event-time-start/-end` run window applies to the *driving source's* `partition_column` — **not** to any column on the keyed output, which has no partition column — and the run steps over the covered source partitions in temporal order, merging each window's delta into keyed state. This is precisely why "forbids a `timeseries:` block" on a keyed mode forbids *output* partitioning, never event-time-aware *consumption* (`keyed_models.md`, `versioned_models.md`). Which column family a `refresh: keyed` model's projections may use under which of these two consumption cells is checked per column by the **admission matrix** (`keyed_models.md` §"Admission matrix") — a fold or once-write family requires window-forward; the plain-overwrite family requires snapshot-diff (reconcile).
+Concretely, for a keyed mode (`keyed`, `versioned`) over a source that carries a `timeseries:` clock, the model is consumed **window-forward**: the `--event-time-start/-end` run window applies to the *driving source's* `partition_column` — **not** to any column on the keyed output, even when the output declares its own admitted `timeseries:` — and the run steps over the covered source partitions in temporal order, merging each window's delta into keyed state. Output partitioning is a separate declaration from consumption windowing: consumption is always derived from the *source's* clock, while a `timeseries:` block on the keyed *output* is admitted only where key temporal locality is established (`keyed_models.md` §"Key temporal locality"; on `versioned` and `materialized_view` it remains forbidden). Which column family a `refresh: keyed` model's projections may use under which of these two consumption cells is checked per column by the **admission matrix** (`keyed_models.md` §"Admission matrix") — a fold or once-write family requires window-forward; the plain-overwrite family requires snapshot-diff (reconcile).
 
 Moving horizontally along this axis **never** changes the equivalence contract or the output shape: a `keyed` model over a mutable snapshot and one over an append-only update stream uphold the same end-state contract; only the delta-discovery mechanics differ (subject to the admission matrix above). The chosen cell is therefore a physical fact to be *surfaced* (via `smelt explain`, alongside batched's per-source clamp), never a semantic one the user declares.
 
@@ -201,7 +201,8 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 | `ephemeral` + `target` override | Hard error |
 | `refresh: batched` without `timeseries` | Hard error (`TimeseriesRequiredForBatched`) |
 | `batched:` block without `refresh: batched` | Hard error |
-| `refresh: keyed` \| `versioned` \| `materialized_view` + `timeseries` | Hard error (keyed-output modes have no partition column) |
+| `refresh: versioned` \| `materialized_view` + `timeseries` | Hard error (these keyed-output modes have no partition column) |
+| `refresh: keyed` + `timeseries` | Admitted iff key temporal locality is established; otherwise hard error (`KeyedForbidsTimeseries`, `keyed_models.md` §"Key temporal locality") |
 | `refresh: keyed` (or any keyed-output mode) + `batched:` block | Hard error (different refresh contracts) |
 | `view` + non-`full` `refresh:` | Warning (stderr); refresh config ignored |
 | `refresh: materialized_view` on a backend without native IVM | Hard error (`materialized_view.md`) |

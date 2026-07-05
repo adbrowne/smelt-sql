@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-05
 owners: [andrew]
 ---
 
@@ -132,10 +132,10 @@ posture under `keyed`, not an error, and there is no write-eligibility horizon t
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `refresh: keyed` model's SELECT has no GROUP BY (key columns are required). |
-| `KeyedForbidsTimeseries` | Error | A `refresh: keyed` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
+| `KeyedForbidsTimeseries` | Error | A `refresh: keyed` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`keyed_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
 | `KeyedForbidsBatched` | Error | A `refresh: keyed` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `refresh: keyed` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
-| `KeyedGroupByContainsPartitionColumn` | Error | The `refresh: keyed` model's GROUP BY contains the driving source's `partition_column` (that is the partitioned/batched shape). |
+| `KeyedGroupByContainsPartitionColumn` | Error | The `refresh: keyed` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: keyed` model's outer body. |
 | `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `refresh: keyed` model's SELECT. |
 | `KeyedSqlNotParseable` | Error | A `refresh: keyed` model's SELECT could not be parsed for column-family classification. |
@@ -144,6 +144,7 @@ posture under `keyed`, not an error, and there is no write-eligibility horizon t
 | `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen). Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
+| `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
 
 ---
 
