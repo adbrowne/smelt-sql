@@ -775,3 +775,76 @@ Block schema:
   identical), nor a holistic combiner over a `mutable-snapshot` source (a distinct, not-yet-catalogued
   cell — mutable-snapshot's non-invertibility concern, per `G-04`, is orthogonal to holistic's
   no-bounded-state concern and would need its own cell).
+
+### CELL G-08 — self-referential batched model (running-total self-join) × append-only (late transaction into an already-processed partition) × recompute-region (local) / no-cascade (trajectory)
+- verdict: CONDITIONAL
+- P (Link 0): additive over a prefix; **unbounded-forward footprint** — a change to one partition's
+  stored value invalidates every LATER partition's own stored trajectory value, not just its own
+  (paper §7). Not a monoid-foldable delta: the "delta" for a stored trajectory is really "recompute
+  every downstream partition", never a local fold.
+  skeleton_cols (Link B): `{d}`
+- Link B facts: combiner=additive SUM (trivially idempotent-under-recompute-region, same as every
+  other batched cell); reach=`Bounded(1 day, 0)` for the self-edge (`bal.d >= t.d - INTERVAL '1 day'
+  AND bal.d < t.d`, the exact form `window_independence`'s own `backward_bounded_self_edge_is_ordered`
+  unit test proves `Ordered`); `window_independence` verdict = `Ordered` (confirmed: forces
+  strictly-sequential single-partition batches via `compute_incremental_windows_ordered`); footprint
+  = bounded PER PARTITION (one partition's own source rows + its immediately-prior stored balance)
+  but **unbounded across partitions** (every downstream partition's stored value depends
+  transitively on it).
+- smelt analyzer: sound for what it actually claims (`Ordered` only asserts "this self-edge
+  converges partition-by-partition under strictly sequential execution" — it does NOT claim that an
+  out-of-order backfill of a single stale partition repairs downstream partitions too, and smelt's
+  execution never claims that either). Not unsound: no analyzer fact says "backfilling day1 alone
+  is sufficient to repair the whole trajectory."
+- Link C: no divergence over the seeded hazard schedule (a late transaction appended into an
+  ALREADY-PROCESSED partition, day1, after the initial 3-day trajectory was built sequentially) —
+  but the schedule surfaces the CONDITIONAL boundary directly: after backfilling ONLY the mutated
+  partition (day1), day1 itself self-corrects (110, matching full-refresh) but day2/day3 remain
+  STALE (15/16, diverging from the true 115/116) until they too are explicitly re-run, in temporal
+  order, downstream of the mutation. Once that cascade is performed, all three partitions match
+  full-refresh exactly.
+- condition (CONDITIONAL): the maintained trajectory equals full-refresh **only when every
+  backfill of a partition `p` is followed by a backfill of every partition `> p`, in strict temporal
+  order** (the same ordering discipline the self-edge's own `Ordered` verdict already requires
+  within a single run, extended here across separate runs/backfills). smelt neither enforces nor
+  automates this cascade: nothing detects that day1's stored value changed and nothing schedules
+  day2/day3 for re-derivation. This is a real, silent staleness trap for an operator who backfills
+  a single day of a running-balance model expecting the trajectory to "just be correct" downstream —
+  worth flagging as a **known limitation to document**, not a divergence bug (no analyzer claims
+  otherwise; recompute-region did exactly what it was asked to do for the partition it was asked to
+  rebuild).
+- production files/functions changed: none — this cell's finding is a scoping/documentation gap in
+  the CONDITIONAL sense, not a code defect: no analyzer fact claims backfill-of-one-partition
+  repairs a self-referential trajectory, so there is nothing "unsound" to fix. A genuine EXECUTION
+  bug was found in constructing this cell's own model (below) and is spun out as its own pending
+  cell (`G-11`) rather than decided here.
+- ancillary finding (spun out, not fixed in this cell): the spec's own documented self-referential
+  form — a DIRECT join to `smelt.<self>` where both the driving source and the self-reference expose
+  the partition column under its own bare name (`t.d`/`bal.d`, exactly `window_independence`'s own
+  unit-test SQL shape) — fails at EXECUTION time with a DuckDB `Binder Error: Ambiguous reference to
+  column name "d"`, because `crates/smelt-runtime/src/transformer.rs::inject_time_filter` injects the
+  outer output-clamp as a bare, unqualified `event_time_column` whenever the model is not
+  `is_transparent_single_source` (true here — a self-referential model with any nonzero self-margin
+  always has ≥2 bound sources). This cell's own test could only proceed by wrapping the self-join in
+  a subquery (`model_shapes::running_balance_self_ref`) so the outer clamp's FROM scope exposes only
+  one `d`-named column — a workaround the documented pattern does not mention. Recorded as `G-11`
+  (appended below) rather than fixed here: the correct fix requires resolving WHICH FROM-item
+  legitimately owns the output `event_time_column` when several expose the same bare name, which is
+  itself judgment-bearing (per policy §8(4), not folded into this cell's mechanical scope).
+- experimental smelt extensions (if any): `model_shapes::running_balance_self_ref` (a new
+  self-referential `ModelShape` fixture, subquery-wrapped per the `G-11` finding above, not
+  experimental analyzer code); a cell-local `stage_project`/`seed_sources`/oracle mirroring `G-05`'s
+  deterministic (non-proptest) pattern, since the self-edge's own `Ordered` requirement (strictly
+  sequential per-partition execution) makes an arbitrary proptest-generated schedule redundant with
+  the specific sequential-then-mutate-then-selectively-backfill scenario this cell needs to isolate.
+- evidence: `smelt-cli::tests::property_discovery::g_08_running_total_self_ref::
+  late_transaction_into_an_already_processed_partition_requires_a_downstream_cascade`
+  (`cargo test -p smelt-cli --test property_discovery --features duckdb g_08 --quiet` → 1 passed;
+  full suite `cargo test -p smelt-cli --test property_discovery --features duckdb --quiet` →
+  20 passed; `cargo fmt --all`; `cargo clippy -p smelt-cli --all-targets` clean).
+- Coverage caveat (design §2.1 N4): a single deterministic scenario (one late-append hazard, one
+  local-backfill-then-cascade sequence), not proptest-generated — the `Ordered` self-edge's forced
+  strictly-sequential execution collapses the useful schedule space to essentially this shape; a
+  future cell could still vary the NUMBER of stale downstream partitions or interleave a SECOND
+  independent mutation, but the qualitative finding (local recompute-region has no cross-partition
+  cascade) would not change.

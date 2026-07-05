@@ -510,9 +510,54 @@ SELECT d, MEDIAN(val) AS med_val, COUNT(DISTINCT id) AS distinct_ids FROM smelt.
     }
 }
 
+/// `G-08`: windowed running total via a **self-referential batched model**
+/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// models" — the construct smelt actually built for a running balance; a
+/// single-partition `ROWS UNBOUNDED PRECEDING` window frame has no
+/// cross-partition trajectory to maintain, so it is not this construct).
+/// `running_balance.d` self-joins its own PRIOR partition
+/// (`bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d`, the exact backward-
+/// bounded form `window_independence`'s own unit test proves `Ordered`) and
+/// adds the current day's transaction total. `transactions` is the driving
+/// append-only source; `running_balance` is the self-edge.
+pub fn running_balance_self_ref() -> ModelShape {
+    ModelShape {
+        name: "running_balance",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT d, balance FROM (
+  SELECT
+    t.d AS d,
+    COALESCE(bal.balance, 0) + SUM(t.amt) AS balance
+  FROM smelt.sources.transactions t
+  LEFT JOIN smelt.running_balance bal
+    ON bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d
+  GROUP BY t.d, bal.balance
+) inner_balance
+"#,
+        source: "transactions",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "amt",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-08  windowed running total (ROWS UNBOUNDED PRECEDING) · append-only.
 // G-09  UNION ALL of two append-only arms.
 // G-10  join fan-out on a COMPOSITE unique key · append-only.
