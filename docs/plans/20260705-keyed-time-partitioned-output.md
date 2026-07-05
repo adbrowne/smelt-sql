@@ -64,7 +64,7 @@ The keyed refresh mode's output is keyed state (one row per key). The spec's §"
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| 1     | pending |        |      |
+| 1     | blocked |        |      |
 | 2     | pending |        |      |
 | 3     | pending |        |      |
 | 4     | pending |        |      |
@@ -74,6 +74,16 @@ The keyed refresh mode's output is keyed state (one row per key). The spec's §"
 | 8     | pending |        |      |
 
 ---
+
+## Blocked phases
+
+- **2026-07-05, Phase 1** — pre-condition check (§"Execution prompt" step 3): this plan requires
+  `docs/plans/20260705-keyed-collapse.md` (K1–K6) `done` before Phase 1 starts. K2–K6 are `blocked` on
+  a pre-existing `smelt-backend-duckdb` hardening-budget regression (see that plan's "Blocked phases"
+  entries for 2026-07-05) — not `done`. Marking Phase 1 `blocked` (dependency capability not yet built,
+  per the block rule) rather than starting against the interim `cumulative` seed; no code touched, tree
+  unchanged from `HEAD`. Unblocks automatically once K1–K6 are all `done`, which itself requires the
+  keyed-collapse plan's K2 hardening-budget block to be resolved by a human first.
 
 ### Phase 1: Admit the block behind a fail-closed locality gate
 
