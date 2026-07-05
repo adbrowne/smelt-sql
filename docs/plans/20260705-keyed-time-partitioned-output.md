@@ -65,7 +65,7 @@ The keyed refresh mode's output is keyed state (one row per key). The spec's §"
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
 | 1     | blocked |        |      |
-| 2     | pending |        |      |
+| 2     | blocked |        |      |
 | 3     | pending |        |      |
 | 4     | pending |        |      |
 | 5     | pending |        |      |
@@ -84,6 +84,14 @@ The keyed refresh mode's output is keyed state (one row per key). The spec's §"
   per the block rule) rather than starting against the interim `cumulative` seed; no code touched, tree
   unchanged from `HEAD`. Unblocks automatically once K1–K6 are all `done`, which itself requires the
   keyed-collapse plan's K2 hardening-budget block to be resolved by a human first.
+
+- **2026-07-05, Phase 2** — same root cause as Phase 1: Phase 2's own "Pre-conditions" row requires
+  "Phase 1 gate in place", which is not the case (Phase 1 is `blocked`, not `done`, per the entry
+  above). Re-verified pre-flight: `cargo test -p smelt-core --test hardening_budget` is still red with
+  the identical `smelt-backend-duckdb`/`smelt-cli` regression/stale-baseline pair reported under K2 in
+  the keyed-collapse plan. Marking Phase 2 `blocked` (dependency capability not yet built, per the block
+  rule) rather than attempting route 1 against a locality gate that doesn't exist yet; no code touched,
+  tree unchanged from `HEAD`. Unblocks automatically once Phase 1 (and transitively K1–K6) land.
 
 ### Phase 1: Admit the block behind a fail-closed locality gate
 
