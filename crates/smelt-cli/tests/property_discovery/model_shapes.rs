@@ -325,10 +325,73 @@ SELECT d, MIN(val) AS min_val FROM smelt.sources.events GROUP BY d
     }
 }
 
+/// `G-05`: inner-join enrichment (fact × dim), batched per partition
+/// (`unique_key: [d, user_id]`), where the fact source (`events`) is a
+/// timeseries append-only source and the dim source (`users`) is a plain
+/// lookup (no `timeseries:` block) declared `mutation_profile: mutable`
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `G-05`). A
+/// dimension update broadcasts to every fact row referencing it (breaks
+/// invariant A, keeps B; paper §10) — this cell asks empirically whether
+/// smelt's batched recompute-region re-reads the CURRENT contents of the
+/// (non-timeseries, unbounded) dimension source when a partition is
+/// explicitly re-run, or whether some cached/derived bound on the dim source
+/// clips it the way `SC-1`'s zero-margin fallback clipped `conversions`.
+pub fn join_enrichment_mutable_dimension() -> MultiSourceModelShape {
+    MultiSourceModelShape {
+        name: "events_enriched",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d, user_id]
+---
+SELECT e.d, e.user_id, e.val, u.tier
+FROM smelt.sources.events e
+JOIN smelt.sources.users u ON e.user_id = u.user_id
+"#,
+        sources: &[
+            MultiSourceSpec {
+                name: "events",
+                columns: &[
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "val",
+                        ty: "DOUBLE",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+            MultiSourceSpec {
+                name: "users",
+                columns: &[
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "tier",
+                        ty: "VARCHAR",
+                    },
+                ],
+                timeseries: None,
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-05  inner-join enrichment (fact × dim) · mutable dimension.
 // G-06  left-join null-preservation · append-only + late right side.
 // G-07  holistic MEDIAN / COUNT DISTINCT · append-only.
 // G-08  windowed running total (ROWS UNBOUNDED PRECEDING) · append-only.

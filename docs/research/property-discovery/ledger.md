@@ -589,3 +589,65 @@ Block schema:
   scoped the same way as SC-2, to "does an explicit backfill after this mutation shape still miss
   it", answered no. Does not establish behaviour for a technique other than the simple
   per-partition batched form every G-*/SC-* cell in this shape has tested.
+
+### CELL G-05 — inner-join enrichment (fact × dim) × mutable dimension (in-place update between runs) × column-scoped re-derivation
+- verdict: HOLDS (CONDITIONAL on an explicit backfill for the already-processed partition — see
+  condition below); hypothesis's "does smelt miss the dimension change" arm REFUTED for the
+  backfill technique, CONFIRMED (expected, not a bug) for a plain forward-only advance
+- P (Link 0): n/a — inner-join enrichment has no combiner identity; this cell is about whether the
+  dimension side of a join is read fresh or from some cached/bounded snapshot
+  skeleton_cols (Link B): `d`, `user_id` (the `unique_key`; `val`/`tier` are payload — `tier` is
+  the enrichment column under test)
+- Link B facts: the dimension source (`users`) carries no `timeseries:` block, so it is never
+  added to `BoundContext`/`dep_timeseries` at all (`crates/smelt-logical/src/analysis/
+  source_bounds.rs::derive_model_bounds` only iterates `ctx.source_partition_cols`, populated from
+  `crates/smelt-runtime/src/compile.rs::build_source_bound_map`'s walk over `dep_timeseries`).
+  reach for `users` = **absent** (not `Unbounded` as a computed value — it never enters the bound
+  map, so `compile.rs`'s `SourceBound`-emission loop simply has nothing to `continue` past for it)
+  footprint=unbounded (whole table, every run)
+- smelt analyzer: sound (no filter is needed or emitted for the dim side, and none is) — but this
+  is a structural consequence of non-timeseries sources being outside `source_bounds`'s domain
+  entirely, not a reasoned "read the dimension fully" derivation. There is no per-run snapshot,
+  cache, or point-in-time pin of a joined lookup source anywhere in this path: the compiled
+  `INSERT`'s `SELECT` plainly references `main.sources_users`, so a same-window backfill re-reads
+  whatever the dimension table currently contains at execution time.
+- Link C: no divergence over 1 seeded schedule (deterministic, not proptest-generated — mirrors
+  SC-2/G-04's Coverage caveat). Seeded fact row `(d=2024-01-01, user_id=1, val=10.0)`, seeded
+  dimension row `(user_id=1, tier='bronze')`; run 1 processes `[2024-01-01, 2024-01-02)`,
+  materializing `tier='bronze'`. Between runs, the dimension row is updated in place to
+  `tier='gold'` (the already-processed partition's enrichment now points at stale dimension data —
+  never pre-populated). Run 2 advances FORWARD to `[2024-01-02, 2024-01-03)` — as expected (not a
+  bug, matches SC-2/G-04's finding for the *fact* side), the never-re-requested `2024-01-01`
+  partition's enrichment stays stale at `'bronze'`. Run 3 explicitly backfills the SAME
+  `[2024-01-01, 2024-01-02)` window: the maintained `tier` becomes `'gold'`, matching the
+  full-refresh oracle (`multiset_equal` over all columns) exactly — the recompute-region re-reads
+  the dimension table's current contents, broadcasting the update to the fact row that references
+  it (paper §10's "breaks invariant A, keeps B" shape, confirmed empirically: a *repeated* backfill
+  of the same fact window is exactly what recovers a dimension change; a fact-side-only advance
+  never does).
+- condition (CONDITIONAL only): the guarantee holds only for a partition that is **explicitly
+  re-run** after the dimension changes (a backfill/re-materialization of that window) — a
+  forward-only advance that never revisits the partition leaves its enrichment permanently stale
+  relative to the current dimension, with no automatic re-derivation triggered by the dimension
+  mutation itself (there is no dependency tracking from dimension source → previously-materialized
+  fact partitions). This is the same traded guarantee SC-2/G-04 already named for mutation of the
+  *fact* source; this cell confirms it holds symmetrically for mutation of a *joined dimension*.
+- production files/functions changed: none — this cell found no divergence to fix; the "absent
+  from the bound map" behaviour for non-timeseries sources is correct as-is for a plain
+  inner-join enrichment (no filter is needed on an always-fully-read dimension).
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request`/
+  `oracle::multiset_equal`; adds `model_shapes::join_enrichment_mutable_dimension` (a new
+  `MultiSourceModelShape` fixture, not experimental analyzer code) and a cell-local
+  `stage_project` that declares `mutation_profile: mutable` on the `users` source only.
+- evidence: `smelt-cli::tests::property_discovery::g_05_join_enrichment_mutable_dimension::
+  dimension_update_between_runs_is_recovered_on_backfill_but_not_forward_advance` (deterministic
+  3-run schedule through `execute_project`, no hand-injected `WHERE`;
+  `cargo test -p smelt-cli --test property_discovery dimension_update_between_runs --quiet` →
+  1 passed; full suite `cargo test -p smelt-cli --test property_discovery --quiet` → 17 passed).
+- Coverage caveat (design §2.1 N4): single hand-authored schedule, not proptest-shrunk over
+  arbitrary dimension-mutation shapes (e.g. a dimension row deleted rather than updated, or a
+  composite dimension key) — scoped to "does an explicit backfill after a simple scalar dimension
+  update recover the current value", answered yes. Does not establish behaviour for a
+  materialization strategy other than the `unique_key`-scoped batched DELETE+INSERT every prior
+  cell in this shape has tested, nor for a dimension source that itself carries a `timeseries:`
+  block (which would enter `source_bounds`'s domain and could in principle be filtered).
