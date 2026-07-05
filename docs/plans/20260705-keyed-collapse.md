@@ -112,7 +112,7 @@ the overwrite and once-write families, the transactional ledger, and the snapsho
 | K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | blocked |
 | K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | blocked |
 | K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | blocked |
-| K6 | K3, K5 | `keyed_models.md` §Surface catalogue (once-write, pattern functions); §Semantics "Functions inside keyed bodies" | pending |
+| K6 | K3, K5 | `keyed_models.md` §Surface catalogue (once-write, pattern functions); §Semantics "Functions inside keyed bodies" | blocked |
 
 ---
 
@@ -474,6 +474,17 @@ four recipes and the explain readout.
   capability not yet built, per the block rule) rather than guessing at a K3/K4-shaped API surface; no
   code touched, tree unchanged from `HEAD`. Unblocks automatically once K3 and K4 are both `done` (which
   itself requires the K2 hardening-budget block above to be resolved by a human first).
+
+- **2026-07-05, K6** — K6's own Progress-tracking row names **K3, K5** as its preconditions; both are
+  `blocked` (see above), neither `done`. The once-write family and pattern functions
+  (`smelt.latest`/`smelt.once`/`smelt.current`) are defined in terms of the column-family catalogue (K3)
+  and the snapshot-reconcile admission matrix (K5) — there is no partial implementation that doesn't
+  assume those land first. Marking K6 `blocked` (dependency capability not yet built, per the block
+  rule) rather than guessing at a K3/K5-shaped surface; no code touched, tree unchanged from `HEAD`.
+  Unblocks automatically once K3 and K5 are both `done` (which itself requires the K2 hardening-budget
+  block above to be resolved by a human first). With this, every phase in the sub-plan is `done` or
+  `blocked` — no `pending` row remains, so the sub-plan is no longer READY per the master's registry
+  rule until a human resolves the K2 hardening-budget regression.
 
 ## Deferred during implementation
 
