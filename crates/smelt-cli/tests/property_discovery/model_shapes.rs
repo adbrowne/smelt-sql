@@ -283,10 +283,51 @@ SELECT d, MAX(val) AS max_val FROM smelt.sources.events GROUP BY d
     }
 }
 
+/// `G-04`: idempotent `MIN` group-by, batched per partition (`unique_key:
+/// [d]`), over a source declared `mutation_profile: mutable`
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `G-04`). Same
+/// `events(d, id, val)` shape as `SC-2`/`additive_agg_mutable_source`, but the
+/// combiner is the idempotent-but-**non-invertible** `MIN` (Link 0 table
+/// §2.0: idempotent monoids are unsound to *fold* over a mutable source,
+/// because a fold can only ever lower the running minimum, never recover
+/// after the row holding the minimum is mutated upward). Distinct model name
+/// from `additive_agg_mutable_source` so both cells' staged projects never
+/// collide.
+pub fn idempotent_agg_mutable_source() -> ModelShape {
+    ModelShape {
+        name: "events_daily_min_mutable",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT d, MIN(val) AS min_val FROM smelt.sources.events GROUP BY d
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "id",
+                ty: "INTEGER",
+            },
+            SourceColumn {
+                name: "val",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-04  idempotent MIN group-by · mutable-snapshot.
 // G-05  inner-join enrichment (fact × dim) · mutable dimension.
 // G-06  left-join null-preservation · append-only + late right side.
 // G-07  holistic MEDIAN / COUNT DISTINCT · append-only.

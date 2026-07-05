@@ -539,3 +539,53 @@ Block schema:
   `EXPERIMENTAL(property-discovery)` scaffolding.
 - evidence: `smelt-logical::tests::input_delta_discovery_dead_code_tripwire::
   input_delta_discovery_has_no_production_call_sites`.
+
+### CELL G-04 — idempotent agg (MIN) group-by × mutable-snapshot (in-place update lowering then raising the min) × fold-delta
+- verdict: HOLDS — hypothesis REFUTED (no divergence found for an explicit backfill after a
+  non-invertible mutation; the predicted "fold gets stuck at the lowest value ever observed" did
+  not reproduce)
+- P (Link 0): `MIN` — idempotent commutative monoid, but **non-invertible** under retraction/mutation
+  (Link 0 table §2.0: "no" for retractable/mutable — a stateful fold `state = MIN(state, delta)`
+  can only ever lower, never recover, once the min-holding row is mutated upward)
+  skeleton_cols (Link B): `d` (the `unique_key`/`GROUP BY` column; `min_val` is the sole payload
+  column)
+- Link B facts: combiner=idempotent-monoid(MIN) (Link 0 table, `discriminants.rs`) reach=n/a (no
+  correlated/cross-source read; disjoint per-partition aggregation, same shape as G-01/G-03/SC-2)
+  footprint=bounded (one partition's rows only)
+- smelt analyzer: sound — same finding as `SC-2`: batched per-partition materialization
+  (`unique_key: [d]`) is unconditionally recompute-region (`DELETE [start,end)` + fresh `INSERT`
+  from current source contents for the requested `[start, end)` window), never a stateful fold onto
+  remembered state, for ANY combiner. Because it is a genuine recompute over the current snapshot
+  rather than `state = MIN(state, delta)`, the non-invertibility hazard in the Link-0 table (which
+  applies to a hypothetical *fold-delta* technique) has no purchase here — there is no remembered
+  state to get stuck at the wrong value. `input_delta.rs`/`MutationProfile` are not consulted for
+  this path either (same as SC-2); what governs recompute is solely whether the partition falls
+  inside the run's requested window.
+- Link C: no divergence over 1 seeded schedule (deterministic, not proptest-generated — mirrors
+  SC-2's Coverage caveat). Seeded rows `(d=2024-01-01, id=1, val=10.0)`, `(id=2, val=5.0)`; run 1
+  processes `[2024-01-01, 2024-01-02)`, materializing `min_val=5.0`. Between runs, `id=2`'s `val` is
+  first LOWERED to `1.0` (a stateful fold would now track `1.0` as its running state), then RAISED
+  to `999.0` — the non-invertible case: the true current minimum is now `10.0` (`id=1`), a value a
+  `state = MIN(state, delta)` fold could never recover once it had latched onto `1.0`. Run 2
+  advances FORWARD to `[2024-01-02, 2024-01-03)` — as expected (not a bug, matches SC-2's finding),
+  the never-re-requested `2024-01-01` partition stays stale at `5.0`. Run 3 explicitly backfills the
+  SAME `[2024-01-01, 2024-01-02)` window: the maintained `min_val` becomes `10.0`, matching the
+  full-refresh oracle exactly — a fresh, unconditional recompute of `MIN(val)` over current source
+  contents for the requested partition, not a fold over remembered state.
+- condition (CONDITIONAL only): n/a
+- production files/functions changed: none — pure test scaffolding, no analyzer/planner/runtime
+  change (this cell confirms the same "batched materialization is recompute-region, not fold-delta"
+  fact SC-1/SC-2 already established production-side; no new production behaviour was exercised).
+- experimental smelt extensions (if any): none — reuses `model_shapes::idempotent_agg_mutable_source`
+  (new fixture, tagged `EXPERIMENTAL(property-discovery): disposable` per the file's existing
+  header) and the pre-existing `link_c_harness`/`SqlCapturingReporter` infrastructure.
+- evidence: `smelt-cli::tests::property_discovery::g_04_idempotent_min_mutable_snapshot::
+  in_place_update_lowering_then_raising_the_min_is_recovered_on_backfill` (deterministic 3-run
+  schedule through `execute_project`, no hand-injected `WHERE`;
+  `cargo test -p smelt-cli --features smelt-cli/duckdb --test property_discovery
+  in_place_update_lowering_then_raising_the_min_is_recovered_on_backfill` → 1 passed).
+- Coverage caveat (design §2.1 N4): single hand-authored schedule targeting the specific
+  non-invertibility hazard (lower-then-raise), not proptest-shrunk over arbitrary MIN schedules —
+  scoped the same way as SC-2, to "does an explicit backfill after this mutation shape still miss
+  it", answered no. Does not establish behaviour for a technique other than the simple
+  per-partition batched form every G-*/SC-* cell in this shape has tested.
