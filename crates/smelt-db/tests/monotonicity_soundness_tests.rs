@@ -245,6 +245,13 @@ fn run_whitelist_case(case: &GenCase) -> Result<(), String> {
                         case.shape
                     ));
                 }
+                Offset::Integer(n) => {
+                    return Err(format!(
+                        "shape {:?} produced an unexpected Integer offset {n} \
+                         (generator is scoped to seconds-only offsets)",
+                        case.shape
+                    ));
+                }
             };
             (secs, source_column.clone())
         }

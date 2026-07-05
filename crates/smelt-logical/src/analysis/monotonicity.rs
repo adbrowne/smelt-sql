@@ -643,8 +643,19 @@ fn classify_binary(bin: &BinaryExpr, declared_monotonic: bool) -> Classification
     };
     let op = bin.operator().unwrap_or_default();
     if op != "+" && op != "-" {
+        // Name the construct explicitly for the two non-monotone integer
+        // transforms this whitelist must positively reject (fail-closed):
+        // `batch_id % n` (modulo — periodic, not monotone) and
+        // `batch_id * n` (multiplication — not a constant *shift*, and
+        // negative multipliers reverse direction). Any other non-`+`/`-`
+        // operator gets the generic message.
+        let construct = match op.as_str() {
+            "%" => "modulo".to_string(),
+            "*" => "multiplication".to_string(),
+            other => format!("operator {other}"),
+        };
         return Classification::disproven(format!(
-            "binary operator {op} is not a column ± constant interval shift"
+            "binary {construct} is not a monotone constant shift"
         ));
     }
 
@@ -660,23 +671,53 @@ fn classify_binary(bin: &BinaryExpr, declared_monotonic: bool) -> Classification
         return Classification::disproven("binary +/- is not a column ± constant interval shift");
     }
 
+    // Subtraction does not commute: `col - const` is a monotone constant
+    // shift (direction preserved), but `const - col` reverses direction as
+    // `col` increases (e.g. `5 - batch_id` is strictly *decreasing* in
+    // `batch_id`, not "batch_id shifted by a constant"). Only admit the
+    // column-on-the-left form for `-`; addition is commutative so both
+    // `col + const` and `const + col` remain fine below.
+    if op == "-" && !left_has_col {
+        return Classification::disproven(
+            "constant minus column reverses direction and is not a monotone shift",
+        );
+    }
+
     let (col_side, const_side) = if left_has_col {
         (left, right)
     } else {
         (right, left)
     };
 
-    let Some(shift) = parse_interval_literal(&const_side) else {
-        return Classification::disproven("binary +/- is not a column ± constant interval shift");
-    };
-
-    match classify(&col_side, declared_monotonic) {
-        Classification::Trace(mut chain) => {
-            chain.offset = combine_offset(chain.offset, shift);
-            Classification::Trace(chain)
-        }
-        other => other,
+    if let Some(shift) = parse_interval_literal(&const_side) {
+        return match classify(&col_side, declared_monotonic) {
+            Classification::Trace(mut chain) => {
+                chain.offset = combine_offset(chain.offset, shift);
+                Classification::Trace(chain)
+            }
+            other => other,
+        };
     }
+
+    // Non-`INTERVAL` bare integer constant shift — admits monotone integer
+    // partition keys (sequence id / offset / watermark), e.g. `batch_id + 1`
+    // or `batch_id - 1`. The column side must still independently classify
+    // as a monotone chain (`classify` below); only the constant shift itself
+    // is being admitted here, mirroring the INTERVAL case above. See
+    // `docs/specs/batched_models.md` §Surface "`partition_column` must be
+    // monotone".
+    if let Some(n) = parse_bare_integer_literal(&const_side) {
+        let signed = if op == "-" { -n } else { n };
+        return match classify(&col_side, declared_monotonic) {
+            Classification::Trace(mut chain) => {
+                chain.offset = combine_offset(chain.offset, Offset::Integer(signed));
+                Classification::Trace(chain)
+            }
+            other => other,
+        };
+    }
+
+    Classification::disproven("binary +/- is not a column ± constant interval shift")
 }
 
 /// Parse an `INTERVAL '<value>'` literal expression (e.g. `INTERVAL '1
@@ -705,6 +746,51 @@ fn parse_interval_literal(expr: &Expr) -> Option<Offset> {
     source_bounds::parse_interval(value)
 }
 
+/// Parse a bare (non-`INTERVAL`) signed integer literal expression (e.g. `5`
+/// or `-5`) — the non-temporal sibling of [`parse_interval_literal`], for
+/// monotone integer partition keys (sequence id / offset / watermark).
+/// Returns `None` for anything that is not a pure sign + `NUMBER` token run
+/// (an identifier, a string literal, a function call, two number tokens, …)
+/// — fail-closed, consistent with [`parse_interval_literal`] returning
+/// `None` for anything that isn't a recognised `INTERVAL '<value>'` shape.
+fn parse_bare_integer_literal(expr: &Expr) -> Option<i64> {
+    use smelt_parser::SyntaxKind::{IDENT, MINUS, NUMBER, PLUS, STRING};
+
+    let tokens: Vec<_> = expr
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .collect();
+
+    if tokens.is_empty() {
+        return None;
+    }
+    // An IDENT (e.g. the `INTERVAL` keyword, a bare identifier, a function
+    // name) or a STRING literal disqualifies this as a bare integer.
+    if tokens.iter().any(|t| matches!(t.kind(), IDENT | STRING)) {
+        return None;
+    }
+
+    let mut sign: i64 = 1;
+    let mut number: Option<i64> = None;
+    for t in &tokens {
+        match t.kind() {
+            MINUS => sign = -sign,
+            PLUS => {}
+            NUMBER => {
+                if number.is_some() {
+                    // More than one NUMBER token — not a single literal.
+                    return None;
+                }
+                number = Some(t.text().parse().ok()?);
+            }
+            _ => return None,
+        }
+    }
+    number.map(|n| n * sign)
+}
+
 /// Fold a newly-parsed constant shift into the chain's running offset.
 fn combine_offset(existing: Offset, shift: Offset) -> Offset {
     match (existing, shift) {
@@ -713,6 +799,26 @@ fn combine_offset(existing: Offset, shift: Offset) -> Offset {
         (Offset::Seconds(a), Offset::Symbolic(b)) if a.0 == 0 => Offset::Symbolic(b),
         (Offset::Seconds(a), Offset::Symbolic(b)) => Offset::Symbolic(format!("{}s + {b}", a.0)),
         (Offset::Symbolic(a), Offset::Symbolic(b)) => Offset::Symbolic(format!("{a} + {b}")),
+
+        // Integer-domain combos (monotone non-temporal partition keys). The
+        // base case (a bare column reference) seeds `chain.offset` at
+        // `Offset::Seconds(Seconds::ZERO)` regardless of the column's own
+        // domain (see `classify`'s column-ref arm) — so the first integer
+        // shift folded onto that identity zero must convert the running
+        // offset to `Integer`, not stay `Seconds`.
+        (Offset::Integer(a), Offset::Integer(b)) => Offset::Integer(a + b),
+        (Offset::Seconds(a), Offset::Integer(b)) if a.0 == 0 => Offset::Integer(b),
+        (Offset::Integer(a), Offset::Seconds(b)) if b.0 == 0 => Offset::Integer(a),
+        // A genuinely mixed chain (a real nonzero `Seconds` interval shift
+        // composed with a bare-integer shift on the same expression) is
+        // exotic and not a supported shape — fold to a descriptive
+        // `Symbolic` string rather than silently discarding either
+        // magnitude (fail-loud: the value is visibly not a clean bound
+        // rather than looking like one).
+        (Offset::Seconds(a), Offset::Integer(b)) => Offset::Symbolic(format!("{}s + {b}", a.0)),
+        (Offset::Integer(a), Offset::Seconds(b)) => Offset::Symbolic(format!("{a} + {}s", b.0)),
+        (Offset::Symbolic(a), Offset::Integer(b)) => Offset::Symbolic(format!("{a} + {b}")),
+        (Offset::Integer(a), Offset::Symbolic(b)) => Offset::Symbolic(format!("{a} + {b}")),
     }
 }
 
@@ -888,6 +994,26 @@ mod tests {
                 assert_eq!(offset, Offset::Seconds(Seconds::hours(2)));
             }
             other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// Fail-closed reject: `INTERVAL '2 hours' - event_ts` (constant minus
+    /// column, same structural gap as the bare-integer case above but on
+    /// the pre-existing `INTERVAL` branch) reverses direction and must not
+    /// be admitted as a monotone shift.
+    #[test]
+    fn trace_interval_minus_column_not_traceable_reverses_direction() {
+        let expr = first_select_expr("SELECT INTERVAL '2 hours' - event_ts AS event_time FROM t");
+        let ctx = events_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::NotTraceable { reason, kind } => {
+                assert_eq!(kind, NotTraceableKind::Disproven);
+                assert!(
+                    reason.to_lowercase().contains("reverses direction"),
+                    "reason should explain the direction reversal, got: {reason}"
+                );
+            }
+            other => panic!("expected NotTraceable (fail closed), got {other:?}"),
         }
     }
 
@@ -1182,6 +1308,124 @@ mod tests {
     fn find_leaf_column_ref_none_for_two_column_arithmetic() {
         let expr = first_select_expr("SELECT end_ts - start_ts AS event_time FROM t");
         assert!(find_leaf_column_ref(&expr).is_none());
+    }
+
+    // ---- BL6: monotone-integer partition keys ----
+
+    fn batch_ctx() -> BoundContext {
+        BoundContext::new().with_source("events", "batch_id")
+    }
+
+    /// `batch_id + 1` (bare integer, no `INTERVAL` keyword) admits a
+    /// monotone integer partition key as `Traceable`, carrying the
+    /// magnitude as `Offset::Integer`.
+    #[test]
+    fn trace_bare_integer_plus_offset_traceable() {
+        let expr = first_select_expr("SELECT batch_id + 1 AS partition_key FROM t");
+        let ctx = batch_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::Traceable {
+                source,
+                source_column,
+                offset,
+                monotonicity,
+            } => {
+                assert_eq!(source, "events");
+                assert_eq!(source_column, "batch_id");
+                assert_eq!(offset, Offset::Integer(1));
+                assert!(monotonicity.is_strict);
+            }
+            other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// `batch_id - 5` (bare integer subtraction) is also a constant shift —
+    /// same admission as the `+` case, sign preserved.
+    #[test]
+    fn trace_bare_integer_minus_offset_traceable() {
+        let expr = first_select_expr("SELECT batch_id - 5 AS partition_key FROM t");
+        let ctx = batch_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::Traceable { offset, .. } => {
+                assert_eq!(offset, Offset::Integer(-5));
+            }
+            other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// Fail-closed reject: `5 - batch_id` (constant minus column) reverses
+    /// direction — as `batch_id` increases, the expression *decreases* — so
+    /// it must NOT be admitted as a monotone constant shift, even though
+    /// `batch_id - 5` (column minus constant) is fine. Regression test for
+    /// the bug where `classify_binary` picked `col_side`/`const_side` purely
+    /// by which operand contained a column, ignoring operand order under
+    /// `-`, and produced a strictly-increasing certification for a
+    /// strictly-decreasing expression.
+    #[test]
+    fn trace_const_minus_column_not_traceable_reverses_direction() {
+        let expr = first_select_expr("SELECT 5 - batch_id AS partition_key FROM t");
+        let ctx = batch_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::NotTraceable { reason, kind } => {
+                assert_eq!(kind, NotTraceableKind::Disproven);
+                assert!(
+                    reason.to_lowercase().contains("reverses direction"),
+                    "reason should explain the direction reversal, got: {reason}"
+                );
+            }
+            other => panic!("expected NotTraceable (fail closed), got {other:?}"),
+        }
+    }
+
+    /// Fail-closed reject: `batch_id + 1` addition still commutes, we must
+    /// not have accidentally broken the `const + col` order while fixing
+    /// the `-` case.
+    #[test]
+    fn trace_const_plus_column_still_traceable() {
+        let expr = first_select_expr("SELECT 1 + batch_id AS partition_key FROM t");
+        let ctx = batch_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::Traceable { offset, .. } => {
+                assert_eq!(offset, Offset::Integer(1));
+            }
+            other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// Fail-closed reject: `batch_id % 3` (modulo) is periodic, not
+    /// monotone — `NotTraceable`, reason names "modulo".
+    #[test]
+    fn trace_integer_modulo_not_traceable_names_modulo() {
+        let expr = first_select_expr("SELECT batch_id % 3 AS partition_key FROM t");
+        let ctx = batch_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::NotTraceable { reason, kind } => {
+                assert_eq!(kind, NotTraceableKind::Disproven);
+                assert!(
+                    reason.to_lowercase().contains("modulo"),
+                    "reason should name modulo, got: {reason}"
+                );
+            }
+            other => panic!("expected NotTraceable, got {other:?}"),
+        }
+    }
+
+    /// Fail-closed reject: `batch_id * -1` (multiplication) is not a
+    /// constant *shift* — `NotTraceable`, reason names "multiplication".
+    #[test]
+    fn trace_integer_multiplication_not_traceable_names_multiplication() {
+        let expr = first_select_expr("SELECT batch_id * -1 AS partition_key FROM t");
+        let ctx = batch_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::NotTraceable { reason, kind } => {
+                assert_eq!(kind, NotTraceableKind::Disproven);
+                assert!(
+                    reason.to_lowercase().contains("multiplication"),
+                    "reason should name multiplication, got: {reason}"
+                );
+            }
+            other => panic!("expected NotTraceable, got {other:?}"),
+        }
     }
 
     #[test]

@@ -89,6 +89,14 @@ pub enum Offset {
     Seconds(Seconds),
     /// Non-uniform unit (month/year) — not folded to seconds.
     Symbolic(String),
+    /// A constant integer shift over a monotone, non-temporal partition key
+    /// (sequence id / offset / watermark) — e.g. the `+ 5` in `batch_id + 5`.
+    /// Sign is preserved (`batch_id - 5` folds to `Integer(-5)`); unlike
+    /// `Seconds` (an unsigned duration), this variant is signed because an
+    /// integer key has no inherent "always forward" direction the way a
+    /// temporal interval literal does. See `docs/specs/batched_models.md`
+    /// §Surface "`partition_column` must be monotone".
+    Integer(i64),
 }
 
 /// Parse an interval-literal value string (e.g. `"1 day"`, `"30 minutes"`,
@@ -630,6 +638,14 @@ fn extract_form_b_bounds(upper_sql: &str, _partition_col_upper: &str) -> Vec<(Se
     let gte_bounds = extract_gte_lt_interval_bounds(upper_sql);
     bounds.extend(gte_bounds);
 
+    // Also check >= ... - <int> / < ... + <int> patterns — the bare-integer
+    // sibling of the INTERVAL-literal form above, for monotone non-temporal
+    // partition keys (sequence id / offset / watermark). See
+    // `docs/specs/batched_models.md` §Surface "`partition_column` must be
+    // monotone".
+    let bare_integer_bounds = extract_gte_lt_bare_integer_bounds(upper_sql);
+    bounds.extend(bare_integer_bounds);
+
     bounds
 }
 
@@ -708,6 +724,14 @@ fn parse_quoted_interval(text: &str) -> Option<Seconds> {
     match parse_quoted_interval_offset(text)? {
         Offset::Seconds(s) => Some(s),
         Offset::Symbolic(_) => None,
+        // `parse_interval` (the parser `parse_quoted_interval_offset` calls
+        // into) only ever folds a quoted `INTERVAL '<value>'` string to
+        // `Seconds`/`Symbolic` — it has no syntax that yields `Integer`
+        // (that variant is only ever constructed from a *bare*, non-INTERVAL
+        // integer literal — see `monotonicity::classify_binary`). This arm
+        // exists solely so the match stays exhaustive now that `Offset`
+        // carries a third variant; it is unreachable in practice.
+        Offset::Integer(_) => None,
     }
 }
 
@@ -768,6 +792,89 @@ fn extract_gte_lt_interval_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
     }
 
     bounds
+}
+
+/// Extract bounds from bare-integer `>= expr - <int>` / `< expr + <int>` (or
+/// `<= expr + <int>`) patterns — the non-temporal sibling of
+/// [`extract_gte_lt_interval_bounds`], for monotone integer partition keys
+/// (sequence id / offset / watermark) rather than timestamps.
+///
+/// Fail-closed scoping: this path only activates when the *whole* SQL
+/// statement contains no `INTERVAL` keyword at all. A model mixing
+/// `INTERVAL`-based temporal arithmetic and bare-integer arithmetic in the
+/// same statement is not a supported shape here — rather than risk
+/// misreading an unrelated bare number inside/adjacent to an INTERVAL-based
+/// clause, this bare-integer extraction stays inert whenever `INTERVAL`
+/// appears anywhere, leaving [`extract_gte_lt_interval_bounds`] as the sole
+/// Form B extractor for that SQL (consistent with the conservative,
+/// whole-statement scoping [`has_symbolic_interval_in_bound_position`]
+/// already uses).
+///
+/// The magnitude is stored in the same `Seconds` (`u64`) field `Bounded`
+/// already carries — for an integer-keyed source this is not literally an
+/// elapsed-seconds duration, it is the constant integer shift's magnitude
+/// reused as the generic "how far" unit `BoundResult` was already using for
+/// merge/injection-point comparisons.
+fn extract_gte_lt_bare_integer_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
+    if upper_sql.contains("INTERVAL") {
+        return Vec::new();
+    }
+
+    let mut bounds = Vec::new();
+    let mut before = Seconds::ZERO;
+    let mut after_secs = Seconds::ZERO;
+    let mut found = false;
+
+    let gte_kw = ">= ";
+    let mut search_from = 0;
+    while let Some(rel) = upper_sql[search_from..].find(gte_kw) {
+        let abs = search_from + rel;
+        let after_gte = &upper_sql[abs + gte_kw.len()..];
+        if let Some(n) = extract_scoped_bare_integer_after_op(after_gte, '-') {
+            before = before.max(Seconds(n));
+            found = true;
+        }
+        search_from = abs + 1;
+    }
+
+    for lt_kw in &["< ", "<= "] {
+        let mut search_from2 = 0;
+        while let Some(rel) = upper_sql[search_from2..].find(lt_kw) {
+            let abs = search_from2 + rel;
+            let after_lt = &upper_sql[abs + lt_kw.len()..];
+            if let Some(n) = extract_scoped_bare_integer_after_op(after_lt, '+') {
+                after_secs = after_secs.max(Seconds(n));
+                found = true;
+            }
+            search_from2 = abs + 1;
+        }
+    }
+
+    if found {
+        bounds.push((before, after_secs));
+    }
+
+    bounds
+}
+
+/// Within `text` (everything after a `>=`/`</<=` comparison operator, up to
+/// but not including the next same-clause `AND`), find the last `<op> <digits>`
+/// occurrence (e.g. `- 5`) and parse the digits. Scoping to the text before
+/// the first ` AND ` keeps this from reading a number out of an unrelated,
+/// later clause in the same statement.
+fn extract_scoped_bare_integer_after_op(text: &str, op: char) -> Option<u64> {
+    let scoped = match text.find(" AND ") {
+        Some(pos) => &text[..pos],
+        None => text,
+    };
+    let pat = format!("{op} ");
+    let pos = scoped.rfind(pat.as_str())?;
+    let after = scoped[pos + pat.len()..].trim_start();
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u64>().ok()
 }
 
 /// Extract the content inside a balanced `(...)` starting at `paren_pos`.
@@ -1523,6 +1630,69 @@ mod tests {
         assert_eq!(
             *bounds.get("silver.events").unwrap(),
             BoundResult::NotDerivable
+        );
+    }
+
+    // ---- BL6: monotone-integer partition keys ----
+
+    /// A monotone integer partition key (`batch_id`, no `INTERVAL` anywhere
+    /// in the SQL) referenced via `WHERE e.batch_id >= m.batch_id - 5 AND
+    /// e.batch_id < m.batch_id` derives `Bounded(batch_id, 5, 0)` — the
+    /// bare-integer sibling of [`test_explicit_between_filter`]'s
+    /// `INTERVAL`-literal form. The magnitude `5` is stored directly in the
+    /// `Seconds` field (an integer key has no elapsed-seconds meaning; see
+    /// `extract_gte_lt_bare_integer_bounds`'s doc for why this is the
+    /// smallest-diff representation rather than a parallel `BoundResult`
+    /// shape).
+    #[test]
+    fn test_integer_key_bare_constant_offset_form_b() {
+        let sql = "SELECT * FROM events e \
+                   WHERE e.batch_id >= m.batch_id - 5 AND e.batch_id < m.batch_id";
+        let ctx = BoundContext::new().with_source("silver.events", "batch_id");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events").unwrap();
+        match bound {
+            BoundResult::Bounded {
+                source_partition_col,
+                before,
+                after,
+            } => {
+                assert_eq!(source_partition_col, "batch_id");
+                assert_eq!(before.0, 5, "before must be integer magnitude 5");
+                assert_eq!(*after, Seconds::ZERO, "after must be zero");
+            }
+            other => panic!("Expected Bounded(batch_id, 5, 0), got {:?}", other),
+        }
+    }
+
+    /// The bare-integer extraction fails closed (inert) when the same SQL
+    /// statement also contains an `INTERVAL` literal anywhere — mixed
+    /// temporal/non-temporal Form B arithmetic in one statement is not a
+    /// supported shape. The WHERE clause's bare-integer shift is `200_000`
+    /// (deliberately larger, in raw magnitude, than the unrelated Form A
+    /// `RANGE BETWEEN INTERVAL '1 day'` frame's 86 400s): if the
+    /// bare-integer path fired despite `INTERVAL` appearing elsewhere in the
+    /// statement, the merged bound would pick up `max(86400, 200000) =
+    /// 200000`. Since it must stay inert, only the interval-derived 1-day
+    /// margin survives.
+    #[test]
+    fn test_integer_key_bare_offset_inert_when_interval_present_elsewhere() {
+        let sql = "SELECT id, ts, LAG(x) OVER (PARTITION BY id ORDER BY ts \
+                   RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS prev_x \
+                   FROM events e \
+                   WHERE e.batch_id >= m.batch_id - 200000 AND e.batch_id < m.batch_id";
+        let ctx = BoundContext::new().with_source("silver.events", "batch_id");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.events").unwrap();
+        assert_eq!(
+            *bound,
+            BoundResult::Bounded {
+                source_partition_col: "batch_id".to_string(),
+                before: Seconds::days(1),
+                after: Seconds::ZERO,
+            },
+            "bare-integer extraction must stay inert when INTERVAL appears anywhere in the SQL \
+             (only the unrelated Form A interval margin should survive)"
         );
     }
 

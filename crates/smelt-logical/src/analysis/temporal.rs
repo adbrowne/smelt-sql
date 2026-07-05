@@ -381,6 +381,17 @@ fn extract_interval_days(text: &str) -> Option<u32> {
             "YEAR" => n * 365,
             _ => n,
         }),
+        // `unit` above is always one of the fixed literal strings
+        // DAY/WEEK/MONTH/YEAR/HOUR, and `parse_interval` only ever folds
+        // those to `Seconds`/`Symbolic` — `Integer` is only ever produced
+        // from a bare, non-INTERVAL integer literal elsewhere
+        // (`monotonicity::classify_binary`), never from this
+        // unit-string-driven call. Unreachable in practice; kept as an
+        // explicit arm (not a wildcard) so a future change to `unit`'s
+        // value set is forced to reconsider this match.
+        source_bounds::Offset::Integer(_) => {
+            unreachable!("parse_interval(\"{n} {unit}\") never yields Offset::Integer")
+        }
     }
 }
 
@@ -496,6 +507,17 @@ fn extract_interval_days_from_combined(text: &str, n: u32) -> Option<u32> {
             "YEAR" => n * 365,
             _ => n,
         }),
+        // `unit` above is always one of the fixed literal strings
+        // DAY/WEEK/MONTH/YEAR/HOUR, and `parse_interval` only ever folds
+        // those to `Seconds`/`Symbolic` — `Integer` is only ever produced
+        // from a bare, non-INTERVAL integer literal elsewhere
+        // (`monotonicity::classify_binary`), never from this
+        // unit-string-driven call. Unreachable in practice; kept as an
+        // explicit arm (not a wildcard) so a future change to `unit`'s
+        // value set is forced to reconsider this match.
+        source_bounds::Offset::Integer(_) => {
+            unreachable!("parse_interval(\"{n} {unit}\") never yields Offset::Integer")
+        }
     }
 }
 

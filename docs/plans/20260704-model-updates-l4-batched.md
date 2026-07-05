@@ -189,7 +189,7 @@ keys**, and **per-source clamp observability**.
 | BL3 | F3, Group A (A1) | `batched_models.md` §"Non-determinism and the payload rule", Constraint 12; `model_transforms.md` "Compile-time pinning" | done |
 | BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | done |
 | BL5 | F1, Group A (A1) | `batched_models.md` §"Run window vs partition granularity"; `timeseries.md` §"Granularity arithmetic" | done (2026-07-05) |
-| BL6 | F1 | `batched_models.md` §Surface (monotone integer `partition_column`), §"Observing the per-source clamp" | pending |
+| BL6 | F1 | `batched_models.md` §Surface (monotone integer `partition_column`), §"Observing the per-source clamp" | done (2026-07-05) |
 | BL7 | F10, BL2 | `batched_models.md` §"Window independence and self-referential models" | pending |
 | BL8 | F1, BL1, BL6 | `batched_models.md` §"Observing the per-source clamp" | pending |
 
