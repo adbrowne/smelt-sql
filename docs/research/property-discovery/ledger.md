@@ -112,3 +112,36 @@ Block schema:
   `G-02` (re-delivered delta into a `SUM`/`COUNT` fold) will exercise through the real planner. Also
   proves row-order independence and that a genuine set difference (an extra distinct row) is caught
   by both forms.
+
+### CELL P0-4 — (infra) × (infra) × generator MutationProfile self-check
+- verdict: HOLDS (infra deliverable — not a construct/source/technique cell; "HOLDS" here means the
+  self-check demonstrably distinguishes a schedule that matches its declared `MutationProfile` from
+  one that doesn't, on both the positive and negative path)
+- P (Link 0): n/a          skeleton_cols (Link B): n/a
+- Link B facts: n/a
+- smelt analyzer: n/a
+- Link C: n/a — this cell builds the label-verification primitive later Link-C cells call before
+  trusting a schedule's declared profile; it does not itself run a construct through
+  `execute_project`
+- experimental smelt extensions (if any): none in production code. Extended
+  `crates/smelt-cli/tests/property_discovery/run_schedule.rs` (test-target-only, tagged
+  `EXPERIMENTAL(property-discovery): disposable`, passes `property-experimental-gate.sh`) with:
+  `MutationProfile` (`AppendOnly` | `Mutable`), `check_profile(&RunSchedule, MutationProfile) ->
+  Result<(), (usize, ScheduleStep)>` (an `AppendOnly` schedule containing any `InPlaceUpdate`/
+  `InPlaceDelete` step fails, returning the offending index + step; `Mutable` permits both), and
+  `arb_mutable_schedule` — a `Mutable`-profile companion to `P0-2`'s `arb_schedule` that generates
+  2-4 window-advance runs with a guaranteed in-place `UPDATE` of a previously-seeded row inserted
+  after one of them (the SC-2 shape), so a `Mutable`-declared schedule provably exercises the
+  mutation hazard rather than silently degenerating into an append-only run.
+- evidence: `smelt-cli::tests::property_discovery::p0_4_mutation_profile_selfcheck::{
+  self_check_detects_an_in_place_update_mislabeled_append_only,
+  self_check_detects_an_in_place_delete_mislabeled_append_only,
+  mutation_steps_are_permitted_under_the_mutable_profile,
+  arb_schedule_output_always_matches_its_declared_append_only_profile (proptest, 256 cases),
+  arb_mutable_schedule_output_matches_profile_and_actually_mutates (proptest, 256 cases)}`. Red-green:
+  the two hand-constructed cases prove the self-check actually rejects an `InPlaceUpdate`/
+  `InPlaceDelete` step mislabeled `AppendOnly` (not a vacuous always-`Ok` check) and that the same
+  steps are accepted under `Mutable`; the two proptests are the F7 self-check proper — every
+  schedule `arb_schedule` (declared `AppendOnly`) emits passes the `AppendOnly` check, and every
+  schedule `arb_mutable_schedule` (declared `Mutable`) emits both passes its check AND contains at
+  least one mutation step, so the `Mutable` label is never an unverified, unexercised claim.

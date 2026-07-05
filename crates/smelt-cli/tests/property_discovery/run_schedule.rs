@@ -94,6 +94,82 @@ pub fn arb_schedule(base: NaiveDate, seed_id_start: i64) -> impl Strategy<Value 
     })
 }
 
+/// A declared upstream shape (`smelt-core/src/sources.rs::MutationProfile`
+/// mirrored here for the harness — see design §3, cell `P0-4`). The label a
+/// generator claims for the data it emits; the self-check below verifies the
+/// claim rather than trusting it (F7: an unverified label silently poisons a
+/// verdict — a schedule declared `AppendOnly` that actually mutates in place
+/// would make an `AppendOnly` cell's HOLDS verdict meaningless).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationProfile {
+    /// Only ever appends new rows (including "late" appends into an
+    /// already-processed range) — never rewrites or removes an existing row.
+    AppendOnly,
+    /// May additionally rewrite (`InPlaceUpdate`) or remove (`InPlaceDelete`)
+    /// an existing row between runs.
+    Mutable,
+}
+
+/// Cell `P0-4`: assert a schedule's steps actually match its declared
+/// `MutationProfile`. `AppendOnly` forbids any `InPlaceUpdate`/`InPlaceDelete`
+/// step; `Mutable` allows (but does not require) them. Returns the index and
+/// step of the first violation.
+pub fn check_profile(
+    schedule: &RunSchedule,
+    profile: MutationProfile,
+) -> Result<(), (usize, ScheduleStep)> {
+    if profile == MutationProfile::AppendOnly {
+        for (i, step) in schedule.0.iter().enumerate() {
+            if matches!(
+                step,
+                ScheduleStep::InPlaceUpdate { .. } | ScheduleStep::InPlaceDelete { .. }
+            ) {
+                return Err((i, step.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A schedule generator for the `Mutable` profile: like `arb_schedule`, but
+/// each window-advance run may additionally be followed by an in-place
+/// `UPDATE` of a previously-seeded row (`seed_id_start - 1`, the last row of
+/// the fixed two-row seed every `model_shapes` fixture uses) — the SC-2
+/// shape. At least one step across the generated schedule is guaranteed to be
+/// a mutation, so the profile's claimed shape is actually exercised.
+pub fn arb_mutable_schedule(
+    base: NaiveDate,
+    seed_id_start: i64,
+) -> impl Strategy<Value = RunSchedule> {
+    (2_usize..=4).prop_flat_map(move |n_windows| {
+        (
+            proptest::collection::vec(1_i64..=2, n_windows),
+            proptest::collection::vec(-5.0_f64..=5.0, n_windows),
+            0..n_windows,
+        )
+            .prop_map(move |(spans, new_vals, mutate_after)| {
+                let mut steps = Vec::new();
+                let mut cursor = 0_i64;
+                for i in 0..n_windows {
+                    let start = base + chrono::Duration::days(cursor);
+                    let end = start + chrono::Duration::days(spans[i]);
+                    steps.push(ScheduleStep::AdvanceWindowAndRun { start, end });
+                    if i == mutate_after {
+                        // Mutate a row from the fixed seed set that the run
+                        // just processed — an in-place rewrite of an
+                        // already-processed partition between runs.
+                        steps.push(ScheduleStep::InPlaceUpdate {
+                            id: seed_id_start - 1,
+                            new_val: new_vals[i],
+                        });
+                    }
+                    cursor += spans[i];
+                }
+                RunSchedule(steps)
+            })
+    })
+}
+
 /// Read back `SELECT d, id, val FROM {table}` ordered for stable comparison.
 ///
 /// `d` is cast to `VARCHAR` in the query and parsed back into a `NaiveDate`
