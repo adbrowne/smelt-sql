@@ -316,3 +316,53 @@ Block schema:
   tested here (e.g. a stateful fold-delta technique that *does* consult `mutation_profile` once one
   is wired) — this cell is scoped to the one technique smelt's batched materialization currently
   emits for this construct.
+
+### CELL G-01 — additive agg (SUM/COUNT) group-by × append-only × fold-delta
+- verdict: HOLDS
+- P (Link 0): commutative monoid (additive, non-idempotent; Link 0 table §2.0)
+  skeleton_cols (Link B): `{d}` (the `unique_key`/`GROUP BY` column — determines row
+  existence/grouping; `total` is payload)
+- Link B facts: combiner=additive-monoid(SUM) reach=n/a (no correlated/cross-source read; disjoint
+  per-partition aggregation) footprint=bounded (one partition's rows only)
+- smelt analyzer: sound — batched per-partition materialization (`unique_key: [d]`) recomputes
+  `SUM(val)` fresh from current source contents for exactly the requested `[start, end)` window on
+  every run; a disjoint append-only schedule never asks it to fold a delta against remembered
+  state, so there is no ledger/dedup obligation to violate.
+- Link C: no divergence over 8 proptest cases (2-4 disjoint one-day windows, 1-3 rows/window,
+  values in `[-50, 50]`). Every window's rows are inserted before that window is ever requested
+  (no lateness, no re-delivery, no revisit) — the disjoint-delta control shape design §4 predicts
+  HOLDS unconditionally for an additive combiner. Confirmed: `maintained_total(d) ==
+  full_refresh_total(d)` for every processed partition, every case.
+- condition (CONDITIONAL only): n/a
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request`; adds
+  `model_shapes::additive_agg_append_only` (a plain `ModelShape`, not experimental analyzer code)
+  and a source YAML declaring `mutation_profile: append_only`.
+- evidence: `smelt-cli::tests::property_discovery::g_01_additive_agg_append_only::
+  additive_sum_fold_over_disjoint_append_only_windows_matches_full_refresh` (8 proptest cases
+  through `execute_project`, no hand-injected `WHERE`).
+- **Related finding (out of this cell's scope, recorded for follow-up — NOT this cell's verdict
+  driver):** the proptest generator originally drew arbitrary fractional `f64` values and found a
+  real, reproducible divergence — `maintained_total` truncated to an integer (e.g. `11.0` instead
+  of `11.094738641060989`). Root-caused (via subagent investigation) to
+  `crates/smelt-db/src/queries/schema.rs::add_source_info_to_type_context` (~line 1356): it derives
+  `(schema, table)` from a source's `address_segments` and requires `segs.len() >= 2`, silently
+  `continue`-ing (dropping ALL of that source's declared columns from the `TypeContext`) for a
+  source file at scan-root with a single-segment address (e.g. `sources/events.yml` →
+  `["events"]`, as every `model_shapes` fixture in this loop declares it). With `val`'s `DOUBLE`
+  type unresolved, `SqlFunction::Sum` (`crates/smelt-db/src/type_inference/function_call.rs`
+  ~435-471) falls through to its historical `BigInt` default, and
+  `crates/smelt-dialect/src/type_conformance.rs::wrap_with_type_casts` faithfully emits
+  `CAST(total AS BIGINT)` — silently truncating any fractional aggregate. **This is NOT a
+  fold-delta/schedule-safety bug** (this cell's target): it reproduces identically on a single
+  non-incremental run with no schedule at all, so it says nothing about append-only maintenance
+  correctness. It is, however, a real, general smelt correctness bug (silently corrupts financial
+  aggregates over any scan-root-declared source with a non-integer combiner) already
+  partially documented (`crates/smelt-db/tests/proptests/aggregate_widening.rs`'s header references
+  the same failure class for a different trigger — an empty `TypeContext` — this is an
+  **uncovered variant**: a populated-but-arity-mismatched `TypeContext`). Worked around in this
+  cell by constraining generated values to whole numbers (`arb_disjoint_windows`, see its doc
+  comment) so the wrong `BigInt` cast is a no-op; **not fixed** (this is a research loop, not an
+  implementation loop — design §8/§9). Flagged here rather than filed as its own catalog cell
+  because it is a type-inference defect, not a `(construct × source-property × technique)` cell in
+  this catalog's schema; a human should triage it against
+  `docs/research/20260417-0.3-regression-triage.md` bug #3 and `aggregate_widening.rs`.

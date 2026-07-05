@@ -202,10 +202,51 @@ SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
     }
 }
 
+/// `G-01`: additive `SUM` group-by, batched per partition (`unique_key: [d]`),
+/// over an append-only source — the control cell establishing the happy path
+/// for the fold-delta technique (`docs/research/20260705-property-discovery-loop.md`
+/// §4 `G-01`): disjoint append-only deltas, each partition's rows fully
+/// present before its window is ever run, no between-run mutation of an
+/// already-processed partition. Same `SUM(val) GROUP BY d` shape as
+/// `additive_agg_mutable_source` (`SC-2`), but a distinct model name so both
+/// cells' staged projects never collide and the declared source-shape (this
+/// cell: `append_only`) stays legible per-cell in each test's own
+/// `stage_project`.
+pub fn additive_agg_append_only() -> ModelShape {
+    ModelShape {
+        name: "events_daily_total_append_only",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "id",
+                ty: "INTEGER",
+            },
+            SourceColumn {
+                name: "val",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-01  additive SUM/COUNT group-by · append-only.
 // G-03  idempotent MAX/BOOL_OR group-by · append-only.
 // G-04  idempotent MIN group-by · mutable-snapshot.
 // G-05  inner-join enrichment (fact × dim) · mutable dimension.
