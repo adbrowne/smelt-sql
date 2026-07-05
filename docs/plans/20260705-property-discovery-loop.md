@@ -120,4 +120,14 @@ gating harness first. Phases E–G are loop-driven.
 
 ## Blocked phases
 
-_(none yet — the loop appends dated entries here when it records a `<<PROBE_BLOCKED>>`.)_
+- **2026-07-06 — `FIX-2`** (input_delta_discovery dormant classifier × clocked mutable ×
+  wire-or-fence): `input_delta_discovery` (`crates/smelt-logical/src/analysis/input_delta.rs`)
+  classifies a clocked `Mutable` source as `WindowForward`, but has zero production call sites
+  today — it is proof-stage-only dead code. Wiring its verdict to any consuming maintenance mode
+  would newly licence a forward-only refresh technique for sources that can be updated in place —
+  a behaviour-defining design decision (design §8(4)), not a mechanical fix, so it is BLOCKed for
+  human review rather than decided autonomously. Mechanical action taken instead: added a
+  permanent tripwire test (`crates/smelt-logical/tests/input_delta_discovery_dead_code_tripwire.rs`)
+  that fails the moment a production caller appears, pointing the author at this entry and ledger
+  cell `FIX-2` / `SC-2` before the wiring can land silently. See
+  `docs/research/property-discovery/ledger.md` cell `FIX-2`.

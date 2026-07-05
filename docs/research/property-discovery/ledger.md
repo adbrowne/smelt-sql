@@ -491,3 +491,51 @@ Block schema:
   production-adjacent tests.
 - evidence: `smelt-logical::analysis::source_bounds::tests::
   test_form_b_does_not_leak_bound_to_unrelated_source`.
+
+### CELL FIX-2 — input_delta_discovery dormant classifier × clocked mutable × wire-or-fence
+- verdict: BLOCKED (mechanical tripwire applied; the wiring decision itself is deferred to human review)
+- P (Link 0): n/a (this cell audits a classifier's *consumption*, not an algebraic combiner property)
+  skeleton_cols (Link B): n/a
+- Link B facts: `input_delta_discovery` (`crates/smelt-logical/src/analysis/input_delta.rs:88`)
+  classifies a clocked `Mutable` source as `InputDeltaKind::WindowForward` — confirmed by SC-2
+  (this ledger) that a forward-only consumer of that verdict misses an in-place UPDATE of an
+  already-processed partition. Confirmed by direct grep
+  (`rg input_delta_discovery crates --include='*.rs'`, run this iteration) that the function has
+  **zero production call sites** — every match is its own definition or its own `#[cfg(test)]`
+  unit tests in the same file. It is proof-stage-only, dead code from the maintenance planner's
+  point of view.
+- smelt analyzer: not-derivable (the function is unconsumed; there is no execution path to audit)
+- Link C: not applicable — nothing calls this classifier today, so there is no emitted maintenance
+  SQL to run an adversarial schedule against. (SC-2 already exercises the *effective* forward-only
+  hazard this classifier would reproduce if wired, via a hand-simulated forward-only consumer —
+  see that cell.)
+- condition: the finding this cell records — wiring `input_delta_discovery`'s `WindowForward`
+  verdict to any consuming maintenance mode for a `Mutable`-profiled source is a
+  **behaviour-defining design decision** (it would newly licence "read only the next window
+  forward" as a real refresh technique for sources that can be updated in place — new maintenance
+  semantics, design §8(4)), not a mechanical bug fix. Per policy this loop must record and BLOCK,
+  not decide it. The mechanical, in-scope action taken instead: a **permanent tripwire test**
+  (`crates/smelt-logical/tests/input_delta_discovery_dead_code_tripwire.rs`) asserting the
+  call-site set stays empty (whitelisted only to the function's own definition file); the moment a
+  future change adds a production caller, this test fails and its message points the author at
+  SC-2 + this cell before they can silently ship the wiring.
+- production files/functions changed: none (no analyzer/planner/runtime behaviour changed). Added
+  `crates/smelt-logical/tests/input_delta_discovery_dead_code_tripwire.rs` — a permanent guard
+  test, not disposable scaffolding, so left **untagged** (no
+  `EXPERIMENTAL(property-discovery)` marker; that tag is reserved for throwaway harness code per
+  design §8).
+- red→green: ran the new tripwire test against the current tree first — PASSED immediately (zero
+  callers today is the expected, already-true state, so there is no pre-existing divergence to
+  reproduce). To verify the tripwire actually tripped, temporarily added a scratch test file with a
+  fake call to `input_delta_discovery` outside the allowed file: the tripwire FAILED with the
+  expected message naming the new caller. Removed the scratch file; re-ran: PASSED again. This
+  establishes the red→green pair for the *guard*, since there is no divergence in current behaviour
+  to fix.
+- no-regression gate: `cargo test -p smelt-logical --test input_delta_discovery_dead_code_tripwire
+  --quiet` → 1 passed. `cargo test -p smelt-logical --quiet` → 296 passed, 0 failed (unchanged).
+  `cargo fmt --all` clean. `cargo clippy -p smelt-logical --all-targets --quiet` clean.
+- experimental smelt extensions (if any): none — the tripwire is a permanent regression guard
+  living in normal test surface (`crates/smelt-logical/tests/`), not
+  `EXPERIMENTAL(property-discovery)` scaffolding.
+- evidence: `smelt-logical::tests::input_delta_discovery_dead_code_tripwire::
+  input_delta_discovery_has_no_production_call_sites`.
