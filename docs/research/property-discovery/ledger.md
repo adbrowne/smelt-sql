@@ -211,3 +211,49 @@ Block schema:
   assertions pass as written on the first construct classified — this cell validates the diagnostic
   harness itself works end-to-end, not yet a discovery about a construct the property grid (`G-*`)
   hasn't reached.
+
+### CELL SC-1 — correlated EXISTS (7-day attribution) × append-only × recompute-region (Link C)
+- verdict: HOLDS — hypothesis REFUTED (no divergence found; the predicted unsound acceptance did
+  not reproduce for this construct's exact SQL shape)
+- P (Link 0): n/a — correlated `EXISTS` has no combiner identity in the Link-0 table (it is a
+  boolean membership test, not a fold); this cell is about reach derivation, not an algebraic
+  property
+  skeleton_cols (Link B): `user_id`, `event_date` (the `unique_key`; `converted` is the sole
+  payload column)
+- Link B facts: reach for `conversions` = `Bounded(conversion_date, before=0, after=7d)` via
+  `source_bounds::derive_model_bounds` — **not** the hypothesized zero-margin fallback
+- smelt analyzer: sound (for this shape) — but by an accident of implementation, not a reasoned
+  derivation. `derive_bound_for_source`'s Form-B extractor (`extract_form_b_bounds`) scans the
+  **whole model SQL as one text blob** for any `... BETWEEN <expr> AND <expr> + INTERVAL '...'`
+  pattern; it takes a `_partition_col_upper` parameter but never uses it to check that the matched
+  columns are actually the source's own partition column (`crates/smelt-logical/src/analysis/
+  source_bounds.rs:589`, `_partition_col_upper` unused). The correlated EXISTS predicate
+  `c.conversion_date BETWEEN e.event_date AND e.event_date + INTERVAL '7 days'` happens to be the
+  *only* BETWEEN+INTERVAL pattern in the model, so it gets attributed to `conversions` (correctly,
+  here) — but the same derivation would attribute the *same* bound to `events` too (confirmed: the
+  compiled SQL's `events` read filter is also widened to `< 2024-01-09`, a spurious 7-day
+  over-read the outer `inject_time_filter` clamp happens to absorb harmlessly). The "no temporal
+  dependency ⇒ Bounded(0,0)" fallback the hypothesis named is real code
+  (`source_bounds.rs:406-411`) but is never reached for this shape, because the Form-B scan matches
+  first, column-blind.
+- Link C: no divergence over 1 seeded schedule (deterministic, not proptest-generated — see
+  Coverage caveat below) — `run 1` processes `[2024-01-01, 2024-01-02)` with no conversion; a late
+  conversion (`user_id=1, conversion_date=2024-01-03`) is appended directly to
+  `main.sources_conversions` *between* runs (never pre-populated); `run 2` re-runs (backfills) the
+  same window and correctly picks up the late row (`converted` flips to `true`, matching the
+  full-refresh oracle). Compiled SQL for `conversions` on run 2:
+  `WHERE conversion_date >= '2024-01-01' AND conversion_date < '2024-01-09'` — the 7-day forward
+  margin is present.
+- condition (CONDITIONAL only): n/a
+- experimental smelt extensions (if any): none — the cell reads `RunReporter::model_compiled`
+  output through the existing `SqlCapturingReporter` (already `EXPERIMENTAL(property-discovery)`
+  from `P0-1`); no new production or analyzer code touched.
+- evidence: `smelt-cli::tests::property_discovery::sc_1_correlated_exists::
+  late_conversion_appended_between_runs_within_7_day_window` (deterministic 2-run schedule through
+  `execute_project`, no hand-injected `WHERE`).
+- Coverage caveat (design §2.1 N4): this is a single hand-authored schedule, not a proptest-shrunk
+  family — appropriate for a seed-bug reproduction attempt (the goal was "does the hypothesized
+  fallback ever fire for this shape", answered no), but it does not rule out the fallback firing
+  for a *differently shaped* correlated-EXISTS query (e.g. one with the interval on the `BETWEEN`
+  lower bound, or a query with a second unrelated `BETWEEN` earlier in the text that the scan
+  matches instead — see the appended follow-on cell `SC-1b`).

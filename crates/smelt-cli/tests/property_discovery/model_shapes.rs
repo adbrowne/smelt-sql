@@ -69,14 +69,97 @@ SELECT d, id, val FROM smelt.sources.events
     }
 }
 
+/// A declared upstream source for a [`MultiSourceModelShape`]: name, columns,
+/// and (for timeseries sources) its `event_time_column`/`partition_column`
+/// pair. `None` stages the source as a plain lookup (no `timeseries:` block) —
+/// absent from `source_bounds`'s `BoundContext` entirely.
+pub struct MultiSourceSpec {
+    pub name: &'static str,
+    pub columns: &'static [SourceColumn],
+    /// `Some((event_time_column, partition_column))` for a timeseries source.
+    pub timeseries: Option<(&'static str, &'static str)>,
+}
+
+/// Like [`ModelShape`], but for cells whose model correlates more than one
+/// staged source (join enrichment, correlated `EXISTS`, ...). `ModelShape`'s
+/// single `source`/`source_columns` fields can't express a second source, so
+/// multi-source cells add a shape here instead of forcing a single-source
+/// struct to grow optional fields every other cell ignores.
+pub struct MultiSourceModelShape {
+    pub name: &'static str,
+    pub sql: &'static str,
+    pub sources: &'static [MultiSourceSpec],
+}
+
+/// `SC-1`: correlated `EXISTS` 7-day attribution over two append-only
+/// timeseries sources (the design §2 worked example). `events` is the
+/// model's own driving source; `conversions` is read only inside the
+/// correlated subquery's `WHERE` — never joined or unioned at the top level.
+/// `source_bounds::derive_bound_for_source` is a per-source, text-scanning
+/// walk over the *whole* model SQL (Form A/B), not scoped to which FROM
+/// clause a column reference actually belongs to (design §2.2's skeleton-
+/// column-set concern in miniature) — this cell asks empirically whether
+/// that walk still derives a correct forward margin for `conversions`, or
+/// falls through to the zero-margin "no temporal dependency" default
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `SC-1`).
+pub fn correlated_exists_attribution() -> MultiSourceModelShape {
+    MultiSourceModelShape {
+        name: "event_conversions",
+        sql: r#"---
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [user_id, event_date]
+---
+SELECT
+  e.event_date,
+  e.user_id,
+  EXISTS(
+    SELECT 1 FROM smelt.sources.conversions c
+    WHERE c.user_id = e.user_id
+      AND c.conversion_date BETWEEN e.event_date AND e.event_date + INTERVAL '7 days'
+  ) AS converted
+FROM smelt.sources.events e
+"#,
+        sources: &[
+            MultiSourceSpec {
+                name: "events",
+                columns: &[
+                    SourceColumn {
+                        name: "event_date",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                ],
+                timeseries: Some(("event_date", "event_date")),
+            },
+            MultiSourceSpec {
+                name: "conversions",
+                columns: &[
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "conversion_date",
+                        ty: "DATE",
+                    },
+                ],
+                timeseries: Some(("conversion_date", "conversion_date")),
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// SC-1  correlated EXISTS 7-day attribution over append-only conversions
-//       (the §2 worked example): SELECT e.*, EXISTS(SELECT 1 FROM
-//       smelt.sources.conversions c WHERE c.user_id = e.user_id AND
-//       c.conversion_ts BETWEEN e.event_ts AND e.event_ts + INTERVAL '7 days')
-//       AS converted FROM smelt.sources.events e
 // SC-2  pass-through + additive agg over a clocked MUTABLE source.
 // G-01  additive SUM/COUNT group-by · append-only.
 // G-03  idempotent MAX/BOOL_OR group-by · append-only.

@@ -14,4 +14,5 @@ mod run_schedule;
 
 mod p0_2_run_schedule;
 mod p0_4_mutation_profile_selfcheck;
+mod sc_1_correlated_exists;
 mod smoke;

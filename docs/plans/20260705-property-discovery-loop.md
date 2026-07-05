@@ -63,9 +63,9 @@ silently skips — a cell verdict without DuckDB is worthless). The fundamentals
 |---|---|---|
 | A | Loop scaffolding: `property-loop.sh`, `property-loop-forever.sh` (10-min retry), `property-loop-prompt.txt`, seed `catalog.jsonl` + `catalog.md`, `ledger.md` + `unsupported.md` scaffolds, `property-experimental-gate.sh` CI grep gate | done (2026-07-05) |
 | B (`P0-1`) | **In-process real-planner PBT harness**: drive `smelt-runtime::execute_project` over a temp DuckDB with generator-produced rows + a generated run schedule; read back the table. No hand-injected `WHERE`. Lives in `crates/smelt-cli/tests/property_discovery/` (`link_c_harness.rs` + `model_shapes.rs` single model-SQL catalogue); **not** `smelt-db` tests (dev-dep cycle). The gating deliverable (design §3a). | done (2026-07-05) |
-| C (`P0-2/3/4`) | Run-schedule generator (append-late + in-place-update between runs; step-`k` source snapshot) + oracle (`EXCEPT ALL`, all-columns diff, per-cell mode, payload-exclusion rule) + generator `MutationProfile` self-check. | pending |
+| C (`P0-2/3/4`) | Run-schedule generator (append-late + in-place-update between runs; step-`k` source snapshot) + oracle (`EXCEPT ALL`, all-columns diff, per-cell mode, payload-exclusion rule) + generator `MutationProfile` self-check. | done (2026-07-05) |
 | D (`P0-5/6`) | Link-A abstract contract-safety proptest scaffold (the 5 adversarial schedule kinds) + Link-B classification-diagnostic scaffold (analyzer facts vs DuckDB ground truth; emits the skeleton-column floor). | done (2026-07-05) |
-| E (`SC-1`,`SC-2`) | The two seed candidate-bugs, end-to-end through Link C — the apparatus's first real verdicts (confirm the bug or refute the hypothesis). | pending |
+| E (`SC-1`,`SC-2`) | The two seed candidate-bugs, end-to-end through Link C — the apparatus's first real verdicts (confirm the bug or refute the hypothesis). | in progress — `SC-1` resolved HOLDS (2026-07-06, hypothesis refuted; see ledger + appended `SC-1b`); `SC-2` pending |
 | F | The reachable grid: append-only + mutable-snapshot cells (additive/idempotent/holistic aggs, join enrichment, left-join, running-total, `UNION ALL`, composite-key fan-out). Loop-driven. | pending |
 | G | Change-feed / CDF generator sub-task; unblocks the retraction / unbounded-lateness cells that currently BLOCK. | pending |
 
