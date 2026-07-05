@@ -28,9 +28,12 @@ sequences of runs, and diff against a full refresh — establishing, to the same
 already holds its type system to (property-based tests against a DuckDB oracle), which
 maintenance techniques uphold the equivalence contract and where **smelt breaks**.
 
-This is a **research engine**: its output is *knowledge* — a ledger of which cells hold, a
-negative catalogue of which don't and why, and the property tests that constitute the
-evidence. It does not autonomously redesign smelt (reuse/extension policy: §8).
+This is a **research-and-repair engine**: its primary output is *knowledge* — a ledger of which
+cells hold, a negative catalogue of which don't and why, and the property tests that constitute the
+evidence — and, when it establishes a *clear, test-backed* analyzer/planner bug or improvement, it
+**applies the fix to production smelt** (red→green, no-regression gated; policy §8). It does not
+autonomously make *behaviour-defining design* decisions — those it records and BLOCKs for human
+review.
 
 ## 2. The proof architecture: four links, one green gate
 
@@ -373,18 +376,36 @@ loop's memory-scope / sampler / sync-with-main / usage-log machinery.
 
 ## 8. Policy: reusing and extending smelt
 
-Default: **reuse** smelt (the real analyzer, `execute_project`, and the proptest oracle infra) and put proof code **into**
-smelt as tests/support — so we test the real analyzer, not a paper model of it, and green proof
-code is reusable by product work. Where a proof needs an analyzer fact smelt does not expose, the
-loop **may extend smelt internals on this branch** as **throwaway**, under enforced constraints:
-(1) marked `// EXPERIMENTAL(property-discovery): disposable`; (2) test-target-only, checked by the
-§6 CI grep gate (no production planning/execution change); (3) recorded in the ledger cell.
-Promotion to product surface is a separate, human-gated decision informed by the ledger.
+**Authority (updated 2026-07-06 — full autonomy, gated by tests).** The loop **may make production
+smelt changes** — extend or fix the analyzer/planner/runtime — for any *clear, test-backed*
+improvement or bug it establishes, on this (throwaway) branch. This restores the original intent
+("I expect this loop will actually extend smelt with extra logic and tests"). The prior test-only
+restriction is lifted; what replaces it is a **test gate**, not a location gate:
+
+1. **Red→green.** The change must be driven by a test that first *fails* (reproduces the divergence,
+   or asserts the missing/over-conservative derivation) and then *passes* with the change.
+2. **No regression.** The full test suite of **every crate whose production code was touched** must
+   be green (`cargo test -p <crate>` for each; the command + result recorded in the ledger cell).
+   `cargo fmt --all` and `cargo clippy --all-targets` clean.
+3. **Recorded.** The ledger cell names the production files/functions changed and the gate output,
+   so every autonomous production change is auditable and revertible.
+4. **BLOCK genuine design forks.** A change that requires *choosing new maintenance semantics* (e.g.
+   wiring a dormant classifier to a new execution path, adding a refresh behaviour) is a design
+   decision, not a mechanical fix — record it as a finding and `<<PROBE_BLOCKED>>` for human review
+   rather than deciding it autonomously. Bug fixes and derivation tightenings with an unambiguous
+   correct answer are in-scope; behaviour-defining design is not.
+
+**Disposable test scaffolding** (harness, generators, oracle) still lives test-target-only and stays
+tagged `// EXPERIMENTAL(property-discovery): disposable`, enforced by the §6 grep gate — that tag now
+marks *throwaway scaffolding*, and must **not** be applied to a real production change (production
+improvements are untagged, permanent-until-reviewed code held to the test gate above). Everything
+lands on this branch; merge to product is still a separate human decision informed by the ledger.
 
 ## 9. Non-goals and risks
 
-- **Not** an implementation loop: it produces evidence, not refresh/planner behaviour changes,
-  specs, or product plans.
+- **Repairs, does not redesign**: it applies test-backed analyzer/planner *fixes and derivation
+  tightenings* (§8), but does not author specs, product plans, or new refresh/maintenance
+  *behaviour* — a change that would define new semantics is BLOCKed for human review.
 - **Empirical, not formal** (F3): PBT gives strong refutation and "no counterexample over N",
   never a machine-checked proof. Verdict vocabulary reflects this.
 - **Risk — Link C is only as sound as the driver + oracle.** A driver that can't emit retractions

@@ -1,4 +1,4 @@
-Resume the smelt PROPERTY-DISCOVERY research loop with fresh context. You do exactly ONE unit of work (one catalog cell) and emit exactly one sentinel. This is a RESEARCH engine: you produce evidence (proptests + a verdict ledger), you do NOT redesign smelt's refresh/planner behaviour.
+Resume the smelt PROPERTY-DISCOVERY research-and-repair loop with fresh context. You do exactly ONE unit of work (one catalog cell) and emit exactly one sentinel. You produce evidence (proptests + a verdict ledger) AND, when you establish a CLEAR, TEST-BACKED analyzer/planner bug or improvement, you APPLY THE FIX TO PRODUCTION SMELT on this branch (red→green, no-regression gated — see step 7). You do NOT autonomously make behaviour-DEFINING design decisions (new refresh/maintenance semantics, wiring a dormant classifier to a new execution path): record those and <<PROBE_BLOCKED>> for human review.
 
 READ FIRST (every iteration):
 1. docs/research/20260705-property-discovery-loop.md — the design (the four-link proof architecture: Link 0 combiner-algebra table, Link A abstract pre-filter, Link B classification diagnostics, Link C the execution GATE that runs smelt's REAL emitted maintenance over adversarial run schedules and diffs vs full-refresh). Internalise §2, §3, and the verdict vocabulary.
@@ -21,7 +21,12 @@ DO THE WORK (reuse smelt; put proof code into smelt's TEST surface):
    - Include the cell's SEEDED construct-specific adversarial schedule for its known hazard, not only generic kinds.
    - RED-GREEN: for a candidate-bug cell, first REPRODUCE the divergence; then commit the test in a state that encodes the verdict.
 6. Run just this test: `cargo test -p <crate> --test <t> <name> --quiet 2>&1 | tail -40`. (DUCKDB_LIB_DIR + LD_LIBRARY_PATH are set by the wrapper; if a DuckDB error shows they are unset, BLOCK the cell — do not fake a verdict.)
-7. Any smelt-internal extension you need must be marked `// EXPERIMENTAL(property-discovery): disposable`, be test-target-only (under #[cfg(test)] or tests/), and pass `.claude/scripts/property-experimental-gate.sh`. Record it in the ledger cell.
+7. PRODUCTION CHANGES (full autonomy, gated by tests). When this cell establishes a clear, test-backed analyzer/planner/runtime bug or improvement, APPLY IT to production smelt (e.g. the source_bounds column-aware-reach fix). Gate — ALL of:
+   (a) Red→green: the fix is driven by a test that first FAILS (reproduces the divergence / asserts the wrong-or-missing derivation) then PASSES with the change.
+   (b) No regression: run `cargo test -p <crate>` GREEN for EVERY crate whose production code you touched (e.g. smelt-logical, smelt-runtime); `cargo fmt --all`; `cargo clippy --all-targets` clean. Record the exact commands + PASS in the ledger cell.
+   (c) Record: the ledger cell names the production files/functions changed. Production changes are REAL code — do NOT tag them `EXPERIMENTAL(property-discovery)` (that tag is ONLY for disposable test scaffolding).
+   (d) BLOCK design forks: if the fix requires CHOOSING new maintenance semantics (wiring a dormant classifier to a new path, adding a refresh behaviour), that is a design decision — record it as a finding and emit <<PROBE_BLOCKED>>, do not decide it yourself.
+   Disposable test scaffolding (harness/generators/oracle) stays test-target-only, tagged `// EXPERIMENTAL(property-discovery): disposable`, and must pass `.claude/scripts/property-experimental-gate.sh`.
 
 RECORD + COMMIT:
 8. Append a verdict block to docs/research/property-discovery/ledger.md (schema in design §7): verdict (HOLDS | REFUTED | CONDITIONAL | BLOCKED), P, skeleton_cols, Link-B facts, smelt-analyzer verdict (sound/over-conservative/unsound/not-derivable), Link-C result (no divergence over N | WITNESS), condition if CONDITIONAL, evidence (test path::name). HOLDS means "no counterexample over N schedules", NEVER "proven".

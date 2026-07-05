@@ -102,8 +102,12 @@ gating harness first. Phases E–G are loop-driven.
   (N2); the full-refresh baseline is the **step-`k` source snapshot** (N3).
 - The cell exercised at least one **seeded construct-specific** adversarial schedule for its known
   hazard, not only Link-A's generic kinds (N4).
-- Any smelt-internal extension is `// EXPERIMENTAL(property-discovery): disposable`, test-target-only,
-  and passes `property-experimental-gate.sh`.
+- **Production changes (authority updated 2026-07-06 — full autonomy, gated by tests; design §8):**
+  a production analyzer/planner fix is allowed when it is red→green AND every touched crate's
+  `cargo test -p <crate>` is green (recorded in the ledger) AND fmt/clippy clean. Behaviour-defining
+  design (new maintenance semantics, wiring a dormant classifier) is BLOCKed for human review, not
+  applied. Production changes are untagged real code; the `EXPERIMENTAL(property-discovery)` tag +
+  `property-experimental-gate.sh` apply only to disposable test scaffolding.
 - The ledger verdict vocabulary never claims "proven" — HOLDS = "no counterexample over N" (F3).
 
 ## Commit messages (per phase)
