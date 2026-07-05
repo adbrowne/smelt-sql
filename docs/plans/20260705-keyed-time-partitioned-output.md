@@ -66,7 +66,7 @@ The keyed refresh mode's output is keyed state (one row per key). The spec's §"
 |-------|---------|--------|------|
 | 1     | blocked |        |      |
 | 2     | blocked |        |      |
-| 3     | pending |        |      |
+| 3     | blocked |        |      |
 | 4     | pending |        |      |
 | 5     | pending |        |      |
 | 6     | pending |        |      |
@@ -92,6 +92,16 @@ The keyed refresh mode's output is keyed state (one row per key). The spec's §"
   the keyed-collapse plan. Marking Phase 2 `blocked` (dependency capability not yet built, per the block
   rule) rather than attempting route 1 against a locality gate that doesn't exist yet; no code touched,
   tree unchanged from `HEAD`. Unblocks automatically once Phase 1 (and transitively K1–K6) land.
+
+- **2026-07-05, Phase 3** — same root cause as Phase 1/2: Phase 3's own "Pre-conditions" row requires
+  "Phase 2 admits route 1 and yields a `LocalitySlice`", which is not the case (Phase 2 is `blocked`,
+  not `done`, per the entry above). Re-verified pre-flight: `cargo test -p smelt-core --test
+  hardening_budget` is still red with the identical `smelt-backend-duckdb expect: current=16 >
+  baseline=15` regression and `smelt-cli` stale-baseline pair reported under K2 in the keyed-collapse
+  plan. Marking Phase 3 `blocked` (dependency capability not yet built, per the block rule) rather than
+  wiring the slice-pruned merge target against a `LocalitySlice` that doesn't exist yet; no code
+  touched, tree unchanged from `HEAD`. Unblocks automatically once Phase 2 (and transitively K1–K6)
+  land.
 
 ### Phase 1: Admit the block behind a fail-closed locality gate
 
