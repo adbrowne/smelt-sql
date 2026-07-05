@@ -174,3 +174,40 @@ Block schema:
   abstract shape `G-04` will replay through real smelt)}`. Red-green: the abstract model was built
   to make exactly these two predictions (idempotent-monoid HOLDS, MIN-under-retraction REFUTED)
   and both assertions pass as written — this cell is a scaffold, not a discovery about smelt.
+
+### CELL P0-6 — (infra) × (infra) × Link-B classification-diagnostic scaffold
+- verdict: HOLDS (infra deliverable — not a construct/source/technique cell; "HOLDS" here means the
+  scaffold's independent DuckDB clamp-probe agrees with smelt's own analyzer reach for the fixed
+  Form-B model, i.e. the analyzer is demonstrated **sound and tight** for this one construct — not
+  that a Link-C property held)
+- P (Link 0): `SUM` — commutative monoid, non-idempotent (additive; `discriminants.rs`)
+  skeleton_cols (Link B): none for this construct — a bare group-less `SUM(payload)` has no
+  grouping/dedup/ordering key; the skeleton floor is empty (payload-only aggregate)
+- Link B facts: combiner=additive monoid (`is_monoid=true, needs_inverse=false`, matches Link 0's
+  `SUM`/`COUNT` row) reach=`Bounded(event_date, before=1d, after=0)` via
+  `source_bounds::derive_model_bounds` over the Form-B model
+  `SELECT SUM(s.payload) FROM sessions s WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1
+  day' AND m.partition_date` footprint=bounded
+- smelt analyzer: sound — the independent DuckDB clamp-probe (restrict the *read* to a candidate
+  margin, then apply the model's own filter on top) confirms 1 day is both **sufficient** (every
+  generated dataset: margin=1d clamp always equals the true output) and **necessary** (margin=0d
+  diverges on a row exactly at `partition_date - 1 day`) — the analyzer's derived reach is not just
+  safe but tight for this construct
+- Link C: n/a — this cell is a static classification diagnostic (analyzer facts vs an independent
+  DuckDB probe); it does not run the model through `execute_project`. It is the diagnostic Link C
+  cells (`G-01` etc.) reuse to localize *why* a reach fact was right or wrong
+- condition (CONDITIONAL only): n/a
+- experimental smelt extensions (if any): none — reuses smelt's existing analyzer APIs
+  (`smelt_logical::analysis::{discriminants::combiner_discriminants, source_bounds::derive_model_bounds}`)
+  read-only; no `EXPERIMENTAL(property-discovery)` tag applies
+- evidence: `smelt-db::tests::proptests::maintenance_link_b::{
+  clamp_probe_at_derived_margin_matches_true_output (proptest, 256 cases: 0-7 generated rows at
+  offsets -3..=2 days from the partition date, random payloads — clamp-probe at the analyzer's
+  derived 1-day margin always matches the model's true `SUM` output),
+  clamp_probe_at_one_less_than_derived_margin_diverges_on_boundary_row (deterministic witness: a
+  single row at exactly `partition_date - 1 day` is inside the model's filter but a 0-day-margin
+  clamp misses it — proves the derived bound is *tight*, not merely conservative)}`. Red-green: the
+  scaffold was built to make exactly these two predictions (sufficiency + tightness) and both
+  assertions pass as written on the first construct classified — this cell validates the diagnostic
+  harness itself works end-to-end, not yet a discovery about a construct the property grid (`G-*`)
+  hasn't reached.

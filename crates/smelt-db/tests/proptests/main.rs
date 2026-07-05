@@ -11,6 +11,7 @@ mod prop_helpers;
 mod aggregate_widening;
 mod collation_tests;
 mod maintenance_link_a;
+mod maintenance_link_b;
 mod prop_coercion_matrix;
 mod prop_cte_types;
 mod prop_nested_functions;
