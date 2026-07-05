@@ -18,6 +18,7 @@ mod g_03_idempotent_agg_append_only;
 mod g_04_idempotent_min_mutable_snapshot;
 mod g_05_join_enrichment_mutable_dimension;
 mod g_06_left_join_null_preservation;
+mod g_07_holistic_agg_append_only;
 mod p0_2_run_schedule;
 mod p0_4_mutation_profile_selfcheck;
 mod sc_1_correlated_exists;

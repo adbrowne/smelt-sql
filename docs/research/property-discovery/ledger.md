@@ -716,3 +716,62 @@ Block schema:
   late right-side append recover the true left-join result", answered yes. Does not establish
   behaviour for join fan-out (a right side with multiple matching rows) or for a right-side source
   declared `mutation_profile: mutable` (that shape is G-05's territory, not this cell's).
+
+### CELL G-07 — holistic agg (MEDIAN / COUNT DISTINCT) × append-only × recompute-region
+- verdict: HOLDS (no divergence over 8 proptest cases × 2-4 disjoint windows each, including 0-2
+  re-deliveries per window); catalog hypothesis REVISED before Link C ran (research below), then
+  the revised prediction was CONFIRMED.
+- P (Link 0): holistic / non-monoid — `MEDIAN` and exact `COUNT(DISTINCT ...)` have no bounded
+  combiner state (Link 0 table §2.0: "no bounded state" row). skeleton_cols (Link B): `{d}` (the
+  `unique_key`; `id`/`val` are payload feeding the holistic aggregates under test)
+- Link B facts: `combiner_discriminants` (`crates/smelt-logical/src/analysis/discriminants.rs:77-134`)
+  DOES classify both correctly — exact `DISTINCT` always routes to `holistic_or_unknown()`
+  (lines 80-84) regardless of underlying function, and unmatched functions (`MEDIAN`, `MODE`,
+  `PERCENTILE_CONT/DISC`) fail-closed to the same bucket via the `_` arm (lines 130-132). But this
+  classification is a **dead input** for the construct under test: `combiner_discriminants`/
+  `Discriminants` is consumed only by the cumulative/running-total rule
+  (`crates/smelt-logical/src/rules/cumulative.rs:92`, refusing `COUNT(DISTINCT)` for THAT feature at
+  lines 294-300) and `join_shape`'s fan-out analysis — `crates/smelt-logical/src/rules/incremental.rs`
+  (the rule governing `refresh: batched` GROUP BY models under test here) never imports or consults
+  `discriminants`/`Discriminants` at all; its only refusals are keyed on time-bound derivability
+  (`NotDerivable`) and window/ordering shape, not combiner algebra. reach for `events` =
+  `derive_model_bounds`'s ordinary timeseries-column reach (unaffected by the aggregate's identity)
+  footprint=bounded (one partition's worth of source rows, same as every other batched-GROUP-BY
+  cell in this catalog)
+- smelt analyzer: sound (not-derivable-by-design is not exercised here — `rules/incremental.rs`
+  simply has no combiner-sensitive branch to be unsound or over-conservative about; the technique it
+  actually applies, recompute-region, is combiner-identity-agnostic by construction)
+- Link C: no divergence over 8 proptest cases (`ProptestConfig::with_cases(8)`), each 2-4 disjoint
+  one-day windows with 2-5 `(id, val)` rows per window (id drawn from `1..=3` so duplicate ids
+  within a window are common — exercising `COUNT(DISTINCT id)`'s de-duplication, which a
+  globally-unique-id scheme like `G-01`/`G-03`'s would never touch) and 0-2 re-deliveries of the
+  identical window with no new rows landing between re-deliveries (the seeded hazard: a genuinely
+  holistic combiner is the shape most likely to expose a hidden fold-onto-remembered-state
+  optimization, since re-delivering a delta into partial holistic state has no well-defined
+  semantics at all — smelt's actual `DELETE [start,end)` + fresh-`INSERT` recompute-region sidesteps
+  the question entirely by never retaining partial state to re-deliver into).
+- condition (CONDITIONAL only): n/a — recorded as unconditional HOLDS.
+- production files/functions changed: none — this cell found no divergence to fix. The catalog's
+  original hypothesis (CONDITIONAL/REFUTED, predicting a "no bounded state to fold" failure mode)
+  was falsified by research *before* Link C ran: smelt's batched materialization
+  (`crates/smelt-backend-duckdb/src/lib.rs::delete_and_insert_transactional`, `DELETE` the window +
+  `INSERT` a freshly-recomputed `SELECT ... GROUP BY d` for it, one DuckDB transaction) is
+  recompute-region, not fold-delta, for every `refresh: batched` cell in this catalog (`G-01`
+  through `G-06` already established this as an aside; this cell is the first to make it the
+  *headline* finding by choosing combiners for which the distinction is load-bearing) — there is no
+  partial aggregate state anywhere in the maintained table for a holistic combiner to corrupt.
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request`; adds
+  `model_shapes::holistic_agg_append_only` (a new single-source `ModelShape` fixture, not
+  experimental analyzer code) and a cell-local `stage_project`/oracle mirroring `G-03`'s pattern.
+- evidence: `smelt-cli::tests::property_discovery::g_07_holistic_agg_append_only::
+  holistic_median_and_count_distinct_fold_over_disjoint_append_only_windows_with_redelivery_matches_full_refresh`
+  (`cargo test -p smelt-cli --test property_discovery --features duckdb g_07 --quiet` → 1 passed;
+  full suite `cargo test -p smelt-cli --test property_discovery --features duckdb --quiet` →
+  19 passed).
+- Coverage caveat (design §2.1 N4): proptest-generated over disjoint-window shape + re-delivery
+  count only — does not cover backfill/recompute of an ALREADY-emitted partition after a NEW row is
+  appended late into it (that shape is `G-06`'s territory, established there for a different
+  construct and expected to generalize here since the underlying technique, recompute-region, is
+  identical), nor a holistic combiner over a `mutable-snapshot` source (a distinct, not-yet-catalogued
+  cell — mutable-snapshot's non-invertibility concern, per `G-04`, is orthogonal to holistic's
+  no-bounded-state concern and would need its own cell).

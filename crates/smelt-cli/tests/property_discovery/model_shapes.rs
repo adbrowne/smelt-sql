@@ -468,10 +468,51 @@ LEFT JOIN smelt.sources.refunds r ON e.user_id = r.user_id AND e.d = r.refund_da
     }
 }
 
+/// `G-07`: holistic `MEDIAN`/exact `COUNT(DISTINCT ...)` group-by, batched per
+/// partition (`unique_key: [d]`), over an append-only source
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `G-07`). Same
+/// `events(d, id, val)` source shape as `G-01`/`G-03`, but the combiners are
+/// **holistic / non-monoid** (Link 0 table §2.0: no bounded combiner state —
+/// `combiner_discriminants` classifies both `MEDIAN` and exact
+/// `COUNT(DISTINCT ...)` into its fail-closed `holistic_or_unknown()` bucket,
+/// `crates/smelt-logical/src/analysis/discriminants.rs`). Distinct model name
+/// from `additive_agg_append_only`/`idempotent_agg_append_only` so all three
+/// cells' staged projects never collide.
+pub fn holistic_agg_append_only() -> ModelShape {
+    ModelShape {
+        name: "events_daily_holistic_append_only",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT d, MEDIAN(val) AS med_val, COUNT(DISTINCT id) AS distinct_ids FROM smelt.sources.events GROUP BY d
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "id",
+                ty: "INTEGER",
+            },
+            SourceColumn {
+                name: "val",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-07  holistic MEDIAN / COUNT DISTINCT · append-only.
 // G-08  windowed running total (ROWS UNBOUNDED PRECEDING) · append-only.
 // G-09  UNION ALL of two append-only arms.
 // G-10  join fan-out on a COMPOSITE unique key · append-only.
