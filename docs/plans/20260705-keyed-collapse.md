@@ -110,7 +110,7 @@ the overwrite and once-write families, the transactional ledger, and the snapsho
 | K1 | — (`keyed_models.md` committed) | decision record §3 change list; `keyed_models.md` §References "Related specs" | done |
 | K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | blocked |
 | K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | blocked |
-| K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | pending |
+| K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | blocked |
 | K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | pending |
 | K6 | K3, K5 | `keyed_models.md` §Surface catalogue (once-write, pattern functions); §Semantics "Functions inside keyed bodies" | pending |
 
@@ -457,6 +457,15 @@ four recipes and the explain readout.
   built on the renamed `RefreshStrategy::Keyed` enum that K2 lands). Marking K3 `blocked` rather than
   re-litigating the same gate; no code touched, tree unchanged from `HEAD`. Unblocks automatically once
   a human resolves the K2 block above and flips K2 to `done`.
+
+- **2026-07-05, K4** — re-verified pre-flight: `cargo test -p smelt-core --test hardening_budget` is
+  still red, identical `smelt-backend-duckdb`/`smelt-cli` pair as reported under K2/K3. K4's own
+  Progress-tracking row and the plan's execution prompt (§"Confirm ... this phase's Depends on rows are
+  `done`") name **K2 only** as its precondition — the ledger work generalises
+  `crates/smelt-runtime/src/cumulative.rs` and `maintenance_driver.rs` under the `RefreshStrategy::Keyed`
+  enum K2 lands, so it cannot start without K2. Marking K4 `blocked` (dependency capability not yet
+  built, per the block rule) rather than attempting ledger work against the pre-collapse enum; no code
+  touched, tree unchanged from `HEAD`. Unblocks automatically once K2 is resolved and flipped to `done`.
 
 ## Deferred during implementation
 
