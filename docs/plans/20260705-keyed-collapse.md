@@ -109,7 +109,7 @@ the overwrite and once-write families, the transactional ledger, and the snapsho
 |-------|-----------|-------------|--------|
 | K1 | — (`keyed_models.md` committed) | decision record §3 change list; `keyed_models.md` §References "Related specs" | done |
 | K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | blocked |
-| K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | pending |
+| K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | blocked |
 | K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | pending |
 | K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | pending |
 | K6 | K3, K5 | `keyed_models.md` §Surface catalogue (once-write, pattern functions); §Semantics "Functions inside keyed bodies" | pending |
@@ -449,6 +449,14 @@ four recipes and the explain readout.
   the new `smelt-backend-duckdb` `.expect(` call for infallibility, or bisect+revert. This blocks
   K2 and therefore the rest of the keyed-collapse chain (K3–K6 all depend on K2 being `done`) until
   resolved — no code was touched in this iteration; the tree is unchanged from `HEAD`.
+
+- **2026-07-05, K3** — re-verified pre-flight: `cargo test -p smelt-core --test hardening_budget` is
+  still red with the identical regression/stale-baseline pair reported under K2 above (same
+  `smelt-backend-duckdb expect: current=16 > baseline=15`, same `smelt-cli` stale baseline). K3's own
+  precondition is K2 `done`, which it is not — K3 cannot start (the overwrite-family/posture work is
+  built on the renamed `RefreshStrategy::Keyed` enum that K2 lands). Marking K3 `blocked` rather than
+  re-litigating the same gate; no code touched, tree unchanged from `HEAD`. Unblocks automatically once
+  a human resolves the K2 block above and flips K2 to `done`.
 
 ## Deferred during implementation
 
