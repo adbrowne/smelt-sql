@@ -2,7 +2,7 @@
 
 - **Date**: 2026-07-05
 - **Design (spec-equivalent)**: `docs/research/20260705-property-discovery-loop.md`
-- **Motivating paper**: `docs/research/20260705-refresh-as-maintenance-plan.md`
+- **Motivating paper**: `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md`
 - **Docs**: code-only (research infrastructure; no user-facing docs-site change)
 - **Type**: a headless `claude -p` **research loop** that empirically maps which
   `(SQL-construct × upstream-property × technique)` cells hold, by running smelt's own emitted

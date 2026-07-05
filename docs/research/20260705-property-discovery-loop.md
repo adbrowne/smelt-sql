@@ -3,7 +3,7 @@
 - **Date**: 2026-07-05
 - **Status**: research / design (predecessor to `docs/plans/20260705-property-discovery-loop.md`)
 - **Author**: Andrew (with Claude; adversarially reviewed by a Fable subagent — findings F1–F9 folded in)
-- **Motivates**: the design decisions in `docs/research/20260705-refresh-as-maintenance-plan.md`
+- **Motivates**: the design decisions in `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md`
   (refresh-as-per-column-maintenance). That paper argues the refresh "modes" are named
   projections of a `(column-group × input-delta)` maintenance plan, and that whether two
   techniques may serve a cell interchangeably is governed by the §4 interchangeability
