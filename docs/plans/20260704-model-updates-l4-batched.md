@@ -190,7 +190,7 @@ keys**, and **per-source clamp observability**.
 | BL4 | F5 | `batched_models.md` §"Safety checks" (`HAVING`/`DISTINCT`/`LIMIT`) | done |
 | BL5 | F1, Group A (A1) | `batched_models.md` §"Run window vs partition granularity"; `timeseries.md` §"Granularity arithmetic" | done (2026-07-05) |
 | BL6 | F1 | `batched_models.md` §Surface (monotone integer `partition_column`), §"Observing the per-source clamp" | done (2026-07-05) |
-| BL7 | F10, BL2 | `batched_models.md` §"Window independence and self-referential models" | pending |
+| BL7 | F10, BL2 | `batched_models.md` §"Window independence and self-referential models" | done (2026-07-05) |
 | BL8 | F1, BL1, BL6 | `batched_models.md` §"Observing the per-source clamp" | pending |
 
 ---
@@ -719,6 +719,20 @@ append to (do not replace) the existing schema/column hover.
   genuinely non-aligned `GROUP BY` to still exercise a refusal. Left red and untouched by BL2 (unrelated to
   backfill chunking) — **BL4 owns the fix** (its own TDD list already covers "a non-aligned HAVING refuses");
   BL4 should update this fixture's `GROUP BY` to omit `event_date` as part of landing group-aligned admission.
+  **Still red as of BL7 (2026-07-05):** BL4 landed as a verification-only phase (pre-existing code already
+  satisfied its own TDD list) and did not touch this fixture; the stale `bad_having` fixture is unrelated to
+  BL7's scope (self-referential ordering) and was left untouched here too.
+- **A self-referential model's first partition cannot bootstrap via `CREATE TABLE ... AS SELECT ...` (found in
+  BL7, 2026-07-05):** confirmed directly against the DuckDB CLI — `CREATE TABLE foo AS SELECT 1 FROM foo`
+  refuses with a catalog error, since the table doesn't exist yet when the `SELECT` resolves. A self-referential
+  batched model's target table must therefore already exist (e.g. seeded with an opening row dated one
+  partition before the run window) before its first backfill batch runs; there is no automatic bootstrap.
+  Documented in `batched_models.md` §Known Divergences and the user guide; not fixed here (out of BL7's
+  ordering/refusal scope) — tracked for a future phase if it becomes a real pain point.
+- **Pre-existing hardening-budget regression (found in BL7 pre-flight, 2026-07-05):**
+  `cargo test -p smelt-core --test hardening_budget::gate_detects_regression` is red on `main` independent of
+  this phase — `smelt-backend-duckdb expect: current=16 > baseline=15` (confirmed red before BL7's changes via
+  `git stash`). Unrelated to self-referential ordering; left untouched.
 
 ## Verification
 

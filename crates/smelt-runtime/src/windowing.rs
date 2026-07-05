@@ -18,6 +18,7 @@ use chrono::{Duration, NaiveDate};
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{BatchedConfig, Granularity};
+use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
 use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days, BatchSafety,
 };
@@ -216,6 +217,73 @@ pub fn compute_incremental_windows(
         effective_window,
         wide_batch_warning,
     })
+}
+
+/// Compose F10's window-independence / ordered-execution verdict into the
+/// backfill chunker (BL7, `batched_models.md` §"Window independence and
+/// self-referential models").
+///
+/// `model_name` and `refs` identify a self-edge exactly as
+/// [`window_independence`] expects (`refs` is this model's own `smelt.ref()`
+/// list; a self-edge is `refs` containing `model_name`). Three outcomes:
+///
+/// - **`WindowIndependent`** (no self-edge, the default) — delegates to
+///   [`compute_incremental_windows`] unchanged; the model keeps its ordinary
+///   batch-safety-derived auto-chunking (or the caller's `per_partition`/
+///   `batch_size_days` override).
+/// - **`Ordered`** (a self-edge proven to converge partition-by-partition) —
+///   forces strictly-sequential single-partition-per-batch execution
+///   regardless of the batch-safety class *or* any `per_partition`/
+///   `batch_size_days` override: a self-referential window reads its own
+///   immediately-prior partition's committed output, so lumping multiple
+///   partitions into one wide batch (`FullyBatchSafe`/`BoundedSafe`'s
+///   multi-partition chunks) would read rows that do not exist yet — never
+///   safe to widen for an ordered model.
+/// - **`Refused`** — the self-edge does not provably converge (a forward
+///   read, an unbounded/whole-history scan, or an underivable bound) — `Err`,
+///   fail-closed, naming the non-convergent self-edge; never silently
+///   downgraded to `Ordered` or `WindowIndependent`.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_incremental_windows_ordered(
+    model_name: &str,
+    refs: &[String],
+    timeseries: &TimeseriesConfig,
+    inc_config: &BatchedConfig,
+    sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+    data_latency_days: u32,
+    full_range: &TimeRange,
+    batch_size_days: Option<u32>,
+    per_partition: bool,
+) -> Result<IncrementalWindows, String> {
+    let stripped = smelt_parser::strip_frontmatter(sql);
+    let verdict = window_independence(
+        model_name,
+        refs,
+        Some(&timeseries.partition_column),
+        &stripped,
+    );
+
+    let forced_per_partition = match verdict {
+        WindowIndependence::Refused { reason } => {
+            return Err(format!(
+                "model '{model_name}' is not eligible for batched execution: {reason}"
+            ));
+        }
+        WindowIndependence::Ordered => true,
+        WindowIndependence::WindowIndependent => per_partition,
+    };
+
+    compute_incremental_windows(
+        timeseries,
+        inc_config,
+        sql,
+        dep_timeseries,
+        data_latency_days,
+        full_range,
+        batch_size_days,
+        forced_per_partition,
+    )
 }
 
 /// Validate that a run window `[start, end)` is aligned to the model's granularity.

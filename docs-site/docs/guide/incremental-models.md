@@ -565,6 +565,18 @@ Batching provides two benefits:
 - **Memory efficiency** -- Each batch processes a bounded amount of data.
 - **Progress tracking** -- If a run fails partway through, completed batches are recorded and will not be re-processed.
 
+## Self-referential (ordered) models
+
+A batched model may read its own prior partitions — a running balance, a partition-by-partition state machine — by referencing itself (`smelt.<its own path>`) in its SQL. This stays a partitioned `batched` table; it does not become `refresh: cumulative`.
+
+Whether a backfill may build its windows in parallel or must build them strictly in temporal order is derived from the model's dependency graph, never declared:
+
+- **No self-edge (the default).** Every window is a pure function of source rows in its own scan range, so a backfill may split into sub-ranges built in any order, including in parallel.
+- **A self-edge that provably converges partition-by-partition** (a backward-bounded read of the model's own prior output, e.g. `WHERE bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d`) forces the backfill to build **one partition per batch, strictly in temporal order** — regardless of the model's batch-safety class or any `--batch-size`/`--per-partition` override. A wide, multi-partition batch would read rows the self-reference expects but that have not been written yet.
+- **A self-edge that does not provably converge** (a forward read, or an unbounded/whole-history scan) is refused at planning time with a diagnostic naming the non-convergent self-reference — never silently built with the wrong ordering.
+
+Self-referential models have one bootstrap requirement the ordinary case does not: their target table must already exist before the first backfill batch runs. A model's very first partition cannot be created via `CREATE TABLE ... AS SELECT ...`, because that statement cannot resolve a reference to the table it is in the middle of creating. Seed the table with an opening row (dated one partition before the run window) before running the first backfill.
+
 ## Monitoring
 
 ### Interval coverage

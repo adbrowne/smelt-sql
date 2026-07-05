@@ -42,7 +42,7 @@ use crate::transformer::{
     pin_run_deterministic_clocks, TimeRange,
 };
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
-use crate::windowing::{compute_incremental_windows, IncrementalBatch};
+use crate::windowing::{compute_incremental_windows_ordered, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
 
 /// Plan for one model's execution. Internal to `execute_project` — the
@@ -474,7 +474,19 @@ pub async fn execute_project(
                     })
                     .collect();
 
-                let inc_windows = compute_incremental_windows(
+                // Own `smelt.ref()` list, unfiltered — a self-edge (BL7,
+                // `window_independence`) is `refs` containing `model_name`
+                // itself, which `model_ref_paths`/`dep_ts` above deliberately
+                // excludes (that map is upstream-*source* timeseries only).
+                let refs: Vec<String> = model
+                    .refs
+                    .iter()
+                    .map(|r| r.smelt_ref.to_path().join("."))
+                    .collect();
+
+                let inc_windows = compute_incremental_windows_ordered(
+                    model_name,
+                    &refs,
                     &ts,
                     &inc,
                     &expanded_sql,
