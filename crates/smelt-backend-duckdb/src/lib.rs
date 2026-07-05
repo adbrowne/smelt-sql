@@ -637,6 +637,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
+            // invariant: see table_exists_sync for rationale; same mutex.
             let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
             // `Transaction` rolls back on `Drop` unless explicitly committed
             // (`duckdb::transaction::DropBehavior::Rollback` is the default),
