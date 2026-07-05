@@ -108,7 +108,7 @@ the overwrite and once-write families, the transactional ledger, and the snapsho
 | Phase | Depends on | Spec anchor | Status |
 |-------|-----------|-------------|--------|
 | K1 | — (`keyed_models.md` committed) | decision record §3 change list; `keyed_models.md` §References "Related specs" | done |
-| K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | pending |
+| K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | blocked |
 | K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | pending |
 | K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | pending |
 | K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | pending |
@@ -432,7 +432,23 @@ four recipes and the explain readout.
 
 ## Blocked phases
 
-(none yet)
+- **2026-07-05, K2** — pre-flight `cargo test -p smelt-core --test hardening_budget` (the
+  unwrap/expect ratchet gate, CLAUDE.md §"Fail-loud discipline") is red on `main`/this branch's tip
+  independent of any K2 change: `.claude/scripts/hardening-budget.sh` reports (a) a REGRESSION —
+  `smelt-backend-duckdb expect: current=16 > baseline=15` — and (b) a STALE BASELINE —
+  `smelt-cli expect: current=34 < baseline=36`. Neither crate is in K2's critical-file list
+  (`smelt-core/src/{config,metadata}.rs`, `smelt-logical/src/rules/cumulative.rs`,
+  `smelt-runtime/src/{cumulative,execute,compile}.rs`); the drift predates this sub-plan (bisects to
+  somewhere in the batched/backfill commits between `f72c1d7d` and `c6b0f158`, none of which touched
+  `.claude/hardening-baseline.txt`). Resolving it requires a human judgment call the gate itself
+  reserves for a reviewer sign-off note (CLAUDE.md: "never lower them without a reviewer sign-off
+  note in the commit") — either (1) find and convert the new `smelt-backend-duckdb` `.expect(` to a
+  classified/justified baseline bump, or (2) revert whichever commit introduced it. The stale
+  `smelt-cli` baseline is a pure tightening (`--update` is safe there) but the regression is not.
+  Candidate options for the human: run `.claude/scripts/hardening-budget.sh --update` after auditing
+  the new `smelt-backend-duckdb` `.expect(` call for infallibility, or bisect+revert. This blocks
+  K2 and therefore the rest of the keyed-collapse chain (K3–K6 all depend on K2 being `done`) until
+  resolved — no code was touched in this iteration; the tree is unchanged from `HEAD`.
 
 ## Deferred during implementation
 
