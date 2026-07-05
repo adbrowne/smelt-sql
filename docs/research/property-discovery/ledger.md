@@ -87,3 +87,28 @@ Block schema:
   snapshot does, (c) the step-0 snapshot and the final ("pre-populated equivalent") snapshot are
   `assert_ne!` — the exact gap a step-`k` oracle exists to close per design N3 — and (d) a live
   read-back of the source table matches the last recorded snapshot (`snapshot()` isn't stale).
+
+### CELL P0-3 — (infra) × (infra) × EXCEPT ALL step-k oracle
+- verdict: HOLDS (infra deliverable — not a construct/source/technique cell; "HOLDS" here means the
+  oracle demonstrably distinguishes multiset from set equality, not that a construct property held)
+- P (Link 0): n/a          skeleton_cols (Link B): n/a
+- Link B facts: n/a
+- smelt analyzer: n/a
+- Link C: n/a — this cell builds the multiset-equality primitive Link-C cells diff against; it does
+  not itself run a construct through `execute_project`
+- experimental smelt extensions (if any): none in production code. Added
+  `crates/smelt-cli/tests/property_discovery/oracle.rs` — test-target-only, tagged
+  `EXPERIMENTAL(property-discovery): disposable`, passes `property-experimental-gate.sh`. Defines
+  `except_all_row_count`/`except_row_count` (raw `EXCEPT ALL` / `EXCEPT` row counts between two SQL
+  queries) and `multiset_equal` (the Link-C oracle: equal iff `EXCEPT ALL` is empty in both
+  directions). Column scope (all-columns-minus-declared-payload, N2) is the caller's responsibility —
+  this module is the mechanical multiset-equality primitive, not the per-cell scoping policy.
+- evidence: `smelt-cli::tests::property_discovery::oracle::{duplicated_identical_row_is_visible_to_except_all_but_not_except,
+  equal_multisets_compare_equal_regardless_of_row_order,
+  unequal_multisets_of_distinct_rows_diverge_in_both_except_forms}` (3 deterministic DuckDB
+  fixtures, in-memory). Proves the plan's acceptance (ii): a row duplicated on one side (`(1,10.0)`
+  twice vs once) is invisible to plain `EXCEPT` (count 0) but surfaces to `EXCEPT ALL` (count 1) and
+  `multiset_equal` correctly reports divergence — the exact additive double-counting shape cell
+  `G-02` (re-delivered delta into a `SUM`/`COUNT` fold) will exercise through the real planner. Also
+  proves row-order independence and that a genuine set difference (an extra distinct row) is caught
+  by both forms.
