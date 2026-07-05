@@ -583,10 +583,19 @@ fn parse_between_bounds(text: &str) -> (Seconds, Seconds) {
 /// - `col BETWEEN expr - INTERVAL '...' AND expr`  (no lookahead)
 /// - `col >= expr - INTERVAL '...'` and `col < expr + INTERVAL '...'`
 ///
-/// The `partition_col_upper` is used as a hint to identify which column is being
-/// filtered. For cross-column rebase (WHERE b.event_ts_utc BETWEEN ...) we look
-/// for any BETWEEN pattern with INTERVAL offsets.
-fn extract_form_b_bounds(upper_sql: &str, _partition_col_upper: &str) -> Vec<(Seconds, Seconds)> {
+/// The `partition_col_upper` column must be the one immediately to the left of
+/// the matched `BETWEEN`/comparison operator (bare or table-qualified, e.g.
+/// `E.EVENT_DATE`) — see [`lhs_column_is_partition_col`]. This scopes a Form-B
+/// pattern to the source it actually filters, rather than attributing *any*
+/// `BETWEEN ... INTERVAL ...` pattern found anywhere in the whole model SQL to
+/// every source regardless of which column it constrains (the `SC-1` ledger
+/// finding: a correlated-`EXISTS` predicate on `conversions.conversion_date`
+/// was also being attributed to the unrelated `events.event_date` source,
+/// spuriously widening its read). Cross-column rebase
+/// (`WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL ... AND
+/// m.event_date_local + INTERVAL ...`) is still supported: only the LHS
+/// column is checked, not the anchor expression on the right of the operator.
+fn extract_form_b_bounds(upper_sql: &str, partition_col_upper: &str) -> Vec<(Seconds, Seconds)> {
     let mut bounds = Vec::new();
 
     // Find BETWEEN ... INTERVAL ... AND ... INTERVAL ... patterns
@@ -595,6 +604,10 @@ fn extract_form_b_bounds(upper_sql: &str, _partition_col_upper: &str) -> Vec<(Se
 
     while let Some(rel) = upper_sql[search_from..].find(keyword) {
         let abs = search_from + rel;
+        if !lhs_column_is_partition_col(upper_sql, abs, partition_col_upper) {
+            search_from = abs + 1;
+            continue;
+        }
         let after_between = &upper_sql[abs + keyword.len()..];
 
         // The text after BETWEEN looks like:
@@ -635,7 +648,7 @@ fn extract_form_b_bounds(upper_sql: &str, _partition_col_upper: &str) -> Vec<(Se
     }
 
     // Also check >= ... - INTERVAL / < ... + INTERVAL patterns
-    let gte_bounds = extract_gte_lt_interval_bounds(upper_sql);
+    let gte_bounds = extract_gte_lt_interval_bounds(upper_sql, partition_col_upper);
     bounds.extend(gte_bounds);
 
     // Also check >= ... - <int> / < ... + <int> patterns — the bare-integer
@@ -643,10 +656,28 @@ fn extract_form_b_bounds(upper_sql: &str, _partition_col_upper: &str) -> Vec<(Se
     // partition keys (sequence id / offset / watermark). See
     // `docs/specs/batched_models.md` §Surface "`partition_column` must be
     // monotone".
-    let bare_integer_bounds = extract_gte_lt_bare_integer_bounds(upper_sql);
+    let bare_integer_bounds = extract_gte_lt_bare_integer_bounds(upper_sql, partition_col_upper);
     bounds.extend(bare_integer_bounds);
 
     bounds
+}
+
+/// True if the identifier immediately preceding `pos` in `upper_sql` (skipping
+/// trailing whitespace), read as a bare or table-qualified column reference
+/// (`EVENT_DATE` or `E.EVENT_DATE`), is the given partition column. Used to
+/// scope a Form-B `BETWEEN`/`>=`/`<` match to the source it actually
+/// constrains — see [`extract_form_b_bounds`].
+fn lhs_column_is_partition_col(upper_sql: &str, pos: usize, partition_col_upper: &str) -> bool {
+    let before = upper_sql[..pos].trim_end();
+    let ident_start = before
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let ident = &before[ident_start..];
+    if ident.is_empty() {
+        return false;
+    }
+    ident == partition_col_upper || ident.ends_with(&format!(".{partition_col_upper}"))
 }
 
 /// Find " AND " at parenthesis depth 0 within the text.
@@ -750,7 +781,12 @@ fn parse_interval_seconds_before(text: &str) -> Option<Seconds> {
 ///
 /// Pattern: `col >= expr - INTERVAL '...'` (gives `before`)
 /// and `col < expr + INTERVAL '...'` (gives `after`)
-fn extract_gte_lt_interval_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
+///
+/// `partition_col_upper`-scoped: see [`lhs_column_is_partition_col`].
+fn extract_gte_lt_interval_bounds(
+    upper_sql: &str,
+    partition_col_upper: &str,
+) -> Vec<(Seconds, Seconds)> {
     let mut bounds = Vec::new();
     let mut before = Seconds::ZERO;
     let mut after_secs = Seconds::ZERO;
@@ -761,6 +797,10 @@ fn extract_gte_lt_interval_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
     let mut search_from = 0;
     while let Some(rel) = upper_sql[search_from..].find(gte_kw) {
         let abs = search_from + rel;
+        if !lhs_column_is_partition_col(upper_sql, abs, partition_col_upper) {
+            search_from = abs + 1;
+            continue;
+        }
         let after_gte = &upper_sql[abs + gte_kw.len()..];
         if after_gte.contains("- INTERVAL") {
             if let Some(s) = extract_interval_from_subtraction(after_gte) {
@@ -776,6 +816,10 @@ fn extract_gte_lt_interval_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
         let mut search_from2 = 0;
         while let Some(rel) = upper_sql[search_from2..].find(lt_kw) {
             let abs = search_from2 + rel;
+            if !lhs_column_is_partition_col(upper_sql, abs, partition_col_upper) {
+                search_from2 = abs + 1;
+                continue;
+            }
             let after_lt = &upper_sql[abs + lt_kw.len()..];
             if after_lt.contains("+ INTERVAL") {
                 if let Some(s) = extract_interval_from_addition(after_lt) {
@@ -815,7 +859,10 @@ fn extract_gte_lt_interval_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
 /// elapsed-seconds duration, it is the constant integer shift's magnitude
 /// reused as the generic "how far" unit `BoundResult` was already using for
 /// merge/injection-point comparisons.
-fn extract_gte_lt_bare_integer_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
+fn extract_gte_lt_bare_integer_bounds(
+    upper_sql: &str,
+    partition_col_upper: &str,
+) -> Vec<(Seconds, Seconds)> {
     if upper_sql.contains("INTERVAL") {
         return Vec::new();
     }
@@ -829,6 +876,10 @@ fn extract_gte_lt_bare_integer_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)
     let mut search_from = 0;
     while let Some(rel) = upper_sql[search_from..].find(gte_kw) {
         let abs = search_from + rel;
+        if !lhs_column_is_partition_col(upper_sql, abs, partition_col_upper) {
+            search_from = abs + 1;
+            continue;
+        }
         let after_gte = &upper_sql[abs + gte_kw.len()..];
         if let Some(n) = extract_scoped_bare_integer_after_op(after_gte, '-') {
             before = before.max(Seconds(n));
@@ -841,6 +892,10 @@ fn extract_gte_lt_bare_integer_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)
         let mut search_from2 = 0;
         while let Some(rel) = upper_sql[search_from2..].find(lt_kw) {
             let abs = search_from2 + rel;
+            if !lhs_column_is_partition_col(upper_sql, abs, partition_col_upper) {
+                search_from2 = abs + 1;
+                continue;
+            }
             let after_lt = &upper_sql[abs + lt_kw.len()..];
             if let Some(n) = extract_scoped_bare_integer_after_op(after_lt, '+') {
                 after_secs = after_secs.max(Seconds(n));
@@ -1336,6 +1391,54 @@ mod tests {
             }
             other => panic!("Expected Bounded(event_date, 30min, 0), got {:?}", other),
         }
+    }
+
+    /// SC-1 regression (`docs/research/property-discovery/ledger.md` CELL
+    /// SC-1): a correlated `EXISTS` predicate on `conversions.conversion_date`
+    /// (`c.conversion_date BETWEEN e.event_date AND e.event_date + INTERVAL
+    /// '7 days'`) must not also widen the *unrelated* `events.event_date`
+    /// source's read — `event_date` never appears to the left of `BETWEEN` in
+    /// this SQL, so `events` has no Form-B pattern of its own and must fall
+    /// through to the partition-local `Bounded(event_date, 0, 0)` default.
+    #[test]
+    fn test_form_b_does_not_leak_bound_to_unrelated_source() {
+        let sql = "SELECT e.event_date, e.user_id, EXISTS( \
+                   SELECT 1 FROM conversions c \
+                   WHERE c.user_id = e.user_id \
+                     AND c.conversion_date BETWEEN e.event_date AND e.event_date + INTERVAL '7 days' \
+                   ) AS converted FROM events e";
+        let ctx = BoundContext::new()
+            .with_source("silver.events", "event_date")
+            .with_source("silver.conversions", "conversion_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+
+        // conversions is the source the BETWEEN pattern actually constrains.
+        let conversions_bound = bounds.get("silver.conversions").unwrap();
+        match conversions_bound {
+            BoundResult::Bounded {
+                source_partition_col,
+                before,
+                after,
+            } => {
+                assert_eq!(source_partition_col, "conversion_date");
+                assert_eq!(*before, Seconds::ZERO);
+                assert_eq!(*after, Seconds::days(7));
+            }
+            other => panic!("Expected Bounded(conversion_date, 0, 7d), got {:?}", other),
+        }
+
+        // events must NOT inherit the conversions-only bound — it has no
+        // Form-B pattern of its own in this SQL.
+        let events_bound = bounds.get("silver.events").unwrap();
+        assert_eq!(
+            *events_bound,
+            BoundResult::Bounded {
+                source_partition_col: "event_date".to_string(),
+                before: Seconds::ZERO,
+                after: Seconds::ZERO,
+            },
+            "events must not be spuriously widened by conversions' BETWEEN pattern"
+        );
     }
 
     // ---- Duration serialization tests ----

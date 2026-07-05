@@ -434,3 +434,60 @@ Block schema:
 - evidence: `smelt-cli::tests::property_discovery::g_03_idempotent_agg_append_only::
   idempotent_max_fold_over_disjoint_append_only_windows_with_redelivery_matches_full_refresh`
   (8 proptest cases through `execute_project`, no hand-injected `WHERE`).
+
+### CELL FIX-1 — correlated EXISTS / Form-B reach derivation × multi-source × column-aware bound attribution (production fix)
+- verdict: HOLDS (production fix landed — test-backed, no-regression gated; not a construct/source/
+  technique discovery cell in the usual sense, but the follow-on production change `SC-1` recorded
+  as a finding)
+- P (Link 0): n/a — this is a reach-derivation fix (Form-B pattern attribution), not an algebraic
+  combiner property
+  skeleton_cols (Link B): `user_id`, `event_date` (unchanged from `SC-1`)
+- Link B facts (before fix): `extract_form_b_bounds` scanned the whole model SQL text for any
+  `BETWEEN … INTERVAL …` pattern and attributed the match to every source in `BoundContext`
+  regardless of which column the pattern actually constrained — `_partition_col_upper` was accepted
+  but unused (`crates/smelt-logical/src/analysis/source_bounds.rs:589`, pre-fix). For `SC-1`'s
+  model, the correlated-`EXISTS` predicate `c.conversion_date BETWEEN e.event_date AND
+  e.event_date + INTERVAL '7 days'` was correctly attributed to `conversions` but *also*
+  spuriously attributed to `events` (confirmed: compiled `events` read widened to
+  `< 2024-01-09` even though `event_date` never appears left of `BETWEEN` in the model).
+- smelt analyzer (after fix): sound and now reasoned rather than accidental. Made
+  `extract_form_b_bounds`, `extract_gte_lt_interval_bounds`, and
+  `extract_gte_lt_bare_integer_bounds` column-aware: a new `lhs_column_is_partition_col` helper
+  checks that the identifier immediately to the left of the matched `BETWEEN`/`>=`/`<` operator
+  (bare or table-qualified, e.g. `E.EVENT_DATE`) is the source's own partition column before a
+  match contributes to that source's bound; a match whose LHS column belongs to a different source
+  is skipped for this source. Cross-column rebase (`WHERE b.event_ts_utc BETWEEN
+  m.event_date_local - INTERVAL … AND m.event_date_local + INTERVAL …`, `test_cross_column_tz_rebase`)
+  is preserved — only the LHS column is checked, not the RHS anchor expression.
+- Link C: re-ran `sc_1_correlated_exists::late_conversion_appended_between_runs_within_7_day_window`
+  after the fix — still passes (HOLDS), and manually inspected the compiled run-2 SQL: `events`'
+  read is now the tight `event_date >= '2024-01-01' AND event_date < '2024-01-02'` (no more
+  spurious 7-day widen) while `conversions`' read correctly stays widened to
+  `< '2024-01-09'`. No divergence introduced.
+- condition (CONDITIONAL only): n/a
+- production files/functions changed: `crates/smelt-logical/src/analysis/source_bounds.rs` —
+  `extract_form_b_bounds` (now uses `partition_col_upper`, renamed from `_partition_col_upper`),
+  `extract_gte_lt_interval_bounds`, `extract_gte_lt_bare_integer_bounds` (both gained a
+  `partition_col_upper` parameter), new `lhs_column_is_partition_col` helper. Untagged — this is a
+  permanent production change, not disposable test scaffolding.
+- red→green: added `test_form_b_does_not_leak_bound_to_unrelated_source` to
+  `source_bounds.rs`'s `#[cfg(test)] mod tests`. Verified red first — ran the new test against the
+  pre-fix code (temporarily restored from `git show HEAD:…`): FAILED, `events` derived
+  `Bounded(event_date, before=0, after=604800)` (the spurious 7-day leak) instead of the expected
+  `Bounded(event_date, 0, 0)`. Restored the fix: PASSED, along with all 30 pre-existing
+  `source_bounds` tests (including `test_form_b_forward_only`, `test_explicit_between_filter`,
+  `test_cross_column_tz_rebase`, `test_aggregation_max`, `test_integer_key_bare_constant_offset_form_b`
+  — all still green, confirming the column-aware scoping does not regress any existing Form-B shape).
+- no-regression gate: `cargo test -p smelt-logical --quiet` → 296 passed, 0 failed.
+  `cargo test -p smelt-planner --quiet` → 38 passed, 0 failed (consumes `source_bounds` via
+  `rules::incremental::derive_model_source_bounds`). `cargo test -p smelt-runtime --quiet` → all
+  suites passed (consumes via `compile::build_source_bound_map`). `cargo test -p smelt-cli --test
+  property_discovery --quiet` → 15 passed, 0 failed (all prior Link-C cells, including `SC-1`
+  itself, still HOLD). `cargo fmt --all` clean. `cargo clippy --all-targets -p smelt-logical -p
+  smelt-planner -p smelt-runtime -p smelt-cli --quiet` clean.
+- experimental smelt extensions (if any): none beyond the production fix above; the new test is a
+  normal (non-`EXPERIMENTAL(property-discovery)`) unit test in `source_bounds.rs`'s existing test
+  module — the tag is reserved for disposable Link-A/B/C harness scaffolding, not permanent
+  production-adjacent tests.
+- evidence: `smelt-logical::analysis::source_bounds::tests::
+  test_form_b_does_not_leak_bound_to_unrelated_source`.
