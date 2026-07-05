@@ -9,5 +9,7 @@
 
 mod link_c_harness;
 mod model_shapes;
+mod run_schedule;
 
+mod p0_2_run_schedule;
 mod smoke;

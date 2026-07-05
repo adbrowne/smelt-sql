@@ -4130,6 +4130,7 @@ dependencies = [
  "duckdb",
  "include_dir",
  "line-index",
+ "proptest",
  "pyo3",
  "rand 0.8.6",
  "rowan",

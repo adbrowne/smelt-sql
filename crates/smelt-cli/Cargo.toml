@@ -70,6 +70,7 @@ line-index.workspace = true
 [dev-dependencies]
 tempfile = "3.8"
 smelt-logical = { path = "../smelt-logical" }
+proptest = { workspace = true }
 
 [features]
 default = ["duckdb"]

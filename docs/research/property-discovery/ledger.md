@@ -55,3 +55,35 @@ Block schema:
   This harness (`LinkCProject`, `SqlCapturingReporter`) is the substrate every subsequent Link-C cell
   (`SC-1`, `SC-2`, the `G-*` grid) will build on; it does not itself carry a construct/source/technique
   verdict.
+
+### CELL P0-2 — (infra) × (infra) × run-schedule generator + step-k snapshot driver
+- verdict: HOLDS (infra deliverable — not a construct/source/technique cell; "HOLDS" here means the
+  driver demonstrably captures between-run source mutation, not that a property held)
+- P (Link 0): n/a          skeleton_cols (Link B): n/a
+- Link B facts: n/a
+- smelt analyzer: n/a
+- Link C: n/a — this cell builds the run-schedule driver Link-C cells replay against, it does not
+  itself run a construct through it
+- experimental smelt extensions (if any): none in production code. Added
+  `crates/smelt-cli/tests/property_discovery/{run_schedule,p0_2_run_schedule}.rs` — test-target-only,
+  tagged `EXPERIMENTAL(property-discovery): disposable`, passes `property-experimental-gate.sh`.
+  `run_schedule.rs` defines `ScheduleStep` (`AdvanceWindowAndRun` | `AppendLateRow` |
+  `InPlaceUpdate` | `InPlaceDelete`), `RunSchedule` (a `Vec<ScheduleStep>`), a bounded proptest
+  strategy `arb_schedule` (2-4 window-advance steps, each optionally followed by a late-row append
+  landing back inside the window just processed — reserved for Link-A/Link-C cells to draw from;
+  not yet exercised by a `proptest!` macro since no construct cell consumes it yet), and
+  `RunScheduleDriver::execute`, which replays a `RunSchedule` against a staged `LinkCProject` +
+  its seeded source table, snapshotting the source contents (`snapshot()`) after every step — the
+  step-`k` full-refresh oracle baseline `P0-3`'s `EXCEPT ALL` oracle will consume. Added `proptest`
+  as a `smelt-cli` dev-dependency (workspace version, no manifest widening beyond that). The `d`
+  column is round-tripped via `CAST(... AS VARCHAR)` + `NaiveDate::parse_from_str` rather than a
+  `chrono`-feature `FromSql` impl, since the workspace `duckdb` dep doesn't enable that feature and
+  widening it isn't warranted for a disposable harness.
+- evidence: `smelt-cli::tests::property_discovery::p0_2_run_schedule::step_k_snapshot_differs_from_pre_populated_after_late_append`
+  (1 deterministic schedule, DuckDB oracle via direct read-back). Stages `model_shapes::batched_passthrough`,
+  seeds 2 rows, then runs a 3-step schedule: `AdvanceWindowAndRun(day1,day2)` →
+  `AppendLateRow(d=day1, id=99)` → `AdvanceWindowAndRun(day2,day3)`. Asserts (a) the snapshot taken
+  right after step 0 does NOT contain the late row (the driver isn't pre-populating), (b) the final
+  snapshot does, (c) the step-0 snapshot and the final ("pre-populated equivalent") snapshot are
+  `assert_ne!` — the exact gap a step-`k` oracle exists to close per design N3 — and (d) a live
+  read-back of the source table matches the last recorded snapshot (`snapshot()` isn't stale).
