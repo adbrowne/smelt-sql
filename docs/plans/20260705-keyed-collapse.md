@@ -111,7 +111,7 @@ the overwrite and once-write families, the transactional ledger, and the snapsho
 | K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | blocked |
 | K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | blocked |
 | K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | blocked |
-| K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | pending |
+| K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | blocked |
 | K6 | K3, K5 | `keyed_models.md` §Surface catalogue (once-write, pattern functions); §Semantics "Functions inside keyed bodies" | pending |
 
 ---
@@ -466,6 +466,14 @@ four recipes and the explain readout.
   enum K2 lands, so it cannot start without K2. Marking K4 `blocked` (dependency capability not yet
   built, per the block rule) rather than attempting ledger work against the pre-collapse enum; no code
   touched, tree unchanged from `HEAD`. Unblocks automatically once K2 is resolved and flipped to `done`.
+
+- **2026-07-05, K5** — K5's own Progress-tracking row names **K3, K4** as its preconditions; both are
+  `blocked` (see above), neither `done`. The snapshot-reconcile executor and admission matrix are built
+  on the column-family catalogue/derived postures (K3) and the transactional merge ledger (K4) — there is
+  no partial implementation that doesn't assume those land first. Marking K5 `blocked` (dependency
+  capability not yet built, per the block rule) rather than guessing at a K3/K4-shaped API surface; no
+  code touched, tree unchanged from `HEAD`. Unblocks automatically once K3 and K4 are both `done` (which
+  itself requires the K2 hardening-budget block above to be resolved by a human first).
 
 ## Deferred during implementation
 
