@@ -26,3 +26,31 @@ Block schema:
 ---
 
 <!-- The loop appends verdict blocks below this line. -->
+
+### CELL P0-1 — (infra) × (infra) × in-process real-planner PBT harness
+- verdict: HOLDS (infra deliverable — not a construct/source/technique cell; "HOLDS" here means the
+  harness demonstrably drives the real path, not that a property held)
+- P (Link 0): n/a          skeleton_cols (Link B): n/a
+- Link B facts: n/a
+- smelt analyzer: n/a
+- Link C: n/a — this cell builds the Link-C harness itself, it does not yet run a property cell
+  through it
+- experimental smelt extensions (if any): none in production code. Added
+  `crates/smelt-db/tests/prop_helpers/link_c_harness.rs`
+  (`LinkCProject`, `SqlCapturingReporter`, `DuckDbBackendFactory`, `base_request`) — test-target-only
+  (`crates/smelt-db/tests/`), tagged `EXPERIMENTAL(property-discovery): disposable`, passes
+  `property-experimental-gate.sh`. Added `smelt-backend`, `smelt-backend-duckdb`, `tokio`,
+  `tokio-util` to `crates/smelt-db/Cargo.toml` `[dev-dependencies]` (test-only deps, no production
+  dependency change).
+- evidence: `smelt-db::tests::link_c_harness_smoke::execute_project_derives_time_filter_no_hand_injected_where`
+  (1 run, DuckDB oracle via `duckdb::Connection` read-back). Stages a `refresh: batched` model with
+  **no `WHERE` clause anywhere in its SQL**, runs it through `LinkCProject::run` →
+  `smelt_runtime::execute_project` (the real bound-derivation + planner path, `execute_parity.rs`'s
+  plumbing pattern generalised), and asserts the SQL captured via
+  `RunReporter::model_compiled` contains a derived `WHERE` clause referencing the partition column —
+  proof the filter came from `source_bounds`/`inject_time_filter`, not from the test. Also asserts
+  the materialized table only contains rows inside the requested window, read back through a fresh
+  DuckDB connection (not the same handle `execute_project` used).
+  This harness (`LinkCProject`, `SqlCapturingReporter`) is the substrate every subsequent Link-C cell
+  (`SC-1`, `SC-2`, the `G-*` grid) will build on; it does not itself carry a construct/source/technique
+  verdict.
