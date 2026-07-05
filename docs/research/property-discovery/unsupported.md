@@ -18,3 +18,4 @@ Format:
 ---
 
 <!-- The loop appends one line per REFUTED/CONDITIONAL cell below this line. -->
+join fan-out on composite unique key (e.g. `(user_id, dt)`) × any source — technique dimension-driven horizon MERGE / join-shape cardinality proof: UNSUPPORTED — `join_shape::JoinContext` can only declare a SINGLE column as unique; a genuine composite-key equi-join (proven one-to-one in ground truth) is conservatively misclassified `OneToMany`, refusing a horizon MERGE it could safely take. Over-conservative, not unsound; `fan_out`/`dimension_horizon_merge` have no production call sites today, so no live path is affected (see ledger cell G-10).

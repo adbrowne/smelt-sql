@@ -894,3 +894,53 @@ Block schema:
   cell mixing `G-09`'s multi-arm shape with `G-04`/`G-05`'s in-place-mutation hazard), or a `UNION ALL`
   feeding a downstream `GROUP BY` (this cell's model is a bare pass-through union, no aggregate above
   it).
+
+### CELL G-10 — join fan-out on COMPOSITE unique key × append-only × column-scoped re-derivation
+- verdict: CONDITIONAL (Link-B classification finding: over-conservative, not unsound — recorded
+  here because Link C's execution gate does not apply to this cell at all, see below).
+- P (Link 0): n/a — this cell concerns `join_shape::fan_out`'s cardinality proof itself, not a
+  combiner-algebra property of a maintained aggregate.
+- skeleton_cols (Link B): `{user_id, dt}` — the composite equi-join key columns
+  (`ON f.user_id = d.user_id AND f.dt = d.dt`); `dim_payload` is enrichment payload.
+- Link B facts: `join_shape::JoinContext::with_unique_key` declares uniqueness **per single
+  column** ("alone uniquely identifies a row" — `join_shape.rs:29-35`); there is no API to declare
+  a composite (multi-column) unique key. Ground-truth proptest
+  (`composite_key_equality_join_is_truly_one_to_one_in_ground_truth`, 100+ generated composite
+  dim/fact datasets where no single column is unique but the `(user_id, dt)` pair is) confirms the
+  join is genuinely one-to-one. `fan_out`'s own `equality_columns_for_table` walk correctly
+  extracts BOTH equality columns from the `AND`-ed `ON` clause, but `JoinContext` has no declared
+  key for either column alone (since neither is individually unique) — so `is_unique` is `false`
+  and `fan_out` returns `OneToMany`: a **false negative**, not a false positive. Also noted:
+  `fan_out`/`JoinContext` and their sole would-be production consumer
+  (`dimension_horizon_merge`, `crates/smelt-runtime/src/dimension_horizon_merge.rs`) have **zero
+  production call sites** today (`rg -n "JoinContext|dimension_horizon_merge\("` outside tests
+  finds none) — this classifier is dormant, same class as `FIX-2`'s `input_delta_discovery`.
+- smelt analyzer verdict: over-conservative (fail-closed correctly) — never unsound. The gap is a
+  missing expressiveness feature (composite unique keys), not an incorrect classification of what
+  it CAN express.
+- Link C: not run — there is no production execution path that consumes `fan_out`'s cardinality
+  verdict (dormant classifier, no caller), so there is nothing for an adversarial run-schedule to
+  exercise; the finding is fully contained in Link B.
+- condition (CONDITIONAL only): the over-conservative gap only matters IF/WHEN `fan_out` or
+  `dimension_horizon_merge` is ever wired to a live maintenance path — at that point a composite
+  natural key (a common real-world shape: e.g. `(user_id, dt)` slowly-changing dimensions) would be
+  refused a horizon-bounded MERGE it could safely take, falling back to a full rebuild. Wiring
+  either function to a consumer, or extending `JoinContext` to accept declared composite keys, is a
+  behaviour-affecting design decision — BLOCKed for human review per policy 8(d), same as `FIX-2`.
+- production files/functions changed: none — the cell establishes a classification gap in currently
+  dormant code, not a live analyzer/planner bug; per policy 8(d) this is a design fork (extending
+  the `JoinContext` surface, or wiring a consumer), not a mechanical fix.
+- experimental smelt extensions (if any): none — reuses `prop_helpers::duckdb_oracle::DuckDbOracle`
+  directly (no new harness), calls `smelt_logical::analysis::join_shape::fan_out` unmodified.
+- evidence: `smelt-db::tests::proptests::maintenance_link_b_composite_key_fan_out::
+  {composite_key_equality_join_is_truly_one_to_one_in_ground_truth,
+  fan_out_cannot_express_composite_unique_key_and_conservatively_classifies_one_to_many}`
+  (`cargo test -p smelt-db --test proptests maintenance_link_b_composite_key_fan_out --quiet` →
+  2 passed; full suite `cargo test -p smelt-db --test proptests --quiet` → 169 passed; `cargo fmt
+  --all`; `cargo clippy -p smelt-db --tests --quiet` clean;
+  `bash .claude/scripts/property-experimental-gate.sh` → clean).
+- Coverage caveat (design §2.1 N4): only a 2-column composite key with small cardinalities (0..4 per
+  column) was generated — not a 3+-column composite key, and not the case where `JoinContext` is
+  MISUSED (a caller wrongly declares one column of a composite key as individually unique, which
+  this cell's analysis suggests would happen to still be safe when the `ON` clause ANDs the other
+  composite column, but was not itself proptested here).
