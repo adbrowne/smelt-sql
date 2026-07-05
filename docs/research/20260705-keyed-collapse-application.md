@@ -502,6 +502,7 @@ its own small design (which outputs may carry a consumer clock, review §6.4).
 | Consumer-facing `timeseries:` on `materialized_view` / versioned outputs | needs pushdown wiring + small design | first partitioned engine-maintained view in anger |
 | Mutation-profile-driven tightening of D9/D10 | mutation profile barely changes verdicts today | the declaration becoming verdict-bearing generally |
 | Self-emitted change feeds (review §5.3) | architecture-level; orthogonal to the collapse | its own research note |
+| **Property-typed function signatures** (§8) | post-v1 type-system extension; needs the pattern functions to exist first | `smelt.versions` design; or the first third-party pattern function |
 
 ## 6. Risks
 
@@ -542,3 +543,104 @@ collision with `batched_models.md`'s state doctrine and the `Append` decision
 questions from the retired specs (§5); the parallel-execution/tie-break
 contradiction (D5/D11); the retained-keys oracle carve-out (D8/D15); and the
 `models.md` parse-set arithmetic in §3.
+
+---
+
+## 8. Extension for later: property-typed function signatures (express the proofs in the type system)
+
+*(Appended after the review; a direction to keep, not a decision. Recorded
+here because it changes how the pattern functions of D13/D14 should
+eventually state their requirements.)*
+
+**The idea.** The proof layer already produces named verdicts — a column is
+`Monotone`, a source is append-only, a value is per-key-constant (FD), a
+combiner is a monoid / idempotent / invertible. Today those verdicts are
+consumed *globally*: the mode classifier runs over the fully expanded model
+and refuses the whole model when a proof fails, and the error surfaces at the
+model level, after expansion, far from the argument that caused it. The
+extension: give the verdicts a **type-level vocabulary** and let function
+signatures *demand* them as argument constraints, so the same failure becomes
+a local, argument-positioned type error — in the LSP, at the call site, before
+any classifier runs.
+
+Sketch, using `smelt.versions` (the motivating case — today its failure mode
+would be a whole-model keyed-classifier refusal after expansion):
+
+```
+smelt.define versions(
+    input       TableExpr<{..r}> & AppendOnly & Clocked,
+    key         Expr<K>,
+    event_time  Expr<Monotone<Timestamp>>
+) -> TableExpr<{..r, valid_from Timestamp, valid_to Timestamp?, is_current Bool}>
+```
+
+Passing a mutable snapshot source produces
+*"argument `input`: expected an append-only clocked table, got
+`smelt.orders_snapshot` (`mutation_profile: mutable`)"* at the argument span —
+instead of a post-expansion `Keyed*` refusal pointing at generated SQL.
+Similarly `smelt.latest(value, ordering Expr<Ordered>)` already almost states
+its requirement; the extension would let it (or a stricter variant) demand
+`Expr<Monotone<…>>` where the maintenance proof needs it.
+
+**Why this is more than ergonomics.**
+
+1. **It is the missing surface for proof modularity.** The unified-keyed doc
+   (§4.3) proposed deriving a pattern function's verdict once at the
+   definition and composing at call sites. Signature constraints are what make
+   that sound rather than cached: the body is checked once *under the
+   assumption* that its parameters satisfy the constraints; each call site
+   discharges the assumptions for its arguments. Assume/guarantee at the
+   function boundary — the standard refinement-type discharge split — instead
+   of re-deriving over the expanded tree.
+2. **The escape hatches get a principled shape.** A declared widening
+   (`assert_monotonic`, declared FD) becomes an explicit, visible *cast* to
+   the property type at a specific expression — same only-widen rule,
+   expressed where the reader can see it, instead of a frontmatter key acting
+   at a distance.
+3. **Third-party pattern functions get a contract language.** The
+   proof-gated-extensibility story (a user pattern is maintainable iff its
+   expansion classifies) currently gives library authors no way to *state*
+   requirements; constraints let them, and let the checker reject misuse at
+   the boundary rather than deep inside an expansion.
+4. **Precedent says the load-bearing case works.** Flink SQL makes event-time
+   a column-level *type* attribute (a rowtime attribute) — precisely the
+   `Monotone`/clocked property — and it is the single property doing the most
+   work in this family.
+
+**Why it plausibly fits the existing machinery.** The constraint slot already
+exists in narrow form: `functions.md` permits `<T: Constraint>` (e.g.
+`Ordered`) on built-ins and `smelt.extern`; the extension is (a) a closed
+vocabulary of *property* constraints drawn from the existing proof inventory
+(`Monotone`, `Clocked`, `AppendOnly`, `PerKeyConstant<K>`, perhaps
+`UniqueOrdering`), and (b) admitting them on `smelt.define` parameters. The
+checker discharges each constraint by calling the *existing* analysis
+(the monotonicity trace discharges `Monotone`; the mutation profile discharges
+`AppendOnly`; the FD verdict discharges `PerKeyConstant`) — no new proof
+engine, just routing existing verdicts through the type checker at argument
+boundaries. Gradual-typing tiers apply naturally: an undischargeable
+constraint on a Tier-1 call degrades to the global classifier path (or
+fails closed), consistent with `gradual_typing.md`.
+
+**Honest limits.**
+
+- **Fragment-shaped properties only.** Whole-model *flow* properties —
+  nondeterminism taint, event-time outer-visibility, run/partition granularity
+  alignment, the model-wide horizon — are not argument-local and stay with the
+  global classifier. The type layer narrows the classifier's job; it does not
+  replace it.
+- **Propagation is the real cost.** Each property needs propagation rules
+  through the operators between the source declaration and the argument
+  (which is exactly what the monotonicity trace already is, for one
+  property). The vocabulary must stay closed and small, or the propagation
+  matrix sprawls.
+- **Sequencing.** This is post-v1-collapse work: it needs the pattern
+  functions to exist (D13), and its first forcing customer is
+  `smelt.versions` (D14), whose signature is the natural pilot. Landing the
+  vocabulary before a second property-demanding function exists would be
+  speculative; landing it with `smelt.versions` is the right moment.
+
+**If adopted**, the spec homes are: `types.md` (the property-constraint
+vocabulary), `functions.md` (constraints on `smelt.define` parameters + the
+assume/guarantee checking rule), `model_properties.md` (each property names
+the proof that discharges it), and `gradual_typing.md` (tier behaviour).
+Registered in §5 as deferred with `smelt.versions` as the trigger.
