@@ -126,3 +126,20 @@ Decision needed (pick one direction):
 - **(C) Exempt bare Map/List loaders from the detector** when no consumer exists —
   contradicts the just-committed P7c forbid-bare-loaders design decision
   (`3c58cd29`), so only with Andrew's sign-off.
+
+## Refresh-as-maintenance-plan: ratification queue (2026-07-06)
+
+The research directory `docs/research/20260705-refresh-as-maintenance-plan/` is complete and
+awaits human review before the spec work starts. The queue of decisions (with recommendations
+already argued) is `09-spec-readiness.md` §1 — headline items:
+
+- [ ] Ratify the five design-fork resolutions in `03-design-forks.md` (G-11 clamp wrap, G-10
+      composite keys, FIX-2 delta-channel wiring, BigInt truncation fix-first, G-06 clamp subsumed)
+- [ ] Decide mode-name sugar vs removal (`04-knobs.md` K1) and the retention trust default
+      (`05-source-properties.md` P5) — the two flagged-contentious surface choices
+- [ ] Point the property loop at the `cumulative_aggregate`/`merge_into` MERGE path (the only
+      live path where a ledger obligation can be violated today; cells written in
+      `06-proof-obligations.md` §5 / `07-example-catalogue.md` closing list)
+- [ ] Then `/smelt:spec` per the spec-diff map in `09-spec-readiness.md` §4
+
+Done alongside: M0 of `08-code-placement.md` (dead CLI incremental executors deleted, `7d1b4f17`).
