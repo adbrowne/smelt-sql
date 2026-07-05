@@ -208,6 +208,16 @@ in-process plumbing (Config + DependencyGraph + Database + Workspace + BackendFa
 does today — it is the gating deliverable, built deliberately. The e2e binary suite is the
 *reference* for how the real planner derives the filter, not the runtime substrate.
 
+**Location (dev-dependency-cycle-safe).** The Link-C harness lives in **`crates/smelt-cli/tests/
+property_discovery/`** (`link_c_harness.rs` = the `execute_project` fixture; `model_shapes.rs` = the
+single readable catalogue of every construct's model SQL — the one place the tested model scope
+lives; one test module per cell). It must **not** live in `smelt-db`'s tests: `smelt-runtime`
+depends on `smelt-db`, so a Link-C harness in `smelt-db` closes a dev-dependency cycle and drags the
+whole runtime+DuckDB stack into `smelt-db`'s own type-property suite. `smelt-cli` already depends on
+`smelt-runtime` + the DuckDB backend (it is the incremental harness's home too), so it is the clean
+home. Link-A (abstract) and Link-B (classification) tests, which need only the analyzer + DuckDB
+oracle, stay in `crates/smelt-db/tests/` reusing `prop_helpers/`.
+
 **(b) The run-schedule generator + corrected oracle.** The run schedule is itself a **proptest
 value** — a generated sequence of steps, each either *advance the event-time window and run
 maintenance* or *mutate the source between runs*. Its defining capability (vs the existing
@@ -335,11 +345,13 @@ path — code-hygiene, not concurrency.
 all tests are **proptest-driven** (generators + `DuckDbOracle`, extending
 `crates/smelt-db/tests/prop_helpers/`), not datagen/e2e · Link-A tests under
 `crates/smelt-db/tests/proptests/maintenance_*` · the **Link-C harness driving
-`smelt-runtime::execute_project` in-process** over generator-produced rows + a generated run
-schedule with between-run source mutation (**not** `crates/smelt-cli/tests/incremental/`, which
-bypasses the analyzer, N1) · Link-B classification diagnostics reusing `smelt-logical` analysis
-APIs + the DuckDB oracle · logs `~/.claude/logs/property-discovery/`. Reuses the autonomy loop's
-memory-scope / sampler / sync-with-main / usage-log machinery.
+`smelt-runtime::execute_project` in-process** in **`crates/smelt-cli/tests/property_discovery/`**
+(`link_c_harness.rs` fixture; `model_shapes.rs` = the single model-SQL catalogue; one module per
+cell) over generator-produced rows + a generated run schedule with between-run source mutation
+(**not** `crates/smelt-cli/tests/incremental/`, which bypasses the analyzer, N1; **not** `smelt-db`'s
+tests, which would close a dev-dep cycle) · Link-B classification diagnostics reusing `smelt-logical`
+analysis APIs + the DuckDB oracle · logs `~/.claude/logs/property-discovery/`. Reuses the autonomy
+loop's memory-scope / sampler / sync-with-main / usage-log machinery.
 
 ## 7. The ledger and negative-catalogue schemas (the deliverables)
 

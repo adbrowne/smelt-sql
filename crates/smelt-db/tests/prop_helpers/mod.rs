@@ -14,7 +14,6 @@ pub mod arrow_mapping;
 pub mod divergences;
 pub mod duckdb_oracle;
 pub mod generators;
-pub mod link_c_harness;
 pub mod monotonicity_gen;
 pub mod null_data;
 pub mod spark_oracle;

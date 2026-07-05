@@ -27,11 +27,7 @@ arrow = { workspace = true }
 proptest = { workspace = true }
 smelt-dialect = { path = "../smelt-dialect" }
 smelt-runtime = { path = "../smelt-runtime" }
-smelt-backend = { path = "../smelt-backend" }
-smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 
 [features]
 default = []

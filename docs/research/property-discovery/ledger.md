@@ -36,14 +36,15 @@ Block schema:
 - Link C: n/a — this cell builds the Link-C harness itself, it does not yet run a property cell
   through it
 - experimental smelt extensions (if any): none in production code. Added
-  `crates/smelt-db/tests/prop_helpers/link_c_harness.rs`
-  (`LinkCProject`, `SqlCapturingReporter`, `DuckDbBackendFactory`, `base_request`) — test-target-only
-  (`crates/smelt-db/tests/`), tagged `EXPERIMENTAL(property-discovery): disposable`, passes
-  `property-experimental-gate.sh`. Added `smelt-backend`, `smelt-backend-duckdb`, `tokio`,
-  `tokio-util` to `crates/smelt-db/Cargo.toml` `[dev-dependencies]` (test-only deps, no production
-  dependency change).
-- evidence: `smelt-db::tests::link_c_harness_smoke::execute_project_derives_time_filter_no_hand_injected_where`
-  (1 run, DuckDB oracle via `duckdb::Connection` read-back). Stages a `refresh: batched` model with
+  `crates/smelt-cli/tests/property_discovery/{main,link_c_harness,model_shapes,smoke}.rs`
+  (`LinkCProject`, `SqlCapturingReporter`, `DuckDbBackendFactory`, `base_request`; `model_shapes` =
+  the single model-SQL catalogue) — test-target-only, tagged
+  `EXPERIMENTAL(property-discovery): disposable`, passes `property-experimental-gate.sh`. Uses
+  `smelt-cli`'s existing `smelt-runtime`/`smelt-backend-duckdb`/`tokio`/`tempfile` deps under the
+  `duckdb` feature — **no manifest change**. (Originally built in `smelt-db`'s tests + dev-deps;
+  relocated to `smelt-cli` to avoid the `smelt-runtime → smelt-db` dev-dependency cycle.)
+- evidence: `smelt-cli::tests::property_discovery::smoke::execute_project_derives_time_filter_no_hand_injected_where`
+  (1 run, DuckDB oracle via `duckdb::Connection` read-back; run with `--features duckdb`). Stages a `refresh: batched` model with
   **no `WHERE` clause anywhere in its SQL**, runs it through `LinkCProject::run` →
   `smelt_runtime::execute_project` (the real bound-derivation + planner path, `execute_parity.rs`'s
   plumbing pattern generalised), and asserts the SQL captured via

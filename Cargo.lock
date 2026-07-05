@@ -4217,8 +4217,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "smelt-backend",
- "smelt-backend-duckdb",
  "smelt-core",
  "smelt-dialect",
  "smelt-logical",
@@ -4226,8 +4224,6 @@ dependencies = [
  "smelt-runtime",
  "smelt-types",
  "tempfile",
- "tokio",
- "tokio-util",
  "walkdir",
 ]
 

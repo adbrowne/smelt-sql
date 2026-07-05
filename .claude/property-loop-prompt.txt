@@ -9,8 +9,12 @@ PICK THE CELL:
 4. Choose the FIRST cell whose "status" is "pending" (skip "done"/"blocked"), reading top-to-bottom. Cells are ordered so infra (P0-*) precedes the seed bugs (SC-1/SC-2) precedes the property grid — respect that order; do not start a property cell while a P0 infra cell it depends on is still pending (if so, that infra cell IS your work this iteration).
 
 DO THE WORK (reuse smelt; put proof code into smelt's TEST surface):
-5. Build or extend the proptest for this cell's layer. NON-NEGOTIABLE rules from the design:
+5. Build or extend the proptest for this cell's layer. WHERE CODE GOES (dev-dep-cycle-safe):
+   - Link-C cells live in crates/smelt-cli/tests/property_discovery/ — reuse the existing link_c_harness.rs (LinkCProject drives execute_project); put the model's SQL in model_shapes.rs (the ONE readable catalogue of every construct's model — add your construct's fn there, don't inline SQL in the test); add one module per cell and declare it in main.rs. Do NOT put Link-C code in smelt-db tests (smelt-runtime depends on smelt-db → dev-dep cycle).
+   - Link-A (abstract) and Link-B (classification) tests live in crates/smelt-db/tests/ reusing prop_helpers/ (generators + duckdb_oracle).
+   NON-NEGOTIABLE rules from the design:
    - Link C MUST run smelt's emitted maintenance through smelt-runtime::execute_project (the real bound derivation — NO hand-injected WHERE). NEVER use crates/smelt-cli/tests/incremental/main.rs run_incremental_sequence / execute_model_incremental (they bypass the analyzer — the exact bug class we hunt).
+   - Model SQL in model_shapes.rs uses RAW string literals (r#"..."#) — a \-newline continuation strips YAML indentation and flattens the frontmatter block.
    - Data is PROPTEST-GENERATED (extend crates/smelt-db/tests/prop_helpers/generators.rs) and run against the DuckDB oracle (prop_helpers/duckdb_oracle.rs). NOT smelt-datagen, NOT e2e fixtures.
    - The run schedule can MUTATE THE SOURCE BETWEEN RUNS (append a late row into an already-processed range; update/delete in place) — a pre-populated source masks lateness/mutation bugs.
    - Oracle = EXCEPT ALL (multiset) over ALL columns, minus only columns that are provably payload AND declared non-deterministic; full-refresh baseline = the source snapshot at step k.

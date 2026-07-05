@@ -12,13 +12,17 @@
 //! derivation (`source_bounds::derive_model_bounds`) by injecting the filter
 //! by hand — exactly the bug class this loop hunts (design N1).
 //!
+//! Lives in `smelt-cli`'s test target (not `smelt-db`'s) because Link C needs
+//! `smelt-runtime::execute_project` + the DuckDB backend, and `smelt-runtime`
+//! depends on `smelt-db` — a Link-C harness in `smelt-db`'s tests would close a
+//! dev-dependency cycle. `smelt-cli` already depends on both, no cycle.
+//!
 //! Mirrors the plumbing pattern already proven in
-//! `crates/smelt-runtime/tests/execute_parity.rs` and
-//! `crates/smelt-runtime/tests/self_referential_ordered_backfill.rs`, generalised
-//! into a reusable `LinkCProject` fixture + a `SqlCapturingReporter` that records
-//! each model's fully-resolved compiled SQL (`RunReporter::model_compiled`) so a
-//! cell can assert the derived time filter is actually present in what smelt
-//! emits — never a filter the test itself injected.
+//! `crates/smelt-runtime/tests/execute_parity.rs`, generalised into a reusable
+//! `LinkCProject` fixture + a `SqlCapturingReporter` that records each model's
+//! fully-resolved compiled SQL (`RunReporter::model_compiled`) so a cell can
+//! assert the derived time filter is actually present in what smelt emits —
+//! never a filter the test itself injected.
 
 #![allow(dead_code)]
 
@@ -98,11 +102,11 @@ impl RunReporter for SqlCapturingReporter {
     }
 }
 
-/// A staged smelt project directory + the parsed `Config`, `Database`, and
-/// `DependencyGraph` `execute_project` needs. Rebuilding the DB/graph after a
-/// between-run source mutation (a model file rewrite, e.g. `smelt.yml`
-/// pointing at a fresh model set) is intentionally cheap — call
-/// [`LinkCProject::reload`].
+/// A staged smelt project directory + the parsed `Config` `execute_project`
+/// needs. Re-discovers models from disk each `run` so a between-run source
+/// mutation (append/update staged by the caller) is picked up — the whole point
+/// of the run-schedule driver (design §3b): the source must be able to change
+/// between runs, not be fully pre-populated up front.
 pub struct LinkCProject {
     pub project_dir: PathBuf,
     pub db_path: PathBuf,
@@ -111,8 +115,7 @@ pub struct LinkCProject {
 
 impl LinkCProject {
     /// Load `Config` from an already-staged `project_dir` (models/ + smelt.yml
-    /// written by the caller) and build the Salsa DB + dependency graph by
-    /// discovering models from disk — exactly what a real `smelt run` does.
+    /// written by the caller).
     pub fn load(project_dir: PathBuf, db_path: PathBuf) -> Result<Self> {
         let config = Arc::new(Config::load(&project_dir)?);
         Ok(Self {
@@ -150,12 +153,8 @@ impl LinkCProject {
     }
 
     /// Run one `execute_project` call over the CURRENT on-disk state of
-    /// `project_dir` (models + source data) through the real bound-derivation
-    /// path, no hand-injected `WHERE`. Re-discovers models each call so a
-    /// between-run source-file mutation (append/update) staged by the caller
-    /// between two calls is picked up — this is the whole point of the
-    /// run-schedule driver (design §3b): the source must be able to change
-    /// between runs, not be fully pre-populated up front.
+    /// `project_dir` through the real bound-derivation path, no hand-injected
+    /// `WHERE`.
     pub async fn run(
         &self,
         run_id: &str,
@@ -194,8 +193,8 @@ impl LinkCProject {
 }
 
 /// A minimal `ExecuteRequest` for `target`, all incremental/backfill knobs at
-/// their default (full window per call, no per-partition split); callers
-/// override `start`/`end`/`batch_size_days` as the cell's run schedule needs.
+/// their default; callers override `start`/`end`/`batch_size_days` as the
+/// cell's run schedule needs.
 pub fn base_request(target: &str) -> ExecuteRequest {
     ExecuteRequest {
         target: target.to_string(),

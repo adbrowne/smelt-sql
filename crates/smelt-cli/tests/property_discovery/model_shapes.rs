@@ -1,0 +1,89 @@
+//! `EXPERIMENTAL(property-discovery): disposable`
+//!
+//! **The single readable catalogue of every model shape the property-discovery
+//! loop tests.** One function per catalog construct, returning the model's
+//! frontmatter + SQL as a string. This is the answer to "where is the generator
+//! for models?" — the *data* is proptest-generated (Link-C run schedule +
+//! `smelt-db`'s `prop_helpers::generators`), but the *model SQL* per construct
+//! lives here, in one file, so the scope of what is tested is legible in one
+//! place. Each `G-*` / `SC-*` catalog cell adds its construct here; the cell's
+//! test only references `model_shapes::<construct>()`.
+//!
+//! Convention: models carry NO `WHERE start/end` clause — smelt derives the
+//! incremental filter (design §2.3). Sources are referenced as
+//! `smelt.sources.<name>`; the harness stages the matching `sources/<name>.yml`
+//! and seeds the DuckDB table `main.sources_<name>`.
+
+/// Column declaration for a staged source (`name`, DuckDB type).
+pub struct SourceColumn {
+    pub name: &'static str,
+    pub ty: &'static str,
+}
+
+/// A model shape: the model file SQL + the source(s) it needs staged.
+pub struct ModelShape {
+    /// Model name (becomes `models/<name>.sql` and output table `main.<name>`).
+    pub name: &'static str,
+    /// Full model file contents (frontmatter + SQL), no `WHERE start/end`.
+    pub sql: &'static str,
+    /// Source name (becomes `sources/<src>.yml` + seed table `main.sources_<src>`).
+    pub source: &'static str,
+    /// Source columns.
+    pub source_columns: &'static [SourceColumn],
+}
+
+/// `P0-1` / control: a `refresh: batched` pass-through over an append-only
+/// source. No `WHERE` — the smoke test asserts the framework derives one.
+pub fn batched_passthrough() -> ModelShape {
+    ModelShape {
+        name: "events_batched",
+        // Raw string: YAML nesting (2-space indents under `timeseries:` /
+        // `batched:`) must be preserved. A `\`-newline continuation would strip
+        // the leading whitespace and flatten the block.
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [id]
+---
+SELECT d, id, val FROM smelt.sources.events
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "id",
+                ty: "INTEGER",
+            },
+            SourceColumn {
+                name: "val",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
+// ── Cells below are stubs the loop fills in as it reaches them. Each returns a
+//    ModelShape; keep them here so the tested scope stays in one file. ──
+//
+// SC-1  correlated EXISTS 7-day attribution over append-only conversions
+//       (the §2 worked example): SELECT e.*, EXISTS(SELECT 1 FROM
+//       smelt.sources.conversions c WHERE c.user_id = e.user_id AND
+//       c.conversion_ts BETWEEN e.event_ts AND e.event_ts + INTERVAL '7 days')
+//       AS converted FROM smelt.sources.events e
+// SC-2  pass-through + additive agg over a clocked MUTABLE source.
+// G-01  additive SUM/COUNT group-by · append-only.
+// G-03  idempotent MAX/BOOL_OR group-by · append-only.
+// G-04  idempotent MIN group-by · mutable-snapshot.
+// G-05  inner-join enrichment (fact × dim) · mutable dimension.
+// G-06  left-join null-preservation · append-only + late right side.
+// G-07  holistic MEDIAN / COUNT DISTINCT · append-only.
+// G-08  windowed running total (ROWS UNBOUNDED PRECEDING) · append-only.
+// G-09  UNION ALL of two append-only arms.
+// G-10  join fan-out on a COMPOSITE unique key · append-only.
