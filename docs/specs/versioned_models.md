@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Versioned Refresh Mode (SCD Type 2)
 
-> **What this is.** A normative spec for `refresh: versioned` — a smelt-owned keyed-output refresh mode that keeps **every version** of a key, each stamped with a validity interval. It is the Type-2 slowly-changing-dimension pattern, named without the vendor "SCD" jargon. This spec is a **composition** (`model_maintenance.md` §"The composition contract"): it presents the composition table referencing shared capabilities **by name**, then defines the versioned-**local** machinery in full — the close-old / open-new interval combiner, the smelt-managed validity columns, tracked-attribute selection, deletion handling, and event-time-stamped validity. Out of scope, owned elsewhere: the equivalence invariant and algebraic ladder (`model_maintenance.md`); the monotonicity/ordering discriminants, driving-fact resolution, and ordered-execution proofs (`model_properties.md`); keyed `merge_into`, the windowed-keyed-maintenance driver, and source-filter pushdown (`model_transforms.md`); the `refresh:` enum, the three-state declaration law, and the input-consumption axis (`models.md`); the overwrite keyed mode (`latest_value_models.md`); the running-aggregate keyed mode (`cumulative_aggregate.md`); engine-owned maintenance (`materialized_view.md`); the batched mode (`batched_models.md`).
+> **What this is.** A normative spec for `refresh: versioned` — a smelt-owned keyed-output refresh mode that keeps **every version** of a key, each stamped with a validity interval. It is the Type-2 slowly-changing-dimension pattern, named without the vendor "SCD" jargon. This spec is a **composition** (`model_maintenance.md` §"The composition contract"): it presents the composition table referencing shared capabilities **by name**, then defines the versioned-**local** machinery in full — the close-old / open-new interval combiner, the smelt-managed validity columns, tracked-attribute selection, deletion handling, and event-time-stamped validity. Out of scope, owned elsewhere: the equivalence invariant and algebraic ladder (`model_maintenance.md`); the monotonicity/ordering discriminants, driving-fact resolution, and ordered-execution proofs (`model_properties.md`); keyed `merge_into`, the windowed-keyed-maintenance driver, and source-filter pushdown (`model_transforms.md`); the `refresh:` enum, the three-state declaration law, and the input-consumption axis (`models.md`); the keyed mode covering the overwrite, running-aggregate, and milestone patterns (`keyed_models.md`); engine-owned maintenance (`materialized_view.md`); the batched mode (`batched_models.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -64,7 +64,7 @@ Order-independence holds because validity is anchored to the source's event time
 
 How new input is discovered is never declared on the model; it is the input-consumption axis (`models.md` §"Input-consumption axis"), derived from the source's shape:
 
-- **Window-forward** — a source carrying a `timeseries:` declaration (an update-events / CDC feed) is consumed in `--event-time` run windows applied to the *source's* `partition_column`, exactly as `cumulative` consumes its driving source (`cumulative_aggregate.md` §CLI). Only the new tail is read (source-filter pushdown, `model_transforms.md`). Because the close-old / open-new combiner consumes versions in event order, windows are applied in temporal order (ordered execution, `model_properties.md`).
+- **Window-forward** — a source carrying a `timeseries:` declaration (an update-events / CDC feed) is consumed in `--event-time` run windows applied to the *source's* `partition_column`, exactly as `keyed` consumes its driving source (`keyed_models.md` §CLI). Only the new tail is read (source-filter pushdown, `model_transforms.md`). Because the close-old / open-new combiner consumes versions in event order, windows are applied in temporal order (ordered execution, `model_properties.md`).
 - **Snapshot-diff** — a mutable snapshot source (no monotone clock) is re-scanned each run and compared against the stored current versions; the end-state contract is identical, only the scan cost differs.
 
 The choice between the two is the mutation-profile world-fact (`sources.md`) feeding the input-delta-discovery proof (`model_properties.md`); moving along this axis never changes the equivalence contract, only what is scanned.
@@ -90,7 +90,7 @@ The close and the open share the same boundary timestamp, so intervals abut with
 
 ### Tracked-attribute selection
 
-A new version is opened for a key only when a **tracked attribute** changes between the stored current version and the incoming row. By default every projected non-key column is tracked. Whether a modeller can mark a column *untracked* (a slowly-drifting field that should not open a new version), and whether that is derived from the SQL or declared, is an Open Question (§Known Divergences); the posture is to derive the key and tracked set from the SQL where unambiguous rather than restate them in a strategy block (`cumulative_aggregate.md` §Design).
+A new version is opened for a key only when a **tracked attribute** changes between the stored current version and the incoming row. By default every projected non-key column is tracked. Whether a modeller can mark a column *untracked* (a slowly-drifting field that should not open a new version), and whether that is derived from the SQL or declared, is an Open Question (§Known Divergences); the posture is to derive the key and tracked set from the SQL where unambiguous rather than restate them in a strategy block (`keyed_models.md` §Design).
 
 ### Validity stamped from source event-time (not run clock)
 
@@ -98,7 +98,7 @@ A new version is opened for a key only when a **tracked attribute** changes betw
 
 ### Deletion handling
 
-A key present in the store but absent from the incoming set is a **retraction**, and how it is handled is settled here as a soft-close: the key's current version is closed (`valid_to` set, `is_current = false`) with no new version opened, marking "no longer present as of this event time." The event time used is the run's window boundary for a window-forward feed, or the snapshot's as-of time for snapshot-diff. A hard delete (physically removing the key's rows) is **not** the default — the whole point of `versioned` is to retain history — but the exact surface for opting into a hard delete, and for *late corrections* to an already-closed interval, remain Open Questions (they are the retraction question the keyed modes share; `cumulative_aggregate.md` §"Reprocessing semantics"). A CDC feed that carries explicit delete events resolves this directly: the delete event is the close signal.
+A key present in the store but absent from the incoming set is a **retraction**, and how it is handled is settled here as a soft-close: the key's current version is closed (`valid_to` set, `is_current = false`) with no new version opened, marking "no longer present as of this event time." The event time used is the run's window boundary for a window-forward feed, or the snapshot's as-of time for snapshot-diff. A hard delete (physically removing the key's rows) is **not** the default — the whole point of `versioned` is to retain history — but the exact surface for opting into a hard delete, and for *late corrections* to an already-closed interval, remain Open Questions (they are the retraction question the keyed modes share; `keyed_models.md` §"Reprocessing"). A CDC feed that carries explicit delete events resolves this directly: the delete event is the close signal.
 
 ## Design
 
@@ -108,7 +108,7 @@ A key present in the store but absent from the incoming set is a **retraction**,
 
 **The combiner stays local; the driver and `merge_into` are referenced.** Close-old / open-new is meaningful only inside this mode, so it lives here in full (`model_transforms.md` §"Transforms that stay in a mode spec"). The mechanisms it is emitted *through* — keyed `merge_into`, the windowed-keyed-maintenance driver, source-filter pushdown — are general capabilities referenced by name, not re-specified.
 
-**Derive from SQL where possible.** Following the keyed-mode posture, the natural key and tracked attributes should be derived from the SQL and the model's declared key rather than restated in a strategy block wherever that is unambiguous (`cumulative_aggregate.md` §Design). The precise derive-vs-declare line for change-tracking columns is an Open Question.
+**Derive from SQL where possible.** Following the keyed-mode posture, the natural key and tracked attributes should be derived from the SQL and the model's declared key rather than restated in a strategy block wherever that is unambiguous (`keyed_models.md` §Design). The precise derive-vs-declare line for change-tracking columns is an Open Question.
 
 ## Constraints & Invariants
 
@@ -123,7 +123,7 @@ A key present in the store but absent from the incoming set is a **retraction**,
 - **Not implemented — does not parse.** `RefreshStrategy` (`crates/smelt-core/src/config.rs`) accepts only `full` / `batched` / `cumulative` / `materialized_view`; `refresh: versioned` fails deserialization with an `Invalid refresh strategy` error today. The classifier, the close-old / open-new maintenance (via `merge_into`), and the validity-column management are delivered by `docs/plans/20260704-model-updates.md`.
 - **Validity-column surface is unsettled.** Exact names/types of `valid_from` / `valid_to` / `is_current`, whether the open interval uses NULL or a sentinel far-future timestamp, and whether these are configurable are Open Questions to settle when the mode is built.
 - **Tracked-attribute selection is unsettled.** All projected non-key columns vs an explicitly declared subset; how a modeller marks a column untracked. Prefer deriving from SQL over a strategy block; the exact line is undecided.
-- **Late corrections to a closed interval.** Deletion is settled as a soft-close (§"Deletion handling"), but how a correction to an *already-closed* interval is applied — and any opt-in hard-delete surface — need their own design, the same retraction question the keyed modes share (`cumulative_aggregate.md` §"Reprocessing semantics"; `docs/research/20260703-model-updates.md` §18.2).
+- **Late corrections to a closed interval.** Deletion is settled as a soft-close (§"Deletion handling"), but how a correction to an *already-closed* interval is applied — and any opt-in hard-delete surface — need their own design, the same retraction question the keyed modes share (`keyed_models.md` §"Reprocessing"; `docs/research/20260703-model-updates.md` §18.2).
 - **Umbrella subsumption.** Whether `versioned` shares execution machinery with the other keyed modes or is a standalone rule is settled here as **standalone** (its own spec, its own classifier), consistent with the narrow-composable-rules posture (`docs/research/20260522-cumulative-as-its-own-rule.md`). It composes shared capabilities by name but owns its combiner.
 
 ## References
@@ -134,8 +134,7 @@ A key present in the store but absent from the incoming set is a **retraction**,
   - [`model_properties.md`](model_properties.md) — the monotonicity/ordering discriminants, driving-fact resolution, event-time trace, window-independence / ordered-execution
   - [`model_transforms.md`](model_transforms.md) — keyed `merge_into`, the windowed-keyed-maintenance driver, source-filter pushdown (close-old / open-new stays local here)
   - [`models.md`](models.md) — the refresh axis; the three-state declaration law; the input-consumption axis; `versioned` as a keyed-output peer
-  - [`latest_value_models.md`](latest_value_models.md) — the symmetric Type-1 mode (overwrite, keep current)
-  - [`cumulative_aggregate.md`](cumulative_aggregate.md) — the running-aggregate keyed mode; the reference keyed-maintenance path
+  - [`keyed_models.md`](keyed_models.md) — the peer keyed mode covering the overwrite (Type-1), running-aggregate, and milestone patterns; the reference keyed-maintenance path
   - [`materialized_view.md`](materialized_view.md) — engine-owned maintenance (where hand-written SCD2 SQL goes instead)
   - [`timeseries.md`](timeseries.md), [`sources.md`](sources.md) — the world-facts (clock; mutation profile) this mode consumes
 - **Research**:

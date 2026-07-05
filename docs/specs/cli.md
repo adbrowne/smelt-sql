@@ -120,7 +120,7 @@ Three input shapes are accepted:
     "<model_name>": {
       "dependencies": ["<upstream_model_name>", ...],
       "materialization": "table" | "view" | "ephemeral" | "materialized_view",
-      "refresh": "full" | "cumulative",     // omitted when "full" (default)
+      "refresh": "full" | "batched" | "keyed" | "versioned" | "materialized_view",     // omitted when "full" (default)
       "incremental": {                      // omitted if not incremental
         "granularity": "day" | "hour" | ...,
         "partition_column": "<col>",

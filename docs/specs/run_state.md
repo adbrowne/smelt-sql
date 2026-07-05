@@ -62,6 +62,10 @@ Cumulative per-model interval coverage as string date keys (`"2026-01-01"`, half
 
 Under `state.mode: environments`, run state additionally records, per model: the **expanded logical SQL** that built each physical table, the **output fingerprint** of that SQL, and a map from `(environment, model)` to the physical table currently backing it. These drive fingerprint-keyed reuse and promotion (`virtual_environments.md`).
 
+### Relationship to the keyed refresh ledger
+
+The run-state intervals this spec owns and `refresh: keyed`'s transactional merge ledger (`keyed_models.md` §"The transactional merge ledger") are **not the same mechanism and do not substitute for each other**. Run-state intervals are **opt-in observability** — a project may run at `state.mode: stateless` and forgo them entirely, with no change to correctness; they exist to answer "what has this project run, and where are the gaps" for humans and tooling. The keyed ledger is **required correctness structure** for every window-forward `refresh: keyed` model — it exists whenever that mode does, independent of `state.mode`, because it is what lets an additive-fold combiner detect a re-run and lets a crashed run resume exactly. Neither reads the other: the ledger is per-model and backend-resident, keyed by merged window; the interval ledger here is project-wide observability state under `.smelt/`. A project could run `state.mode: stateless` with `refresh: keyed` models and still get correct, ledger-enforced reprocessing refusal — the ledger's presence is a property of the *mode*, not of the project's state posture.
+
 ## Semantics
 
 - **Stateless writes nothing.** Under `state.mode: stateless` (the default), no manifest, interval, snapshot, or environment record is written; `.smelt/` need not exist. State is created only when a higher posture is opted into.
@@ -99,4 +103,4 @@ Under `state.mode: environments`, run state additionally records, per model: the
 - **Tests**: `crates/smelt-state/tests/`
 - **User docs**: none yet (CLI surfaces `smelt status` / `smelt history` over this state — see `cli.md`)
 - **Plans (history)**: none yet — predecessor research is `docs/research/20260601-virtual-environments.md`
-- **Related specs**: `batched_models.md` (interval semantics, idempotent recovery), `schema_evolution.md` (deployed-schema snapshots and migration), `virtual_environments.md` (the snapshot/environment consumers), `output_fingerprint.md` (the equivalence key), `architecture.md` (`state.mode` surface, `smelt-state` crate)
+- **Related specs**: `batched_models.md` (interval semantics, idempotent recovery), `keyed_models.md` (the transactional merge ledger — required correctness structure, distinct from this spec's opt-in observability), `schema_evolution.md` (deployed-schema snapshots and migration), `virtual_environments.md` (the snapshot/environment consumers), `output_fingerprint.md` (the equivalence key), `architecture.md` (`state.mode` surface, `smelt-state` crate)

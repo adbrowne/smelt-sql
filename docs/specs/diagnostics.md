@@ -120,22 +120,30 @@ Owned by `docs/specs/batched_models.md`.
 
 ---
 
-### Cumulative aggregate
+### Keyed refresh mode
 
-Owned by `docs/specs/cumulative_aggregate.md`.
+Owned by `docs/specs/keyed_models.md`. This family replaces the retired `Cumulative*` and
+`AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
+unchanged; `CumulativeNoDrivingSource` and `AccumulatingSnapshotUnboundedHorizon` are
+**retired outright, not renamed** (an unclocked model is a legitimate snapshot-reconcile
+posture under `keyed`, not an error, and there is no write-eligibility horizon to bound —
+`keyed_models.md` §Known Divergences).
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `CumulativeRequiresGroupBy` | Error | A `refresh: cumulative` model's SELECT has no GROUP BY (key columns are required). |
-| `CumulativeUnknownAggregator` | Error | A `refresh: cumulative` model's projection uses a non-allowlisted aggregator or composite expression over aggregates. |
-| `CumulativeGroupByContainsPartitionColumn` | Error | The `refresh: cumulative` model's GROUP BY contains the driving source's `partition_column`. |
-| `CumulativeForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: cumulative` model. |
-| `CumulativeForbidsNondeterministic` | Error | A non-deterministic function appears in a `refresh: cumulative` model's SELECT. |
-| `CumulativeNoDrivingSource` | Error | No source in a `refresh: cumulative` model's FROM declares a `timeseries:` block. |
-| `CumulativeMultipleDrivingSources` | Error | Multiple timeseries-tagged sources in a `refresh: cumulative` model's FROM (v1 supports exactly one). |
-| `CumulativeSqlNotParseable` | Error | A `refresh: cumulative` model's SELECT could not be parsed for aggregator classification. |
-| `CumulativeForbidsTimeseries` | Error | A `refresh: cumulative` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
-| `CumulativeForbidsBatched` | Error | A `refresh: cumulative` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+| `KeyedRequiresGroupBy` | Error | A `refresh: keyed` model's SELECT has no GROUP BY (key columns are required). |
+| `KeyedForbidsTimeseries` | Error | A `refresh: keyed` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
+| `KeyedForbidsBatched` | Error | A `refresh: keyed` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+| `KeyedUnknownCombiner` | Error | A `refresh: keyed` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
+| `KeyedGroupByContainsPartitionColumn` | Error | The `refresh: keyed` model's GROUP BY contains the driving source's `partition_column` (that is the partitioned/batched shape). |
+| `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: keyed` model's outer body. |
+| `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `refresh: keyed` model's SELECT. |
+| `KeyedSqlNotParseable` | Error | A `refresh: keyed` model's SELECT could not be parsed for column-family classification. |
+| `KeyedMultipleDrivingSources` | Error | Multiple timeseries-tagged sources appear in a `refresh: keyed` model's FROM (exactly one is admitted under window-forward). |
+| `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column has no once-write provenance proof (key-derived, or a declared functional dependency). Names the column. |
+| `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen). Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
+| `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
+| `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
 
 ---
 

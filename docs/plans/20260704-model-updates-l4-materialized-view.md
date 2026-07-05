@@ -95,6 +95,20 @@ and hard-errors when there is no native IVM. It performs **no** smelt-side eligi
   `materialized_view` model (`materialized_view.md` §Semantics "Freshness owner"), so the operator contract
   the mode exists to surface is legible. Deferrable if `smelt explain` has no mode-readout surface to extend.
 
+### Absorbed from the keyed-collapse decision record (no phase needed)
+
+- **D16 — output-shape wording fix.** The keyed-collapse decision record
+  (`docs/research/20260705-keyed-collapse-application.md` D16) assigned this sub-plan the
+  textual correction of `materialized_view.md`'s output-shape wording from "keyed" to
+  **engine-defined**, plus the matching `models.md` refresh-table cell. This landed as a
+  companion spec edit in the keyed-collapse plan's Phase K1
+  (`docs/plans/20260705-keyed-collapse.md`), not as a phase of this sub-plan — it is a
+  purely textual, blocking-free change with no code dependency, so it shipped ahead of
+  MV1–MV3 rather than waiting on them. No phase here needs to touch that wording again.
+  The consumer-facing `timeseries:`-on-output direction D16 also raised is **not**
+  absorbed here or there — it remains deferred pending pushdown wiring
+  (`materialized_view.md` §Known Divergences).
+
 ### Explicitly deferred (minimal by design)
 - **The real happy path against a shipping native-IVM backend.** No current backend advertises
   `supports_native_ivm = true` (`multi_backend.md`; `crates/smelt-dialect/src/dialect.rs`), so MV1's emit

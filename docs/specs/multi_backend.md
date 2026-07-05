@@ -108,7 +108,7 @@ suite is the executable list):
   This is the one carve-out from lower-don't-reject: `refresh: materialized_view` is a declared
   commitment to engine-owned freshness (`materialized_view.md`), so substituting a smelt-driven or
   full-refresh table would swap the declared contract. Every other refresh mode (`batched`,
-  `cumulative`, `versioned`, `latest_value`) is smelt-driven and needs no backend IVM. No backend
+  `keyed`, `versioned`) is smelt-driven and needs no backend IVM. No backend
   today advertises native IVM — DuckDB and both Spark profiles set the flag `false`, so
   `refresh: materialized_view` currently always errors; native IVM would be a Databricks-only
   capability (Enzyme).
@@ -116,8 +116,8 @@ suite is the executable list):
 ### Incremental-view-maintenance capabilities
 Two flags describe a backend's participation in maintaining a keyed refresh mode's state; both are `false` on every backend today.
 
-- **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. It is *not* consulted for the smelt-driven keyed modes (`cumulative`, `versioned`, `latest_value`), which maintain their own state with `merge_into` + views on any backend.
-- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `cumulative` model can retract is a *per-model* property of its aggregator algebra (the group rung, `cumulative_aggregate.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
+- **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. It is *not* consulted for the smelt-driven keyed modes (`keyed`, `versioned`), which maintain their own state with `merge_into` + views on any backend.
+- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `keyed` model can retract is a *per-model* property of its column families' algebra (the group rung, `keyed_models.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
 
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may

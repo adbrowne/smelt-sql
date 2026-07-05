@@ -18,8 +18,7 @@ owners: [andrew]
 > `model_maintenance.md` §"The equivalence invariant" — referenced here, never
 > redefined). Out of scope, with their own homes: mode-only transforms that are
 > meaningless outside a single `refresh:` mode (`batched_models.md`,
-> `cumulative_aggregate.md`, `latest_value_models.md`, `versioned_models.md`,
-> `accumulating_snapshot.md`); the backend capability flags a transform's lowering
+> `keyed_models.md`, `versioned_models.md`); the backend capability flags a transform's lowering
 > checks (`multi_backend.md`); the `refresh:` enum and the three-state declaration
 > law (`models.md`).
 >
@@ -53,8 +52,9 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
 | Compile-time pinning | run-determinism (`NOW`/`CURRENT_*`) | resolve a run-deterministic function to a single literal once per run, before emit | **built** |
 | Targeted column backfill | additive-only model diff | `UPDATE`/dimension-merge only the added columns in place, never a full rebuild | **built** |
-| Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact | **built** |
-| Horizon settled-delay / tail-rewrite | maintained-window / horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value | unbuilt |
+| Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + a **derived** horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact. Licensed by a *derived* `H` only — a *declared*-on-source `H` no longer licenses this transform (an under-declared source lateness would silently truncate the recompute); where `H` is not derivable the transform is simply not licensed and the enrichment evaluates via the ordinary widened scan | **built** |
+| Horizon settled-delay / tail-rewrite | maintained-window / **derived** horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value. Batched-side forward-reach machinery, confirmed derived-only (never licensed by a declared horizon) | unbuilt |
+| Transactional merge ledger | window-forward keyed consumption | record each merged window in a per-model ledger, written atomically with that window's `merge_into`; enforcement is required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
 | Idempotent window re-scan vs delta-driven probe | idempotent monoid + source mutation profile | unconditional CDF-free re-scan when the fold is idempotent; a per-run changed-set probe when a change feed is available | *partial* |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
 | DAG composition | litmus rule (`models.md`) | express a mode combination as two composed models at two grains, not a new mode | mechanism exists |
@@ -78,9 +78,10 @@ retraction-via-delta-history, not by `merge_into` alone). The step loop that
 sequences `merge_into` across driving partitions (classify → step → per-partition
 pushdown → create-or-merge) is the *windowed-keyed-maintenance driver* — a mode-agnostic
 mechanism, so it is catalogued here in its own right. Its reference *implementation*
-lives today in `cumulative_aggregate.md` (the only keyed mode built so far) and
-generalises to the other keyed modes as they land; the normative *description* of the
-driver mechanism is this catalogue entry, not the mode spec.
+lives today in `keyed_models.md`'s built seed (the direct-monoid classifier, the only
+keyed mode built so far) and generalises across `keyed`'s own column families as they
+land, with `versioned` a prospective future consumer of the same driver; the normative
+*description* of the driver mechanism is this catalogue entry, not the mode spec.
 
 **Source-filter pushdown + the two clamps.** Three related mechanisms share one
 window. Source-filter pushdown wraps each bounded input ref in a subquery so the
@@ -142,9 +143,14 @@ here; the mode spec owns them in full:
 - **Backfill chunking** (one-shot / auto-sized / per-partition) and **auto-coarsen
   run window** — `batched_models.md`.
 - **Close-old / open-new interval maintenance** (SCD2) — `versioned_models.md`.
-- **Upsert-overwrite** (overwrite per key) — `latest_value_models.md`.
-- **Eviction / settled-key GC** (retire keys older than `current_window − H`) —
-  `accumulating_snapshot.md`.
+
+**Deferred, not catalogued as built or unbuilt: eviction / settled-key GC.** Retiring
+keyed state older than `current_window − H` is **not** licensed by any transform today —
+`keyed_models.md` §"No write-eligibility clamp" removed the write-eligibility clamp that
+would have motivated it (`docs/research/20260705-keyed-collapse-application.md` D6). It
+is deliberately deferred rather than catalogued as a mode-local transform: if it is ever
+introduced it must ship together with late-fact accounting (a package, not a standalone
+GC pass), tracked as a deferred item rather than given a home in any single mode spec.
 
 ## Design
 
@@ -269,9 +275,9 @@ by `docs/plans/20260704-model-updates.md` (design:
   outstanding, tracked by the same plan.
 - The **windowed-keyed-maintenance driver** is a standalone mechanism (mode-agnostic
   classify → step over driving partitions in temporal order → per-partition pushdown →
-  create-or-merge loop, fail-closed on a non-monoid combiner) with `cumulative` as its
-  first named consumer. The other keyed modes (`latest_value`, `versioned`) compose the
-  same driver as they land; the mechanism's normative home is this spec, not the mode
+  create-or-merge loop, fail-closed on a non-monoid combiner) with the built `cumulative`
+  seed (now `keyed_models.md`) as its first named consumer. `versioned` composes the
+  same driver as it lands; the mechanism's normative home is this spec, not the mode
   that first implements it.
 
 ## References
@@ -280,4 +286,4 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Tests**: the batched per-partition full-refresh-equivalence harness; the cumulative end-state-equivalence harness; the pushdown/clamp unit tests in `smelt-runtime/src/transformer.rs`; the generative soundness oracle.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`.
-- **Related specs**: `model_maintenance.md`, `model_properties.md`, `models.md`, `batched_models.md`, `cumulative_aggregate.md`, `latest_value_models.md`, `versioned_models.md`, `accumulating_snapshot.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.
+- **Related specs**: `model_maintenance.md`, `model_properties.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.
