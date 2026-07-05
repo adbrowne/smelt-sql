@@ -389,10 +389,88 @@ JOIN smelt.sources.users u ON e.user_id = u.user_id
     }
 }
 
+/// `G-06`: left-join null-preservation (fact `events` × right-side `refunds`),
+/// batched per partition (`unique_key: [d, user_id]`), where BOTH sources are
+/// timeseries **append-only** (`docs/research/20260705-property-discovery-loop.md`
+/// §4 `G-06`). A left-joined row is first emitted with `refund_amt IS NULL`
+/// because no matching `refunds` row has arrived yet; the `refunds` row then
+/// arrives **late** — appended between runs into the SAME (already-processed)
+/// `d` partition, never mutated in place (both sources stay append-only, so
+/// this is `SC-1`'s "late row appended into an already-processed range" shape,
+/// not `G-04`/`G-05`'s in-place mutation shape). This cell asks empirically
+/// whether smelt's recompute-region (explicit backfill of the same window)
+/// re-reads the CURRENT contents of `refunds` and recovers the non-NULL row —
+/// or whether the NULL is stranded (paper §10: a left-join's unmatched-row
+/// footprint is unbounded-forward until recompute-region re-derives it).
+///
+/// `refunds`'s own event-time column is named `refund_date`, deliberately
+/// distinct from `events.d`: naming both partition columns `d` makes smelt's
+/// derived bare (unqualified) `WHERE d >= ... AND d < ...` filter genuinely
+/// ambiguous across the two FROM-clause sources (a DuckDB binder error, not
+/// this cell's target) — a real but SEPARATE finding about the filter emitter
+/// not qualifying its derived column reference, orthogonal to the late-arrival
+/// hypothesis this cell tests. Distinct column names sidestep it so the cell
+/// stays scoped to G-06's actual question.
+pub fn left_join_late_right_side() -> MultiSourceModelShape {
+    MultiSourceModelShape {
+        name: "events_with_refunds",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d, user_id]
+---
+SELECT e.d, e.user_id, e.val, r.refund_amt
+FROM smelt.sources.events e
+LEFT JOIN smelt.sources.refunds r ON e.user_id = r.user_id AND e.d = r.refund_date
+"#,
+        sources: &[
+            MultiSourceSpec {
+                name: "events",
+                columns: &[
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "val",
+                        ty: "DOUBLE",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+            MultiSourceSpec {
+                name: "refunds",
+                columns: &[
+                    SourceColumn {
+                        name: "refund_date",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "refund_amt",
+                        ty: "DOUBLE",
+                    },
+                ],
+                timeseries: Some(("refund_date", "refund_date")),
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-06  left-join null-preservation · append-only + late right side.
 // G-07  holistic MEDIAN / COUNT DISTINCT · append-only.
 // G-08  windowed running total (ROWS UNBOUNDED PRECEDING) · append-only.
 // G-09  UNION ALL of two append-only arms.

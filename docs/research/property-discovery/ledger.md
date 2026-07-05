@@ -651,3 +651,68 @@ Block schema:
   materialization strategy other than the `unique_key`-scoped batched DELETE+INSERT every prior
   cell in this shape has tested, nor for a dimension source that itself carries a `timeseries:`
   block (which would enter `source_bounds`'s domain and could in principle be filtered).
+
+### CELL G-06 — left-join null-preservation (fact × late-arriving right side) × append-only both sides × recompute-region
+- verdict: HOLDS (no divergence over the seeded schedule); hypothesis's "does smelt strand the
+  left-join NULL" arm REFUTED for the backfill/recompute-region technique, CONFIRMED (expected, not
+  a bug) that a plain forward-only advance never revisits the already-processed partition.
+- P (Link 0): n/a — a left-join has no combiner identity; this cell is about whether the batched
+  recompute-region (`DELETE [start,end)` + fresh `INSERT`) re-reads the right-side source's CURRENT
+  contents when the partition is explicitly re-run, or whether the unmatched-row NULL is stranded.
+  skeleton_cols (Link B): `d`, `user_id` (the `unique_key`; `val`/`refund_amt` are payload —
+  `refund_amt` is the recovered column under test)
+- Link B facts: `refunds` is a genuine `timeseries:` source (unlike G-05's non-timeseries `users`
+  dimension), so it DOES enter `BoundContext`/`source_bounds::derive_model_bounds` via its own
+  `refund_date` partition column — but the model never applies a `WHERE` on `refund_date` (the join
+  predicate `e.d = r.refund_date` is an equality across two different source columns, not a
+  same-source temporal filter smelt's Form-A/B derivation recognizes), so no bound clips it. reach
+  for `refunds` = whatever `derive_model_bounds` derives (unbounded/no-op for this join shape, same
+  observed effect as G-05's absent case) footprint=unbounded (whole table read fresh on
+  recompute-region)
+- smelt analyzer: sound (no over-read, no under-read observed on backfill; the recompute-region's
+  DELETE+INSERT simply re-reads both sources' current contents for the reprocessed window,
+  independent of any per-source bound on `refunds`)
+- Link C: no divergence over 1 seeded schedule (deterministic, not proptest-generated — mirrors
+  SC-2/G-04/G-05's coverage caveat). Seeded fact row `(d=2024-01-01, user_id=1, val=10.0)`, empty
+  `refunds` table; run 1 processes `[2024-01-01, 2024-01-02)`, materializing `refund_amt=NULL` (no
+  matching refund exists yet). Between runs, a refund row `(refund_date=2024-01-01, user_id=1,
+  refund_amt=3.5)` is APPENDED (never pre-populated, never mutated in place — the `SC-1` late-append
+  shape, not `G-04`/`G-05`'s in-place-update shape) into the already-processed `2024-01-01`
+  partition. Run 2 advances FORWARD to `[2024-01-02, 2024-01-03)` — as expected (not a bug, matches
+  every prior forward-advance finding in this catalog), the never-re-requested `2024-01-01`
+  partition's `refund_amt` stays `NULL`. Run 3 explicitly backfills the SAME
+  `[2024-01-01, 2024-01-02)` window: the maintained `refund_amt` becomes `3.5`, matching the
+  full-refresh oracle (`multiset_equal` over all columns) exactly — the recompute-region re-reads
+  `refunds`'s current contents and recovers the previously-unmatched row, the same "explicit
+  backfill recovers a late/updated right-side fact" shape SC-1/G-04/G-05 already established for
+  their respective constructs, now confirmed for LEFT JOIN null-preservation specifically.
+- condition (CONDITIONAL only): n/a — recorded as unconditional HOLDS (the guarantee is identical
+  in shape to G-05's traded condition — recovery requires an EXPLICIT backfill of the affected
+  window, a forward-only advance never revisits it — but that same condition already applies
+  uniformly to every batched cell in this catalog via the shared recompute-region technique, so it
+  is not re-declared as a cell-specific trade here; see G-04/G-05 for the general statement).
+- production files/functions changed: none — this cell found no divergence to fix.
+- Note (separate, out-of-scope finding surfaced while authoring this cell): giving both `events`
+  and `refunds` the SAME partition column name (`d`) makes smelt's derived bare `WHERE d >= ... AND
+  d < ...` filter genuinely ambiguous across two FROM-clause sources — a DuckDB `Binder Error:
+  Ambiguous reference to column name "d"` at execution time, not a silent wrong-answer. This is a
+  real filter-emission gap (the derived predicate is not qualified by source alias/table), but it
+  is orthogonal to G-06's late-arrival hypothesis and was sidestepped here by naming `refunds`'s
+  column `refund_date` instead. Not filed as a new catalog cell per the ≤2-adjacent-append cap
+  discipline (§4) — flagged here for whoever next touches `source_bounds`/filter emission for
+  multi-timeseries-source models.
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request`/
+  `oracle::multiset_equal`; adds `model_shapes::left_join_late_right_side` (a new
+  `MultiSourceModelShape` fixture, not experimental analyzer code) and a cell-local `stage_project`
+  that keeps both sources at the append-only default (no `mutation_profile:` block).
+- evidence: `smelt-cli::tests::property_discovery::g_06_left_join_null_preservation::
+  late_refund_appended_between_runs_is_recovered_on_backfill_but_not_forward_advance`
+  (deterministic 3-run schedule through `execute_project`, no hand-injected `WHERE`;
+  `cargo test -p smelt-cli --test property_discovery g_06 --quiet` → 1 passed; full suite
+  `cargo test -p smelt-cli --test property_discovery --quiet` → 18 passed).
+- Coverage caveat (design §2.1 N4): single hand-authored schedule, not proptest-shrunk over
+  arbitrary late-arrival timing (e.g. a right-side row landing beyond the derived horizon, or
+  multiple late rows across several partitions). Scoped to "does an explicit backfill after one
+  late right-side append recover the true left-join result", answered yes. Does not establish
+  behaviour for join fan-out (a right side with multiple matching rows) or for a right-side source
+  declared `mutation_profile: mutable` (that shape is G-05's territory, not this cell's).
