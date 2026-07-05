@@ -157,10 +157,54 @@ FROM smelt.sources.events e
     }
 }
 
+/// `SC-2`: additive `SUM` group-by, batched per partition (`unique_key: [d]`),
+/// over a clocked source declared `mutation_profile: mutable`
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `SC-2`). Reuses the
+/// `events(d, id, val)` shape every other cell's harness already stages, so
+/// the run-schedule driver's `arb_mutable_schedule`/`InPlaceUpdate` (keyed on
+/// `id`) applies unmodified. `input_delta.rs:88-93` classifies a clocked
+/// source as `WindowForward` **regardless of its declared `MutationProfile`**
+/// (the `Some(MutationProfile::ChangeFeed) => ChangeFeed` arm is the only
+/// profile-conditioned branch; `Mutable` falls through to the `has_clock`
+/// guard identically to `AppendOnly`/`None`) — this cell asks empirically
+/// whether smelt's actual emitted batched maintenance ever revisits an
+/// already-processed partition's source rows after they are mutated in place
+/// between runs, with no hand-injected `WHERE` deciding the answer for it.
+pub fn additive_agg_mutable_source() -> ModelShape {
+    ModelShape {
+        name: "events_daily_total",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "id",
+                ty: "INTEGER",
+            },
+            SourceColumn {
+                name: "val",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// SC-2  pass-through + additive agg over a clocked MUTABLE source.
 // G-01  additive SUM/COUNT group-by · append-only.
 // G-03  idempotent MAX/BOOL_OR group-by · append-only.
 // G-04  idempotent MIN group-by · mutable-snapshot.

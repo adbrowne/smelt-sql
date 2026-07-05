@@ -15,4 +15,5 @@ mod run_schedule;
 mod p0_2_run_schedule;
 mod p0_4_mutation_profile_selfcheck;
 mod sc_1_correlated_exists;
+mod sc_2_clocked_mutable_window_forward;
 mod smoke;

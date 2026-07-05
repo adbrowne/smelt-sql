@@ -257,3 +257,62 @@ Block schema:
   for a *differently shaped* correlated-EXISTS query (e.g. one with the interval on the `BETWEEN`
   lower bound, or a query with a second unrelated `BETWEEN` earlier in the text that the scan
   matches instead — see the appended follow-on cell `SC-1b`).
+
+### CELL SC-2 — pass-through + additive agg (SUM, batched unique_key=[d]) × clocked mutable-snapshot × recompute-region (Link C)
+- verdict: HOLDS — hypothesis REFUTED (no divergence found for an explicit backfill of the
+  mutated partition; the predicted unsound acceptance did not reproduce)
+- P (Link 0): `SUM` — commutative monoid, non-idempotent (additive; matches the Link-0 table row;
+  `discriminants.rs`)
+  skeleton_cols (Link B): `d` (the `unique_key` / partition column; `total` is the sole payload
+  column)
+- Link B facts: `input_delta.rs:88-93` (`input_delta_discovery`) classifies this source
+  `WindowForward` for `has_clock=true` **independent of `mutation_profile`** — the match arm order
+  is `Some(ChangeFeed) => ChangeFeed`, then `_ if has_clock => WindowForward`, so a clocked
+  `Mutable` source takes the identical branch a clocked `AppendOnly`/undeclared source would. This
+  is the hypothesis's premise and is confirmed as written.
+  **However**: a repo-wide grep (`rg -n "input_delta_discovery|InputDeltaKind"`, excluding its own
+  module and `#[cfg(test)]`) finds **zero call sites outside `input_delta.rs`'s own unit tests** —
+  neither `smelt-runtime::maintenance_driver` (the actual batched-partition INSERT/MERGE driver,
+  which has no `mutation_profile`-conditioned branch at all) nor any other production path reads
+  this function's verdict. It is a **proof-only artifact, not yet wired to any consuming mode**
+  (matches its own doc comment: "the re-scan/probe transform this verdict licenses is wired per
+  consuming mode (L4), not here"). smelt's actual emitted maintenance for this cell does not
+  consult `MutationProfile`/`InputDeltaKind` at all — what actually governs re-processing a
+  partition is simply whether that partition falls inside the run's requested
+  `[start, end)` window, exactly as for an append-only source.
+- smelt analyzer: **not-derivable** (for the runtime-behaviour question) rather than unsound —
+  `input_delta_discovery`'s `WindowForward` verdict for `Mutable` is a real, confirmed
+  classification, but it has no observable effect on the emitted maintenance SQL because nothing
+  in the execution path consumes it yet. The Link-C divergence the hypothesis predicted (an
+  explicit backfill of the mutated partition still missing the mutation) does not reproduce,
+  because batched partition maintenance is unconditionally recompute-region: re-running a window
+  always re-derives `SUM` fresh from current source contents for the requested partition,
+  regardless of any mutation-profile classification.
+- Link C: no divergence over 1 seeded schedule (deterministic, not proptest-generated — see
+  Coverage caveat below). Seeded row `(d=2024-01-01, id=1, val=10.0)`; run 1 processes
+  `[2024-01-01, 2024-01-02)`, materializing `total=10.0`. Between runs, `id=1`'s `val` is updated
+  in place to `999.0` (the already-processed partition, mutated between runs — never
+  pre-populated). Run 2 advances FORWARD to `[2024-01-02, 2024-01-03)` — as expected (not a bug),
+  the never-re-requested `2024-01-01` partition stays stale at `10.0`, establishing the baseline.
+  Run 3 explicitly re-runs (backfills) the SAME `[2024-01-01, 2024-01-02)` window run 1 processed:
+  the maintained `total` becomes `999.0`, matching the full-refresh oracle. Compiled SQL for the
+  backfill run: `SELECT d, SUM(val) AS total FROM main.sources_events WHERE d >= '2024-01-01' AND
+  d < '2024-01-02' GROUP BY d` — a fresh, unconditional re-read of current source contents for the
+  requested partition (recompute-region), not a fold over a remembered delta.
+- condition (CONDITIONAL only): n/a
+- experimental smelt extensions (if any): none — reuses the existing `SqlCapturingReporter`
+  (`EXPERIMENTAL(property-discovery)` from `P0-1`) and the `run_schedule`/`link_c_harness`
+  infrastructure; no new production or analyzer code touched. Added `mutation_profile: mutable` to
+  the staged source YAML (a pre-existing, non-experimental declaration surface).
+- evidence: `smelt-cli::tests::property_discovery::sc_2_clocked_mutable_window_forward::
+  in_place_update_of_already_processed_partition_is_missed_on_forward_only_advance` (deterministic
+  3-run schedule through `execute_project`, no hand-injected `WHERE`).
+- Coverage caveat (design §2.1 N4): single hand-authored schedule, not proptest-shrunk — the goal
+  was "does an explicit backfill of a mutated partition still miss the mutation", answered no.
+  This does NOT establish that a plain forward-only advance ever revisits a mutated partition
+  without an explicit backfill request (it provably doesn't — see the run-2 assertion above, which
+  is the expected/documented limitation, not the hazard this cell hunts). It also does not rule out
+  a divergence for a technique other than the simple per-partition `SUM`/`unique_key` batched form
+  tested here (e.g. a stateful fold-delta technique that *does* consult `mutation_profile` once one
+  is wired) — this cell is scoped to the one technique smelt's batched materialization currently
+  emits for this construct.
