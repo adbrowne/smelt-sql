@@ -366,3 +366,43 @@ Block schema:
   because it is a type-inference defect, not a `(construct × source-property × technique)` cell in
   this catalog's schema; a human should triage it against
   `docs/research/20260417-0.3-regression-triage.md` bug #3 and `aggregate_widening.rs`.
+
+### CELL G-02 — additive agg (SUM/COUNT) group-by × append-only (delta RE-DELIVERED) × fold-delta
+- verdict: HOLDS
+- P (Link 0): commutative monoid (additive, non-idempotent; Link 0 table §2.0) — the property under
+  test is whether smelt's *execution mechanism* upholds re-delivery safety despite `SUM` itself
+  being a non-idempotent combiner (re-delivery is unsafe for a technique that blindly appends a
+  delta onto remembered state; the question is whether smelt's batched materialization is such a
+  technique).
+  skeleton_cols (Link B): `{d}` (the `unique_key`/`GROUP BY` column; `total` is payload)
+- Link B facts: combiner=additive-monoid(SUM) reach=n/a footprint=bounded (one partition's rows
+  only, resolved fresh from current source contents every run)
+- smelt analyzer: sound — but the reason is not a ledger/dedup mechanism at all. A dedicated
+  Explore pass (this cell) confirmed `refresh: batched` never resolves to a `unique_key`-scoped
+  MERGE/upsert: `crates/smelt-backend/src/lib.rs::resolve_strategy` always returns
+  `IncrementalStrategy::DeleteInsert` for a batched model (`unique_key` on `BatchedConfig` is
+  reserved for diagnostics only — `let _ = unique_key;` at `lib.rs:195` — MERGE/`merge_into` is
+  dead code on this path, it backs `cumulative_aggregate` instead). `delete_and_insert_transactional`
+  (`crates/smelt-backend-duckdb/src/lib.rs:618-659`) runs, in one transaction,
+  `DELETE FROM table WHERE col >= start AND col < end` then `INSERT INTO table {sql}`, where the
+  DELETE range is exactly the run's `[start, end)` write window (`crates/smelt-runtime/src/
+  execute.rs:970-973, 1028-1042` — "the DELETE range must equal exactly what the INSERT writes").
+  Re-delivering an identical window is therefore a **full partition replace**, not a fold onto
+  remembered state — there is no ledger obligation to violate because there is nothing folded onto;
+  each run recomputes `SUM(val)` fresh from the source's CURRENT contents for that window alone.
+- Link C: no divergence over 8 proptest cases (1-3 rows in a single one-day window, values in
+  `[-50, 50]`, re-delivered 1-3 times with no new rows landing between re-runs — Link A kind (2),
+  design §2.1). `maintained_total(d) == full_refresh_total(d)` after every re-delivery count tried,
+  every case — re-delivery is a no-op vs a single run, never a double-count.
+- condition (CONDITIONAL only): n/a
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request` and
+  `model_shapes::additive_agg_append_only` (already added for `G-01`); adds no new model shape.
+- evidence: `smelt-cli::tests::property_discovery::g_02_additive_agg_redelivery::
+  redelivering_the_same_window_does_not_double_count_the_fold` (8 proptest cases through
+  `execute_project`, no hand-injected `WHERE`).
+- **Note on generality (not this cell's verdict driver):** this HOLDS is a mechanism-level fact
+  about `refresh: batched`'s DELETE+INSERT-by-window-range strategy, not an algebra-level fact
+  about `SUM` — the same non-idempotent combiner folded by a *different* smelt materialization
+  path that DOES consult `unique_key` for a scoped upsert (`cumulative_aggregate`, mentioned above
+  but out of this cell's scope) would need its own cell, since a real MERGE/upsert path is exactly
+  where a re-delivery ledger obligation could actually be violated.

@@ -13,6 +13,7 @@ mod oracle;
 mod run_schedule;
 
 mod g_01_additive_agg_append_only;
+mod g_02_additive_agg_redelivery;
 mod p0_2_run_schedule;
 mod p0_4_mutation_profile_selfcheck;
 mod sc_1_correlated_exists;
