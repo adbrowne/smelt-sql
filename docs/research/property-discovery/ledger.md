@@ -848,3 +848,49 @@ Block schema:
   future cell could still vary the NUMBER of stale downstream partitions or interleave a SECOND
   independent mutation, but the qualitative finding (local recompute-region has no cross-partition
   cascade) would not change.
+
+### CELL G-09 — UNION ALL of two sources × append-only both arms × recompute-region
+- verdict: HOLDS (no divergence over the seeded hazard schedule: a late row appended into EACH arm
+  independently, between runs, into an already-processed partition).
+- P (Link 0): a multiset union is combiner-identity-agnostic — no combiner runs at all, so §2.0's
+  table does not apply; the only live question is reach/footprint of smelt's chosen technique.
+  skeleton_cols (Link B): `{d, id, src}` (the declared `unique_key`; `val` is payload). `src` is a
+  literal discriminator added so the two arms' `(d, id)` domains can overlap without colliding under
+  the union's shared grain.
+- Link B facts: `combiner_discriminants` is not consulted (no aggregate in this model — a plain
+  `UNION ALL` of two projections). reach for `events_a`/`events_b` = `derive_model_bounds`'s ordinary
+  per-source timeseries-column reach, derived independently for each `FROM`/arm of the `UNION ALL`
+  (both arms are their own top-level `FROM` clause, not one nested inside the other the way `SC-1`'s
+  correlated subquery was) — footprint=bounded (one partition's worth of rows from EACH arm).
+- smelt analyzer: sound — `rules/incremental.rs`'s batched technique (recompute-region: `DELETE
+  [start,end)` + `INSERT` a freshly-recomputed `SELECT` for that window,
+  `crates/smelt-backend-duckdb/src/lib.rs::delete_and_insert_transactional`) re-executes the model's
+  ENTIRE `SELECT` — both `UNION ALL` arms — against their CURRENT source contents on every run,
+  including an explicit backfill of an already-processed window. There is no per-arm bound that
+  could under-cover one arm while covering the other: the derived `WHERE` clamp is applied to the
+  OUTER window, not threaded separately into each arm, so both arms see the same backfilled range.
+- Link C: no divergence over the deterministic 3-run scenario (run 1: process day 1 with one row per
+  arm; between runs: append a late row into EACH arm independently, into the SAME already-processed
+  day-1 partition; run 2: forward-only advance to day 2 — confirmed to leave day 1 stale at 2 rows,
+  not a bug; run 3: explicit backfill of day 1 — confirmed to recover BOTH late rows, 4 rows total,
+  multiset-equal to the full-refresh oracle over both arms' current contents).
+- condition (CONDITIONAL only): n/a — recorded as unconditional HOLDS.
+- production files/functions changed: none — no divergence found, nothing to fix.
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request`/`oracle::
+  multiset_equal`; adds `model_shapes::union_all_two_append_only` (a new `MultiSourceModelShape`
+  fixture, not experimental analyzer code) and a cell-local `stage_project`/`seed_sources` mirroring
+  `G-06`'s deterministic (non-proptest) late-append-then-backfill pattern — a single scenario
+  suffices here since the question (does recompute-region read BOTH arms on backfill) does not
+  depend on window count or row volume the way a combiner-fold cell's re-delivery count does.
+- evidence: `smelt-cli::tests::property_discovery::g_09_union_all_append_only::
+  late_rows_appended_into_both_union_arms_between_runs_are_recovered_on_backfill_but_not_forward_advance`
+  (`cargo test -p smelt-cli --test property_discovery --features duckdb g_09 --quiet` → 1 passed;
+  full suite `cargo test -p smelt-cli --test property_discovery --features duckdb --quiet` →
+  21 passed).
+- Coverage caveat (design §2.1 N4): a single deterministic scenario (one late-append hazard per arm,
+  one backfill), not proptest-generated — mirrors `G-06`'s rationale: the qualitative question (does
+  the whole `SELECT` re-execute on backfill) has no combiner-fold dimension to vary. Not covered: a
+  THIRD arm, an arm declared `mutable-snapshot` instead of append-only (a distinct, not-yet-catalogued
+  cell mixing `G-09`'s multi-arm shape with `G-04`/`G-05`'s in-place-mutation hazard), or a `UNION ALL`
+  feeding a downstream `GROUP BY` (this cell's model is a bare pass-through union, no aggregate above
+  it).

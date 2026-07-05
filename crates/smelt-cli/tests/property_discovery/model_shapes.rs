@@ -556,8 +556,80 @@ SELECT d, balance FROM (
     }
 }
 
+/// `G-09`: `UNION ALL` of two independent append-only timeseries sources
+/// (`events_a`, `events_b`), batched per partition
+/// (`unique_key: [d, id, src]` — `src` disambiguates the two arms so a
+/// same-`(d, id)` row from each arm never collides under the union's shared
+/// grain) (`docs/research/20260705-property-discovery-loop.md` §4 `G-09`).
+/// Link 0: a multiset union is combiner-identity-agnostic by construction —
+/// no combiner even runs, so this is really testing whether smelt's
+/// **recompute-region** (batched DELETE+INSERT of the whole `[start,end)`
+/// window; `G-03`/`G-07`'s established technique for `refresh: batched`) reads
+/// BOTH union arms' CURRENT contents on an explicit backfill of an
+/// already-processed partition — a per-arm reach that under-covers one arm
+/// (e.g. `source_bounds` deriving a bound from only the first `FROM` clause
+/// it text-scans, `SC-1`'s known failure shape in miniature) would silently
+/// strand a late row appended into arm B while arm A recomputes correctly.
+/// Each arm gets its own late-append between runs so the hazard schedule
+/// exercises both arms independently, not just one.
+pub fn union_all_two_append_only() -> MultiSourceModelShape {
+    MultiSourceModelShape {
+        name: "events_union_all",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d, id, src]
+---
+SELECT d, id, val, 'a' AS src FROM smelt.sources.events_a
+UNION ALL
+SELECT d, id, val, 'b' AS src FROM smelt.sources.events_b
+"#,
+        sources: &[
+            MultiSourceSpec {
+                name: "events_a",
+                columns: &[
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "id",
+                        ty: "INTEGER",
+                    },
+                    SourceColumn {
+                        name: "val",
+                        ty: "DOUBLE",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+            MultiSourceSpec {
+                name: "events_b",
+                columns: &[
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "id",
+                        ty: "INTEGER",
+                    },
+                    SourceColumn {
+                        name: "val",
+                        ty: "DOUBLE",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-09  UNION ALL of two append-only arms.
 // G-10  join fan-out on a COMPOSITE unique key · append-only.
