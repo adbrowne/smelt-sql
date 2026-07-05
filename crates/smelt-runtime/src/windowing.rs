@@ -6,7 +6,11 @@
 //! CLI's `compute_incremental_windows` path, closing the gap that previously existed
 //! when `execute_project` used only `analyze_batch_safety`'s `context_days`.
 //!
-//! Also owns `validate_run_window_alignment` (moved from `smelt-cli::temporal`).
+//! Also owns `validate_run_window_alignment` (moved from `smelt-cli::temporal`)
+//! and `validate_run_window_against_partition_grid` (`g_run >= g_part`, BL5),
+//! both called from [`compute_incremental_windows`] so every real
+//! `smelt run`/`smelt backfill`/UI run enforces them — see
+//! `docs/specs/batched_models.md` §"Run window vs partition granularity".
 
 use std::collections::HashMap;
 
@@ -114,6 +118,13 @@ pub fn compute_incremental_windows(
             wide_batch_warning: None,
         });
     }
+
+    // Fail-closed run-window validation (`batched_models.md` §"Run window vs
+    // partition granularity"): alignment to `timeseries.granularity`, then
+    // `g_run >= g_part` against the partition column's own derived grid unit.
+    // Must run before any batching/widening below — a misaligned or
+    // sub-`g_part` window is refused outright, never silently coarsened.
+    validate_run_window_against_partition_grid(sql, timeseries, start_date, end_date)?;
 
     // Analyze temporal dependencies to compute effective window.
     let stripped = smelt_parser::strip_frontmatter(sql);
@@ -316,6 +327,80 @@ pub fn validate_run_window_alignment(
             Ok(())
         }
     }
+}
+
+/// Derive the truncation/grid granularity (`g_part`) of `partition_column`'s
+/// SELECT-list projection expression in `sql`, if classifiable.
+///
+/// Locates the projection via `smelt_logical::analyze_select` (the shared
+/// select-item classifier — no second parse) and reads its truncation unit
+/// off the same structural monotonicity trace `trace_event_time` uses
+/// (`smelt_logical::analysis::monotonicity::classify_truncation_grid_unit`).
+/// Returns `None` — undecidable, not a positive disproof — when the
+/// projection can't be found or its shape doesn't resolve to a known grid
+/// unit; callers must fail open (skip the `g_run >= g_part` comparison) in
+/// that case, matching the trace's existing `Undecidable` posture.
+fn derive_partition_grid_unit(sql: &str, partition_column: &str) -> Option<Granularity> {
+    let analysis = smelt_logical::analyze_select(sql)?;
+    let expr = analysis.items.into_iter().find_map(|item| match item {
+        smelt_logical::SelectItemKind::CountDistinct { alias, expr, .. }
+        | smelt_logical::SelectItemKind::OtherAggregate { alias, expr, .. }
+        | smelt_logical::SelectItemKind::GroupByKey { alias, expr, .. }
+            if alias == partition_column =>
+        {
+            Some(expr)
+        }
+        _ => None,
+    })?;
+    smelt_logical::analysis::monotonicity::classify_truncation_grid_unit(&expr)
+}
+
+/// Validate the run window `[start, end)` against the model's derived
+/// partition granularity (`g_part`), in addition to the ordinary
+/// alignment-to-declared-granularity check ([`validate_run_window_alignment`]).
+///
+/// Two checks, in order:
+/// 1. The window aligns to `timeseries.granularity` boundaries (existing
+///    check, unconditional).
+/// 2. `timeseries.granularity` (`g_run`) is at least as coarse as the
+///    partition column's derived grid unit (`g_part`) — i.e. `g_run >=
+///    g_part` under `Granularity`'s increasing-coarseness ordering. When
+///    `g_part` can't be derived (an opaque projection, an unrecognised
+///    truncation unit), this second check is skipped — fail open, since an
+///    undecidable `g_part` is not a positive disproof.
+///
+/// Ships hard-validation only: a sub-`g_part` run window is rejected with a
+/// message naming the minimum window, never silently coarsened to fit
+/// (`batched_models.md` §"Run window vs partition granularity"; auto-coarsen
+/// is a deferred enhancement, see Known Divergences there).
+///
+/// Called from [`compute_incremental_windows`] — the single real driver both
+/// `smelt-cli` and `smelt-ui` runs go through (`execute_project`) — so both
+/// consumers get this refusal for free.
+pub fn validate_run_window_against_partition_grid(
+    sql: &str,
+    timeseries: &TimeseriesConfig,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(), String> {
+    validate_run_window_alignment(start, end, &timeseries.granularity)?;
+
+    let Some(g_part) = derive_partition_grid_unit(sql, &timeseries.partition_column) else {
+        return Ok(());
+    };
+
+    if timeseries.granularity < g_part {
+        return Err(format!(
+            "run window granularity ({}) is finer than partition column '{}''s derived \
+             granularity ({}); the minimum run window for this model is one {}",
+            granularity_display(&timeseries.granularity),
+            timeseries.partition_column,
+            granularity_display(&g_part),
+            granularity_display(&g_part),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Advance `current` by exactly one partition step for the given granularity.

@@ -21,6 +21,7 @@
 //! are conservative/sound, so no special-case is implemented here.
 
 use serde::Serialize;
+use smelt_core::Granularity;
 use smelt_parser::{BinaryExpr, CastExpr, ColumnRef, Expr, FunctionCall};
 
 use crate::analysis::source_bounds::{self, BoundContext, Seconds};
@@ -93,6 +94,17 @@ pub struct Monotonicity {
     /// Strictly injective (true) vs weakly monotone with plateaus (false,
     /// e.g. `DATE_TRUNC`).
     pub is_strict: bool,
+    /// The truncation/grid unit of the outermost many-to-one transform in
+    /// the chain, if any (e.g. `DATE_TRUNC('day', …)` → `Some(Granularity::Day)`,
+    /// `CAST(… AS DATE)` → `Some(Granularity::Day)`). `None` when the chain
+    /// has no grid-truncating layer (a bare column, an offset-only shift) or
+    /// the layer's unit couldn't be resolved to a `Granularity` (e.g. an
+    /// unrecognised `DATE_TRUNC` unit string) — undecided, not a positive
+    /// disproof. Set by the outermost grid-truncating layer, overwriting any
+    /// inner value, since the outermost transform governs the expression's
+    /// final partition grid. See `docs/specs/batched_models.md`
+    /// §"Run window vs partition granularity".
+    pub grid_unit: Option<Granularity>,
 }
 
 /// Whether a `NotTraceable` verdict is a positive structural disproof or
@@ -281,6 +293,7 @@ fn identity_monotonicity() -> Monotonicity {
         is_positive: true,
         is_always_monotonic: true,
         is_strict: true,
+        grid_unit: None,
     }
 }
 
@@ -422,7 +435,17 @@ fn classify_function(func: &FunctionCall, declared_monotonic: bool) -> Classific
 
     match upper.as_str() {
         "DATE_TRUNC" | "DATE_BIN" | "TIME_BUCKET" => {
-            recurse_single_column_arg(&args, &upper, true, declared_monotonic)
+            let grid_unit = args
+                .iter()
+                .find_map(extract_string_literal_text)
+                .and_then(|s| unit_text_to_granularity(&s));
+            match recurse_single_column_arg(&args, &upper, true, declared_monotonic) {
+                Classification::Trace(mut chain) => {
+                    chain.monotonicity.grid_unit = grid_unit;
+                    Classification::Trace(chain)
+                }
+                other => other,
+            }
         }
         "FLOOR" => recurse_single_column_arg(&args, &upper, true, declared_monotonic),
         "COALESCE" => classify_coalesce(&args),
@@ -536,10 +559,69 @@ fn classify_cast(cast: &CastExpr, declared_monotonic: bool) -> Classification {
         Classification::Trace(mut chain) => {
             if type_name == "DATE" {
                 chain.monotonicity.is_strict = false;
+                chain.monotonicity.grid_unit = Some(Granularity::Day);
             }
             Classification::Trace(chain)
         }
         other => other,
+    }
+}
+
+/// Extract the text of a single `STRING` literal token from `expr`'s
+/// immediate token children, if any (e.g. the `'day'` in `DATE_TRUNC('day',
+/// col)`, or the `'1 day'` in `DATE_BIN(INTERVAL '1 day', col)`). Structural
+/// AST-token lookup, not a text/substring search over the SQL.
+fn extract_string_literal_text(expr: &Expr) -> Option<String> {
+    use smelt_parser::SyntaxKind::STRING;
+
+    let token = expr
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == STRING)?;
+    Some(
+        token
+            .text()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string(),
+    )
+}
+
+/// Map a truncation/grid unit string (e.g. `"day"`, `"1 day"`, `"hours"`) to
+/// the closed `Granularity` enum. Takes the last whitespace-separated token
+/// (so an `INTERVAL`-shaped bucket width like `"1 day"` resolves the same as
+/// a bare unit string), lower-cases, and strips a trailing plural `s`.
+/// Returns `None` for an unrecognised unit — undecided, not a positive
+/// disproof; callers fall back to skipping the `g_run >= g_part` comparison.
+fn unit_text_to_granularity(text: &str) -> Option<Granularity> {
+    let last_word = text.split_whitespace().next_back()?.to_ascii_lowercase();
+    let singular = last_word.strip_suffix('s').unwrap_or(&last_word);
+    match singular {
+        "hour" => Some(Granularity::Hour),
+        "day" => Some(Granularity::Day),
+        "week" => Some(Granularity::Week),
+        "month" => Some(Granularity::Month),
+        "quarter" => Some(Granularity::Quarter),
+        "year" => Some(Granularity::Year),
+        _ => None,
+    }
+}
+
+/// Structural classification entry point exposed to callers that need only
+/// the derived truncation/grid unit of a projected expression (`g_part`),
+/// without a resolvable `BoundContext` (e.g. `smelt_cli::temporal`'s run-window
+/// validation, which has the model's own SQL but no upstream-source bound
+/// map). Reuses the same `classify` walk `trace_event_time` uses — not a
+/// second independent parser — so `grid_unit` is always the walk's
+/// outermost-truncation verdict. Returns `None` when the expression doesn't
+/// classify to a traceable chain at all, or when it does but no layer in the
+/// chain resolved a grid unit (fail-open: caller treats this as
+/// undecidable and skips the `g_run >= g_part` comparison, matching the
+/// classifier's existing `Undecidable` posture elsewhere).
+pub fn classify_truncation_grid_unit(expr: &Expr) -> Option<Granularity> {
+    match classify(expr, false) {
+        Classification::Trace(chain) => chain.monotonicity.grid_unit,
+        _ => None,
     }
 }
 

@@ -177,7 +177,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
                 if let Some(ref inc) = model.incremental {
                     print!(
                         " (incremental: {} by {}, {})",
-                        serde_json::to_value(&inc.granularity)
+                        serde_json::to_value(inc.granularity)
                             .ok()
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_else(|| "?".to_string()),
@@ -313,7 +313,7 @@ fn build_physical_section(
                 part_col, gran
             )
         } else if let (Some(_), Some(ts)) = (&inc_config, &ts_config) {
-            let gran = serde_json::to_value(&ts.granularity)
+            let gran = serde_json::to_value(ts.granularity)
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "?".to_string());

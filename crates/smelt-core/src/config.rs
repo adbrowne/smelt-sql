@@ -432,7 +432,13 @@ impl<'de> Deserialize<'de> for DataLatency {
 ///
 /// A closed enum of supported time-unit boundaries. `week_start` for weekly
 /// partitions lives in `TimeseriesConfig.week_start`, not in this variant.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// Variant declaration order is increasing coarseness (`Hour` finest, `Year`
+/// coarsest) and derives `PartialOrd`/`Ord` on that basis — `g_run >= g_part`
+/// comparisons (`batched_models.md` §"Run window vs partition granularity")
+/// read this as a plain enum comparison rather than a bespoke arithmetic
+/// table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Granularity {
     Hour,

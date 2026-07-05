@@ -132,7 +132,7 @@ pub fn build_explain_output(
                     compute_batch_safety_label(model_name, &expanded_sql, model_file, &inc, &ts);
                 let source_bounds = compute_source_bounds(model_name, &expanded_sql, graph, config);
                 Some(ExplainIncremental {
-                    granularity: ts.granularity.clone(),
+                    granularity: ts.granularity,
                     partition_column: ts.partition_column.clone(),
                     event_time_column: ts.event_time_column.clone(),
                     unique_key: inc.unique_key.clone(),

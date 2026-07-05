@@ -98,6 +98,17 @@ The longer form `--event-time-start` and `--event-time-end` is also supported an
 !!! note
     Non-incremental models in the DAG are still executed normally. The time range only affects models with incremental configuration.
 
+### Run window granularity vs partition granularity
+
+The declared `granularity:` must be at least as coarse as the granularity actually produced by the model's `partition_column` expression. If `partition_column` is computed with `DATE_TRUNC('day', event_time)`, the model's real partition grid is daily, and `granularity: hour` is rejected even though the run window itself might otherwise look valid — an hourly run window doesn't correspond to a real partition boundary on a daily-partitioned model. The rejection names the minimum valid window:
+
+```
+run window granularity (hour) is finer than partition column 'event_date''s derived
+granularity (day); the minimum run window for this model is one day
+```
+
+Declaring `granularity: day` (or coarser, e.g. `week`) on the same model is valid — run-window size and partition granularity are otherwise independent, as long as the declared granularity is not finer than what the SQL actually produces. When smelt can't determine the partition column's actual granularity from the SQL (an opaque function call it doesn't recognize), this extra check is skipped and only the ordinary run-window alignment check applies — smelt never guesses or silently widens the window to compensate.
+
 ### Auto mode
 
 Let smelt determine what needs processing based on previously recorded intervals:

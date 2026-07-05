@@ -457,7 +457,7 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         data: OpportunityData::Incremental {
             event_time_column: event_time_column.clone(),
             partition_column: partition_col.clone(),
-            granularity: ts_config.granularity.clone(),
+            granularity: ts_config.granularity,
         },
     }))
 }
@@ -1482,7 +1482,7 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
                 model: model.name.clone(),
                 event_time_column: event_time_column.clone(),
                 partition_column: partition_column.clone(),
-                granularity: granularity.clone(),
+                granularity: *granularity,
             })),
             _ => Ok(None),
         },

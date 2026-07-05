@@ -266,7 +266,7 @@ pub fn build_catalog(
 
         let incremental = match (inc_config, ts_config) {
             (Some(inc), Some(ts)) => Some(CatalogIncremental {
-                granularity: serde_json::to_value(&ts.granularity)
+                granularity: serde_json::to_value(ts.granularity)
                     .ok()
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
                     .unwrap_or_else(|| "unknown".to_string()),

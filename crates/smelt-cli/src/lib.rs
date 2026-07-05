@@ -41,8 +41,8 @@ pub use smelt_runtime::{
     TimeRange, TransformError, UpstreamSchemas,
 };
 pub use temporal::{
-    compute_incremental_windows, compute_single_window, validate_run_window_alignment,
-    IncrementalBatch, IncrementalWindows, SingleIncrementalWindow,
+    compute_incremental_windows, validate_run_window_against_partition_grid,
+    validate_run_window_alignment, IncrementalBatch, IncrementalWindows,
 };
 pub use test_compiler::{
     compile_whole_model_test_with_fns, extract_ctes, find_cte_ref_in_body,
