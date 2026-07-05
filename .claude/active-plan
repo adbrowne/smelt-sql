@@ -92,8 +92,16 @@
 # sub-plans afterwards. Design: docs/research/20260704-maintenance-fundamentals.md
 # §"Target plan architecture"; specs: model_properties.md, model_transforms.md,
 # model_maintenance.md.
+# ACTIVE (2026-07-05, keyed collapse first): the refresh-mode keyed collapse.
+# `cumulative`/`latest_value`/`accumulating_snapshot` collapse into one
+# `refresh: keyed` mode. Spec: docs/specs/keyed_models.md; decision record:
+# docs/research/20260705-keyed-collapse-application.md. The keyed-collapse
+# sub-plan (docs/plans/20260705-keyed-collapse.md, K1–K6) is the FIRST pending
+# registry row in the master — the loop runs it to completion before L4
+# batched/versioned/materialized_view. L4 latest_value and L4 cumulative are
+# DE-REGISTERED (see the master's 2026-07-05 registry note); do not run them.
 master_plan: docs/plans/20260704-model-updates.md
-active_subplan: docs/plans/20260704-model-updates-fundamentals.md
+active_subplan: docs/plans/20260705-keyed-collapse.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.

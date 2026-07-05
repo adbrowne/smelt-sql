@@ -85,9 +85,8 @@ queue the next group, scaffold its sub-plan (own spec-diff + docs-site update) a
 | [`docs/plans/20260704-model-updates-fundamentals.md`](20260704-model-updates-fundamentals.md) | **Fundamentals (L1+L2)** — derived proofs + transforms (F1–F3 consolidate the six code duplications; F4–F10 the new proof classifiers: algebraic discriminants, scoped partition-alignment, join-contribution/fan-out, presentation-map purity, additive-only diff, input-delta discovery, window-independence; F11–F15 the transforms: windowed-keyed-maintenance driver, decomposed-state+view, two-layer widened-scan/exact-clamp redesign, targeted column backfill, dimension-driven horizon MERGE). Runs **first** — the fundamentals-first re-cut (`docs/research/20260704-maintenance-fundamentals.md` §"Target plan architecture") that Groups B/C/D later compose. Does not cover L3 declaration surfaces or L4 mode compositions. | done (2026-07-05) |
 | [`docs/plans/20260704-model-updates-group-a.md`](20260704-model-updates-group-a.md) | **Group A** — rename & ontology landing (A1 `refresh: batched` selector + `batched:` block, hard-cutting the `incremental:` block; A2 `Incremental→Batched` diagnostic/config rename + downstream doc sweep; A3 remove `materialized_view` from the storage axis; A4 IVM capability flags + `refresh: materialized_view` hard error). | done (2026-07-04) |
 | [`docs/plans/20260704-model-updates-l3-declarations.md`](20260704-model-updates-l3-declarations.md) | **L3 — Declaration surfaces** (DC1–DC5): declared monotonicity escape hatch, functional dependency `key → column`, bounded-domain/space budget, warning-only horizon ceiling, + source mutation-profile/lateness declaration. Each declaration may only **widen** a proof (fail-closed when it tries to narrow). Runs after Fundamentals. | done (2026-07-05) |
+| [`docs/plans/20260705-keyed-collapse.md`](20260705-keyed-collapse.md) | **Keyed collapse** (K1–K6) — **supersedes L4 latest_value and the `accumulating_snapshot` master; displaces L4 cumulative** (see 2026-07-05 note below). One `refresh: keyed` mode (`docs/specs/keyed_models.md`) replaces `cumulative`/`latest_value`/`accumulating_snapshot`: companion spec edits (retire the three mode specs + 10 touchpoints), `RefreshStrategy::Keyed` + `Keyed*` diagnostics, the order-monotone overwrite family + derived postures + enrichment-join admission, the transactional merge ledger, the snapshot-reconcile executor + admission matrix, once-write + `smelt.latest`/`once`/`current` pattern functions. Decision record: `docs/research/20260705-keyed-collapse-application.md`. | pending |
 | [`docs/plans/20260704-model-updates-l4-batched.md`](20260704-model-updates-l4-batched.md) | **L4 batched** (BL1–BL8) — **supersedes Group B**. Wires the batched composition (partition-addressed; per-partition equivalence a *strengthening* of the one invariant) from fundamentals F1/F3/F5/F10/F13 + the batched-local residue: taint/pinning, `HAVING`/`DISTINCT`, run/partition granularity, self-referential ordered execution, monotone-integer keys, clamp observability, backfill chunking. | pending |
-| [`docs/plans/20260704-model-updates-l4-cumulative.md`](20260704-model-updates-l4-cumulative.md) | **L4 cumulative** (CU1–CU4) — **supersedes Group C**. Key-addressed ladder rungs 2–4 wired from F4/F7/F11/F12: decomposed-monoid `AVG`/Welford/approx-distinct + presentation view, group-rung retraction via delta history, opt-in bounded-domain multiset (needs the L3 budget declaration). | pending |
-| [`docs/plans/20260704-model-updates-l4-latest-value.md`](20260704-model-updates-l4-latest-value.md) | **L4 latest_value** (LV1–LV4) — **supersedes Group D/D1**. SCD-1 keyed-overwrite: `RefreshStrategy::LatestValue` + upsert-overwrite via the F11 windowed-keyed-maintenance driver; "latest" = max-by-ordering vs last-processed; input-consumption derivation. Wires F2/F4/F9/F11. | pending |
 | [`docs/plans/20260704-model-updates-l4-versioned.md`](20260704-model-updates-l4-versioned.md) | **L4 versioned** (V1–V5) — **supersedes Group D/D2**. SCD-2 close-old/open-new via keyed `merge_into` (the out-of-window keyed write — the canonical proof that output addressing, not the clock, is the axis) + smelt-managed validity columns + tracked-attribute selection. Wires F1/F2/F4/F10/F11/F13. | pending |
 | [`docs/plans/20260704-model-updates-l4-materialized-view.md`](20260704-model-updates-l4-materialized-view.md) | **L4 materialized_view** (MV1–MV3) — **supersedes Group D/D3**, minimal. Delegate-to-native-IVM emit + verbatim engine-error relay + remove the silent `create_table_as` fallback. Wires no fundamentals; depends on A4 (done). | pending |
 
@@ -102,15 +101,31 @@ queue the next group, scaffold its sub-plan (own spec-diff + docs-site update) a
 > Fundamentals → L3 → L4 (batched, cumulative, latest_value, versioned, materialized_view); because the
 > loop runs the first READY row to completion, all F-phases land before any L4 row begins.
 
+> **The keyed collapse (2026-07-05).** `refresh: cumulative`, `latest_value`, and `accumulating_snapshot`
+> are collapsed into one `refresh: keyed` mode (`docs/specs/keyed_models.md`; decision record
+> `docs/research/20260705-keyed-collapse-application.md`). Registry consequences: the **keyed-collapse
+> sub-plan is registered first** among pending rows (it renames the shipped cumulative path, so it must
+> land before anything that builds on the old names); **L4 latest_value is de-registered** (its scope is
+> absorbed — `docs/plans/20260704-model-updates-l4-latest-value.md` retained for history only); **L4
+> cumulative (rungs 2–4) is de-registered** — its scope is still wanted but its oracle
+> (`cumulative_aggregate.md`) is retired by K1, so it is re-scaffolded against `keyed_models.md` after
+> the collapse completes (do not run `docs/plans/20260704-model-updates-l4-cumulative.md` as-is). The
+> `accumulating_snapshot` master (`docs/plans/20260704-accumulating-snapshot.md`, never in this registry)
+> is superseded the same way. **L4 versioned** stays (versioned remains a peer mode; its plan composes
+> against `keyed_models.md`'s driver text) and **L4 materialized_view** stays (K1 absorbs only its D16
+> shape-wording item).
+
 ### Group scaffolding queue (human-gated — NOT registered until scaffolded)
 
 The L3/L4 re-cut is scaffolded and registered above — Groups B/C/D no longer need separate scaffolding
 (their capabilities are re-homed into the Fundamentals L1/L2 layer and the L4 mode compositions). What
 remains human-gated:
 
-- **`accumulating_snapshot`** — delivered by its own master, `docs/plans/20260704-accumulating-snapshot.md`
-  (not this registry). It composes the join-contribution monotonicity proof + dimension-driven
-  horizon-bounded MERGE + the horizon settled-delay transform once those fundamentals land.
+- **`accumulating_snapshot`** — superseded by the keyed collapse (2026-07-05 note above): its use cases
+  land as `refresh: keyed` column families via `docs/plans/20260705-keyed-collapse.md`; the standalone
+  master `docs/plans/20260704-accumulating-snapshot.md` is retained for history only.
+- **Keyed rungs 2–4** (decomposed state / retraction / multiset — the de-registered L4-cumulative scope)
+  — re-scaffold against `docs/specs/keyed_models.md` after the keyed-collapse sub-plan completes.
 - The loop reports `<<MASTER_EXHAUSTED>>` when no registered sub-plan has pending work; a human then
   scaffolds any further sub-plan (via `/smelt:plan` against the cited spec) and adds its registry row.
   **The loop never scaffolds a sub-plan or authors a spec autonomously.**
