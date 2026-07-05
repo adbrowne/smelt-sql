@@ -8,7 +8,7 @@
 //!
 //! This file owns the model-plan construction (batch dispatch per
 //! `BatchSafety` shape), the per-model compile+execute loop (full refresh,
-//! incremental batches, and cumulative dispatch via `crate::cumulative`),
+//! incremental batches, and keyed dispatch via `crate::cumulative`),
 //! cancellation handling, manifest writes, and interval-store updates.
 
 use std::collections::{HashMap, HashSet};
@@ -205,9 +205,9 @@ pub async fn execute_project(
                         .cloned()
                         .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
-                    // Route cumulative detection through is_cumulative().
-                    if metadata.is_some_and(|m| m.is_cumulative()) {
-                        ModelStrategy::Cumulative
+                    // Route keyed detection through is_keyed().
+                    if metadata.is_some_and(|m| m.is_keyed()) {
+                        ModelStrategy::Keyed
                     } else {
                         match materialization {
                             smelt_core::config::Materialization::Ephemeral => {
@@ -412,7 +412,7 @@ pub async fn execute_project(
     // timeseries with per-entity source YAML timeseries declarations (BUG-072).
     // Built here (before model-plan construction) because BL2's bound-based
     // batch-safety derivation needs each model's dependency timeseries info
-    // while building its `ModelPlan`/`IncrementalPlan`; cumulative dispatch and
+    // while building its `ModelPlan`/`IncrementalPlan`; keyed dispatch and
     // incremental pushdown also use this same map further below.
     let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
     let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
@@ -786,16 +786,16 @@ pub async fn execute_project(
             }
         }
 
-        // Cumulative-aggregate dispatch — handled separately from the
-        // incremental / full-refresh branches because it has its own per-
-        // partition merge loop (see `smelt_runtime::cumulative` and
-        // `docs/specs/cumulative_aggregate.md`).
-        let plan_is_cumulative = plan
+        // Keyed dispatch — handled separately from the incremental /
+        // full-refresh branches because it has its own per-partition merge
+        // loop (see `smelt_runtime::cumulative` and
+        // `docs/specs/keyed_models.md`).
+        let plan_is_keyed = plan
             .model_file
             .metadata
             .as_deref()
-            .is_some_and(|m| m.is_cumulative());
-        if plan_is_cumulative {
+            .is_some_and(|m| m.is_keyed());
+        if plan_is_keyed {
             let db_table_name = plan.model_file.db_name_owned();
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
@@ -822,15 +822,15 @@ pub async fn execute_project(
                 }
                 _ => {
                     // No run window: single-shot full refresh of the
-                    // cumulative SELECT. Matches CLI's behaviour for
+                    // keyed SELECT. Matches CLI's behaviour for
                     // `smelt build` / `smelt run` without an event-time
                     // window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
                     // Classify even on the no-window full-refresh path: a
                     // classifier rejection must REFUSE the model
-                    // (cumulative_aggregate.md Constraint #10 — "No silent
-                    // downgrade. … No fallback to full-refresh"). Without this,
-                    // forbidden cumulative SQL (e.g. a non-allowlisted
+                    // (keyed_models.md Constraint #4 — "The catalogue is
+                    // closed and the classifier is fail-closed"). Without
+                    // this, forbidden keyed SQL (e.g. a non-allowlisted
                     // aggregator) would be silently materialised as a plain
                     // full refresh whenever no event-time window is supplied.
                     crate::cumulative::classify_cumulative_sql(
@@ -854,11 +854,7 @@ pub async fn execute_project(
                         .create_table_as(schema, &db_table_name, &compiled.sql)
                         .await
                         .map_err(|err| {
-                            anyhow::anyhow!(
-                                "Failed to create cumulative model {}: {}",
-                                plan.name,
-                                err
-                            )
+                            anyhow::anyhow!("Failed to create keyed model {}: {}", plan.name, err)
                         })?;
                     let row_count = backend
                         .get_row_count(schema, &db_table_name)
@@ -1255,7 +1251,7 @@ fn build_outcome(
 }
 
 /// Build the project-wide `smelt.<path> → timeseries` lookup map used by
-/// the planner (cumulative classification) and the incremental execute path
+/// the planner (keyed classification) and the incremental execute path
 /// (source-filter pushdown, Phase 3).
 ///
 /// Merges two sources of timeseries declarations:

@@ -112,7 +112,7 @@ pub fn format_strategy(strategy: &ModelStrategy) -> String {
             partition_column,
             granularity,
         } => format!("incremental (by {}, {})", partition_column, granularity),
-        ModelStrategy::Cumulative => "cumulative".to_string(),
+        ModelStrategy::Keyed => "keyed".to_string(),
         ModelStrategy::Ephemeral => "ephemeral".to_string(),
         ModelStrategy::Skipped { .. } => "skipped".to_string(),
     }

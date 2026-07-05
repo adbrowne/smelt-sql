@@ -108,9 +108,9 @@ the overwrite and once-write families, the transactional ledger, and the snapsho
 | Phase | Depends on | Spec anchor | Status |
 |-------|-----------|-------------|--------|
 | K1 | — (`keyed_models.md` committed) | decision record §3 change list; `keyed_models.md` §References "Related specs" | done |
-| K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | pending |
-| K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | blocked |
-| K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | blocked |
+| K2 | K1 | `keyed_models.md` §Surface "YAML frontmatter", "Diagnostic codes"; §Known Divergences (parse state) | done |
+| K3 | K2 | `keyed_models.md` §Surface "The column-family catalogue"; §Semantics "Derived execution postures", "Ordering ties", "Enrichment joins" | pending |
+| K4 | K2 | `keyed_models.md` §Semantics "The transactional merge ledger", "Reprocessing"; §Constraints 9, 11 | pending |
 | K5 | K3, K4 | `keyed_models.md` §Semantics "The two run shapes", "Admission matrix"; §Constraints 7, 8 | blocked |
 | K6 | K3, K5 | `keyed_models.md` §Surface catalogue (once-write, pattern functions); §Semantics "Functions inside keyed bodies" | blocked |
 
@@ -485,6 +485,16 @@ four recipes and the explain readout.
   block above to be resolved by a human first). With this, every phase in the sub-plan is `done` or
   `blocked` — no `pending` row remains, so the sub-plan is no longer READY per the master's registry
   rule until a human resolves the K2 hardening-budget regression.
+
+- **2026-07-05, K2 done; K3/K4 unblocked.** K2 landed (`RefreshStrategy::Keyed` rename, the
+  `refresh: cumulative` pointing error, the `Keyed*` diagnostic family, the interim
+  `KeyedSnapshotPostureUnsupported` refusal) — implementer + independent reviewer both green, full gate
+  suite passing except the pre-existing unrelated `smelt-cli::e2e::incremental_refusal::test_outer_having_refused`
+  failure (confirmed present on the pre-K2 commit `9f7118da` via `git stash`, not caused by this phase).
+  K3 and K4 each name **K2 only** as their precondition, so both flip `blocked` → `pending` per the
+  block-rule note recorded against them above ("unblocks automatically once K2 is resolved and flipped to
+  `done`"). K5 and K6 stay `blocked` — they need K3 **and** K4 (K5) or K3 **and** K5 (K6), neither of
+  which is `done` yet.
 
 ## Deferred during implementation
 

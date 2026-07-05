@@ -321,7 +321,7 @@ fn build_physical_section(
                 "incremental (partition: {}, granularity: {})",
                 ts.partition_column, gran
             )
-        } else if metadata.is_some_and(|m| m.is_cumulative()) {
+        } else if metadata.is_some_and(|m| m.is_keyed()) {
             "cumulative_aggregate".to_string()
         } else {
             "full_refresh".to_string()
@@ -380,7 +380,7 @@ mod tests {
         let path: std::path::PathBuf = format!("models/{}.sql", model_name).into();
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Cumulative),
+            refresh: Some(RefreshStrategy::Keyed),
             ..ModelMetadata::default()
         };
         let model_file = ModelFile {

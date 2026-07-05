@@ -21,8 +21,8 @@ pub enum ConfigError {
 /// Stored outputs (`materialization: table`) may
 /// opt into a non-default refresh strategy.  `Full` is the default (no key
 /// needed).  `Batched` processes new data forward in partition-sized slices
-/// (see `docs/specs/batched_models.md`).  `Cumulative` enables the
-/// cumulative-aggregate merge loop (see `docs/specs/cumulative_aggregate.md`).
+/// (see `docs/specs/batched_models.md`).  `Keyed` enables the key-addressed
+/// merge loop (see `docs/specs/keyed_models.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshStrategy {
     /// Rebuild from scratch on every run (default; no key required).
@@ -31,12 +31,13 @@ pub enum RefreshStrategy {
     /// `timeseries:` block. Opt-in: `refresh: batched` (+ optional `batched:`
     /// block for `unique_key`/`safety_overrides`).
     Batched,
-    /// Cumulative-aggregate merge: one row per GROUP BY key, grown across
-    /// partitions using commutative-associative per-column combiners.
-    Cumulative,
+    /// Keyed merge: one row per GROUP BY key, grown across partitions by
+    /// folding each run's per-key delta into the stored state via
+    /// `merge_into`, using per-column-family combiners.
+    Keyed,
     /// Engine-maintained materialized view: the backend keeps the output
     /// current with its own native incremental-view maintenance, not a
-    /// smelt-driven refresh loop. Keyed output, like `Cumulative`; forbids
+    /// smelt-driven refresh loop. Keyed output, like `Keyed`; forbids
     /// `timeseries:` and a `batched:` block. Requires the resolved backend's
     /// `supports_native_ivm` capability — otherwise a hard error, never a
     /// silent fallback (`docs/specs/materialized_view.md` §"No silent fallback").
@@ -52,10 +53,15 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
         match s.to_lowercase().as_str() {
             "full" => Ok(RefreshStrategy::Full),
             "batched" => Ok(RefreshStrategy::Batched),
-            "cumulative" => Ok(RefreshStrategy::Cumulative),
+            "cumulative" => Err(serde::de::Error::custom(
+                "Invalid refresh strategy: 'cumulative'. `refresh: cumulative` is now \
+                 `refresh: keyed` — rename the frontmatter/config value (see \
+                 docs/specs/keyed_models.md)",
+            )),
+            "keyed" => Ok(RefreshStrategy::Keyed),
             "materialized_view" => Ok(RefreshStrategy::MaterializedView),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid refresh strategy: {}. Must be 'full', 'batched', 'cumulative', or 'materialized_view'",
+                "Invalid refresh strategy: {}. Must be 'full', 'batched', 'keyed', or 'materialized_view'",
                 s
             ))),
         }
@@ -70,7 +76,7 @@ impl Serialize for RefreshStrategy {
         match self {
             RefreshStrategy::Full => serializer.serialize_str("full"),
             RefreshStrategy::Batched => serializer.serialize_str("batched"),
-            RefreshStrategy::Cumulative => serializer.serialize_str("cumulative"),
+            RefreshStrategy::Keyed => serializer.serialize_str("keyed"),
             RefreshStrategy::MaterializedView => serializer.serialize_str("materialized_view"),
         }
     }
@@ -97,7 +103,7 @@ impl<'de> Deserialize<'de> for Materialization {
             _ => Err(serde::de::Error::custom(format!(
                 "Invalid materialization type: {}. Must be 'table', 'view', or 'ephemeral'. \
                  Note: 'test' has been removed — use `smelt.test` declarations instead. \
-                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: cumulative` instead. \
+                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: keyed` instead. \
                  Note: 'materialized_view' has been removed — use `refresh: materialized_view` instead.",
                 s
             ))),
@@ -324,7 +330,7 @@ pub struct ModelConfig {
     pub materialization: Option<Materialization>,
     #[serde(default)]
     pub timeseries: Option<TimeseriesConfig>,
-    /// Refresh axis override (`full` | `batched` | `cumulative`). Frontmatter
+    /// Refresh axis override (`full` | `batched` | `keyed`). Frontmatter
     /// wins over this when both set it (see `Config::get_refresh`).
     #[serde(default)]
     pub refresh: Option<RefreshStrategy>,
@@ -475,8 +481,8 @@ pub struct BatchedSafetyOverrides {
 /// decide *how* (which strategy to use) via `resolve_strategy()`.
 ///
 /// UPSERT (`MERGE`) is **not** an incremental strategy — it is the physical
-/// primitive used by the `cumulative_aggregate` materialization
-/// (`docs/specs/cumulative_aggregate.md`), which is a separate sibling rule
+/// primitive used by the `refresh: keyed` merge loop
+/// (`docs/specs/keyed_models.md`), which is a separate sibling rule
 /// with a different equivalence contract. `Backend::merge_into` remains on
 /// the backend trait for that caller; it is not reachable from this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1103,7 +1109,7 @@ models:
     #[test]
     fn test_materialization_cumulative_aggregate_is_rejected() {
         // `materialization: cumulative_aggregate` is no longer valid —
-        // use `materialization: table` + `refresh: cumulative` instead.
+        // use `materialization: table` + `refresh: keyed` instead.
         let yaml = r#"
 name: test_project
 version: 1
@@ -1128,18 +1134,18 @@ models:
         );
     }
 
-    /// `refresh: cumulative` models cannot carry a `batched:` block.
-    /// The forbid is enforced in `validate_timeseries` via `is_cumulative()`.
+    /// `refresh: keyed` models cannot carry a `batched:` block.
+    /// The forbid is enforced in `validate_timeseries` via `is_keyed()`.
     /// Since `materialization: cumulative_aggregate` is no longer accepted,
-    /// this test uses the new surface (`materialization: table` + `refresh: cumulative`).
+    /// this test uses the new surface (`materialization: table` + `refresh: keyed`).
     #[test]
-    fn test_validate_refresh_cumulative_forbids_incremental_via_metadata() {
+    fn test_validate_refresh_keyed_forbids_incremental_via_metadata() {
         use crate::config::{BatchedConfig, BatchedSafetyOverrides, RefreshStrategy};
         use crate::metadata::{validate_timeseries, MetadataError, ModelMetadata};
 
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Cumulative),
+            refresh: Some(RefreshStrategy::Keyed),
             batched: Some(BatchedConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
@@ -1148,12 +1154,45 @@ models:
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("refresh: cumulative + batched: must error");
+            .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsBatched),
-            "Expected CumulativeForbidsBatched, got: {}",
+            matches!(err, MetadataError::KeyedForbidsBatched),
+            "Expected KeyedForbidsBatched, got: {}",
             err
         );
+    }
+
+    /// `refresh: keyed` deserializes to `RefreshStrategy::Keyed`.
+    #[test]
+    fn test_refresh_strategy_keyed_deserializes() {
+        let strategy: RefreshStrategy = serde_yaml::from_str("keyed").unwrap();
+        assert_eq!(strategy, RefreshStrategy::Keyed);
+    }
+
+    /// `refresh: cumulative` is a hard error pointing at the renamed value.
+    #[test]
+    fn test_refresh_strategy_cumulative_is_hard_error() {
+        let result: Result<RefreshStrategy, _> = serde_yaml::from_str("cumulative");
+        let err = result
+            .expect_err("`refresh: cumulative` must be rejected")
+            .to_string();
+        assert!(
+            err.contains("`refresh: cumulative` is now `refresh: keyed`"),
+            "error must contain the exact pointer message; got: {err}"
+        );
+    }
+
+    /// `refresh: latest_value` and `refresh: accumulating_snapshot` remain
+    /// unknown-value errors — this rename does not introduce them as aliases.
+    #[test]
+    fn test_refresh_strategy_latest_value_and_accumulating_snapshot_remain_unknown() {
+        for value in ["latest_value", "accumulating_snapshot"] {
+            let result: Result<RefreshStrategy, _> = serde_yaml::from_str(value);
+            assert!(
+                result.is_err(),
+                "`refresh: {value}` must still be rejected as unknown"
+            );
+        }
     }
 
     #[test]
@@ -1363,7 +1402,7 @@ targets:
     }
 
     /// `merge` is not an incremental strategy — UPSERT is the physical
-    /// primitive used by the cumulative-aggregate merge loop (`refresh: cumulative`),
+    /// primitive used by the keyed merge loop (`refresh: keyed`),
     /// not a knob on `incremental:`. Deserialising it must fail.
     #[test]
     fn test_incremental_strategy_no_merge_variant() {
@@ -1371,7 +1410,7 @@ targets:
         assert!(
             result.is_err(),
             "`merge` must not deserialise as an IncrementalStrategy — it is the \
-             physical primitive of the cumulative-aggregate merge loop (`refresh: cumulative`)"
+             physical primitive of the keyed merge loop (`refresh: keyed`)"
         );
     }
 

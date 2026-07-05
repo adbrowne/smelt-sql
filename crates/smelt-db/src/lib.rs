@@ -113,8 +113,8 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // path — they are never returned by extract_file_metadata itself:
         MetadataError::TimeseriesRequiredForBatched => None,
         MetadataError::MalformedTimeseries { .. } => None,
-        MetadataError::CumulativeForbidsTimeseries => None,
-        MetadataError::CumulativeForbidsBatched => None,
+        MetadataError::KeyedForbidsTimeseries => None,
+        MetadataError::KeyedForbidsBatched => None,
         MetadataError::BatchedRequiresRefreshBatched => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
         MetadataError::MaterializedViewForbidsBatched => None,
@@ -1067,16 +1067,16 @@ fn cte_ref_outside_test_diagnostics(
 fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCode {
     use smelt_logical::RuleDiagnosticCode as R;
     match code {
-        R::CumulativeRequiresGroupBy => DiagnosticCode::CumulativeRequiresGroupBy,
-        R::CumulativeUnknownAggregator => DiagnosticCode::CumulativeUnknownAggregator,
-        R::CumulativeGroupByContainsPartitionColumn => {
-            DiagnosticCode::CumulativeGroupByContainsPartitionColumn
+        R::KeyedRequiresGroupBy => DiagnosticCode::KeyedRequiresGroupBy,
+        R::KeyedUnknownCombiner => DiagnosticCode::KeyedUnknownCombiner,
+        R::KeyedGroupByContainsPartitionColumn => {
+            DiagnosticCode::KeyedGroupByContainsPartitionColumn
         }
-        R::CumulativeForbidsWindowFunctions => DiagnosticCode::CumulativeForbidsWindowFunctions,
-        R::CumulativeForbidsNondeterministic => DiagnosticCode::CumulativeForbidsNondeterministic,
-        R::CumulativeNoDrivingSource => DiagnosticCode::CumulativeNoDrivingSource,
-        R::CumulativeMultipleDrivingSources => DiagnosticCode::CumulativeMultipleDrivingSources,
-        R::CumulativeSqlNotParseable => DiagnosticCode::CumulativeSqlNotParseable,
+        R::KeyedForbidsWindowFunctions => DiagnosticCode::KeyedForbidsWindowFunctions,
+        R::KeyedForbidsNondeterministic => DiagnosticCode::KeyedForbidsNondeterministic,
+        R::KeyedSnapshotPostureUnsupported => DiagnosticCode::KeyedSnapshotPostureUnsupported,
+        R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
+        R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
         R::BatchedNotSafe => DiagnosticCode::BatchedNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
@@ -1112,7 +1112,7 @@ fn remap_pipe_parse_error_code(message: &str) -> DiagnosticCode {
 /// Resolve a `smelt.<path>` ref string to its definition's frontmatter
 /// `timeseries:` block, when it resolves to a model that declares one. This
 /// reconstructs (project-scoped) the `smelt.<path> → timeseries` lookup the
-/// runtime builds from the model graph, so the cumulative classifier sees the
+/// runtime builds from the model graph, so the keyed classifier sees the
 /// same driving sources in the editor as it does at build time.
 fn ref_timeseries_config(
     db: &dyn salsa::Database,
@@ -1446,12 +1446,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
-                smelt_core::metadata::MetadataError::CumulativeForbidsTimeseries => Some((
-                    ts_err.to_string(),
-                    DiagnosticCode::CumulativeForbidsTimeseries,
-                )),
-                smelt_core::metadata::MetadataError::CumulativeForbidsBatched => {
-                    Some((ts_err.to_string(), DiagnosticCode::CumulativeForbidsBatched))
+                smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => {
+                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsTimeseries))
+                }
+                smelt_core::metadata::MetadataError::KeyedForbidsBatched => {
+                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsBatched))
                 }
                 // `batched:` without `refresh: batched` maps to the generic
                 // YamlParseError code — no dedicated code exists yet.
@@ -1551,18 +1550,18 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
-        // Built-in planner-rule diagnostics (cumulative classifier, incremental
+        // Built-in planner-rule diagnostics (keyed classifier, incremental
         // batch-safety) surfaced through the uniform rule → diagnostics
         // interface. The checks live in `smelt-planner` (analysis-pure); this
         // query only gathers inputs and aggregates, so the editor and the build
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
-        // Route cumulative detection through is_cumulative() (a `refresh:
-        // cumulative` model) and batched detection through `refresh: batched`
-        // (the opt-in, independent of whether the optional `batched:` block is
-        // present) so both reach the classifier. The strings below are the
+        // Route keyed detection through is_keyed() (a `refresh: keyed` model)
+        // and batched detection through `refresh: batched` (the opt-in,
+        // independent of whether the optional `batched:` block is present)
+        // so both reach the classifier. The strings below are the
         // classifier's internal keys for each rule, not user surface values.
-        let materialization = if metadata.is_cumulative() {
+        let materialization = if metadata.is_keyed() {
             "cumulative_aggregate"
         } else if metadata.refresh == Some(smelt_core::config::RefreshStrategy::Batched) {
             "incremental"
@@ -1572,7 +1571,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         if !materialization.is_empty() {
             let stripped = smelt_parser::strip_frontmatter(text);
             let refs = smelt_logical::collect_path_refs(&stripped);
-            // The cumulative classifier resolves its driving source by looking
+            // The keyed classifier resolves its driving source by looking
             // each ref up in this map. The incremental rule's UNION-ALL
             // injectability check (`rule_diagnostics::check_union_all_injectable`)
             // also needs it — it builds the same per-ref `BoundContext` the

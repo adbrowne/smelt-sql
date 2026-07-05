@@ -1,9 +1,9 @@
 ---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
--- STRING_AGG is NOT in the cumulative allowlist; the classifier must refuse
--- this model (CumulativeUnknownAggregator) regardless of run window.
+-- STRING_AGG is NOT in the keyed allowlist; the classifier must refuse
+-- this model (KeyedUnknownCombiner) regardless of run window.
 SELECT
     device_id,
     STRING_AGG(CAST(amount AS VARCHAR), ',') AS amounts

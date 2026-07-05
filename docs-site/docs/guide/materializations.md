@@ -36,7 +36,7 @@ Best for:
 - Heavy aggregations you don't want to recompute on every read
 - Models with many downstream dependents
 - Incremental models (incremental requires `table` materialization)
-- Cumulative aggregates (`refresh: cumulative` requires `table` materialization)
+- Keyed merges (`refresh: keyed` requires `table` materialization)
 
 ### ephemeral
 
@@ -49,18 +49,18 @@ Best for:
 - Simple column renames or type casts
 
 !!! warning
-    Ephemeral models cannot have incremental configuration, `refresh: cumulative`, or target overrides. smelt will raise an error if you try to combine these.
+    Ephemeral models cannot have incremental configuration, `refresh: keyed`, or target overrides. smelt will raise an error if you try to combine these.
 
-### cumulative_aggregate
+### keyed
 
-Stateful merge into one row per `GROUP BY` key. Each daily run only aggregates the new partition's events and merges them into the running cumulative state. The unique key, the per-column aggregator, and the cross-partition combiner are all derived from the SQL.
+Stateful merge into one row per `GROUP BY` key. Each run only aggregates the new partition's events and merges them into the running keyed state via `merge_into`. The unique key, the per-column aggregator, and the cross-window combiner are all derived from the SQL.
 
-Use `materialization: table` together with `refresh: cumulative` to enable this mode:
+Use `materialization: table` together with `refresh: keyed` to enable this mode:
 
 ```sql
 ---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
 SELECT
     device_id,
@@ -75,9 +75,9 @@ GROUP BY device_id, user_id
 
 The output has one row per `(device_id, user_id)`. There is no `event_date` column — partitions collapse into a per-key row. The driving partition shape is read from the source's `timeseries:` declaration; running with `--event-time-start D --event-time-end D+N` merges the N partitions in temporal order. Without a run window, the model falls back to a single-shot full refresh.
 
-Each non-key projection must be a direct call to one of the **allowlisted aggregators**, which are paired with a fixed cross-partition combiner:
+Each non-key projection must be a direct call to one of the **allowlisted aggregators**, which are paired with a fixed cross-window combiner:
 
-| Per-partition aggregator | Cross-partition combiner |
+| Per-partition aggregator | Cross-window combiner |
 |---|---|
 | `COUNT(...)` | `SUM` |
 | `SUM(...)` | `SUM` |
@@ -89,21 +89,21 @@ Each non-key projection must be a direct call to one of the **allowlisted aggreg
 | `BIT_OR(...)` | `BIT_OR` |
 | `BIT_XOR(...)` | `xor()` |
 
-Anything outside the allowlist — `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `AVG`, composite expressions like `SUM(x) + 1` — is rejected at planning time. Each allowed aggregator is commutative and associative, which is the property that lets the rule merge partitions in any order and still produce the same final state.
+Anything outside the allowlist — `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `AVG`, composite expressions like `SUM(x) + 1` — is rejected at planning time. Each allowed aggregator is commutative and associative, which is the property that lets the rule merge windows in any order and still produce the same final state.
 
 Best for:
 
-- Cumulative counts and identity edge sets (e.g. `(device, user)` co-occurrence)
-- Per-key rollups where each daily run should be cheap — proportional to that day's source rows, not the full source history
-- Tables consumed downstream as a lookup (no `partition_column` on the output)
+- Running counts and identity edge sets (e.g. `(device, user)` co-occurrence)
+- Per-key rollups where each run should be cheap — proportional to the new window's source rows, not the full source history
+- Tables consumed downstream as a lookup (no `partition_column` on the output, unless key temporal locality is established)
 
 !!! warning "Forbidden combinations"
-    Cumulative models cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare a `batched:` block (the two are sibling rules with different equivalence contracts). Combining them produces a `CumulativeForbidsTimeseries` or `CumulativeForbidsBatched` error. Using `refresh: cumulative` on an `ephemeral` model is also a hard error.
+    Keyed models cannot declare a `timeseries:` block unless key temporal locality is established (the output has no partition column by default — the partition shape comes from the source) and cannot declare a `batched:` block (the two are sibling refresh strategies with different equivalence contracts). Combining them produces a `KeyedForbidsTimeseries` or `KeyedForbidsBatched` error. Using `refresh: keyed` on an `ephemeral` model is also a hard error.
 
 !!! note "Reprocessing"
-    v1 does not support per-partition reprocessing for already-merged source partitions. If a past partition's data changes, run with `--full-refresh` to truncate and rebuild from scratch.
+    Reprocessing an already-merged window is refused when detected. If a past window's data changes, run with `--full-refresh` to truncate and rebuild from scratch.
 
-For the deeper rationale, see the [cumulative_aggregate spec](../reference/cumulative-aggregate.md).
+For the deeper rationale, see the [keyed models spec](../reference/cumulative-aggregate.md).
 
 !!! note "Tests are not a materialization"
     A unit test is a `smelt.test` declaration, not a `materialization` value — it lives on the kind axis alongside models and functions, produces no database object, and is run by `smelt test` (never by `smelt run`). See the [Testing guide](testing.md) for the `smelt.test` grammar (`PASSING`/`EXPECT`, the `#cte` operator, `check_order`/`cases`).
@@ -154,7 +154,7 @@ The `refresh:` frontmatter key controls how a stored model's output is recompute
 | Value | Meaning |
 |---|---|
 | `full` (default) | Rebuild the table from scratch on every run. |
-| `cumulative` | Cumulative-aggregate merge: one row per `GROUP BY` key, grown across partitions. |
+| `keyed` | Keyed merge: one row per `GROUP BY` key, grown across partitions. |
 | `materialized_view` | Engine-maintained view: the backend keeps the output current with its own native incremental-view maintenance, not a smelt-driven refresh loop. Requires a backend with native IVM — see below. |
 
 When `refresh:` is omitted, `full` is assumed — the model always rebuilds completely.
@@ -172,14 +172,14 @@ FROM transactions
 GROUP BY 1
 ```
 
-### refresh: cumulative
+### refresh: keyed
 
-Enables the cumulative-aggregate merge loop. The model accumulates one row per `GROUP BY` key across all processed partitions — see [cumulative_aggregate](#cumulative_aggregate) above for the full semantics, allowed aggregators, and constraint rules.
+Enables the keyed merge loop. The model accumulates one row per `GROUP BY` key across all processed partitions — see [keyed](#keyed) above for the full semantics, allowed aggregators, and constraint rules.
 
 ```sql
 ---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
 SELECT device_id, user_id, COUNT(*) AS event_count
 FROM smelt.silver.events_parsed
@@ -189,7 +189,7 @@ GROUP BY device_id, user_id
 
 ### refresh: materialized_view
 
-Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like `cumulative`; it must not declare a `timeseries:` block or a `batched:` block.
+Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like `keyed`; it must not declare a `timeseries:` block or a `batched:` block.
 
 ```sql
 ---
@@ -202,7 +202,7 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-smelt never silently substitutes another refresh mode for this one: on a backend without native incremental-view maintenance (every backend today — DuckDB and both Spark profiles), `refresh: materialized_view` is a **hard error** rather than a silent fallback to `cumulative` or a full-refresh table. Use `refresh: cumulative` for smelt-driven maintenance on those backends.
+smelt never silently substitutes another refresh mode for this one: on a backend without native incremental-view maintenance (every backend today — DuckDB and both Spark profiles), `refresh: materialized_view` is a **hard error** rather than a silent fallback to `keyed` or a full-refresh table. Use `refresh: keyed` for smelt-driven maintenance on those backends.
 
 ## Decision guide
 
@@ -213,24 +213,24 @@ smelt never silently substitutes another refresh mode for this one: on a backend
 | Intermediate step used by one downstream | `ephemeral` |
 | Model with many downstream dependents | `table` |
 | Incremental processing (per-partition output) | `incremental` (per-partition `timeseries:` output) |
-| Cumulative state (one row per key across history) | `table` + `refresh: cumulative` |
+| Keyed state (one row per key across history) | `table` + `refresh: keyed` |
 | Database-managed refresh | `table` + `refresh: materialized_view` |
 | Development / iteration | `view` |
 
-## Incremental vs cumulative (refresh: cumulative)
+## Incremental vs keyed (refresh: keyed)
 
 Both shapes are time-aware, but they uphold different contracts:
 
-| Property | `incremental` | `refresh: cumulative` |
+| Property | `incremental` | `refresh: keyed` |
 |---|---|---|
-| Frontmatter | `materialization: table` + `timeseries:` + `incremental:` | `materialization: table` + `refresh: cumulative` |
-| Output shape | One row per `(partition_column, …)` — partitioned | One row per `GROUP BY` key — collapsed |
-| Declares `timeseries:`? | Yes (the model's output is a timeseries) | No (forbidden; reads partition shape from source) |
-| Equivalence contract | Per-partition equivalence with full refresh | Cross-partition equivalence under any partition ordering |
-| Re-running a past partition | Idempotent (DELETE+INSERT) | Refused in v1; use `--full-refresh` |
+| Frontmatter | `materialization: table` + `timeseries:` + `incremental:` | `materialization: table` + `refresh: keyed` |
+| Output shape | One row per `(partition_column, …)` — partitioned | One row per `GROUP BY` key — collapsed (by default) |
+| Declares `timeseries:`? | Yes (the model's output is a timeseries) | Only when key temporal locality is established (otherwise forbidden; reads partition shape from source) |
+| Equivalence contract | Per-partition equivalence with full refresh | End-state equivalence under any admitted window ordering |
+| Re-running a past window | Idempotent (DELETE+INSERT) | Refused when detected; use `--full-refresh` |
 | Backend primitive | `DELETE` + `INSERT` per partition | `MERGE INTO` with per-column combiners |
 
-If the question is "what's the day's contribution?", use `incremental`. If the question is "what's the running total per key?", use `refresh: cumulative`.
+If the question is "what's the day's contribution?", use `incremental`. If the question is "what's the running total per key?", use `refresh: keyed`.
 
 ## Changing materialization type
 
@@ -252,5 +252,5 @@ Run `smelt run --select my_model` and smelt will drop the view and create the ta
 ## Further reading
 
 - [Incremental Models](incremental-models.md) for time-partitioned incremental processing (requires `table`)
-- [cumulative_aggregate spec](../reference/cumulative-aggregate.md) for the normative behaviour, classifier rules, and complete diagnostic list
+- [keyed models spec](../reference/cumulative-aggregate.md) for the normative behaviour, classifier rules, and complete diagnostic list
 - [SQL Models](sql-models.md) for YAML frontmatter syntax

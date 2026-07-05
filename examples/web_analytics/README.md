@@ -66,7 +66,7 @@ bronze/raw_events                  (view; passthrough)
   └── silver/events_parsed         (INCR by event_date)
         ├── silver/sessions        (INCR by session_start_date; 1-day lookback)
         │     └── gold/identity_forward_only         (INCR by session_start_date)
-        └── silver/device_user_edges                 (refresh: cumulative)
+        └── silver/device_user_edges                 (refresh: keyed)
               ├── gold/identity_backward_fill        (view; rebuilt on query)
               └── gold/identity_connected_components (view; rebuilt on query)
         ↓
@@ -92,14 +92,14 @@ Source files:
 
 ## Incremental shape
 
-Five models are incremental, one is a cumulative aggregate (`refresh: cumulative`), and the rest are
+Five models are incremental, one is a cumulative aggregate (`refresh: keyed`), and the rest are
 views.
 
 | Model                                         | Materialization     | Partition column     |
 |-----------------------------------------------|---------------------|----------------------|
 | `silver/events_parsed`                        | INCR table          | `event_date`         |
 | `silver/sessions`                             | INCR table          | `session_start_date` |
-| `silver/device_user_edges`                    | table + refresh: cumulative | (driven by source)   |
+| `silver/device_user_edges`                    | table + refresh: keyed | (driven by source)   |
 | `gold/identity_forward_only`                  | INCR table          | `session_start_date` |
 | `gold/eventstream_with_identity`              | INCR table          | `event_date`         |
 | `marts/daily_active_users_by_method`          | INCR table          | `event_date`         |
@@ -113,7 +113,7 @@ views.
 The two global identity algorithms (backward_fill, connected_components) need
 the cumulative `(device, user)` edge set to produce correct per-device
 elections and clusters. `silver/device_user_edges` uses
-`materialization: table` + `refresh: cumulative` so each daily run only
+`materialization: table` + `refresh: keyed` so each daily run only
 aggregates that day's signed-in events and merges them into the running
 cumulative state via the SQL aggregator → cross-partition combiner mapping
 (COUNT→SUM, MIN→MIN, MAX→MAX). The backward_fill and connected_components

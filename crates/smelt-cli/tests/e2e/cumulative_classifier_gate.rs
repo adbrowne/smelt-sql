@@ -85,21 +85,21 @@ fn valid_cumulative_builds_without_window() {
     );
 }
 
-/// A cumulative model using a non-allowlisted aggregator (`STRING_AGG`) must be
-/// REFUSED on the no-window path, with the `CumulativeUnknownAggregator`
+/// A keyed model using a non-allowlisted aggregator (`STRING_AGG`) must be
+/// REFUSED on the no-window path, with the `KeyedUnknownCombiner`
 /// diagnostic — not silently materialised as a full refresh.
 #[test]
 fn unknown_aggregator_refused_without_window() {
     let (ok, out) = run_select("+edges_bad_aggregator");
     assert!(
         !ok,
-        "STRING_AGG cumulative must be refused even without a run window \
-         (Constraint #10 — no silent downgrade); instead it succeeded. Output:\n{}",
+        "STRING_AGG keyed model must be refused even without a run window \
+         (the classifier is fail-closed — no silent downgrade); instead it succeeded. Output:\n{}",
         out
     );
     assert!(
-        out.contains("CumulativeUnknownAggregator"),
-        "rejection must name the classifier diagnostic CumulativeUnknownAggregator; output:\n{}",
+        out.contains("KeyedUnknownCombiner"),
+        "rejection must name the classifier diagnostic KeyedUnknownCombiner; output:\n{}",
         out
     );
 }

@@ -1,6 +1,6 @@
 ---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
 -- Cumulative (device_id, user_id) co-occurrence evidence — every signed-in
 -- event contributes one observation, combined across all source partitions

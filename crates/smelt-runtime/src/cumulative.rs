@@ -1,6 +1,8 @@
-//! Per-partition execution loop for `refresh: cumulative` table models.
+//! Per-partition execution loop for `refresh: keyed` table models.
 //!
-//! See `docs/specs/cumulative_aggregate.md` for the normative spec.
+//! See `docs/specs/keyed_models.md` for the normative spec. This module is
+//! the mode's built seed: it only drives the direct-monoid (additive +
+//! extremal/lattice) column families.
 //!
 //! For a run window `[run_start, run_end)`:
 //!
@@ -18,13 +20,13 @@ use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
 use smelt_planner::{
-    classify_cumulative, combiner_for, AggregatorColumn, CumulativeClassification,
-    CumulativeDiagnostic, SourceTimeseriesMap,
+    classify_cumulative, combiner_for, AggregatorColumn, CumulativeClassification, KeyedDiagnostic,
+    SourceTimeseriesMap,
 };
 use std::collections::HashMap;
 use tracing::info;
 
-/// `cumulative`'s [`WindowedKeyedRule`] impl: its classification already
+/// `keyed`'s [`WindowedKeyedRule`] impl: its classification already
 /// gated every aggregator column through `combiner_for` (the monoid-only
 /// allowlist) at classify time, but the driver re-checks independently —
 /// defense in depth against a future classifier bug ever handing the driver
@@ -48,7 +50,7 @@ impl WindowedKeyedRule for CumulativeClassification {
     }
 }
 
-/// Execute a single cumulative_aggregate model over the given run window.
+/// Execute a single keyed model over the given run window.
 ///
 /// Returns the total ExecutionResult (rows summed across partitions, duration
 /// summed). The driving source's `timeseries:` block is read from the
@@ -80,7 +82,7 @@ pub async fn execute_cumulative_aggregate(
     let driving_ts = classification.driving_source.timeseries.clone();
 
     info!(
-        "Running model: {} (cumulative_aggregate, driving source = {})",
+        "Running model: {} (keyed, driving source = {})",
         model_name, driving_source_name
     );
 
@@ -99,7 +101,7 @@ pub async fn execute_cumulative_aggregate(
     //    exist => normal merge loop; table exists => refuse" rather than
     //    "table exists => silently rebuild". The full-refresh opt-in is
     //    handled by the caller (run.rs) by dropping the table before the
-    //    cumulative path is dispatched, so by the time we reach here the
+    //    keyed path is dispatched, so by the time we reach here the
     //    table either does not exist or is being appended to by an
     //    operator who has accepted the implicit double-count risk.
     //
@@ -218,21 +220,22 @@ pub fn build_cumulative_merge_sql(
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
 ///
 /// Delegates to [`smelt_planner::collect_path_refs`] — the single shared
-/// implementation so the runtime's cumulative dispatch and the analysis-layer
+/// implementation so the runtime's keyed dispatch and the analysis-layer
 /// diagnostic gate reach the identical driving-source lookup (Diagnostic parity
 /// rule).
 fn collect_refs_from_sql(sql: &str) -> Vec<String> {
     smelt_planner::collect_path_refs(sql)
 }
 
-/// Classify a cumulative model's SQL, collecting its `smelt.<path>` refs and
+/// Classify a keyed model's SQL, collecting its `smelt.<path>` refs and
 /// looking the driving source up in `source_timeseries`. Returns the
 /// classification on success or a formatted error on rejection.
 ///
 /// This is the single entry point both run-pipeline paths use to enforce the
 /// classifier — including the **no-window full-refresh** path. A classifier
 /// rejection must refuse the model rather than silently materialise forbidden
-/// SQL (`cumulative_aggregate.md` Constraint #10 — "No silent downgrade").
+/// SQL (`keyed_models.md` Constraint #4 — "The catalogue is closed and the
+/// classifier is fail-closed").
 pub fn classify_cumulative_sql(
     model_name: &str,
     clean_sql: &str,
@@ -244,13 +247,10 @@ pub fn classify_cumulative_sql(
 }
 
 /// Format classifier diagnostics into a single error message for the CLI.
-fn format_classifier_error(
-    model_name: &str,
-    diagnostics: &[CumulativeDiagnostic],
-) -> anyhow::Error {
+fn format_classifier_error(model_name: &str, diagnostics: &[KeyedDiagnostic]) -> anyhow::Error {
     let lines: Vec<String> = diagnostics.iter().map(|d| format!("  - {}", d)).collect();
     anyhow::anyhow!(
-        "Model '{}' failed cumulative_aggregate classification:\n{}",
+        "Model '{}' failed keyed classification:\n{}",
         model_name,
         lines.join("\n")
     )

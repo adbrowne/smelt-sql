@@ -1,6 +1,6 @@
 //! Real-fixture test: `refresh: materialized_view` on a backend without native
 //! incremental-view maintenance (every backend today) is a hard error — never a
-//! silent fallback to `cumulative` or a full-refresh table
+//! silent fallback to `keyed` or a full-refresh table
 //! (`docs/specs/materialized_view.md` §"No silent fallback").
 //!
 //! Exercises the actual `execute_project` pipeline (same entry point `smelt build` /
@@ -96,7 +96,7 @@ fn make_request(target: &str) -> ExecuteRequest {
 }
 
 /// `refresh: materialized_view` on DuckDB errors — never silently becomes
-/// `cumulative` or a full-refresh table.
+/// `keyed` or a full-refresh table.
 #[tokio::test]
 async fn test_materialized_view_hard_errors_on_duckdb() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -169,8 +169,8 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
         message
     );
     assert!(
-        message.contains("use `refresh: cumulative`"),
-        "expected the hard error to point at `refresh: cumulative`, got: {}",
+        message.contains("use `refresh: keyed`"),
+        "expected the hard error to point at `refresh: keyed`, got: {}",
         message
     );
 }

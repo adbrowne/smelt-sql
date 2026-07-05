@@ -2348,20 +2348,20 @@ fn timeseries_broken_incremental_without_timeseries() {
     );
 }
 
-// ===== BUG-006: CumulativeForbidsTimeseries / CumulativeForbidsBatched regression =====
+// ===== BUG-006: KeyedForbidsTimeseries / KeyedForbidsBatched regression =====
 //
 // Before the fix, `validate_timeseries` returned these errors but `file_diagnostics`
 // silently dropped them via the `_ => None` catch-all in the match block.
 //
 // Fixtures:
-//   - `examples/timeseries_broken_cumulative_with_timeseries/`   — CumulativeForbidsTimeseries
-//   - `examples/timeseries_broken_cumulative_with_incremental/`  — CumulativeForbidsBatched
+//   - `examples/timeseries_broken_cumulative_with_timeseries/`   — KeyedForbidsTimeseries
+//   - `examples/timeseries_broken_cumulative_with_incremental/`  — KeyedForbidsBatched
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `CumulativeForbidsTimeseries` or `CumulativeForbidsBatched` diagnostic fires
+/// `KeyedForbidsTimeseries` or `KeyedForbidsBatched` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any other
 /// file in the workspace.
-fn check_workspace_emits_cumulative_frontmatter_diagnostic(
+fn check_workspace_emits_keyed_frontmatter_diagnostic(
     example_dir: &str,
     expected_file: &str,
     expected_code: smelt_db::DiagnosticCode,
@@ -2370,9 +2370,9 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     use smelt_db::{DiagnosticAcc, Workspace};
     use std::path::Path;
 
-    const CUMULATIVE_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
-        smelt_db::DiagnosticCode::CumulativeForbidsBatched,
+    const KEYED_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
+        smelt_db::DiagnosticCode::KeyedForbidsTimeseries,
+        smelt_db::DiagnosticCode::KeyedForbidsBatched,
     ];
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2396,8 +2396,8 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
     let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
 
-    let is_cumulative = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
-        code.is_some_and(|c| CUMULATIVE_FRONTMATTER_CODES.contains(c))
+    let is_keyed_frontmatter = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| KEYED_FRONTMATTER_CODES.contains(c))
     };
 
     for model in &models {
@@ -2416,7 +2416,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
             .ends_with(&expected_file.replace('\\', "/"));
 
         for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
-            if !is_cumulative(d.code.as_ref()) {
+            if !is_keyed_frontmatter(d.code.as_ref()) {
                 continue;
             }
             if is_target {
@@ -2426,7 +2426,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
             }
         }
         for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
-            if !is_cumulative(d.0.code.as_ref()) {
+            if !is_keyed_frontmatter(d.0.code.as_ref()) {
                 continue;
             }
             if is_target {
@@ -2439,7 +2439,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
 
     assert!(
         other_diags.is_empty(),
-        "expected zero cumulative frontmatter diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        "expected zero keyed frontmatter diagnostics from files other than '{}' in {}, got {}:\n  {}",
         expected_file,
         example_dir,
         other_diags.len(),
@@ -2453,7 +2453,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     assert_eq!(
         target_diags.len(),
         1,
-        "expected exactly 1 cumulative frontmatter diagnostic from '{}' in {}, got {}:\n  {}",
+        "expected exactly 1 keyed frontmatter diagnostic from '{}' in {}, got {}:\n  {}",
         expected_file,
         example_dir,
         target_diags.len(),
@@ -2467,7 +2467,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     assert_eq!(
         target_diags[0].code,
         Some(expected_code),
-        "expected cumulative frontmatter diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        "expected keyed frontmatter diagnostic code {:?} from '{}' in {}, got {:?}: {}",
         expected_code,
         expected_file,
         example_dir,
@@ -2477,36 +2477,36 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
 }
 
 /// BUG-006 regression: `examples/timeseries_broken_cumulative_with_timeseries/` produces
-/// exactly one `CumulativeForbidsTimeseries` diagnostic from
+/// exactly one `KeyedForbidsTimeseries` diagnostic from
 /// `models/cumulative_with_timeseries.sql`.
 ///
-/// Before the fix, `validate_timeseries` returned `CumulativeForbidsTimeseries`
+/// Before the fix, `validate_timeseries` returned `KeyedForbidsTimeseries`
 /// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
-/// so the LSP showed no error even though cumulative models must not declare
-/// `timeseries:` (cumulative_aggregate.md §"Output shape").
+/// so the LSP showed no error even though keyed models must not declare
+/// `timeseries:` without key temporal locality (`keyed_models.md` §"Output shape").
 #[test]
 fn timeseries_broken_cumulative_with_timeseries() {
-    check_workspace_emits_cumulative_frontmatter_diagnostic(
+    check_workspace_emits_keyed_frontmatter_diagnostic(
         "examples/timeseries_broken_cumulative_with_timeseries",
         "models/cumulative_with_timeseries.sql",
-        smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
+        smelt_db::DiagnosticCode::KeyedForbidsTimeseries,
     );
 }
 
 /// BUG-006 regression: `examples/timeseries_broken_cumulative_with_incremental/` produces
-/// exactly one `CumulativeForbidsBatched` diagnostic from
+/// exactly one `KeyedForbidsBatched` diagnostic from
 /// `models/cumulative_with_incremental.sql`.
 ///
-/// Before the fix, `validate_timeseries` returned `CumulativeForbidsBatched`
+/// Before the fix, `validate_timeseries` returned `KeyedForbidsBatched`
 /// but `file_diagnostics` silently dropped it, so the LSP showed no error even
-/// though cumulative models must not declare `incremental:` (cumulative_aggregate.md
+/// though keyed models must not declare `batched:` (`keyed_models.md`
 /// §"Constraints & Invariants" #2).
 #[test]
 fn timeseries_broken_cumulative_with_incremental() {
-    check_workspace_emits_cumulative_frontmatter_diagnostic(
+    check_workspace_emits_keyed_frontmatter_diagnostic(
         "examples/timeseries_broken_cumulative_with_incremental",
         "models/cumulative_with_incremental.sql",
-        smelt_db::DiagnosticCode::CumulativeForbidsBatched,
+        smelt_db::DiagnosticCode::KeyedForbidsBatched,
     );
 }
 

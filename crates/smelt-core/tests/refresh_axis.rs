@@ -1,23 +1,23 @@
 //! Tests for the `refresh:` frontmatter axis.
 //!
 //! Spec oracle: `docs/specs/models.md` §"YAML frontmatter keys" and
-//! `docs/specs/cumulative_aggregate.md` §Surface.
+//! `docs/specs/keyed_models.md` §Surface.
 
 use smelt_core::config::{Materialization, RefreshStrategy};
 use smelt_core::metadata::{
     extract_file_metadata, validate_timeseries, FileMetadata, ModelMetadata,
 };
 
-// ── refresh: cumulative parses ────────────────────────────────────────────────
+// ── refresh: keyed parses ─────────────────────────────────────────────────────
 
-/// `materialization: table` + `refresh: cumulative` parses to
-/// `RefreshStrategy::Cumulative`; a model with no `refresh:` key defaults to
+/// `materialization: table` + `refresh: keyed` parses to
+/// `RefreshStrategy::Keyed`; a model with no `refresh:` key defaults to
 /// `RefreshStrategy::Full` (or `None` in the `Option<RefreshStrategy>` field).
 #[test]
-fn refresh_cumulative_parses() {
+fn refresh_keyed_parses() {
     let source = r#"---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
 SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, user_id"#;
 
@@ -25,18 +25,36 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
     match result {
         FileMetadata::Single { metadata, .. } => {
             assert_eq!(metadata.materialization, Some(Materialization::Table));
-            assert_eq!(metadata.refresh, Some(RefreshStrategy::Cumulative));
-            // is_cumulative() must return true for the new surface
+            assert_eq!(metadata.refresh, Some(RefreshStrategy::Keyed));
+            // is_keyed() must return true for the new surface
             assert!(
-                metadata.is_cumulative(),
-                "is_cumulative() must be true for refresh: cumulative"
+                metadata.is_keyed(),
+                "is_keyed() must be true for refresh: keyed"
             );
         }
         _ => panic!("Expected Single variant"),
     }
 }
 
-/// A model with no `refresh:` key has `None` refresh — not cumulative.
+/// `refresh: cumulative` is a hard error pointing at the renamed value —
+/// not a silent alias.
+#[test]
+fn refresh_cumulative_is_hard_error_pointing_at_keyed() {
+    let source = r#"---
+materialization: table
+refresh: cumulative
+---
+SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, user_id"#;
+
+    let err = extract_file_metadata(source).expect_err("`refresh: cumulative` must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("`refresh: cumulative` is now `refresh: keyed`"),
+        "error must contain the exact pointer message; got: {message}"
+    );
+}
+
+/// A model with no `refresh:` key has `None` refresh — not keyed.
 #[test]
 fn refresh_absent_is_full() {
     let source = r#"---
@@ -49,8 +67,8 @@ SELECT 1 AS n"#;
         FileMetadata::Single { metadata, .. } => {
             assert_eq!(metadata.refresh, None);
             assert!(
-                !metadata.is_cumulative(),
-                "is_cumulative() must be false when refresh: is absent"
+                !metadata.is_keyed(),
+                "is_keyed() must be false when refresh: is absent"
             );
         }
         _ => panic!("Expected Single variant"),
@@ -59,7 +77,7 @@ SELECT 1 AS n"#;
 
 /// `refresh: full` explicitly — same as absent.
 #[test]
-fn refresh_full_is_not_cumulative() {
+fn refresh_full_is_not_keyed() {
     let source = r#"---
 materialization: table
 refresh: full
@@ -70,10 +88,7 @@ SELECT 1 AS n"#;
     match result {
         FileMetadata::Single { metadata, .. } => {
             assert_eq!(metadata.refresh, Some(RefreshStrategy::Full));
-            assert!(
-                !metadata.is_cumulative(),
-                "refresh: full must not be cumulative"
-            );
+            assert!(!metadata.is_keyed(), "refresh: full must not be keyed");
         }
         _ => panic!("Expected Single variant"),
     }
@@ -83,7 +98,7 @@ SELECT 1 AS n"#;
 
 /// `materialization: cumulative_aggregate` must fail to deserialize with a clear
 /// unknown-value error now that the variant has been removed.
-/// The opt-in is `materialization: table` + `refresh: cumulative`.
+/// The opt-in is `materialization: table` + `refresh: keyed`.
 #[test]
 fn cumulative_aggregate_materialization_rejected() {
     let source = r#"---
@@ -95,7 +110,7 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
     assert!(
         result.is_err(),
         "`materialization: cumulative_aggregate` must fail to deserialize — \
-         the variant has been removed. Use `materialization: table` + `refresh: cumulative` instead."
+         the variant has been removed. Use `materialization: table` + `refresh: keyed` instead."
     );
     let err = result.unwrap_err().to_string();
     assert!(
@@ -104,17 +119,32 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
     );
 }
 
-// ── refresh: cumulative forbids timeseries: and incremental: ─────────────────
-
-/// `refresh: cumulative` + `timeseries:` → `CumulativeForbidsTimeseries`.
+/// `refresh: latest_value` and `refresh: accumulating_snapshot` remain
+/// unknown-value errors — the keyed rename does not introduce them as
+/// aliases for `refresh: keyed`.
 #[test]
-fn refresh_cumulative_forbids_timeseries() {
+fn refresh_latest_value_and_accumulating_snapshot_remain_unknown() {
+    for value in ["latest_value", "accumulating_snapshot"] {
+        let source = format!("---\nmaterialization: table\nrefresh: {value}\n---\nSELECT 1 AS n");
+        let result = extract_file_metadata(&source);
+        assert!(
+            result.is_err(),
+            "`refresh: {value}` must still be rejected as unknown"
+        );
+    }
+}
+
+// ── refresh: keyed forbids timeseries: and batched: ───────────────────────────
+
+/// `refresh: keyed` + `timeseries:` → `KeyedForbidsTimeseries`.
+#[test]
+fn refresh_keyed_forbids_timeseries() {
     use smelt_core::config::{Granularity, TimeseriesConfig};
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        refresh: Some(RefreshStrategy::Cumulative),
+        refresh: Some(RefreshStrategy::Keyed),
         timeseries: Some(TimeseriesConfig {
             event_time_column: "ts".to_string(),
             partition_column: "dt".to_string(),
@@ -125,23 +155,23 @@ fn refresh_cumulative_forbids_timeseries() {
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-        .expect_err("refresh: cumulative + timeseries: must error");
+        .expect_err("refresh: keyed + timeseries: must error");
     assert!(
-        matches!(err, MetadataError::CumulativeForbidsTimeseries),
-        "Expected CumulativeForbidsTimeseries, got: {}",
+        matches!(err, MetadataError::KeyedForbidsTimeseries),
+        "Expected KeyedForbidsTimeseries, got: {}",
         err
     );
 }
 
-/// `refresh: cumulative` + `batched:` → `CumulativeForbidsBatched`.
+/// `refresh: keyed` + `batched:` → `KeyedForbidsBatched`.
 #[test]
-fn refresh_cumulative_forbids_incremental() {
+fn refresh_keyed_forbids_incremental() {
     use smelt_core::config::{BatchedConfig, BatchedSafetyOverrides};
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        refresh: Some(RefreshStrategy::Cumulative),
+        refresh: Some(RefreshStrategy::Keyed),
         batched: Some(BatchedConfig {
             unique_key: vec![],
             nondeterministic_columns: vec![],
@@ -150,10 +180,10 @@ fn refresh_cumulative_forbids_incremental() {
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-        .expect_err("refresh: cumulative + batched: must error");
+        .expect_err("refresh: keyed + batched: must error");
     assert!(
-        matches!(err, MetadataError::CumulativeForbidsBatched),
-        "Expected CumulativeForbidsBatched, got: {}",
+        matches!(err, MetadataError::KeyedForbidsBatched),
+        "Expected KeyedForbidsBatched, got: {}",
         err
     );
 }
@@ -281,27 +311,27 @@ SELECT dt FROM foo"#;
     );
 }
 
-// ── view + refresh: cumulative is a warning (no error) ───────────────────────
+// ── view + refresh: keyed is a warning (no error) ─────────────────────────────
 
-/// `view` + `refresh: cumulative` emits an advisory warning but does NOT
+/// `view` + `refresh: keyed` emits an advisory warning but does NOT
 /// produce a hard error — the config is ignored and the model parses cleanly.
 /// (Mirrors the existing `view` + `incremental` treatment.)
 #[test]
 fn refresh_on_view_is_warning() {
     let metadata = ModelMetadata {
         materialization: Some(Materialization::View),
-        refresh: Some(RefreshStrategy::Cumulative),
+        refresh: Some(RefreshStrategy::Keyed),
         ..Default::default()
     };
     // Must not error — warning is advisory
     validate_timeseries(&metadata, "SELECT 1")
-        .expect("view + refresh: cumulative must not be a hard error (only a warning)");
+        .expect("view + refresh: keyed must not be a hard error (only a warning)");
 }
 
-// ── ephemeral + refresh: cumulative is a hard error ───────────────────────────
+// ── ephemeral + refresh: keyed is a hard error ────────────────────────────────
 
-/// `ephemeral` + `refresh: cumulative` must be a hard error.
-/// Ephemeral models have no persisted output to accumulate into, so the
+/// `ephemeral` + `refresh: keyed` must be a hard error.
+/// Ephemeral models have no persisted output to merge into, so the
 /// combination is nonsensical. Mirrors the existing `ephemeral` +
 /// `incremental:` treatment (hard error, not a warning).
 #[test]
@@ -310,11 +340,11 @@ fn refresh_on_ephemeral_is_error() {
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Ephemeral),
-        refresh: Some(RefreshStrategy::Cumulative),
+        refresh: Some(RefreshStrategy::Keyed),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT 1")
-        .expect_err("ephemeral + refresh: cumulative must be a hard error");
+        .expect_err("ephemeral + refresh: keyed must be a hard error");
     assert!(
         matches!(err, MetadataError::MalformedTimeseries { .. }),
         "Expected MalformedTimeseries, got: {}",

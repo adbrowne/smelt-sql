@@ -17,14 +17,14 @@ pub use analysis::temporal::{
 pub use graph::{ModelGraph, ModelInfo};
 pub use rules::cumulative::{
     classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
-    CumulativeClassification, CumulativeDiagnostic, DrivingSource, SourceTimeseriesMap,
+    CumulativeClassification, DrivingSource, KeyedDiagnostic, SourceTimeseriesMap,
 };
 pub use rules::incremental::{
     analyze_batch_safety, batch_safety_from_bounds, derive_model_source_bounds, BatchSafety,
 };
 pub use rules::rule_diagnostics::{
-    collect_path_refs, detect_builtin_rules, CumulativeRule, IncrementalRule, PlannerRule,
-    RuleContext, RuleDiagnostic, RuleDiagnosticCode, RuleSeverity,
+    collect_path_refs, detect_builtin_rules, IncrementalRule, KeyedRule, PlannerRule, RuleContext,
+    RuleDiagnostic, RuleDiagnosticCode, RuleSeverity,
 };
 pub use rules::Planner;
 pub use types::{

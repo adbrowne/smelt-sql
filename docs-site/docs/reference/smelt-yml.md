@@ -107,7 +107,7 @@ The `default_materialization` field and per-model `materialization` field accept
 
 Test files are identified by a `smelt.test` declaration in the SQL file, not by a materialization value. See [Testing](../guide/testing.md) for details.
 
-A cumulative/running aggregate table is opted in with `materialization: table` + `refresh: cumulative` — see [Cumulative Aggregates](../guide/cumulative-aggregates.md) for details.
+A keyed/running aggregate table is opted in with `materialization: table` + `refresh: keyed` — see [Materializations](../guide/materializations.md#keyed) for details.
 
 **Precedence for materialization resolution:**
 

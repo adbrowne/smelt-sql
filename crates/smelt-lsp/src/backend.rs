@@ -409,21 +409,21 @@ impl Backend {
                 // VALUES / CTE alias-column-list diagnostic codes.
                 DbCode::AliasColumnArityMismatch => "alias-column-arity-mismatch",
                 DbCode::EmptyValuesClause => "empty-values-clause",
-                // Planner-rule diagnostic codes (cumulative classifier,
+                // Planner-rule diagnostic codes (keyed classifier,
                 // batched batch-safety) surfaced via the uniform rule →
                 // diagnostics interface.
-                DbCode::CumulativeRequiresGroupBy => "cumulative-requires-group-by",
-                DbCode::CumulativeUnknownAggregator => "cumulative-unknown-aggregator",
-                DbCode::CumulativeGroupByContainsPartitionColumn => {
-                    "cumulative-group-by-contains-partition-column"
+                DbCode::KeyedRequiresGroupBy => "keyed-requires-group-by",
+                DbCode::KeyedUnknownCombiner => "keyed-unknown-combiner",
+                DbCode::KeyedGroupByContainsPartitionColumn => {
+                    "keyed-group-by-contains-partition-column"
                 }
-                DbCode::CumulativeForbidsWindowFunctions => "cumulative-forbids-window-functions",
-                DbCode::CumulativeForbidsNondeterministic => "cumulative-forbids-nondeterministic",
-                DbCode::CumulativeNoDrivingSource => "cumulative-no-driving-source",
-                DbCode::CumulativeMultipleDrivingSources => "cumulative-multiple-driving-sources",
-                DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
-                DbCode::CumulativeForbidsTimeseries => "cumulative-forbids-timeseries",
-                DbCode::CumulativeForbidsBatched => "cumulative-forbids-batched",
+                DbCode::KeyedForbidsWindowFunctions => "keyed-forbids-window-functions",
+                DbCode::KeyedForbidsNondeterministic => "keyed-forbids-nondeterministic",
+                DbCode::KeyedSnapshotPostureUnsupported => "keyed-snapshot-posture-unsupported",
+                DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
+                DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
+                DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
+                DbCode::KeyedForbidsBatched => "keyed-forbids-batched",
                 DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
                 DbCode::MaterializedViewForbidsBatched => "materialized-view-forbids-batched",
                 DbCode::BatchedNotSafe => "batched-not-safe",

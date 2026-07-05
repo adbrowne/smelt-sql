@@ -1,6 +1,6 @@
 ---
 materialization: table
-refresh: cumulative
+refresh: keyed
 timeseries:
   event_time_column: event_date
   partition_column: event_date

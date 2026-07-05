@@ -42,8 +42,8 @@ pub struct CatalogModel {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     pub materialization: String,
-    /// Refresh axis: `"cumulative"` when the model uses the cumulative-aggregate
-    /// merge loop. Omitted when the model uses the default full-refresh strategy.
+    /// Refresh axis: `"keyed"` when the model uses the keyed merge loop.
+    /// Omitted when the model uses the default full-refresh strategy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
     pub path: String,
@@ -299,10 +299,10 @@ pub fn build_catalog(
 
         let tests_targeting = test_targets.get(model_name).cloned().unwrap_or_default();
 
-        // Emit `refresh: "cumulative"` when the model is cumulative; omit otherwise.
+        // Emit `refresh: "keyed"` when the model is keyed; omit otherwise.
         let refresh = metadata
             .and_then(|m| m.refresh.clone())
-            .filter(|r| *r == RefreshStrategy::Cumulative);
+            .filter(|r| *r == RefreshStrategy::Keyed);
 
         models.insert(
             model_name.to_string(),

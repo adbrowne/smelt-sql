@@ -211,11 +211,11 @@ pub struct ModelMetadata {
     /// Refresh axis: how stored output is recomputed across runs.
     ///
     /// `None` / `Some(Full)` — default full rebuild from scratch.
-    /// `Some(Cumulative)` — cumulative-aggregate merge loop.
-    /// Opt-in: `materialization: table` + `refresh: cumulative`.
+    /// `Some(Keyed)` — keyed merge loop.
+    /// Opt-in: `materialization: table` + `refresh: keyed`.
     ///
     /// See `docs/specs/models.md` §"Refresh axis" and
-    /// `docs/specs/cumulative_aggregate.md` §Surface.
+    /// `docs/specs/keyed_models.md` §Surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
 
@@ -249,12 +249,12 @@ pub struct ModelMetadata {
 }
 
 impl ModelMetadata {
-    /// Returns `true` when this model uses the cumulative-aggregate merge loop.
+    /// Returns `true` when this model uses the keyed merge loop.
     ///
-    /// The opt-in is `materialization: table` + `refresh: cumulative`.
-    /// Every cumulative detection site must route through this predicate.
-    pub fn is_cumulative(&self) -> bool {
-        self.refresh == Some(RefreshStrategy::Cumulative)
+    /// The opt-in is `materialization: table` + `refresh: keyed`.
+    /// Every keyed detection site must route through this predicate.
+    pub fn is_keyed(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::Keyed)
     }
 
     /// Returns `true` when this model delegates freshness to a backend's
@@ -362,24 +362,25 @@ pub enum MetadataError {
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
-    /// A model declares `refresh: cumulative` and a `timeseries:` block.
-    /// Cumulative outputs are not themselves timeseries — the rule reads the
-    /// partition shape from the driving source instead (see
-    /// `docs/specs/cumulative_aggregate.md` §"Output shape").
-    #[error("CumulativeForbidsTimeseries: cumulative models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
-    CumulativeForbidsTimeseries,
+    /// A model declares `refresh: keyed` and a `timeseries:` block without
+    /// key temporal locality being established. Keyed outputs are not
+    /// themselves timeseries by default — the rule reads the partition
+    /// shape from the driving source instead (see
+    /// `docs/specs/keyed_models.md` §"Output shape").
+    #[error("KeyedForbidsTimeseries: keyed models must not declare a `timeseries:` block — the keyed output has no partition column; the rule reads the partition shape from the driving source")]
+    KeyedForbidsTimeseries,
 
-    /// A model declares `refresh: cumulative` (or another keyed-output mode)
+    /// A model declares `refresh: keyed` (or another keyed-output mode)
     /// and a `batched:` block.
-    #[error("CumulativeForbidsBatched: cumulative and batched are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
-    CumulativeForbidsBatched,
+    #[error("KeyedForbidsBatched: keyed and batched are different refresh strategies with different equivalence contracts — pick one (see docs/specs/keyed_models.md)")]
+    KeyedForbidsBatched,
 
     /// A model declares a `batched:` block without `refresh: batched`.
     #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: batched` — add `refresh: batched` or remove the `batched:` block")]
     BatchedRequiresRefreshBatched,
 
     /// A model declares `refresh: materialized_view` and a `timeseries:` block.
-    /// Like `cumulative`, the engine-maintained output is a keyed lookup with
+    /// Like `keyed`, the engine-maintained output is a keyed lookup with
     /// no partition column (`docs/specs/materialized_view.md` §"Constraints
     /// & Invariants").
     #[error("MaterializedViewForbidsTimeseries: refresh: materialized_view models must not declare a `timeseries:` block — the output is a keyed lookup with no partition column")]
@@ -444,17 +445,18 @@ fn frontmatter_has_generates(source: &str) -> bool {
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
-    // Rule: cumulative forbids batched: — enforced here so the diagnostic
+    // Rule: keyed forbids batched: — enforced here so the diagnostic
     // fires alongside the other materialization-block constraints.
-    // Triggered by `refresh: cumulative`.
-    if metadata.is_cumulative() && metadata.batched.is_some() {
-        return Err(MetadataError::CumulativeForbidsBatched);
+    // Triggered by `refresh: keyed`.
+    if metadata.is_keyed() && metadata.batched.is_some() {
+        return Err(MetadataError::KeyedForbidsBatched);
     }
 
-    // Rule: cumulative forbids timeseries: — the cumulative output
-    // has no partition column.
-    if metadata.is_cumulative() && metadata.timeseries.is_some() {
-        return Err(MetadataError::CumulativeForbidsTimeseries);
+    // Rule: keyed forbids timeseries: — the keyed output has no
+    // partition column by default (key temporal locality establishment
+    // is not yet built; see docs/specs/keyed_models.md §Known Divergences).
+    if metadata.is_keyed() && metadata.timeseries.is_some() {
+        return Err(MetadataError::KeyedForbidsTimeseries);
     }
 
     // Rule: materialized_view forbids batched: — the engine owns freshness
@@ -463,29 +465,29 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         return Err(MetadataError::MaterializedViewForbidsBatched);
     }
 
-    // Rule: materialized_view forbids timeseries: — like cumulative, the
+    // Rule: materialized_view forbids timeseries: — like keyed, the
     // engine-maintained output is a keyed lookup with no partition column.
     if metadata.is_materialized_view() && metadata.timeseries.is_some() {
         return Err(MetadataError::MaterializedViewForbidsTimeseries);
     }
 
-    // `refresh: cumulative` on a non-stored materialization:
-    // - ephemeral: hard error — there is no persisted output to accumulate into.
+    // `refresh: keyed` on a non-stored materialization:
+    // - ephemeral: hard error — there is no persisted output to merge into.
     //   Mirrors the existing `ephemeral` + `incremental:` hard-error treatment.
     // - view: advisory warning only — config is ignored; mirrors `view + incremental`.
-    if metadata.refresh == Some(RefreshStrategy::Cumulative) {
+    if metadata.refresh == Some(RefreshStrategy::Keyed) {
         if let Some(mat) = &metadata.materialization {
             match mat {
                 Materialization::Ephemeral => {
                     return Err(MetadataError::MalformedTimeseries {
-                        message: "ephemeral models cannot use refresh: cumulative \
-                                  (ephemeral models have no persisted output to accumulate into)"
+                        message: "ephemeral models cannot use refresh: keyed \
+                                  (ephemeral models have no persisted output to merge into)"
                             .to_string(),
                     });
                 }
                 Materialization::View => {
                     tracing::warn!(
-                        "model has `refresh: cumulative` but `materialization: view` — \
+                        "model has `refresh: keyed` but `materialization: view` — \
                          the refresh config is ignored for non-table materializations"
                     );
                     // Not an error — fall through.
@@ -928,7 +930,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // `materialization: cumulative_aggregate` and `materialization:
         // materialized_view` are also checked here to give a clear migration
         // error — `cumulative_aggregate` was removed (use `materialization:
-        // table` + `refresh: cumulative` instead); `materialized_view` was
+        // table` + `refresh: keyed` instead); `materialized_view` was
         // relocated from the storage axis to the refresh axis (use `refresh:
         // materialized_view` instead). `incremental:` is checked for the same
         // reason — the block was retired; use `refresh: batched` + `batched:` instead.
@@ -959,6 +961,15 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     "the `incremental:` block has been removed — use `refresh: batched` + \
                      an optional `batched:` block instead (see docs/specs/batched_models.md)",
                 )));
+            // `refresh: cumulative` is a hard error pointing at the renamed
+            // value, not a silently-stripped unknown value — the resilient
+            // fallback below must not swallow this rename.
+            } else if key_str == "refresh" {
+                if let Err(e) =
+                    serde_yaml::from_value::<crate::config::RefreshStrategy>(value.clone())
+                {
+                    return Err(MetadataError::YamlParseError(e));
+                }
             }
         }
 
@@ -2175,10 +2186,10 @@ SELECT dt FROM foo"#;
         );
     }
 
-    // ── cumulative frontmatter tests ─────────────────────────────────────────
+    // ── keyed frontmatter tests ───────────────────────────────────────────────
 
     /// `materialization: cumulative_aggregate` is no longer valid — must fail.
-    /// The new opt-in is `materialization: table` + `refresh: cumulative`.
+    /// The new opt-in is `materialization: table` + `refresh: keyed`.
     #[test]
     fn test_cumulative_aggregate_frontmatter_is_rejected() {
         let source = r#"---
@@ -2195,12 +2206,12 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// `materialization: table` + `refresh: cumulative` parses cleanly.
+    /// `materialization: table` + `refresh: keyed` parses cleanly.
     #[test]
-    fn test_refresh_cumulative_frontmatter_parses() {
+    fn test_refresh_keyed_frontmatter_parses() {
         let source = r#"---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
 SELECT device_id, user_id, COUNT(*) AS event_count
 FROM smelt.events
@@ -2215,7 +2226,7 @@ GROUP BY device_id, user_id"#;
                 );
                 assert_eq!(
                     metadata.refresh,
-                    Some(crate::config::RefreshStrategy::Cumulative)
+                    Some(crate::config::RefreshStrategy::Keyed)
                 );
                 assert!(metadata.timeseries.is_none());
                 assert!(metadata.batched.is_none());
@@ -2224,13 +2235,13 @@ GROUP BY device_id, user_id"#;
         }
     }
 
-    /// A model with `refresh: cumulative` + a `timeseries:` block
-    /// emits `CumulativeForbidsTimeseries`.
+    /// A model with `refresh: keyed` + a `timeseries:` block
+    /// emits `KeyedForbidsTimeseries`.
     #[test]
-    fn test_cumulative_aggregate_forbids_timeseries() {
+    fn test_keyed_forbids_timeseries() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(crate::config::RefreshStrategy::Cumulative),
+            refresh: Some(crate::config::RefreshStrategy::Keyed),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "ts".to_string(),
                 partition_column: "dt".to_string(),
@@ -2241,21 +2252,21 @@ GROUP BY device_id, user_id"#;
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-            .expect_err("refresh: cumulative + timeseries must error");
+            .expect_err("refresh: keyed + timeseries must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsTimeseries),
-            "Expected CumulativeForbidsTimeseries, got: {}",
+            matches!(err, MetadataError::KeyedForbidsTimeseries),
+            "Expected KeyedForbidsTimeseries, got: {}",
             err
         );
     }
 
-    /// A model with `refresh: cumulative` + a `batched:` block
-    /// emits `CumulativeForbidsBatched`.
+    /// A model with `refresh: keyed` + a `batched:` block
+    /// emits `KeyedForbidsBatched`.
     #[test]
-    fn test_cumulative_aggregate_forbids_incremental() {
+    fn test_keyed_forbids_batched() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(crate::config::RefreshStrategy::Cumulative),
+            refresh: Some(crate::config::RefreshStrategy::Keyed),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
@@ -2264,10 +2275,10 @@ GROUP BY device_id, user_id"#;
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("refresh: cumulative + batched: must error");
+            .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsBatched),
-            "Expected CumulativeForbidsBatched, got: {}",
+            matches!(err, MetadataError::KeyedForbidsBatched),
+            "Expected KeyedForbidsBatched, got: {}",
             err
         );
     }

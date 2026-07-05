@@ -1,6 +1,9 @@
-//! Classifier for the `cumulative_aggregate` materialization.
+//! Classifier for the `refresh: keyed` mode.
 //!
-//! See `docs/specs/cumulative_aggregate.md` for the normative spec.
+//! See `docs/specs/keyed_models.md` for the normative spec. This module is
+//! the mode's built seed: the direct-monoid families (additive fold,
+//! extremal/lattice fold) — the overwrite, once-write, and plain-overwrite
+//! families are not yet classified here.
 //!
 //! The classifier is a pure function that reads an inlined SELECT
 //! (post function expansion) plus a small source-timeseries lookup
@@ -14,7 +17,7 @@
 //!   FROM clause.
 //!
 //! Returns a `CumulativeClassification` on success or a list of
-//! `CumulativeDiagnostic`s on rejection.
+//! `KeyedDiagnostic`s on rejection.
 
 use serde::Serialize;
 use smelt_core::config::TimeseriesConfig;
@@ -103,86 +106,92 @@ pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
     }
 }
 
-/// A diagnostic code emitted by the cumulative classifier.
+/// A diagnostic code emitted by the keyed classifier.
 ///
-/// Mirrors `cumulative_aggregate.md` §"Diagnostic codes".
+/// Mirrors `keyed_models.md` §"Diagnostic codes" (owned by this spec).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum CumulativeDiagnostic {
-    CumulativeRequiresGroupBy,
-    CumulativeUnknownAggregator {
+pub enum KeyedDiagnostic {
+    KeyedRequiresGroupBy,
+    KeyedUnknownCombiner {
         projection: String,
         offending: String,
     },
-    CumulativeGroupByContainsPartitionColumn {
+    KeyedGroupByContainsPartitionColumn {
         partition_column: String,
     },
-    CumulativeForbidsWindowFunctions,
-    CumulativeForbidsNondeterministic {
+    KeyedForbidsWindowFunctions,
+    KeyedForbidsNondeterministic {
         offending: String,
     },
-    CumulativeNoDrivingSource,
-    CumulativeMultipleDrivingSources {
+    /// Interim not-yet-supported refusal: no clocked driving source was
+    /// found, and the snapshot-reconcile executor is unbuilt
+    /// (`docs/specs/keyed_models.md` §Known Divergences). This is a
+    /// fail-loud "not yet" refusal, not a model error.
+    KeyedSnapshotPostureUnsupported,
+    KeyedMultipleDrivingSources {
         candidates: Vec<String>,
     },
-    SqlNotParseable,
+    KeyedSqlNotParseable,
 }
 
-impl std::fmt::Display for CumulativeDiagnostic {
+impl std::fmt::Display for KeyedDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CumulativeDiagnostic::CumulativeRequiresGroupBy => write!(
+            KeyedDiagnostic::KeyedRequiresGroupBy => write!(
                 f,
-                "CumulativeRequiresGroupBy: cumulative_aggregate SELECT must have a GROUP BY \
+                "KeyedRequiresGroupBy: refresh: keyed SELECT must have a GROUP BY \
                  clause — the GROUP BY columns are the unique key"
             ),
-            CumulativeDiagnostic::CumulativeUnknownAggregator {
+            KeyedDiagnostic::KeyedUnknownCombiner {
                 projection,
                 offending,
             } => write!(
                 f,
-                "CumulativeUnknownAggregator: projection `{}` uses `{}`, which is not in the \
-                 cumulative aggregator allowlist (COUNT, SUM, MIN, MAX, BOOL_AND, BOOL_OR, \
+                "KeyedUnknownCombiner: projection `{}` uses `{}`, which is not in the \
+                 keyed aggregator allowlist (COUNT, SUM, MIN, MAX, BOOL_AND, BOOL_OR, \
                  BIT_AND, BIT_OR, BIT_XOR). Composite expressions over aggregates are not \
                  allowed — split into separate projections.",
                 projection, offending
             ),
-            CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn { partition_column } => {
+            KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { partition_column } => {
                 write!(
                     f,
-                    "CumulativeGroupByContainsPartitionColumn: the GROUP BY contains the driving \
+                    "KeyedGroupByContainsPartitionColumn: the GROUP BY contains the driving \
                      source's partition_column `{}`, which produces a per-partition output shape, \
-                     not the cumulative one — switch to `materialization: incremental` + \
-                     `timeseries:` instead",
+                     not the keyed one — switch to `refresh: batched` + `timeseries:` instead, or \
+                     declare `timeseries:` on this model to stay keyed",
                     partition_column
                 )
             }
-            CumulativeDiagnostic::CumulativeForbidsWindowFunctions => write!(
+            KeyedDiagnostic::KeyedForbidsWindowFunctions => write!(
                 f,
-                "CumulativeForbidsWindowFunctions: window functions (OVER (...)) are not allowed \
-                 in cumulative_aggregate SELECTs — the cumulative state is the window"
+                "KeyedForbidsWindowFunctions: window functions (OVER (...)) are not allowed \
+                 in refresh: keyed SELECTs — the keyed state is the window"
             ),
-            CumulativeDiagnostic::CumulativeForbidsNondeterministic { offending } => write!(
+            KeyedDiagnostic::KeyedForbidsNondeterministic { offending } => write!(
                 f,
-                "CumulativeForbidsNondeterministic: non-deterministic function `{}` is not \
-                 allowed in cumulative_aggregate SELECTs — cross-partition combine requires \
-                 deterministic per-partition output",
+                "KeyedForbidsNondeterministic: non-deterministic function `{}` is not \
+                 allowed in refresh: keyed SELECTs — cross-window combine requires \
+                 deterministic per-window output",
                 offending
             ),
-            CumulativeDiagnostic::CumulativeNoDrivingSource => write!(
+            KeyedDiagnostic::KeyedSnapshotPostureUnsupported => write!(
                 f,
-                "CumulativeNoDrivingSource: no source in the FROM clause declares a `timeseries:` \
-                 block — declare `timeseries:` on the source, or choose a different materialization"
+                "KeyedSnapshotPostureUnsupported: this model has no clocked driving source \
+                 (no timeseries-tagged source in the FROM clause) — the snapshot-reconcile \
+                 executor for `refresh: keyed` is not yet built (see \
+                 docs/plans/20260705-keyed-collapse.md). Declare `timeseries:` on a driving \
+                 source to use the window-forward run shape instead."
             ),
-            CumulativeDiagnostic::CumulativeMultipleDrivingSources { candidates } => write!(
+            KeyedDiagnostic::KeyedMultipleDrivingSources { candidates } => write!(
                 f,
-                "CumulativeMultipleDrivingSources: multiple timeseries-tagged sources in the \
+                "KeyedMultipleDrivingSources: multiple timeseries-tagged sources in the \
                  FROM clause ({}). v1 supports exactly one driving source.",
                 candidates.join(", ")
             ),
-            CumulativeDiagnostic::SqlNotParseable => write!(
-                f,
-                "SQL body could not be parsed for cumulative classification"
-            ),
+            KeyedDiagnostic::KeyedSqlNotParseable => {
+                write!(f, "SQL body could not be parsed for keyed classification")
+            }
         }
     }
 }
@@ -209,7 +218,7 @@ pub struct DrivingSource {
 
 /// Lookup table for a source's `timeseries:` declaration. The classifier
 /// uses this to identify the driving source and to enforce
-/// `CumulativeGroupByContainsPartitionColumn`.
+/// `KeyedGroupByContainsPartitionColumn`.
 pub type SourceTimeseriesMap = HashMap<String, TimeseriesConfig>;
 
 /// Classify a `cumulative_aggregate` model.
@@ -225,19 +234,19 @@ pub fn classify_cumulative(
     sql: &str,
     refs: &[String],
     source_timeseries: &SourceTimeseriesMap,
-) -> Result<CumulativeClassification, Vec<CumulativeDiagnostic>> {
+) -> Result<CumulativeClassification, Vec<KeyedDiagnostic>> {
     let mut diagnostics = Vec::new();
 
     let analysis = match analyze_select(sql) {
         Some(a) => a,
         None => {
-            return Err(vec![CumulativeDiagnostic::SqlNotParseable]);
+            return Err(vec![KeyedDiagnostic::KeyedSqlNotParseable]);
         }
     };
 
     // Rule: GROUP BY required.
     if analysis.group_by_exprs.is_empty() {
-        diagnostics.push(CumulativeDiagnostic::CumulativeRequiresGroupBy);
+        diagnostics.push(KeyedDiagnostic::KeyedRequiresGroupBy);
     }
 
     // Build the unique_key as the SELECT aliases corresponding to GROUP BY
@@ -276,7 +285,7 @@ pub fn classify_cumulative(
                 // permitted in a cumulative SELECT.
                 let in_group_by = analysis.group_by_exprs.iter().any(|g| g == text);
                 if !in_group_by {
-                    diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                    diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                         projection: alias.clone(),
                         offending: format!("composite expression `{}`", text.trim()),
                     });
@@ -286,7 +295,7 @@ pub fn classify_cumulative(
                 // COUNT(DISTINCT x) is not commutative under merge (the union
                 // of distinct values across partitions cannot be reconstructed
                 // from per-partition counts). Refuse.
-                diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                     projection: alias.clone(),
                     offending: "COUNT(DISTINCT)".to_string(),
                 });
@@ -319,20 +328,20 @@ pub fn classify_cumulative(
                                 cross_partition_combiner: combiner,
                             });
                         } else {
-                            diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                            diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                                 projection: alias.clone(),
                                 offending: format!("composite expression `{}`", text.trim()),
                             });
                         }
                     }
                     (Some(name), None) => {
-                        diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                             projection: alias.clone(),
                             offending: name,
                         });
                     }
                     (None, _) => {
-                        diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                             projection: alias.clone(),
                             offending: text.clone(),
                         });
@@ -345,14 +354,14 @@ pub fn classify_cumulative(
     // Rule: no window functions in the outer body.
     let upper_sql = sql.to_uppercase();
     if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
-        diagnostics.push(CumulativeDiagnostic::CumulativeForbidsWindowFunctions);
+        diagnostics.push(KeyedDiagnostic::KeyedForbidsWindowFunctions);
     }
 
     // Rule: no non-deterministic functions in the outer body.
     for nd in NONDETERMINISTIC_FUNCTIONS {
         let pattern = format!("{}(", nd);
         if upper_sql.contains(&pattern) {
-            diagnostics.push(CumulativeDiagnostic::CumulativeForbidsNondeterministic {
+            diagnostics.push(KeyedDiagnostic::KeyedForbidsNondeterministic {
                 offending: nd.to_string(),
             });
             break;
@@ -384,11 +393,11 @@ pub fn classify_cumulative(
     }) {
         Ok(ds) => Some(ds),
         Err(AnchorAmbiguity::NoCandidate) => {
-            diagnostics.push(CumulativeDiagnostic::CumulativeNoDrivingSource);
+            diagnostics.push(KeyedDiagnostic::KeyedSnapshotPostureUnsupported);
             None
         }
         Err(AnchorAmbiguity::Multiple(candidates)) => {
-            diagnostics.push(CumulativeDiagnostic::CumulativeMultipleDrivingSources {
+            diagnostics.push(KeyedDiagnostic::KeyedMultipleDrivingSources {
                 candidates: candidates
                     .into_iter()
                     .map(|n| format!("smelt.{n}"))
@@ -410,11 +419,9 @@ pub fn classify_cumulative(
                 .iter()
                 .any(|e| e.to_ascii_lowercase() == partition_col_lower);
         if contains_partition {
-            diagnostics.push(
-                CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn {
-                    partition_column: partition_col.clone(),
-                },
-            );
+            diagnostics.push(KeyedDiagnostic::KeyedGroupByContainsPartitionColumn {
+                partition_column: partition_col.clone(),
+            });
         }
     }
 
@@ -537,7 +544,7 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// A SELECT with no GROUP BY produces CumulativeRequiresGroupBy.
+    /// A SELECT with no GROUP BY produces KeyedRequiresGroupBy.
     #[test]
     fn test_no_group_by_refused() {
         let sql = "SELECT COUNT(*) AS n FROM smelt.silver.events_parsed";
@@ -545,13 +552,13 @@ GROUP BY device_id, user_id"#;
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeRequiresGroupBy)),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedRequiresGroupBy)),
             "diagnostics: {:?}",
             err
         );
     }
 
-    /// STRING_AGG on a non-key projection produces CumulativeUnknownAggregator.
+    /// STRING_AGG on a non-key projection produces KeyedUnknownCombiner.
     #[test]
     fn test_unknown_aggregator_refused() {
         let sql = r#"SELECT
@@ -564,7 +571,7 @@ GROUP BY device_id"#;
         assert!(
             err.iter().any(|d| matches!(
                 d,
-                CumulativeDiagnostic::CumulativeUnknownAggregator { offending, .. }
+                KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
                     if offending.to_uppercase() == "STRING_AGG"
             )),
             "diagnostics: {:?}",
@@ -585,7 +592,7 @@ GROUP BY device_id"#;
         assert!(
             err.iter().any(|d| matches!(
                 d,
-                CumulativeDiagnostic::CumulativeUnknownAggregator { offending, .. }
+                KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
                     if offending.contains("composite") || offending.contains("expression")
             )),
             "diagnostics: {:?}",
@@ -605,7 +612,7 @@ GROUP BY device_id"#;
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeUnknownAggregator { .. })),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
             "diagnostics: {:?}",
             err
         );
@@ -626,7 +633,7 @@ GROUP BY device_id, user_id, event_date"#;
         assert!(
             err.iter().any(|d| matches!(
                 d,
-                CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn { partition_column }
+                KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { partition_column }
                     if partition_column == "event_date"
             )),
             "diagnostics: {:?}",
@@ -634,7 +641,7 @@ GROUP BY device_id, user_id, event_date"#;
         );
     }
 
-    /// An OVER (...) projection produces CumulativeForbidsWindowFunctions.
+    /// An OVER (...) projection produces KeyedForbidsWindowFunctions.
     #[test]
     fn test_window_function_refused() {
         let sql = r#"SELECT
@@ -646,7 +653,7 @@ GROUP BY device_id"#;
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeForbidsWindowFunctions)),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
             "diagnostics: {:?}",
             err
         );
@@ -663,18 +670,16 @@ GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
-            err.iter().any(|d| matches!(
-                d,
-                CumulativeDiagnostic::CumulativeForbidsNondeterministic { .. }
-            )),
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
             "diagnostics: {:?}",
             err
         );
     }
 
-    /// A SELECT from a source with no timeseries: produces CumulativeNoDrivingSource.
+    /// A SELECT from a source with no timeseries: produces KeyedSnapshotPostureUnsupported.
     #[test]
-    fn test_zero_driving_sources_refused() {
+    fn test_zero_driving_sources_refused_as_snapshot_posture_unsupported() {
         let sql = r#"SELECT
     device_id,
     COUNT(*) AS n
@@ -684,13 +689,13 @@ GROUP BY device_id"#;
         let err = classify_cumulative(sql, &refs, &HashMap::new()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeNoDrivingSource)),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
             "diagnostics: {:?}",
             err
         );
     }
 
-    /// Two timeseries-tagged sources produces CumulativeMultipleDrivingSources.
+    /// Two timeseries-tagged sources produces KeyedMultipleDrivingSources.
     #[test]
     fn test_multiple_driving_sources_refused() {
         let sql = r#"SELECT
@@ -708,10 +713,8 @@ GROUP BY device_id"#;
         map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
         let err = classify_cumulative(sql, &refs, &map).unwrap_err();
         assert!(
-            err.iter().any(|d| matches!(
-                d,
-                CumulativeDiagnostic::CumulativeMultipleDrivingSources { .. }
-            )),
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedMultipleDrivingSources { .. })),
             "diagnostics: {:?}",
             err
         );

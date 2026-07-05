@@ -21,8 +21,8 @@ pub struct ExplainOutput {
 pub struct ExplainModel {
     pub dependencies: Vec<String>,
     pub materialization: Materialization,
-    /// Refresh axis: `"cumulative"` when the model uses the cumulative-aggregate
-    /// merge loop (`materialization: table` + `refresh: cumulative`). Omitted
+    /// Refresh axis: `"keyed"` when the model uses the keyed merge loop
+    /// (`materialization: table` + `refresh: keyed`). Omitted
     /// when the model uses the default full-refresh strategy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
@@ -154,10 +154,10 @@ pub fn build_explain_output(
                 generator_name: gn.clone(),
             });
 
-        // Emit `refresh: "cumulative"` when the model is cumulative; omit otherwise.
+        // Emit `refresh: "keyed"` when the model is keyed; omit otherwise.
         let refresh = metadata
             .and_then(|m| m.refresh.clone())
-            .filter(|r| *r == RefreshStrategy::Cumulative);
+            .filter(|r| *r == RefreshStrategy::Keyed);
 
         models.insert(
             model_name.clone(),
@@ -211,7 +211,7 @@ pub fn build_physical_explain(
                 "incremental (partition: {}, granularity: {})",
                 partition_column, granularity
             ),
-            smelt_runtime::ModelStrategy::Cumulative => "cumulative_aggregate".to_string(),
+            smelt_runtime::ModelStrategy::Keyed => "cumulative_aggregate".to_string(),
             smelt_runtime::ModelStrategy::Ephemeral => "ephemeral".to_string(),
             smelt_runtime::ModelStrategy::Skipped { reason } => {
                 format!("skipped ({})", reason)
@@ -598,12 +598,12 @@ mod tests {
     }
 
     /// `smelt explain --json` must emit `"materialization": "table"` and
-    /// `"refresh": "cumulative"` for a cumulative model, and must NOT emit
+    /// `"refresh": "keyed"` for a keyed model, and must NOT emit
     /// `"cumulative_aggregate"` anywhere in the materialization field.
     ///
     /// Spec oracle: `docs/specs/cli.md` §"`smelt explain --json` output schema".
     #[test]
-    fn explain_json_emits_refresh_cumulative_for_cumulative_model() {
+    fn explain_json_emits_refresh_keyed_for_keyed_model() {
         use crate::metadata::ModelMetadata;
         use smelt_core::config::RefreshStrategy;
 
@@ -614,7 +614,7 @@ mod tests {
         );
         model.metadata = Some(Box::new(ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Cumulative),
+            refresh: Some(RefreshStrategy::Keyed),
             ..Default::default()
         }));
 
@@ -631,22 +631,22 @@ mod tests {
         assert_eq!(
             model_entry.materialization,
             Materialization::Table,
-            "cumulative model materialization must be 'table', not anything else"
+            "keyed model materialization must be 'table', not anything else"
         );
 
-        // The `refresh` field must be `Some(Cumulative)`.
+        // The `refresh` field must be `Some(Keyed)`.
         assert_eq!(
             model_entry.refresh,
-            Some(RefreshStrategy::Cumulative),
-            "cumulative model must have refresh: Some(Cumulative)"
+            Some(RefreshStrategy::Keyed),
+            "keyed model must have refresh: Some(Keyed)"
         );
 
-        // Verify the JSON serialization: must emit `"refresh": "cumulative"`
+        // Verify the JSON serialization: must emit `"refresh": "keyed"`
         // and `"materialization": "table"`, must NOT contain `"cumulative_aggregate"`.
         let json = serde_json::to_string_pretty(&output).unwrap();
         assert!(
-            json.contains("\"refresh\": \"cumulative\""),
-            "JSON must contain '\"refresh\": \"cumulative\"'; got:\n{json}"
+            json.contains("\"refresh\": \"keyed\""),
+            "JSON must contain '\"refresh\": \"keyed\"'; got:\n{json}"
         );
         assert!(
             json.contains("\"materialization\": \"table\""),
@@ -658,7 +658,7 @@ mod tests {
         );
     }
 
-    /// A plain `materialization: table` model (no `refresh: cumulative`) must
+    /// A plain `materialization: table` model (no `refresh: keyed`) must
     /// NOT emit a `refresh` field in the JSON — the field is omitted for
     /// the default full-refresh strategy.
     #[test]

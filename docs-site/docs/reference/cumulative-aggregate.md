@@ -1,15 +1,15 @@
-# cumulative_aggregate Reference
+# keyed Reference
 
-The cumulative-aggregate merge loop is a stateful-merge materialization. The output has one row per `GROUP BY` key, where each row's columns reflect the combined state across every processed source partition. The unique key and the per-column combiners are derived from the SELECT.
+The keyed merge loop (`refresh: keyed`) is a stateful-merge materialization. The output has one row per `GROUP BY` key, where each row's columns reflect the combined state across every processed source window. The unique key and the per-column combiners are derived from the SELECT.
 
 ## Frontmatter
 
-Use `materialization: table` together with `refresh: cumulative` to enable this mode:
+Use `materialization: table` together with `refresh: keyed` to enable this mode:
 
 ```sql
 ---
 materialization: table
-refresh: cumulative
+refresh: keyed
 ---
 SELECT
     device_id,
@@ -30,7 +30,7 @@ There is no additional configuration block — the SQL is the entire specificati
 |---|---|
 | `unique_key` | the `GROUP BY` column list |
 | Per-column aggregator | each non-key projection's outer function |
-| Cross-partition combiner | a fixed lookup off the per-partition aggregator |
+| Cross-window combiner | a fixed lookup off the per-partition aggregator |
 | Driving source | the single `timeseries:`-tagged source in the FROM clause |
 
 There is no way to override these — they are read from the SQL on every run.
@@ -39,7 +39,7 @@ There is no way to override these — they are read from the SQL on every run.
 
 Each non-key projection must be a direct call to one of:
 
-| Per-partition aggregator | Cross-partition combiner | Rendered SQL |
+| Per-partition aggregator | Cross-window combiner | Rendered SQL |
 |---|---|---|
 | `COUNT(...)` | `SUM` | `target.c + delta.c` |
 | `SUM(...)`   | `SUM` | `target.c + delta.c` |
@@ -51,7 +51,7 @@ Each non-key projection must be a direct call to one of:
 | `BIT_OR(...)`   | `BIT_OR`   | `target.c \| delta.c` |
 | `BIT_XOR(...)`  | `xor()`    | `xor(target.c, delta.c)` |
 
-Each allowed aggregator is commutative and associative — that's the property that lets the rule merge partitions in any order and still produce the same final state.
+Each allowed aggregator is commutative and associative — that's the property that lets the rule merge windows in any order and still produce the same final state.
 
 **Out of v1**: `AVG`, `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `COUNT(DISTINCT ...)`, `APPROX_COUNT_DISTINCT`. Composite expressions over aggregates (e.g. `SUM(x) + 1`) are also refused — split into separate projections and compute derived values downstream.
 
@@ -66,53 +66,53 @@ For a run window `[run_start, run_end)`:
     - First partition: `CREATE TABLE AS` the delta. Subsequent partitions: emit a `MERGE INTO` with the per-column combiners.
 
 !!! warning "Granularity restriction"
-    The driving source must declare `granularity: day` or `granularity: week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `cumulative_aggregate v1 supports day and week granularity; got <Granularity>`.
+    The driving source must declare `granularity: day` or `granularity: week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `keyed merge supports day and week granularity; got <Granularity>`.
 
 Running without a run window (`smelt run` without `--event-time-start`/`--event-time-end`) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.
 
-## Cross-partition equivalence
+## End-state equivalence
 
-For any set of source partitions `S = {D₁, …, Dₙ}` and any ordering π over `S`:
+For any set of source partitions `S = {D₁, …, Dₙ}` and any admitted ordering π over `S`:
 
 ```
-cumulative_aggregate_run(model, π(S))
+keyed_run(model, π(S))
   == full_refresh(model, source.where(partition ∈ S))
 ```
 
-Reordering merges across source partitions does not change the final state. This is the load-bearing contract the rule upholds — and the reason the allowlist is restricted to commutative-associative aggregators.
+Reordering merges across source partitions does not change the final state (for the additive and extremal/lattice combiners covered above). This is the load-bearing contract the mode upholds — and the reason the allowlist is restricted to commutative-associative aggregators.
 
 ## Diagnostic codes
 
 | Code | When it fires |
 |---|---|
-| `CumulativeRequiresGroupBy` | SELECT has no `GROUP BY` — there is no unique key to derive |
-| `CumulativeUnknownAggregator` | A non-key projection is not a direct call to an allowlisted aggregator |
-| `CumulativeGroupByContainsPartitionColumn` | `GROUP BY` contains the driving source's `partition_column` (would produce the per-partition shape, not the cumulative one) |
-| `CumulativeForbidsWindowFunctions` | Outer-body `OVER (...)` clause |
-| `CumulativeForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
-| `CumulativeNoDrivingSource` | No source in the FROM clause declares `timeseries:` |
-| `CumulativeMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
-| `CumulativeForbidsTimeseries` | Model declares both `refresh: cumulative` and a `timeseries:` block |
-| `CumulativeForbidsBatched` | Model declares both `refresh: cumulative` and a `batched:` block |
+| `KeyedRequiresGroupBy` | SELECT has no `GROUP BY` — there is no unique key to derive |
+| `KeyedUnknownCombiner` | A non-key projection is not a direct call to an allowlisted aggregator |
+| `KeyedGroupByContainsPartitionColumn` | `GROUP BY` contains the driving source's `partition_column` (would produce the per-partition shape, not the keyed one) |
+| `KeyedForbidsWindowFunctions` | Outer-body `OVER (...)` clause |
+| `KeyedForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
+| `KeyedMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
+| `KeyedForbidsTimeseries` | Model declares a `timeseries:` block without key temporal locality being established |
+| `KeyedForbidsBatched` | Model declares both `refresh: keyed` and a `batched:` block |
+| `KeyedSnapshotPostureUnsupported` | Interim: no clocked driving source is found and the snapshot-reconcile executor is not yet built — a not-yet-supported refusal, not a model error |
 
-There is no `safety_overrides:` block for cumulative models. Rejected constructs break the cross-partition equivalence contract, not partial correctness — there is no opt-in escape hatch.
+There is no `safety_overrides:` block for keyed models. Rejected constructs break the end-state equivalence contract, not partial correctness — there is no opt-in escape hatch.
 
 ## Reprocessing
 
-v1 does not support per-partition reprocessing. If a past partition's source data changes after the partition has already been merged, the cumulative table is stale until the operator runs with `--full-refresh` (truncate and rebuild). Per-key combine plus an already-merged delta would double-count under a second pass; the rule refuses to silently double-count.
+Reprocessing an already-merged window is refused when detected. If a past window's source data changes after the window has already been merged, the keyed table is stale until the operator runs with `--full-refresh` (truncate and rebuild). Re-merging additive columns over an already-merged delta would double-count under a second pass; the rule refuses to silently double-count.
 
 ## Output shape
 
-A cumulative aggregate model's output has:
+A keyed model's output has:
 
 - One row per `unique_key` value (the `GROUP BY` column list).
-- Per-key columns whose values reflect the combined state across every processed source partition.
-- **No** `partition_column`. **No** `event_time_column`. **No** `timeseries:` declaration on the model itself.
+- Per-key columns whose values reflect the combined state across every processed source window.
+- By default: **no** `partition_column`, **no** `event_time_column`, and **no** `timeseries:` declaration on the model itself.
 
-Downstream consumers see the cumulative output as a lookup — there is no partition information to push down. Joins to the cumulative table read it in full each run, identical to the treatment of any non-`timeseries:` source.
+Downstream consumers see the keyed output as a lookup — there is no partition information to push down. Joins to the keyed table read it in full each run, identical to the treatment of any non-`timeseries:` source.
 
 ## Related references
 
-- [Materializations guide](../guide/materializations.md#cumulative_aggregate) — author-facing walkthrough.
+- [Materializations guide](../guide/materializations.md#keyed) — author-facing walkthrough.
 - [Incremental Models](../guide/incremental-models.md) — the sibling materialization for per-partition output.
-- [Timeseries reference](timeseries.md) — `timeseries:` block declared on the *source* a cumulative model reads from.
+- [Timeseries reference](timeseries.md) — `timeseries:` block declared on the *source* a keyed model reads from.

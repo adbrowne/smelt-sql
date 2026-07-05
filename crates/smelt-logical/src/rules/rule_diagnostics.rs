@@ -20,7 +20,7 @@ use crate::analysis::monotonicity::EventTimeTrace;
 use crate::analysis::source_bounds::{derive_model_bounds, BoundContext};
 use crate::analysis::{item_alias, select_stmt_items};
 use crate::graph::ModelInfo;
-use crate::rules::cumulative::{classify_cumulative, CumulativeDiagnostic, SourceTimeseriesMap};
+use crate::rules::cumulative::{classify_cumulative, KeyedDiagnostic, SourceTimeseriesMap};
 use crate::rules::incremental;
 use crate::rules::incremental::trace_union_branches;
 use crate::types::BatchedConfig;
@@ -43,14 +43,14 @@ pub enum RuleSeverity {
 /// same verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleDiagnosticCode {
-    CumulativeRequiresGroupBy,
-    CumulativeUnknownAggregator,
-    CumulativeGroupByContainsPartitionColumn,
-    CumulativeForbidsWindowFunctions,
-    CumulativeForbidsNondeterministic,
-    CumulativeNoDrivingSource,
-    CumulativeMultipleDrivingSources,
-    CumulativeSqlNotParseable,
+    KeyedRequiresGroupBy,
+    KeyedUnknownCombiner,
+    KeyedGroupByContainsPartitionColumn,
+    KeyedForbidsWindowFunctions,
+    KeyedForbidsNondeterministic,
+    KeyedSnapshotPostureUnsupported,
+    KeyedMultipleDrivingSources,
+    KeyedSqlNotParseable,
     BatchedNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
@@ -74,8 +74,9 @@ pub struct RuleContext<'a> {
     /// Model name (for messages).
     pub model_name: &'a str,
     /// Materialization string the build resolves for this model — e.g.
-    /// `"cumulative_aggregate"` or `"incremental"`. A rule keys its scope off
-    /// this exactly as the build does.
+    /// `"cumulative_aggregate"` (the `refresh: keyed` mode's internal scope
+    /// key) or `"incremental"`. A rule keys its scope off this exactly as the
+    /// build does.
     pub materialization: &'a str,
     /// The model SQL the build will run, with frontmatter stripped (the same
     /// SQL the runtime hands the classifier — see `cumulative.rs`).
@@ -98,21 +99,21 @@ pub trait PlannerRule {
     fn detect(&self, ctx: &RuleContext) -> Vec<RuleDiagnostic>;
 }
 
-/// The cumulative-aggregate classifier as a uniform rule.
+/// The `refresh: keyed` classifier as a uniform rule.
 ///
-/// Its rejections refuse the model at planning time (`cumulative_aggregate.md`
-/// §"Classifier checks"), so every one is `Error` — the build hard-refuses on
+/// Its rejections refuse the model at planning time (`keyed_models.md`
+/// §"Diagnostic codes"), so every one is `Error` — the build hard-refuses on
 /// them today via `smelt_planner::classify_cumulative`.
-pub struct CumulativeRule;
+pub struct KeyedRule;
 
-impl PlannerRule for CumulativeRule {
+impl PlannerRule for KeyedRule {
     fn detect(&self, ctx: &RuleContext) -> Vec<RuleDiagnostic> {
         if ctx.materialization != "cumulative_aggregate" {
             return Vec::new();
         }
         match classify_cumulative(ctx.sql, ctx.refs, ctx.source_timeseries) {
             Ok(_) => Vec::new(),
-            Err(diags) => diags.iter().map(cumulative_to_rule).collect(),
+            Err(diags) => diags.iter().map(keyed_to_rule).collect(),
         }
     }
 }
@@ -466,37 +467,33 @@ fn extract_balanced_parens(text: &str) -> Option<&str> {
 /// rule here surfaces it to the editor and the build at once.
 pub fn detect_builtin_rules(ctx: &RuleContext) -> Vec<RuleDiagnostic> {
     let mut out = Vec::new();
-    out.extend(CumulativeRule.detect(ctx));
+    out.extend(KeyedRule.detect(ctx));
     out.extend(IncrementalRule.detect(ctx));
     out
 }
 
-/// Map a cumulative-classifier diagnostic to its uniform rule diagnostic. Every
+/// Map a keyed-classifier diagnostic to its uniform rule diagnostic. Every
 /// classifier rejection is `Error`.
-fn cumulative_to_rule(diag: &CumulativeDiagnostic) -> RuleDiagnostic {
+fn keyed_to_rule(diag: &KeyedDiagnostic) -> RuleDiagnostic {
     let code = match diag {
-        CumulativeDiagnostic::CumulativeRequiresGroupBy => {
-            RuleDiagnosticCode::CumulativeRequiresGroupBy
+        KeyedDiagnostic::KeyedRequiresGroupBy => RuleDiagnosticCode::KeyedRequiresGroupBy,
+        KeyedDiagnostic::KeyedUnknownCombiner { .. } => RuleDiagnosticCode::KeyedUnknownCombiner,
+        KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { .. } => {
+            RuleDiagnosticCode::KeyedGroupByContainsPartitionColumn
         }
-        CumulativeDiagnostic::CumulativeUnknownAggregator { .. } => {
-            RuleDiagnosticCode::CumulativeUnknownAggregator
+        KeyedDiagnostic::KeyedForbidsWindowFunctions => {
+            RuleDiagnosticCode::KeyedForbidsWindowFunctions
         }
-        CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn { .. } => {
-            RuleDiagnosticCode::CumulativeGroupByContainsPartitionColumn
+        KeyedDiagnostic::KeyedForbidsNondeterministic { .. } => {
+            RuleDiagnosticCode::KeyedForbidsNondeterministic
         }
-        CumulativeDiagnostic::CumulativeForbidsWindowFunctions => {
-            RuleDiagnosticCode::CumulativeForbidsWindowFunctions
+        KeyedDiagnostic::KeyedSnapshotPostureUnsupported => {
+            RuleDiagnosticCode::KeyedSnapshotPostureUnsupported
         }
-        CumulativeDiagnostic::CumulativeForbidsNondeterministic { .. } => {
-            RuleDiagnosticCode::CumulativeForbidsNondeterministic
+        KeyedDiagnostic::KeyedMultipleDrivingSources { .. } => {
+            RuleDiagnosticCode::KeyedMultipleDrivingSources
         }
-        CumulativeDiagnostic::CumulativeNoDrivingSource => {
-            RuleDiagnosticCode::CumulativeNoDrivingSource
-        }
-        CumulativeDiagnostic::CumulativeMultipleDrivingSources { .. } => {
-            RuleDiagnosticCode::CumulativeMultipleDrivingSources
-        }
-        CumulativeDiagnostic::SqlNotParseable => RuleDiagnosticCode::CumulativeSqlNotParseable,
+        KeyedDiagnostic::KeyedSqlNotParseable => RuleDiagnosticCode::KeyedSqlNotParseable,
     };
     RuleDiagnostic {
         code,
@@ -508,7 +505,7 @@ fn cumulative_to_rule(diag: &CumulativeDiagnostic) -> RuleDiagnostic {
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
 ///
 /// Returns the deduplicated list of data refs (e.g. `smelt.silver.events`). The
-/// single source of ref collection shared by the runtime cumulative dispatch
+/// single source of ref collection shared by the runtime keyed dispatch
 /// and the analysis-layer gate, so both reach the identical driving-source
 /// lookup. Conservative: filters out `smelt.functions.*` / `smelt.config.*` /
 /// `smelt.define` / `smelt.extern` / `smelt.metric`, which are not data refs.
@@ -577,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn cumulative_rule_flags_unknown_aggregator() {
+    fn keyed_rule_flags_unknown_combiner() {
         let sql = "SELECT device_id, STRING_AGG(CAST(amount AS VARCHAR), ',') AS amounts \
                    FROM smelt.events_ts GROUP BY device_id";
         let refs = collect_path_refs(sql);
@@ -593,16 +590,16 @@ mod tests {
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
-            diags.iter().any(
-                |d| d.code == RuleDiagnosticCode::CumulativeUnknownAggregator
-                    && d.severity == RuleSeverity::Error
-            ),
-            "expected CumulativeUnknownAggregator Error, got {diags:?}"
+            diags
+                .iter()
+                .any(|d| d.code == RuleDiagnosticCode::KeyedUnknownCombiner
+                    && d.severity == RuleSeverity::Error),
+            "expected KeyedUnknownCombiner Error, got {diags:?}"
         );
     }
 
     #[test]
-    fn cumulative_rule_clean_model_is_silent() {
+    fn keyed_rule_clean_model_is_silent() {
         let sql = "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(amount) AS min_amount \
                    FROM smelt.events_ts WHERE user_id IS NOT NULL GROUP BY device_id, user_id";
         let refs = collect_path_refs(sql);
@@ -618,12 +615,12 @@ mod tests {
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
-            "valid cumulative model must produce no rule diagnostics"
+            "valid keyed model must produce no rule diagnostics"
         );
     }
 
     #[test]
-    fn non_cumulative_materialization_is_silent() {
+    fn non_keyed_materialization_is_silent() {
         let sql = "SELECT 1 AS x";
         let refs = collect_path_refs(sql);
         let ts: SourceTimeseriesMap = HashMap::new();

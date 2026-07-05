@@ -683,35 +683,38 @@ pub enum DiagnosticCode {
 
     // ── Planner-rule diagnostic codes (surfaced via the uniform rule →
     //    diagnostics interface; see `smelt_logical::rules::rule_diagnostics`) ────
-    /// `cumulative_aggregate` SELECT has no GROUP BY (the key columns).
-    CumulativeRequiresGroupBy,
-    /// A `cumulative_aggregate` projection uses a non-allowlisted aggregator or
+    /// A `refresh: keyed` SELECT has no GROUP BY (the key columns).
+    KeyedRequiresGroupBy,
+    /// A `refresh: keyed` projection uses a non-allowlisted aggregator or
     /// a composite expression over aggregates.
-    CumulativeUnknownAggregator,
-    /// The `cumulative_aggregate` GROUP BY contains the driving source's
-    /// `partition_column` (a per-partition shape, not the cumulative one).
-    CumulativeGroupByContainsPartitionColumn,
-    /// Window functions (`OVER (...)`) are not allowed in a `cumulative_aggregate`.
-    CumulativeForbidsWindowFunctions,
-    /// A non-deterministic function appears in a `cumulative_aggregate` SELECT.
-    CumulativeForbidsNondeterministic,
-    /// No source in a `cumulative_aggregate`'s FROM declares a `timeseries:` block.
-    CumulativeNoDrivingSource,
-    /// Multiple timeseries-tagged sources in a `cumulative_aggregate`'s FROM (v1
-    /// supports exactly one driving source).
-    CumulativeMultipleDrivingSources,
-    /// A `cumulative_aggregate` SELECT could not be parsed for classification.
-    CumulativeSqlNotParseable,
-    /// A `cumulative_aggregate` model incorrectly declares a `timeseries:` block.
-    /// The cumulative output has no partition column; the rule reads it from the
-    /// driving source. Anchored at offset 0. Error severity.
-    CumulativeForbidsTimeseries,
-    /// A `cumulative_aggregate` model incorrectly declares a `batched:` block.
-    /// The two materializations have different equivalence contracts; pick one.
+    KeyedUnknownCombiner,
+    /// The `refresh: keyed` GROUP BY contains the driving source's
+    /// `partition_column` (a per-partition shape, not the keyed one).
+    KeyedGroupByContainsPartitionColumn,
+    /// Window functions (`OVER (...)`) are not allowed in a `refresh: keyed` model.
+    KeyedForbidsWindowFunctions,
+    /// A non-deterministic function appears in a `refresh: keyed` SELECT.
+    KeyedForbidsNondeterministic,
+    /// Interim not-yet-supported refusal: a `refresh: keyed` model has no
+    /// clocked driving source and the snapshot-reconcile executor is unbuilt
+    /// (`docs/specs/keyed_models.md` §Known Divergences).
+    KeyedSnapshotPostureUnsupported,
+    /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
+    /// (v1 supports exactly one driving source).
+    KeyedMultipleDrivingSources,
+    /// A `refresh: keyed` SELECT could not be parsed for classification.
+    KeyedSqlNotParseable,
+    /// A `refresh: keyed` model incorrectly declares a `timeseries:` block
+    /// (key temporal locality is not established). The keyed output has no
+    /// partition column by default; the rule reads it from the driving
+    /// source. Anchored at offset 0. Error severity.
+    KeyedForbidsTimeseries,
+    /// A `refresh: keyed` model incorrectly declares a `batched:` block.
+    /// The two refresh strategies have different equivalence contracts; pick one.
     /// Anchored at offset 0. Error severity.
-    CumulativeForbidsBatched,
+    KeyedForbidsBatched,
     /// A `refresh: materialized_view` model incorrectly declares a
-    /// `timeseries:` block. Like `cumulative`, the engine-maintained output
+    /// `timeseries:` block. Like `keyed`, the engine-maintained output
     /// has no partition column. Anchored at offset 0. Error severity.
     MaterializedViewForbidsTimeseries,
     /// A `refresh: materialized_view` model incorrectly declares a

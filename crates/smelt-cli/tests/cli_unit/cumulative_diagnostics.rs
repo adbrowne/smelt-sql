@@ -1,9 +1,9 @@
-//! Diagnostic-parity regression: the cumulative-aggregate classifier's
+//! Diagnostic-parity regression: the `refresh: keyed` classifier's
 //! rejections are surfaced through the analysis layer (`file_diagnostics`),
 //! not only at `smelt run`/`build`.
 //!
 //! Closes BUG-011 (`docs/bug-hunt/2026-05-30-findings.md`): a malformed
-//! cumulative model used to be LSP-clean — `file_diagnostics` reported nothing
+//! keyed model used to be LSP-clean — `file_diagnostics` reported nothing
 //! while the build refused it. The uniform rule → diagnostics interface
 //! (`architecture.md` §"Planner scope") now routes the classifier through
 //! `file_diagnostics`, so the editor and the build reach the same verdict.
@@ -40,17 +40,17 @@ fn diagnostics_for(model_stem: &str) -> Vec<smelt_db::Diagnostic> {
     smelt_db::file_diagnostics(&db, ws, file)
 }
 
-/// A `STRING_AGG` cumulative model is flagged with `CumulativeUnknownAggregator`
+/// A `STRING_AGG` keyed model is flagged with `KeyedUnknownCombiner`
 /// at the analysis layer (where it used to be diagnostic-clean).
 #[test]
-fn unknown_aggregator_surfaces_in_file_diagnostics() {
+fn unknown_combiner_surfaces_in_file_diagnostics() {
     let diags = diagnostics_for("edges_bad_aggregator");
     assert!(
-        diags.iter().any(
-            |d| d.code == Some(DiagnosticCode::CumulativeUnknownAggregator)
-                && d.severity == smelt_db::DiagnosticSeverity::Error
-        ),
-        "expected a CumulativeUnknownAggregator Error from file_diagnostics; got: {:?}",
+        diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::KeyedUnknownCombiner)
+                && d.severity == smelt_db::DiagnosticSeverity::Error),
+        "expected a KeyedUnknownCombiner Error from file_diagnostics; got: {:?}",
         diags
             .iter()
             .map(|d| (d.severity, d.code, d.message.clone()))
@@ -58,15 +58,15 @@ fn unknown_aggregator_surfaces_in_file_diagnostics() {
     );
 }
 
-/// A well-formed cumulative model stays diagnostic-clean (guards against
-/// over-rejection, including a spurious `CumulativeNoDrivingSource` when the
-/// driving-source timeseries map is built correctly from the fixture).
+/// A well-formed keyed model stays diagnostic-clean (guards against
+/// over-rejection, including a spurious `KeyedSnapshotPostureUnsupported` when
+/// the driving-source timeseries map is built correctly from the fixture).
 #[test]
-fn valid_cumulative_is_clean_in_file_diagnostics() {
+fn valid_keyed_is_clean_in_file_diagnostics() {
     let diags = diagnostics_for("edges_valid");
     assert!(
         diags.is_empty(),
-        "valid cumulative model must be diagnostic-clean; got: {:?}",
+        "valid keyed model must be diagnostic-clean; got: {:?}",
         diags
             .iter()
             .map(|d| (d.severity, d.code, d.message.clone()))

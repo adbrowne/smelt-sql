@@ -1069,7 +1069,7 @@ impl SqlCompiler {
     ///
     /// No backend advertises `supports_native_ivm` today, so this always fires
     /// for `refresh: materialized_view` models — never a silent fallback to
-    /// `cumulative` or a full-refresh table
+    /// `keyed` or a full-refresh table
     /// (`docs/specs/materialized_view.md` §"No silent fallback"). Called from
     /// every compile entry point (`compile`, `compile_with_sql`,
     /// `compile_with_sql_and_ephemerals`) so the gate applies uniformly
@@ -1081,7 +1081,7 @@ impl SqlCompiler {
         if refresh == RefreshStrategy::MaterializedView && !self.capabilities.supports_native_ivm {
             anyhow::bail!(
                 "`refresh: materialized_view` requires native incremental-view maintenance; \
-                 this engine has none — use `refresh: cumulative` for smelt-driven maintenance."
+                 this engine has none — use `refresh: keyed` for smelt-driven maintenance."
             );
         }
         Ok(())
@@ -2112,7 +2112,7 @@ JOIN smelt.model_b b ON a.id = b.id
     }
 
     /// `refresh: materialized_view` on DuckDB (no native IVM) is a hard error —
-    /// never a silent fallback to `cumulative` or a full-refresh table
+    /// never a silent fallback to `keyed` or a full-refresh table
     /// (`docs/specs/materialized_view.md` §"No silent fallback").
     #[test]
     fn test_materialized_view_hard_errors_without_native_ivm() {
@@ -2147,8 +2147,8 @@ JOIN smelt.model_b b ON a.id = b.id
             message
         );
         assert!(
-            message.contains("use `refresh: cumulative`"),
-            "expected the hard error to point at `refresh: cumulative`, got: {}",
+            message.contains("use `refresh: keyed`"),
+            "expected the hard error to point at `refresh: keyed`, got: {}",
             message
         );
     }

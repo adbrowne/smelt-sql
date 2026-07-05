@@ -1,10 +1,10 @@
 //! Windowed-keyed-maintenance driver — the mode-agnostic mechanism behind
-//! `refresh: cumulative` and (later) the other keyed refresh modes.
+//! `refresh: keyed`'s window-forward run shape.
 //!
 //! See `docs/specs/model_transforms.md` §Surface "Windowed-keyed-maintenance
 //! driver" and §Semantics "Keyed `merge_into`". The driver is the reusable
 //! **classify → step over driving partitions in temporal order → per-partition
-//! pushdown → create-or-merge** loop; `cumulative` is its first named
+//! pushdown → create-or-merge** loop; `keyed` is its first named
 //! consumer (`WindowedKeyedRule` impl in `crate::cumulative`).
 //!
 //! Fail-closed (`model_transforms.md` §Constraints "Equivalence or refusal"):
@@ -71,9 +71,9 @@ pub fn driving_steps(
     Ok(steps)
 }
 
-/// A rule pluggable into the windowed-keyed-maintenance driver. `cumulative`
-/// is the first named implementor (`crate::cumulative`); the other keyed
-/// modes (`latest_value`, `versioned`) compose the same driver later.
+/// A rule pluggable into the windowed-keyed-maintenance driver. `keyed`'s
+/// direct-monoid families are the first named implementor (`crate::cumulative`);
+/// the other keyed column families compose the same driver later.
 pub trait WindowedKeyedRule: Send + Sync {
     /// `None` when every step is safe to keyed-merge; `Some(reason)` refuses
     /// the **whole run**, before any backend call — a rule that cannot prove
