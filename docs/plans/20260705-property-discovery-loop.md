@@ -131,3 +131,26 @@ gating harness first. Phases E–G are loop-driven.
   that fails the moment a production caller appears, pointing the author at this entry and ledger
   cell `FIX-2` / `SC-2` before the wiring can land silently. See
   `docs/research/property-discovery/ledger.md` cell `FIX-2`.
+
+- **2026-07-06 — `G-11`** (self-referential batched model direct-join × execution
+  layer × outer-clamp qualification): confirmed and reproduced red→green as a test
+  that `crates/smelt-runtime/src/transformer.rs::inject_time_filter` injects the
+  outer output clamp as a bare, unqualified column reference, which DuckDB rejects
+  with `Binder Error: Ambiguous reference to column name` for the DIRECT-join
+  self-referential-model shape `docs/specs/batched_models.md` documents and
+  `window_independence`'s own unit tests use (both the driving source and the
+  self-reference expose the partition column under its own bare name; `G-08`'s
+  test only worked because it discovered it needed to wrap the self-join in a
+  subquery). The repair requires choosing between two non-equivalent strategies —
+  (1) qualify the clamp to the resolved driving-fact alias, which would need
+  `smelt-runtime::transformer` to gain alias-resolution knowledge `smelt-logical`
+  already encodes elsewhere (`resolve_single_anchor`/`resolve_join_driving_fact`),
+  a new cross-crate dependency/duplication question, or (2) always wrap the whole
+  query in an outer `SELECT * FROM (...)` before clamping, which is a structural
+  change to the documented "two-layer clamp" mechanism and must decide whether to
+  preserve or drop the already-qualified-column calling convention one existing
+  unit test (`transformer.rs::tests::test_with_join`) exercises. Both are
+  behaviour/contract-affecting design decisions (policy §8(d), same precedent as
+  `FIX-2`/`G-10`), so BLOCKed for human review rather than decided autonomously.
+  See `docs/research/property-discovery/ledger.md` cell `G-11` and
+  `docs/research/property-discovery/unsupported.md`.

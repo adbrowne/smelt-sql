@@ -556,6 +556,53 @@ SELECT d, balance FROM (
     }
 }
 
+/// `G-11`: the SAME self-referential running-balance construct as
+/// [`running_balance_self_ref`], but WITHOUT the subquery wrap G-08's model
+/// uses — a direct self-join exposing the model's own output column (`d`)
+/// under its own name from BOTH the driving source alias `t` and the
+/// self-reference alias `bal` in one FROM scope
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `G-11`, appended
+/// from `G-08`). `batched_models.md`'s own documented self-referential-model
+/// pattern and `window_independence`'s own unit tests use exactly this
+/// direct-join shape (qualifying `t.d`/`bal.d` only in the join predicate,
+/// not wrapping in a subquery) — this model shape reproduces that documented
+/// form to test whether the outer output-clamp injection
+/// (`crates/smelt-runtime/src/transformer.rs::inject_time_filter`) can
+/// actually execute against it.
+pub fn running_balance_self_ref_direct_join() -> ModelShape {
+    ModelShape {
+        name: "running_balance",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT
+  t.d AS d,
+  COALESCE(bal.balance, 0) + SUM(t.amt) AS balance
+FROM smelt.sources.transactions t
+LEFT JOIN smelt.running_balance bal
+  ON bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d
+GROUP BY t.d, bal.balance
+"#,
+        source: "transactions",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "amt",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 /// `G-09`: `UNION ALL` of two independent append-only timeseries sources
 /// (`events_a`, `events_b`), batched per partition
 /// (`unique_key: [d, id, src]` — `src` disambiguates the two arms so a

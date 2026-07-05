@@ -997,3 +997,72 @@ Block schema:
   proptest-shrunk family — appropriate for chasing a specific seeded hazard (same-named-column
   collision) to its algebraic conclusion (widen-only, proven safe by `merge`'s max semantics), not a
   general sweep over arbitrary schedules for this construct.
+
+### CELL G-11 — self-referential batched model direct-join × execution layer × outer clamp qualification (Link C)
+- verdict: BLOCKED — root cause confirmed and reproduced red→green as a test; the PRODUCTION FIX
+  requires a judgment call between two non-equivalent repair strategies, which is a design fork per
+  policy §8(d), not a mechanical change
+- P (Link 0): n/a — execution-layer bug (SQL binder ambiguity), not an algebraic combiner property
+  skeleton_cols (Link B): n/a — the model never executes far enough to materialize a table to diff
+- Link B facts: `crates/smelt-runtime/src/transformer.rs::inject_time_filter` injects the outer
+  output clamp as a BARE, unqualified `{event_time_column} >= .. AND {event_time_column} < ..`
+  whenever `is_transparent_single_source` returns false — true for any self-referential batched
+  model, since the self-edge (`smelt.<self>`) counts as a second bounded source alongside the
+  driving fact. `docs/specs/batched_models.md`'s own documented self-referential-model pattern, and
+  `window_independence`'s own unit tests (`crates/smelt-logical/src/analysis/window_independence.rs`
+  lines ~113-119), use a DIRECT join — `bal.partition_date`/`t.partition_date`, no subquery wrap —
+  where BOTH the driving source and the self-reference expose the model's own output/partition
+  column under its own bare name. `G-08`'s own test could only proceed by discovering it needed to
+  wrap the self-join in a subquery (`SELECT d, balance FROM (...) inner_balance`) — a workaround the
+  spec's documented pattern does not itself describe.
+- smelt analyzer verdict: n/a (no analyzer classification is wrong; this is a code-generation /
+  SQL-injection bug in `smelt-runtime`, downstream of the analyzer's bound derivation, which is
+  itself correct — the *value* of the derived filter is right, only its unqualified textual
+  placement is unsafe against a FROM scope with a repeated bare column name).
+- Link C: reproduced deterministically on the FIRST run (no adversarial schedule needed — this is a
+  hard SQL compile failure, not a data-dependent divergence). `running_balance_self_ref_direct_join`
+  (the exact `window_independence`-documented direct-join shape, no subquery wrap) fails
+  `execute_project`'s first run with DuckDB `Binder Error: Ambiguous reference to column name "d"`,
+  because the compiled query's FROM scope exposes `d` from both `t` (driving source alias) and
+  `bal` (self-reference alias) and the injected clamp does not qualify which one it means.
+- condition (CONDITIONAL only): n/a
+- production files/functions changed: none — establishing WHICH fix is correct requires choosing
+  between two non-equivalent repair strategies, each carrying its own behaviour/contract
+  implications, so it is BLOCKed rather than applied:
+  1. **Qualify the injected clamp** to the specific FROM item that legitimately owns the model's
+     output `event_time_column` — resolved the same way `crates/smelt-logical/src/rules/
+     cumulative.rs`'s `resolve_single_anchor` / `crates/smelt-logical/src/analysis/
+     source_bounds.rs::resolve_join_driving_fact` already pick a driving fact for other analyses.
+     This requires `smelt-runtime::transformer` (a pure, alias-unaware text/AST transform today) to
+     either gain the same alias-resolution knowledge `smelt-logical` already encodes (new
+     cross-crate dependency/duplication question — `smelt-runtime` does not depend on
+     `smelt-logical` today) or have that resolution threaded through from the analyzer at compile
+     time. Also requires deciding what happens when resolution is ambiguous (two FROM items besides
+     the self-edge, e.g. a 3-way join) — fail loudly with a smelt diagnostic, or fall back?
+  2. **Always wrap the *whole* original query in an outer `SELECT * FROM (...) AS __clamp`** before
+     applying the non-transparent-slice clamp, so the outer WHERE only ever sees the query's own
+     SELECT-list column names (never an inner FROM scope's aliases) — mechanically closes the
+     ambiguity for ANY multi-source model, not just self-referential ones, and appears
+     result-equivalent for the currently-passing `inject_time_filter` test suite (the outer clamp
+     already only ever needs to see the model's own declared output/event-time column). But it is a
+     structural change to what `docs/specs/model_transforms.md` calls the "two-layer clamp"
+     mechanism, and one existing unit test
+     (`crates/smelt-runtime/src/transformer.rs::tests::test_with_join`) exercises passing an
+     ALREADY-QUALIFIED column (`orders.created_at`) into `inject_time_filter` directly — a real
+     calling convention this fix must either preserve (qualify-aware wrap) or deliberately drop,
+     which is itself a contract decision, not derivable from this cell alone.
+  Per policy §8(d) (same precedent as `FIX-2`/`G-10`), choosing between these — or inventing a
+  third — is a behaviour/contract-affecting design decision, not a mechanical red→green fix, so it
+  is recorded here for human review rather than applied.
+- experimental smelt extensions (if any): added `model_shapes::running_balance_self_ref_direct_join`
+  (tagged, disposable) and `g_11_self_ref_ambiguous_column.rs` (tagged, disposable) — the RED
+  reproduction only; no production code touched.
+- evidence: `smelt-cli::tests::property_discovery::g_11_self_ref_ambiguous_column::
+  direct_self_join_output_clamp_is_ambiguous_without_subquery_wrap` (asserts `execute_project`
+  returns an `Err` whose message contains a DuckDB ambiguous-column binder error).
+  `cargo test -p smelt-cli --test property_discovery --features duckdb --quiet` → 23 passed, 0
+  failed (all prior Link-C cells unaffected). `cargo fmt --all`;
+  `bash .claude/scripts/property-experimental-gate.sh` → clean.
+- Coverage caveat (design §2.1 N4): a single deterministic first-run reproduction — appropriate here
+  since the failure is a hard SQL compile error independent of any run schedule, not a data-dependent
+  divergence Link A's generic schedule kinds would help enumerate.
