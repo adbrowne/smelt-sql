@@ -244,10 +244,48 @@ SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
     }
 }
 
+/// `G-03`: idempotent `MAX` group-by, batched per partition (`unique_key:
+/// [d]`), over an append-only source
+/// (`docs/research/20260705-property-discovery-loop.md` §4 `G-03`). Same
+/// `events(d, id, val)` source shape as `G-01`/`G-02`, but the combiner is
+/// `MAX` — an idempotent monoid (Link 0 table §2.0) rather than `SUM`'s
+/// additive one. Distinct model name from `additive_agg_append_only` so both
+/// cells' staged projects never collide.
+pub fn idempotent_agg_append_only() -> ModelShape {
+    ModelShape {
+        name: "events_daily_max_append_only",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+SELECT d, MAX(val) AS max_val FROM smelt.sources.events GROUP BY d
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "id",
+                ty: "INTEGER",
+            },
+            SourceColumn {
+                name: "val",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
-// G-03  idempotent MAX/BOOL_OR group-by · append-only.
 // G-04  idempotent MIN group-by · mutable-snapshot.
 // G-05  inner-join enrichment (fact × dim) · mutable dimension.
 // G-06  left-join null-preservation · append-only + late right side.

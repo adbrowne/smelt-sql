@@ -406,3 +406,31 @@ Block schema:
   path that DOES consult `unique_key` for a scoped upsert (`cumulative_aggregate`, mentioned above
   but out of this cell's scope) would need its own cell, since a real MERGE/upsert path is exactly
   where a re-delivery ledger obligation could actually be violated.
+
+### CELL G-03 — idempotent agg (MAX/BOOL_OR) group-by × append-only × fold-delta
+- verdict: HOLDS
+- P (Link 0): idempotent monoid (`MAX`; Link 0 table §2.0) — folding the same delta twice is the
+  identity, so this combiner has no ledger/dedup obligation even under a hypothetical
+  fold-onto-remembered-state technique.
+  skeleton_cols (Link B): `{d}` (the `unique_key`/`GROUP BY` column; `max_val` is payload)
+- Link B facts: combiner=idempotent-monoid(MAX) reach=n/a (no correlated/cross-source read;
+  disjoint per-partition aggregation) footprint=bounded (one partition's rows only)
+- smelt analyzer: sound — same mechanism as `G-01`/`G-02`: batched refresh always emits
+  `DELETE FROM table WHERE col IN [start,end)` then `INSERT INTO table {sql}` in one transaction
+  (`crates/smelt-backend-duckdb/src/lib.rs::delete_and_insert_transactional`), a full partition
+  *replace* recomputing `MAX(val)` fresh from current source contents every run — not a fold onto
+  remembered state. There is no ledger obligation to violate for ANY combiner on this path
+  (established generically by `G-02`); this cell confirms smelt does not do anything additionally
+  unsound for the idempotent case, and exercises both adversarial dimensions (`G-01`'s disjoint
+  windows, `G-02`'s re-delivery) together in one schedule.
+- Link C: no divergence over 8 proptest cases (2-4 disjoint one-day windows, 1-3 rows/window,
+  values in `[-50, 50]`, each window re-delivered 0-2 extra times after its first run with no new
+  rows landing between re-runs). `maintained_max(d) == full_refresh_max(d)` for every processed
+  partition after every re-delivery count tried, every case.
+- condition (CONDITIONAL only): n/a
+- experimental smelt extensions (if any): none — reuses `link_c_harness`/`base_request`; adds
+  `model_shapes::idempotent_agg_append_only` (a plain `ModelShape`, not experimental analyzer code)
+  over the same `events(d, id, val)` source shape as `G-01`/`G-02`.
+- evidence: `smelt-cli::tests::property_discovery::g_03_idempotent_agg_append_only::
+  idempotent_max_fold_over_disjoint_append_only_windows_with_redelivery_matches_full_refresh`
+  (8 proptest cases through `execute_project`, no hand-injected `WHERE`).
