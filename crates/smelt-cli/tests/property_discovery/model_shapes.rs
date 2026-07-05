@@ -629,6 +629,74 @@ SELECT d, id, val, 'b' AS src FROM smelt.sources.events_b
     }
 }
 
+/// `SC-1b`: `FIX-1`'s `lhs_column_is_partition_col` scopes a Form-B match to
+/// the *name* of the source's own partition column, but `derive_bound_for_source`
+/// is still called once per source with only that name — it has no notion of
+/// *which table alias in the FROM/JOIN clause belongs to which source*. If two
+/// sources declare partition columns with the SAME name (`d`), a Form-B
+/// pattern that is textually scoped to one source's alias (`r.d BETWEEN ...`)
+/// still satisfies the LHS check for the *other* source too, because the
+/// check only compares the bare column name, not the alias's source identity.
+/// `logins` has no temporal-lookback pattern of its own; `resets` is the only
+/// source the correlated `EXISTS` predicate actually constrains. This cell
+/// asks whether that spurious cross-source match ever *narrows* `logins`'s
+/// derived bound (unsound — clamps away rows) or only ever *widens* it
+/// (over-conservative but safe) via `BoundResult::merge`'s max-merge.
+pub fn column_name_collision_across_sources() -> MultiSourceModelShape {
+    MultiSourceModelShape {
+        name: "logins_with_reset_flag",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [user_id, d]
+---
+SELECT
+  l.d,
+  l.user_id,
+  EXISTS(
+    SELECT 1 FROM smelt.sources.resets r
+    WHERE r.user_id = l.user_id
+      AND r.d BETWEEN l.d AND l.d + INTERVAL '3 days'
+  ) AS reset_flag
+FROM smelt.sources.logins l
+"#,
+        sources: &[
+            MultiSourceSpec {
+                name: "logins",
+                columns: &[
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+            MultiSourceSpec {
+                name: "resets",
+                columns: &[
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //

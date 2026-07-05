@@ -944,3 +944,56 @@ Block schema:
   MISUSED (a caller wrongly declares one column of a composite key as individually unique, which
   this cell's analysis suggests would happen to still be safe when the `ON` clause ANDs the other
   composite column, but was not itself proptested here).
+
+### CELL SC-1b — correlated EXISTS (same-named-column collision across sources) × append-only × recompute-region (Link C)
+- verdict: HOLDS — hypothesis (as literally stated: a wrong-source misattribution clamps away the
+  late row, REFUTED-as-unsound) REFUTED; the mechanism the cell actually reaches is an
+  over-conservative spurious widen, not an unsound narrowing
+- P (Link 0): n/a — reach derivation, not an algebraic combiner property
+  skeleton_cols (Link B): `user_id`, `d` (the `unique_key`; `reset_flag` is the sole payload column)
+- Link B facts: `derive_bound_for_source` (`source_bounds.rs`) is invoked once per source with only
+  that source's own partition-*column-name*; `FIX-1`'s `lhs_column_is_partition_col` scopes a
+  Form-B match to the LHS column *name*, but has no notion of *which FROM/JOIN alias belongs to
+  which source*. `model_shapes::column_name_collision_across_sources` stages `logins` (partition
+  col `d`, no Form-B pattern of its own) alongside `resets` (partition col also `d`, the only
+  source the correlated `EXISTS` predicate `r.d BETWEEN l.d AND l.d + INTERVAL '3 days'` actually
+  constrains). Confirmed via captured compiled SQL: `logins`'s own read is spuriously widened to
+  `d >= '2024-01-01' AND d < '2024-01-05'` (the resets-only 3-day margin), even though `logins` has
+  no textual Form-B pattern of its own — the exact cross-source leak `FIX-1`'s column-name check
+  cannot close because it never resolves alias→source identity.
+- smelt analyzer: over-conservative for this shape (not unsound) — and provably so by construction,
+  not merely by this one probe: `BoundResult::merge` (`source_bounds.rs`) takes `before.max`/
+  `after.max` when folding multiple matches into one source's bound, so a spurious cross-source
+  match can only ever ADD margin, never remove it. A same-named-partition-column collision can
+  widen a source's read (wasted work) but cannot narrow it (cannot clamp away a row full-refresh
+  would include) — the class of bug `SC-1`/`SC-1b`'s hypothesis chain was hunting for is therefore
+  not reachable via this mechanism, by the same algebraic argument each cell's own analysis
+  predicted before running it.
+- Link C: no divergence over 1 deterministic schedule — run 1 processes `[2024-01-01, 2024-01-02)`
+  with no reset row; a late reset (`user_id=1, d=2024-01-03`) is appended directly to
+  `main.sources_resets` *between* runs (never pre-populated); run 2 re-runs (backfills) the same
+  window and correctly picks up the late row (`reset_flag` flips to `true`, matching the
+  full-refresh oracle over the step-2 source snapshot).
+- condition (CONDITIONAL only): n/a
+- production files/functions changed: none — this cell establishes an over-conservative
+  (safety-preserving) gap, not a correctness bug; per design §8 the test gate applies to
+  correctness fixes, and there is no wrong-answer divergence here to drive a red→green fix against.
+  Making `derive_bound_for_source` alias/source-scoped (not just column-name-scoped) would be a
+  legitimate future efficiency improvement but is out of scope for this cell — recorded as a
+  finding, not actioned, since it changes no observable behaviour.
+- experimental smelt extensions (if any): none — the cell reads `RunReporter::model_compiled`
+  output through the existing `SqlCapturingReporter` (already `EXPERIMENTAL(property-discovery)`
+  from `P0-1`); no new production or analyzer code touched. Added
+  `model_shapes::column_name_collision_across_sources` (tagged, disposable) and
+  `sc_1b_column_name_collision.rs` (tagged, disposable).
+- evidence: `smelt-cli::tests::property_discovery::sc_1b_column_name_collision::
+  same_named_partition_column_collision_only_widens_never_narrows` (deterministic 2-run schedule
+  through `execute_project`, no hand-injected `WHERE`; asserts both the maintained-vs-full-refresh
+  equality and the spurious widen visible in the captured compiled SQL).
+  `cargo test -p smelt-cli --test property_discovery --features smelt-cli/bundled-duckdb --quiet` →
+  22 passed, 0 failed (all prior Link-C cells unaffected). `cargo fmt --all`;
+  `bash .claude/scripts/property-experimental-gate.sh` → clean.
+- Coverage caveat (design §2.1 N4): a single hand-authored deterministic schedule, not a
+  proptest-shrunk family — appropriate for chasing a specific seeded hazard (same-named-column
+  collision) to its algebraic conclusion (widen-only, proven safe by `merge`'s max semantics), not a
+  general sweep over arbitrary schedules for this construct.
