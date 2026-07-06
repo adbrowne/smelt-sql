@@ -92,16 +92,29 @@
 # sub-plans afterwards. Design: docs/research/20260704-maintenance-fundamentals.md
 # §"Target plan architecture"; specs: model_properties.md, model_transforms.md,
 # model_maintenance.md.
-# ACTIVE (2026-07-05, keyed collapse first): the refresh-mode keyed collapse.
-# `cumulative`/`latest_value`/`accumulating_snapshot` collapse into one
-# `refresh: keyed` mode. Spec: docs/specs/keyed_models.md; decision record:
-# docs/research/20260705-keyed-collapse-application.md. The keyed-collapse
-# sub-plan (docs/plans/20260705-keyed-collapse.md, K1–K6) is the FIRST pending
-# registry row in the master — the loop runs it to completion before L4
-# batched/versioned/materialized_view. L4 latest_value and L4 cumulative are
-# DE-REGISTERED (see the master's 2026-07-05 registry note); do not run them.
+# SUPERSEDED (2026-07-07): the 2026-07-05 keyed-collapse-first ordering below.
+# The refresh-as-maintenance-plan spec set landed (maintenance_plan.md new;
+# models.md trichotomy rewrite; sources.md world-facts) and every pending
+# registry row written against the old mode surface (keyed-collapse K3–K6,
+# keyed-time-partitioned-output, L4 batched/versioned/materialized_view) is
+# marked `done (superseded 2026-07-07)` in the master registry — do not run
+# them; surviving scope is re-homed (see the master's 2026-07-07 note).
+#
+# ACTIVE (2026-07-07): the refresh-as-maintenance-plan programme. Research:
+# docs/research/20260705-refresh-as-maintenance-plan/ (ratified 09 §1); specs:
+# docs/specs/maintenance_plan.md, models.md, sources.md. Two registered
+# sub-plans run in order:
+#   1. docs/plans/20260707-maintenance-plan-spec-alignment.md (SA1–SA5,
+#      docs-only: shape-profile demotions, transform contracts, architecture
+#      invariant, Maintenance* diagnostics catalogue)
+#   2. docs/plans/20260707-maintenance-plan-impl.md (MP1–MP16: refresh-axis
+#      surface cut, docs-site rewrite, plan derivation + diagnostics +
+#      smelt explain, testkit graduation, reconciliation ledger, targeted-write
+#      + fold cells closing G-12, bakeoff, forward/backward propagation)
+# PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
+# (unset → the DuckDB equivalence legs skip green, which is a silent hole).
 master_plan: docs/plans/20260704-model-updates.md
-active_subplan: docs/plans/20260705-keyed-collapse.md
+active_subplan: docs/plans/20260707-maintenance-plan-spec-alignment.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.

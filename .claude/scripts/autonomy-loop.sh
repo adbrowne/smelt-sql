@@ -111,10 +111,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # stop-autonomy.sh; it is removed automatically when the loop acts on it.
 STOP_FLAG="${STOP_FLAG:-${SCRIPT_DIR}/../autonomy.stop}"
 
-# Currently active: the model-updates master — batched rename + refresh-axis
-# reshape, eligibility relaxations, keyed-mode rungs, new keyed refresh modes
-# (docs/plans/20260704-model-updates.md via .claude/active-plan).
-LOG_DIR="${HOME}/.claude/logs/model-updates"
+# Currently active: the refresh-as-maintenance-plan programme — spec alignment
+# (SA1–SA5) then implementation (MP1–MP16: surface cut, plan derivation,
+# diagnostics/explain, ledger, targeted-write/fold cells, propagation), under
+# the model-updates master (docs/plans/20260704-model-updates.md via
+# .claude/active-plan).
+LOG_DIR="${HOME}/.claude/logs/maintenance-plan"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
