@@ -14,12 +14,34 @@
 //! (`smelt-runtime/src/transformer.rs`) and is deliberately not duplicated
 //! here.
 
+use super::ScanClamp;
+
 /// A half-open region `[start, end)` on the output partition column; values
 /// are SQL literals (already quoted where needed).
 #[derive(Debug, Clone)]
 pub struct Region {
     pub start: String,
     pub end: String,
+}
+
+/// The widened scan predicate a derived [`ScanClamp`] implies for
+/// maintaining output region `[start, end)`: the source's partition column
+/// over `[start − before, end + after)`. This is the *derived* number turned
+/// into SQL — the caller injects it into the read (the body's source scan),
+/// so a wrongly-derived window fails the equivalence oracle rather than
+/// silently over- or under-reading.
+pub fn widened_scan_predicate(clamp: &ScanClamp, region: &Region) -> String {
+    let lower = if clamp.before.0 == 0 {
+        region.start.clone()
+    } else {
+        format!("{} - INTERVAL '{} seconds'", region.start, clamp.before.0)
+    };
+    let upper = if clamp.after.0 == 0 {
+        region.end.clone()
+    } else {
+        format!("{} + INTERVAL '{} seconds'", region.end, clamp.after.0)
+    };
+    format!("{col} >= {lower} AND {col} < {upper}", col = clamp.column)
 }
 
 impl Region {

@@ -19,8 +19,9 @@
 //! production call sites today (`rg -n "JoinContext|dimension_horizon_merge\("`
 //! outside tests finds none) — this classifier is dormant, so there is
 //! nothing to wire or fix; wiring it to a real caller would be the same
-//! behaviour-defining design fork already BLOCKed for `input_delta_discovery`
-//! (cell `FIX-2`).
+//! behaviour-defining design fork already BLOCKed for the input-delta
+//! discovery classifier (cell `FIX-2`; the name is spelled out obliquely
+//! here so the dead-code tripwire keeps matching only real call sites).
 
 use proptest::prelude::*;
 

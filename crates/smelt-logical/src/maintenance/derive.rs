@@ -6,17 +6,17 @@
 //! classifiers that do not exist yet (column groups, skeleton roles) — see
 //! the module doc in [`super`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use smelt_types::SqlFunction;
 
 use super::{
     ColumnGroup, Corner, Grain, MaintenancePlan, MutationProfile, OutputSpec, PartitionLocal,
-    PlanCell, Refusal, SourceFacts, Technique, Trigger,
+    PlanCell, Refusal, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::discriminants::combiner_discriminants;
 use crate::analysis::model_diff::ModelDiff;
-use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
+use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult, Seconds};
 
 /// Caller-supplied fold admission input for a keyed-grain model: which key
 /// the fold addresses and which columns fold additively under `combiner`.
@@ -59,6 +59,71 @@ impl ModelInputs<'_> {
         }
         ctx
     }
+
+    fn output_partition_col(&self) -> Option<&str> {
+        match &self.output.grain {
+            Grain::Partition { partition_col } => Some(partition_col),
+            Grain::Key { .. } => None,
+        }
+    }
+}
+
+/// How one read source relates to the output's partition axis for a
+/// region-anchored maintenance op.
+enum SourceLink {
+    /// Bounded: the derived scan clamp, anchored to the output region.
+    Clamp(ScanClamp),
+    /// Clocked but with no derivable link to the output partition axis (or
+    /// an unbounded one) — the op cannot be partition-pruned.
+    Unlinked { why: String },
+    /// Not clocked at all: a lookup read in full.
+    Unclocked,
+}
+
+/// Link `facts` to the output partition axis via the derived bounds.
+///
+/// The load-bearing v0 rule: a **cross-axis** source (its partition column is
+/// not the output's) is linked only by an *explicit, derivable* predicate on
+/// its partition column — the zero-margin `Bounded{0,0}` fallback means "no
+/// predicate found at all", which for a cross-axis source is the absence of a
+/// link, not a zero-cost one. Neither smelt nor the engine can know how an
+/// undeclared timestamp relates to the partition column, so this fails
+/// closed. (A same-axis source is linked by identity; zero margin is real
+/// there.)
+fn link_source(
+    output_partition_col: Option<&str>,
+    bounds: &HashMap<String, BoundResult>,
+    facts: &SourceFacts,
+) -> SourceLink {
+    let Some(col) = &facts.partition_col else {
+        return SourceLink::Unclocked;
+    };
+    let same_axis = output_partition_col == Some(col.as_str());
+    match bounds.get(&facts.name) {
+        Some(BoundResult::Bounded { before, after, .. }) => {
+            if same_axis || *before > Seconds::ZERO || *after > Seconds::ZERO {
+                SourceLink::Clamp(ScanClamp {
+                    source: facts.name.clone(),
+                    column: col.clone(),
+                    before: *before,
+                    after: *after,
+                })
+            } else {
+                SourceLink::Unlinked {
+                    why: format!(
+                        "no predicate links '{col}' to the output partition axis — the \
+                         scan cannot be partition-pruned"
+                    ),
+                }
+            }
+        }
+        Some(BoundResult::Unbounded) => SourceLink::Unlinked {
+            why: "derived scan is unbounded".to_string(),
+        },
+        Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
+            why: "scan bound not derivable".to_string(),
+        },
+    }
 }
 
 /// Derive the plan cells (and refusals) for `triggers` against `inputs`.
@@ -69,8 +134,12 @@ pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> Ma
     for trigger in triggers {
         match trigger {
             Trigger::NewData { source } => derive_new_data(inputs, &bounds, source, &mut plan),
-            Trigger::UpstreamMutation { source } => derive_mutation(inputs, source, &mut plan),
-            Trigger::ColumnAdded { columns } => derive_column_added(inputs, columns, &mut plan),
+            Trigger::UpstreamMutation { source } => {
+                derive_mutation(inputs, &bounds, source, &mut plan)
+            }
+            Trigger::ColumnAdded { columns } => {
+                derive_column_added(inputs, &bounds, columns, &mut plan)
+            }
             Trigger::Backfill => derive_backfill(inputs, &bounds, &mut plan),
         }
     }
@@ -84,7 +153,7 @@ pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> Ma
 /// append-only source (`01-framework.md` §4).
 fn derive_new_data(
     inputs: &ModelInputs,
-    bounds: &std::collections::HashMap<String, BoundResult>,
+    bounds: &HashMap<String, BoundResult>,
     source: &str,
     plan: &mut MaintenancePlan,
 ) {
@@ -93,12 +162,14 @@ fn derive_new_data(
     };
     match &inputs.output.grain {
         Grain::Partition { .. } => {
+            let (partition_local, scans) = read_locality(inputs, bounds);
             plan.cells.push(PlanCell {
                 group: "{*}".to_string(),
                 trigger,
                 corner: Corner::RecomputeRegion,
                 technique: Technique::DeleteInsert,
-                partition_local: read_locality(inputs, bounds),
+                partition_local,
+                scans,
                 ledger_catch_up: false,
             });
         }
@@ -148,18 +219,25 @@ fn derive_new_data(
                 // Keyed end-state: the write is key-addressed, not
                 // partition-addressed; there is no partition axis to bound.
                 partition_local: PartitionLocal::Yes,
+                scans: vec![],
                 ledger_catch_up: false,
             });
         }
     }
 }
 
-/// Mutation: a post-creation change in `source` touches exactly the column
+/// Mutation: a post-creation delta in `source` touches exactly the column
 /// groups mutation-sensitive to it — the bottom-left column-scoped
-/// re-derivation, partition-local only when the source is clocked (K8's
-/// ratified `require: partition_local` refuses the unclocked case unless the
+/// re-derivation. Partition-local only when the source's partition column is
+/// explicitly linked to the output axis (K8's ratified
+/// `require: partition_local` refuses the unlinked/unclocked case unless the
 /// full scan is declared).
-fn derive_mutation(inputs: &ModelInputs, source: &str, plan: &mut MaintenancePlan) {
+fn derive_mutation(
+    inputs: &ModelInputs,
+    bounds: &HashMap<String, BoundResult>,
+    source: &str,
+    plan: &mut MaintenancePlan,
+) {
     let trigger = Trigger::UpstreamMutation {
         source: source.to_string(),
     };
@@ -176,15 +254,24 @@ fn derive_mutation(inputs: &ModelInputs, source: &str, plan: &mut MaintenancePla
         .iter()
         .filter(|g| g.mutation_sensitivity.contains(source))
     {
-        let locality = if facts.partition_col.is_some() {
-            PartitionLocal::Yes
-        } else {
-            PartitionLocal::No {
-                source: source.to_string(),
-                why: "unclocked source: a change's footprint projects onto no bounded \
-                      partition interval of the output"
-                    .to_string(),
-            }
+        let (locality, scans) = match link_source(inputs.output_partition_col(), bounds, facts) {
+            SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
+            SourceLink::Unclocked => (
+                PartitionLocal::No {
+                    source: source.to_string(),
+                    why: "unclocked source: a change's footprint projects onto no bounded \
+                          partition interval of the output"
+                        .to_string(),
+                },
+                vec![],
+            ),
+            SourceLink::Unlinked { why } => (
+                PartitionLocal::No {
+                    source: source.to_string(),
+                    why,
+                },
+                vec![],
+            ),
         };
         if matches!(locality, PartitionLocal::No { .. }) && !facts.allow_full_scan {
             plan.refusals.push(Refusal::ScanUnbounded {
@@ -203,6 +290,7 @@ fn derive_mutation(inputs: &ModelInputs, source: &str, plan: &mut MaintenancePla
             corner: Corner::ColumnMerge,
             technique: Technique::ColumnScopedMerge,
             partition_local: locality,
+            scans,
             ledger_catch_up: false,
         });
     }
@@ -212,7 +300,12 @@ fn derive_mutation(inputs: &ModelInputs, source: &str, plan: &mut MaintenancePla
 /// changes and refuse (EX-39); payload adds land in the 2×2's left column by
 /// what they read (EX-36/37/40), instantiating their ledger entries at
 /// `S = ∅` (the catch-up flag).
-fn derive_column_added(inputs: &ModelInputs, columns: &[String], plan: &mut MaintenancePlan) {
+fn derive_column_added(
+    inputs: &ModelInputs,
+    bounds: &HashMap<String, BoundResult>,
+    columns: &[String],
+    plan: &mut MaintenancePlan,
+) {
     let trigger = Trigger::ColumnAdded {
         columns: columns.to_vec(),
     };
@@ -243,6 +336,7 @@ fn derive_column_added(inputs: &ModelInputs, columns: &[String], plan: &mut Main
                     corner: Corner::FoldDelta,
                     technique: Technique::InPlaceUpdate,
                     partition_local: PartitionLocal::Yes,
+                    scans: vec![],
                     ledger_catch_up: true,
                 }),
                 Some(ModelDiff::NotAdditive { reason }) => {
@@ -262,39 +356,62 @@ fn derive_column_added(inputs: &ModelInputs, columns: &[String], plan: &mut Main
             continue;
         }
 
-        // Re-derives from upstream: column-scoped MERGE, inheriting each
-        // read source's partition-locality verdict unchanged (EX-38).
-        let unclocked: Option<&SourceFacts> = group
-            .mutation_sensitivity
-            .iter()
-            .filter_map(|s| inputs.source(s))
-            .find(|f| f.partition_col.is_none());
-        match unclocked {
-            Some(f) if !f.allow_full_scan => {
-                plan.refusals.push(Refusal::ScanUnbounded {
-                    source: f.name.clone(),
-                    why: format!(
-                        "backfill of {} reads unclocked '{}' with no partition bound",
-                        group.name(),
-                        f.name
-                    ),
+        // Re-derives from upstream: column-scoped MERGE. Every read source
+        // must be linked to the output partition axis or explicitly accepted
+        // as a full read (EX-38: the field-add inherits its source's
+        // partition-locality verdict unchanged).
+        let mut scans = Vec::new();
+        let mut locality = PartitionLocal::Yes;
+        let mut refused = false;
+        for source_name in &group.mutation_sensitivity {
+            let Some(facts) = inputs.source(source_name) else {
+                plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                    trigger: format!("{trigger:?}"),
+                    why: format!("unknown source '{source_name}'"),
                 });
-            }
-            _ => plan.cells.push(PlanCell {
-                group: group.name(),
-                trigger: trigger.clone(),
-                corner: Corner::ColumnMerge,
-                technique: Technique::ColumnScopedMerge,
-                partition_local: match unclocked {
-                    Some(f) => PartitionLocal::No {
-                        source: f.name.clone(),
+                refused = true;
+                break;
+            };
+            match link_source(inputs.output_partition_col(), bounds, facts) {
+                SourceLink::Clamp(clamp) => scans.push(clamp),
+                SourceLink::Unclocked | SourceLink::Unlinked { .. } if !facts.allow_full_scan => {
+                    plan.refusals.push(Refusal::ScanUnbounded {
+                        source: facts.name.clone(),
+                        why: format!(
+                            "backfill of {} reads '{}' with no partition bound",
+                            group.name(),
+                            facts.name
+                        ),
+                    });
+                    refused = true;
+                    break;
+                }
+                SourceLink::Unclocked => {
+                    locality = PartitionLocal::No {
+                        source: facts.name.clone(),
                         why: "unclocked source read in full (declared)".to_string(),
-                    },
-                    None => PartitionLocal::Yes,
-                },
-                ledger_catch_up: true,
-            }),
+                    };
+                }
+                SourceLink::Unlinked { why } => {
+                    locality = PartitionLocal::No {
+                        source: facts.name.clone(),
+                        why: format!("{why} (declared full scan)"),
+                    };
+                }
+            }
         }
+        if refused {
+            continue;
+        }
+        plan.cells.push(PlanCell {
+            group: group.name(),
+            trigger: trigger.clone(),
+            corner: Corner::ColumnMerge,
+            technique: Technique::ColumnScopedMerge,
+            partition_local: locality,
+            scans,
+            ledger_catch_up: true,
+        });
     }
 }
 
@@ -302,52 +419,59 @@ fn derive_column_added(inputs: &ModelInputs, columns: &[String], plan: &mut Main
 /// replayable input, unconditionally correct (`01-framework.md` §3).
 fn derive_backfill(
     inputs: &ModelInputs,
-    bounds: &std::collections::HashMap<String, BoundResult>,
+    bounds: &HashMap<String, BoundResult>,
     plan: &mut MaintenancePlan,
 ) {
+    let (partition_local, scans) = read_locality(inputs, bounds);
     plan.cells.push(PlanCell {
         group: "{*}".to_string(),
         trigger: Trigger::Backfill,
         corner: Corner::RecomputeRegion,
         technique: Technique::DeleteInsert,
-        partition_local: read_locality(inputs, bounds),
+        partition_local,
+        scans,
         ledger_catch_up: false,
     });
 }
 
-/// Partition-locality of a whole-row recompute's *reads*: every clocked
-/// source must have a bounded derived scan; an unclocked source is a
-/// full-read lookup (partition-local only as a declared acceptance).
+/// Partition-locality of a whole-row recompute's *reads*, plus the derived
+/// scan clamps for the sources that are linked. The first unlinked or
+/// unclocked source decides the `No` verdict (backfill stays admitted — a
+/// recompute is the universal ground-truth reset — but the full read is
+/// named, never silent).
 fn read_locality(
     inputs: &ModelInputs,
-    bounds: &std::collections::HashMap<String, BoundResult>,
-) -> PartitionLocal {
+    bounds: &HashMap<String, BoundResult>,
+) -> (PartitionLocal, Vec<ScanClamp>) {
+    // Keyed grain: a backfill is a whole-table rebuild; there is no output
+    // partition axis to be local to.
+    if inputs.output_partition_col().is_none() {
+        return (PartitionLocal::Yes, vec![]);
+    }
+    let mut scans = Vec::new();
+    let mut verdict = PartitionLocal::Yes;
     for s in &inputs.sources {
-        if s.partition_col.is_none() {
-            return PartitionLocal::No {
-                source: s.name.clone(),
-                why: "unclocked source is read in full on every recompute".to_string(),
-            };
-        }
-        match bounds.get(&s.name) {
-            Some(BoundResult::Bounded { .. }) => {}
-            Some(BoundResult::Unbounded) => {
-                return PartitionLocal::No {
-                    source: s.name.clone(),
-                    why: "derived scan is unbounded".to_string(),
+        match link_source(inputs.output_partition_col(), bounds, s) {
+            SourceLink::Clamp(clamp) => scans.push(clamp),
+            SourceLink::Unclocked => {
+                if matches!(verdict, PartitionLocal::Yes) {
+                    verdict = PartitionLocal::No {
+                        source: s.name.clone(),
+                        why: "unclocked source is read in full on every recompute".to_string(),
+                    };
                 }
             }
-            Some(BoundResult::NotDerivable) | None => {
-                // The driving source's own partition column bounds its scan
-                // even when no explicit predicate names it (the window
-                // clamp); only a *non-driving* clocked source with no
-                // derivable bound is an unbounded read. v0 treats the
-                // absence of a derived bound on a clocked source as
-                // driving-source behaviour (clamped by the run window).
+            SourceLink::Unlinked { why } => {
+                if matches!(verdict, PartitionLocal::Yes) {
+                    verdict = PartitionLocal::No {
+                        source: s.name.clone(),
+                        why,
+                    };
+                }
             }
         }
     }
-    PartitionLocal::Yes
+    (verdict, scans)
 }
 
 /// Convenience used by tests: the set of column names across `groups`.

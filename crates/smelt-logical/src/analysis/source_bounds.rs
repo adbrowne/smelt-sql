@@ -617,7 +617,10 @@ fn extract_form_b_bounds(upper_sql: &str, partition_col_upper: &str) -> Vec<(Sec
         // Find AND at depth 0
         if let Some(and_pos) = find_and_at_depth0(after_between) {
             let lower_expr = &after_between[..and_pos];
-            let upper_expr = &after_between[and_pos + 4..]; // skip " AND"
+            // Skip " AND", then truncate to the upper-bound *expression* —
+            // without this, a zero-margin upper bound absorbs `+ INTERVAL`
+            // literals from later, unrelated predicates.
+            let upper_expr = expression_prefix(&after_between[and_pos + 4..]);
 
             // Check for INTERVAL in lower (before) expression
             let before = if lower_expr.contains("INTERVAL") {
@@ -702,6 +705,56 @@ fn find_and_at_depth0(text: &str) -> Option<usize> {
 }
 
 /// Parse INTERVAL seconds from a subtraction expression like "expr - INTERVAL '1 day'".
+/// Truncate `text` (already uppercased) to its leading *expression*: stop at
+/// the first depth-0 boolean connective or clause keyword, or at a `)` that
+/// closes a parenthesis opened before `text` began. Interval extraction runs
+/// over this prefix only, so a bound never absorbs a `± INTERVAL` literal
+/// belonging to a later, unrelated predicate (the within-source sibling of
+/// the SC-1b cross-source leak; regression tests
+/// `test_form_b_between_upper_bound_does_not_absorb_later_intervals` /
+/// `test_gte_lte_bound_does_not_absorb_later_intervals`).
+fn expression_prefix(text: &str) -> &str {
+    const BOUNDARIES: [&[u8]; 16] = [
+        b" AND ",
+        b" OR ",
+        b" WHERE ",
+        b" QUALIFY ",
+        b" GROUP ",
+        b" ORDER ",
+        b" HAVING ",
+        b" LIMIT ",
+        b" JOIN ",
+        b" LEFT ",
+        b" RIGHT ",
+        b" INNER ",
+        b" FULL ",
+        b" CROSS ",
+        b" ON ",
+        b" UNION ",
+    ];
+    let bytes = text.as_bytes();
+    let mut depth = 0i32;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    // Closes a paren opened before this expression — the
+                    // enclosing group (subquery, call) ends here. `)` is
+                    // ASCII, so `i` is a char boundary.
+                    return &text[..i];
+                }
+            }
+            b' ' if depth == 0 && BOUNDARIES.iter().any(|b| bytes[i..].starts_with(b)) => {
+                return &text[..i];
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
 fn extract_interval_from_subtraction(text: &str) -> Option<Seconds> {
     // Find "- INTERVAL" pattern
     let sub_kw = "- INTERVAL";
@@ -801,7 +854,7 @@ fn extract_gte_lt_interval_bounds(
             search_from = abs + 1;
             continue;
         }
-        let after_gte = &upper_sql[abs + gte_kw.len()..];
+        let after_gte = expression_prefix(&upper_sql[abs + gte_kw.len()..]);
         if after_gte.contains("- INTERVAL") {
             if let Some(s) = extract_interval_from_subtraction(after_gte) {
                 before = before.max(s);
@@ -820,7 +873,7 @@ fn extract_gte_lt_interval_bounds(
                 search_from2 = abs + 1;
                 continue;
             }
-            let after_lt = &upper_sql[abs + lt_kw.len()..];
+            let after_lt = expression_prefix(&upper_sql[abs + lt_kw.len()..]);
             if after_lt.contains("+ INTERVAL") {
                 if let Some(s) = extract_interval_from_addition(after_lt) {
                     after_secs = after_secs.max(s);
@@ -1438,6 +1491,60 @@ mod tests {
                 after: Seconds::ZERO,
             },
             "events must not be spuriously widened by conversions' BETWEEN pattern"
+        );
+    }
+
+    /// Expression-delimitation regression (surfaced by the maintenance-plan
+    /// tracer, `docs/research/20260705-refresh-as-maintenance-plan/`): the
+    /// text scanned for a bound's `± INTERVAL` must stop at the end of the
+    /// *expression* — a `BETWEEN`'s zero-margin upper bound must not absorb
+    /// a `+ INTERVAL` literal belonging to a *later, unrelated* predicate.
+    /// Same SC-1b species as cross-source leakage, but within one source's
+    /// window: the spurious widening is safe-not-unsound, yet it silently
+    /// inflates every derived scan (here a 2-day session lookback gained a
+    /// phantom 48h lookahead from the lateness filter).
+    #[test]
+    fn test_form_b_between_upper_bound_does_not_absorb_later_intervals() {
+        let sql = "SELECT e.event_id, s.session_id FROM events e \
+                   LEFT JOIN sessions s \
+                     ON s.user_id = e.user_id \
+                    AND s.session_start_date BETWEEN CAST(e.event_ts AS DATE) - INTERVAL '2 days' \
+                                                 AND CAST(e.event_ts AS DATE) \
+                   WHERE e.arrival_ts < e.event_ts + INTERVAL '48 hours'";
+        let ctx = BoundContext::new().with_source("sessions", "session_start_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        assert_eq!(
+            *bounds.get("sessions").unwrap(),
+            BoundResult::Bounded {
+                source_partition_col: "session_start_date".to_string(),
+                before: Seconds::days(2),
+                after: Seconds::ZERO,
+            },
+            "the BETWEEN upper bound must not absorb the later '+ INTERVAL 48 hours'"
+        );
+    }
+
+    /// Sibling of the test above for the `>= / <=` form: the text after a
+    /// comparison operator must be truncated at the expression boundary
+    /// before searching for `± INTERVAL`.
+    #[test]
+    fn test_gte_lte_bound_does_not_absorb_later_intervals() {
+        let sql = "SELECT e.event_id, s.session_id FROM events e \
+                   LEFT JOIN sessions s \
+                     ON s.user_id = e.user_id \
+                    AND s.session_start_date >= CAST(e.event_ts AS DATE) - INTERVAL '2 days' \
+                    AND s.session_start_date <= CAST(e.event_ts AS DATE) \
+                   WHERE e.arrival_ts < e.event_ts + INTERVAL '48 hours'";
+        let ctx = BoundContext::new().with_source("sessions", "session_start_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        assert_eq!(
+            *bounds.get("sessions").unwrap(),
+            BoundResult::Bounded {
+                source_partition_col: "session_start_date".to_string(),
+                before: Seconds::days(2),
+                after: Seconds::ZERO,
+            },
+            "the '<=' zero-margin bound must not absorb the later '+ INTERVAL 48 hours'"
         );
     }
 

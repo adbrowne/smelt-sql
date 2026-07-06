@@ -150,6 +150,35 @@ pub enum PartitionLocal {
     No { source: String, why: String },
 }
 
+/// The derived scan window on one read source, anchored to the output
+/// region: maintaining output partitions `[start, end)` reads this source's
+/// partition column over `[start − before, end + after)`. This is the
+/// `(partition_col, before, after)` triple of `01-framework.md` §5, carried
+/// per cell so the emitted SQL's clamp is the *derived* number, never a
+/// hand-typed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanClamp {
+    pub source: String,
+    /// The source's partition column the clamp predicates on.
+    pub column: String,
+    pub before: crate::analysis::source_bounds::Seconds,
+    pub after: crate::analysis::source_bounds::Seconds,
+}
+
+impl ScanClamp {
+    /// The reflected footprint (`01-framework.md` §5): a delta of this
+    /// source at time `t` writes output over `[t − after, t + before]`.
+    /// Scan `(before, after)` and footprint are reflections of each other.
+    pub fn footprint(
+        &self,
+    ) -> (
+        crate::analysis::source_bounds::Seconds,
+        crate::analysis::source_bounds::Seconds,
+    ) {
+        (self.after, self.before)
+    }
+}
+
 /// One `(column-group × trigger)` cell of the plan.
 #[derive(Debug, Clone)]
 pub struct PlanCell {
@@ -160,6 +189,9 @@ pub struct PlanCell {
     pub corner: Corner,
     pub technique: Technique,
     pub partition_local: PartitionLocal,
+    /// Derived scan windows per read source (empty for reads the derivation
+    /// could not bound — those surface in `partition_local` instead).
+    pub scans: Vec<ScanClamp>,
     /// True for a definition-change cell: the group's ledger entries start
     /// at `S = ∅` over existing regions and this op catches them up
     /// (`01-framework.md` §8; EX-40's group-convergence rule).
