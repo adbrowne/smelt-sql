@@ -87,23 +87,20 @@ fn maintained_total(conn: &duckdb::Connection, date: &str) -> f64 {
 /// BEFORE that window is ever requested (append-only, no lateness, no
 /// re-delivery) — the disjoint-delta control shape.
 ///
-/// Values are generated as WHOLE numbers (cast from `i64`), not arbitrary
-/// fractional `f64` — sidestepping an orthogonal, already-discovered smelt
-/// bug unrelated to this cell's hypothesis: a source declared at scan-root
-/// (`sources/events.yml`, a single-segment address) is silently dropped from
-/// `apply_type_casts`'s `TypeContext`
-/// (`crates/smelt-db/src/queries/schema.rs::add_source_info_to_type_context`,
-/// `segs.len() < 2` guard), so `SUM(val)` can't resolve `val`'s declared
-/// `DOUBLE` type and falls back to the historical `BigInt` default — the
-/// `_smelt_typed` CAST wrapper then truncates a fractional sum (see ledger
-/// `G-01` note). That bug corrupts ANY aggregate over this source shape
-/// regardless of run schedule (it reproduces on a single non-incremental
-/// run), so it is not evidence about fold-delta safety under append-only
-/// schedules — this cell's actual target. Whole-number values make the
-/// (wrong) `BigInt` cast a no-op, isolating the schedule-safety question.
+/// Values include genuine fractional `f64`s. The whole-number workaround
+/// that previously lived here (single-segment scan-root sources were
+/// silently dropped from the `TypeContext`, so `SUM(val)` fell back to a
+/// truncating `CAST(… AS BIGINT)` — ledger `G-01` note) is gone: design
+/// fork F4 fixed `add_source_info_to_type_context` to register
+/// single-segment sources under the schema-free simple key, pinned by
+/// `crates/smelt-db/tests/single_segment_source_types.rs`. Fractional
+/// values here are the end-to-end assertion that the fix holds through the
+/// real path — a regression re-truncates the sums and fails the oracle.
+/// Halves (`v as f64 / 2.0`) keep the arithmetic float-exact so the oracle
+/// stays an equality check, while guaranteeing non-integer sums occur.
 fn arb_disjoint_windows() -> impl Strategy<Value = Vec<Vec<f64>>> {
     proptest::collection::vec(
-        proptest::collection::vec((-50_i64..=50_i64).prop_map(|v| v as f64), 1..=3),
+        proptest::collection::vec((-101_i64..=101_i64).prop_map(|v| v as f64 / 2.0), 1..=3),
         2..=4,
     )
 }

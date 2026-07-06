@@ -1347,30 +1347,63 @@ fn entity_name_for_table_ref(table_ref: &TableRef) -> Option<String> {
 /// Pure function: populate a `TypeContext` with column type information from
 /// Phase 6 per-entity `SourceInfo` records.
 ///
-/// The source's identity in the TypeContext is `(schema, table)` where:
+/// For a multi-segment address the source's identity is `(schema, table)`:
 ///   schema = `address_segments[address_segments.len() - 2]` (e.g. "raw")
 ///   table  = `address_segments[address_segments.len() - 1]` (e.g. "users")
-///
-/// This mirrors how `smelt.sources.raw.users` is resolved: the last two
-/// segments of the path are the schema and table.
+/// mirroring how `smelt.sources.raw.users` is resolved by its last two
+/// segments. A **single-segment** address (a source YAML at scan root —
+/// `sources.rs` derives segments from the file stem, so this is a legitimate
+/// layout, not an error) registers under the schema-free `{table}.{column}`
+/// simple key, the identity such a source resolves by. Design fork F4
+/// (`docs/research/20260705-refresh-as-maintenance-plan/03-design-forks.md`):
+/// the previous `< 2` skip silently dropped every declared column of a
+/// scan-root source, and `SUM(DOUBLE)` fell through to the `BigInt` default
+/// — silent truncation of fractional aggregates.
 pub fn add_source_info_to_type_context(sources: &[SourceInfo], ctx: &mut TypeContext) {
     for source in sources {
         let segs = &source.address_segments;
-        if segs.len() < 2 {
-            continue; // degenerate address — skip
-        }
-        let schema_name = &segs[segs.len() - 2];
-        let table_name = &segs[segs.len() - 1];
-        for col in &source.columns {
-            ctx.add_source_column(
-                schema_name,
-                table_name,
-                &col.name,
-                TypedColumn {
-                    data_type: col.data_type.clone(),
-                    nullable: col.nullable,
-                },
-            );
+        match segs.len() {
+            0 => {
+                // Structurally unreachable from the loaders (segments are
+                // derived from a non-empty file stem); fail loud rather
+                // than silently dropping declared columns.
+                debug_assert!(
+                    false,
+                    "SourceInfo with empty address_segments: {:?}",
+                    source.path
+                );
+                tracing::warn!(
+                    path = %source.path.display(),
+                    "source has an empty address — its declared column types were skipped"
+                );
+            }
+            1 => {
+                for col in &source.columns {
+                    ctx.add_source_column_unqualified(
+                        &segs[0],
+                        &col.name,
+                        TypedColumn {
+                            data_type: col.data_type.clone(),
+                            nullable: col.nullable,
+                        },
+                    );
+                }
+            }
+            _ => {
+                let schema_name = &segs[segs.len() - 2];
+                let table_name = &segs[segs.len() - 1];
+                for col in &source.columns {
+                    ctx.add_source_column(
+                        schema_name,
+                        table_name,
+                        &col.name,
+                        TypedColumn {
+                            data_type: col.data_type.clone(),
+                            nullable: col.nullable,
+                        },
+                    );
+                }
+            }
         }
     }
 }

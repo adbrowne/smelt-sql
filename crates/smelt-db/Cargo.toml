@@ -20,6 +20,7 @@ smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
 walkdir = "2"
 line-index.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 duckdb = { workspace = true }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use smelt_core::config::{BackendType, Config, Materialization, RefreshStrategy, Target};
 use smelt_core::{ModelFile, SourcesConfig};
 use smelt_db::type_inference::infer_select_column_types;
-use smelt_db::{build_type_context, StaticRefSchemaProvider};
+use smelt_db::{add_source_info_to_type_context, build_type_context, StaticRefSchemaProvider};
 use smelt_dialect::{
     wrap_with_type_casts, AsStructEmitter, BackendCapabilities, PrintContext, SmeltFnExpander,
     SmeltPathCallExpander, SmeltPathRefResolver, SqlDialect,
@@ -889,11 +889,10 @@ impl SqlCompiler {
                 models: &self.upstream_schemas.models,
                 seeds: &self.upstream_schemas.seeds,
             };
-            Some(build_type_context(
-                &file,
-                &self.upstream_schemas.sources,
-                &provider,
-            ))
+            let mut ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+            // Per-entity source columns, same as `apply_type_casts`.
+            add_source_info_to_type_context(&self.upstream_schemas.per_entity_sources, &mut ctx);
+            Some(ctx)
         } else {
             None
         };
@@ -1161,7 +1160,15 @@ impl SqlCompiler {
             models: &self.upstream_schemas.models,
             seeds: &self.upstream_schemas.seeds,
         };
-        let ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+        let mut ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+        // Per-entity `sources/*.yml` columns (Phase 6) — the same two-path
+        // source resolution `smelt-db`'s `type_context()` query performs.
+        // Without this, every per-entity source column resolves to Unknown
+        // and `SUM(val)` falls through to the concrete `BigInt` default,
+        // so the `_smelt_typed` wrapper truncates fractional aggregates
+        // (design fork F4's runtime-side sibling; end-to-end pinned by the
+        // property loop's G-01 cell with fractional values).
+        add_source_info_to_type_context(&self.upstream_schemas.per_entity_sources, &mut ctx);
         let column_types = infer_select_column_types(&select_stmt, &ctx);
 
         let select_list = match select_stmt.select_list() {
