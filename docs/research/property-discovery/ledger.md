@@ -1066,3 +1066,34 @@ Block schema:
 - Coverage caveat (design §2.1 N4): a single deterministic first-run reproduction — appropriate here
   since the failure is a hard SQL compile error independent of any run schedule, not a data-dependent
   divergence Link A's generic schedule kinds would help enumerate.
+
+---
+
+## G-12 — `cumulative_aggregate` × keyed additive fold × `merge_into` (the live targeted-write path) — 2026-07-07
+
+- construct: keyed additive fold (`refresh: keyed`, `COUNT(*) GROUP BY device_id`) over an
+  append-only driving source, dispatched by `execute_project` through
+  `crates/smelt-runtime/src/cumulative.rs::execute_cumulative_aggregate` →
+  `maintenance_driver::run_windowed_keyed_maintenance` → `Backend::merge_into` — the only live
+  path where a generalized-ledger obligation can actually be violated
+  (`09-spec-readiness.md` §3 item 1; previously entirely unprobed).
+- verdict, arm 1 (frontier advance): **HOLDS** — disjoint windows folded in temporal order
+  through the real run path equal a full refresh (Jan-1 fold 2 + Jan-2 fold 1 = 3).
+- verdict, arm 2 (reprocessed window): **CONFIRMED VIOLATION (live)** — re-running the
+  already-merged Jan-1 window **double-folds** (3 → 5). The never-fold-a-delta-twice
+  obligation (`01-framework.md` §4; `keyed_models.md` §Reprocessing specs a
+  `KeyedReprocessedWindow` refusal) is not enforced on the run path:
+  `cumulative.rs` step 2 is an admitted placeholder — "For now we do *not* check existence
+  here" — there is no watermark/ledger consultation before the merge loop.
+- production files/functions changed: none — the missing check is exactly the generalized
+  reconciliation ledger's fold operation (`01-framework.md` §8, "refuse if the delta is
+  already in the entry's processed set"), which is framework machinery (M4/M6 of
+  `08-code-placement.md`), not a mechanical fix. The cell pins today's behaviour so the spec
+  work starts from empirical truth; the pinning assertion fails loudly the day a refusal or
+  idempotence check lands (flip the arm then).
+- evidence: `smelt-cli::tests::property_discovery::g_12_keyed_merge_reprocessed_window::
+  keyed_merge_frontier_holds_but_reprocessed_window_double_folds` (both arms asserted through
+  `execute_project`).
+- Coverage caveat (design §2.1 N4): deterministic 3-run schedule (fold, fold, re-fold) — the
+  violation is mechanism-level (no ledger consultation exists), not data-dependent; adversarial
+  value schedules add nothing until a ledger exists to stress.

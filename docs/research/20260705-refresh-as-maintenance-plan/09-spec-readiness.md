@@ -133,9 +133,14 @@ From [`02-loop-findings.md`](02-loop-findings.md) §8, prioritized in
 [`06-proof-obligations.md`](06-proof-obligations.md) §5; lift-ready cells at the end of
 [`07-example-catalogue.md`](07-example-catalogue.md):
 
-1. **The `cumulative_aggregate`/`merge_into` MERGE path** — the only live path where a ledger
-   obligation can actually be violated today, and entirely unprobed. Highest information per
-   probe; should run before the spec asserts anything about targeted-write behavior.
+1. ~~The `cumulative_aggregate`/`merge_into` MERGE path~~ — **probed 2026-07-07 (cell G-12)**:
+   frontier advance HOLDS through the real run path, and the reprocessed-window obligation is
+   a **confirmed live violation** — re-running an already-merged window silently double-folds
+   (no watermark/ledger consultation exists; `cumulative.rs`'s refusal is an admitted
+   placeholder). The spec's targeted-write sections should therefore state the
+   never-fold-twice obligation as *specified-and-unenforced today* (a Known Divergence with
+   the pinning test named), not as shipped behaviour. See
+   `docs/research/property-discovery/ledger.md` G-12.
 2. **Beyond-horizon lateness through the real path** (only demonstrated abstractly, P0-5).
 3. **Change-feed/CDF sources** (the `ChangeFeed` classifier arm has never been exercised).
 4. The remainder (multi-arm mutable unions, holistic-over-mutable, ≥3-column composite keys,

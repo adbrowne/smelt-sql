@@ -22,6 +22,7 @@ mod g_07_holistic_agg_append_only;
 mod g_08_running_total_self_ref;
 mod g_09_union_all_append_only;
 mod g_11_self_ref_ambiguous_column;
+mod g_12_keyed_merge_reprocessed_window;
 mod p0_2_run_schedule;
 mod p0_4_mutation_profile_selfcheck;
 mod sc_1_correlated_exists;
