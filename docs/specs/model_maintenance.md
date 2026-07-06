@@ -1,13 +1,13 @@
 ---
 feature: model_maintenance
 status: experimental
-last_reviewed: 2026-07-05
+last_reviewed: 2026-07-07
 owners: [andrew]
 ---
 
 # Model Maintenance
 
-> **What this is.** The framework for *keeping a model current*: the correctness invariant every non-`full` refresh mode upholds, the algebraic ladder that bounds what smelt can maintain itself, and the contract by which a `refresh:` mode is composed from a model's properties and transforms. It **names** capabilities defined elsewhere and describes their **combination** into refresh modes. Out of scope, with their own homes: the properties a model's SQL can have (`model_properties.md`); the physical transforms those properties license (`model_transforms.md`); the `refresh:` enum, the three model axes, the input-consumption axis, the three-state declaration law, and the litmus rule (`models.md`); each mode's own surface and local machinery (`batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`); backend capability flags (`multi_backend.md`); the source clock and mutation declarations (`timeseries.md`, `sources.md`).
+> **What this is.** The framework for *keeping a model current*: the correctness invariant every non-`full` refresh mode upholds, the algebraic ladder that bounds what smelt can maintain itself, and the contract by which a `refresh:` mode is composed from a model's properties and transforms. It **names** capabilities defined elsewhere and describes their **combination** into refresh modes. Out of scope, with their own homes: the derived per-model **maintenance plan** — the `(column-group × trigger)` cell matrix, per-cell admission, the reconciliation ledger, and the cross-model propagation graph (`maintenance_plan.md`, which consumes this spec's invariant); the properties a model's SQL can have (`model_properties.md`); the physical transforms those properties license (`model_transforms.md`); the `refresh:` enum, the three model axes, the input-consumption axis, the three-state declaration law, and the litmus rule (`models.md`); each mode's own surface and local machinery (`batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`); backend capability flags (`multi_backend.md`); the source clock and mutation declarations (`timeseries.md`, `sources.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -136,4 +136,4 @@ The machinery **validates** the declared `refresh:` mode against the derived pro
 - **Tests**: the cumulative and batched full-refresh-equivalence harnesses; the monotonicity-trace unit tests (`smelt-logical`); the generative soundness oracle.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md` (the mode-vertical master this framework re-cuts).
-- **Related specs**: `model_properties.md`, `model_transforms.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `timeseries.md`, `sources.md`, `multi_backend.md`, `schema_evolution.md`.
+- **Related specs**: `maintenance_plan.md`, `model_properties.md`, `model_transforms.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `timeseries.md`, `sources.md`, `multi_backend.md`, `schema_evolution.md`.
