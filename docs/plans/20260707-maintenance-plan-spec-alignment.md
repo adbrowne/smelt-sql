@@ -64,6 +64,7 @@ Three of the spec-diff map's rows landed (`maintenance_plan.md` created; `models
 | SA3   | pending  |        |      |
 | SA4   | pending  |        |      |
 | SA5   | pending  |        |      |
+| SA6   | pending  |        |      |
 
 ---
 
@@ -199,6 +200,50 @@ Three of the spec-diff map's rows landed (`maintenance_plan.md` created; `models
 - [ ] Spec edits are timeless
 
 **Commit.** `spec(architecture+diagnostics): maintenance-plan purity invariant; Maintenance* catalogue family`
+
+---
+
+### Phase SA6: `model_properties.md` — catalogue the plan's proof inputs; retire superseded surface
+
+**Goal.** `model_properties.md` covers every reusable static proof the maintenance plan consumes
+(per `maintenance_plan.md`'s own out-of-scope delegation): add derived-proof rows for
+**per-column mutation-sensitivity / column provenance** (which sources' post-creation deltas can
+change a column's value, with the immutable-at-creation exemption — `maintenance_plan.md` §"The
+plan matrix" and §Design "Factoring by mutation-sensitivity"), **skeleton-role extraction**
+(membership/grouping/dedup/ordering positions per column — promote it out of the determinism
+taint-flow prose into its own entry; consumed by the definition-change trigger and the theorem's
+skeleton-equivalence statement), **footprint reflection / bounded write footprint** (the write-scope
+dual of the reach derivation — admission obligation 5), and the **grain-alignment check** (declared
+`timeseries.granularity` validated against the SQL's grouping — ratified P3, check-only). All four
+carry maturity `not-yet`/`unbuilt` honestly (they land in `docs/plans/20260707-maintenance-plan-impl.md`
+MP4/MP5/MP14). Also: mark the `nondeterministic_columns` declaration superseded by
+`columns.<c>.contract` (ratified K3; `models.md` owns the surface — same treatment the demotions
+give it), refresh §"Catalogued inputs" to the structured `mutation_profile` block
+(`mutable_snapshot`, lateness/watermark inside the block, current `sources.md` section names), and
+state the fan-out proof's declared-unique-key input as composite-valued (F2).
+
+**Pre-conditions.** None (independent of SA1–SA5; runs last only by registry order).
+
+**Verification greps (red before, green after).**
+- `rg -n 'mutation-sensitivity|skeleton-role|footprint' docs/specs/model_properties.md` → derived-proof rows present.
+- `rg -n 'mutable_snapshot' docs/specs/model_properties.md` → catalogued-inputs refreshed.
+- `rg -n 'contract' docs/specs/model_properties.md` → the supersession recorded.
+- `/smelt:validate model_properties` reports no timeless-oracle violations.
+
+**Critical files (allowed to touch in this phase).**
+- `docs/specs/model_properties.md` — the additions + refresh
+- `docs/specs/maintenance_plan.md` — only to point its grouping/skeleton sketches at the new property rows (no semantic change)
+
+**Docs touched.** *Timeless.*
+- as above
+
+**Review checklist** (material findings only):
+- [ ] New rows are stated mode-agnostically (the spec's charter: no consumer named as owner)
+- [ ] No duplication of `maintenance_plan.md`'s factoring/admission semantics — rows state the property, cite the consumer spec
+- [ ] Maturity honest (`not-yet`), Known Divergences link the impl plan
+- [ ] Spec edits are timeless
+
+**Commit.** `spec(properties): catalogue mutation-sensitivity, skeleton roles, footprint reflection, grain check; retire superseded surface`
 
 ---
 
