@@ -223,6 +223,40 @@ mutation_profile:
 
 ---
 
+## P7 — Scan ceilings (source-side, symmetric to K8) — *deferred*
+
+**Status: deferred (2026-07-06, `09-spec-readiness.md` decision 11).** The shipped scan ceiling is
+the model-side, per-consumer `max_lookback` (K8); this source-owner variant is retained as a design
+option and added only if owner-side governance proves needed. Documented here so the symmetry is on
+record.
+
+**Trust class:** neither widens nor narrows — a pure assertion → check-only, always safe.
+**Motivation:** `01-framework.md` §5 (partition-local maintenance); the model-side guardrail
+[`04-knobs.md`](04-knobs.md) §K8.
+
+K8 lets a *model* assert that its maintenance stays partition-bounded in each source it reads. The
+symmetric fact belongs to the source owner: a source may cap how much of itself any consumer's
+maintenance is allowed to scan, so a downstream model that accidentally spells an unbounded
+correlation against a 10-TB feed fails at *its* compile, not at 3 a.m. in production.
+
+```yaml
+# on the source
+max_consumer_scan: '14 days'     # no consumer's per-run maintenance scan of this source may exceed 14 days
+```
+
+- Consumed exactly like K8's `max_lookback`, but authored once on the source and inherited by every
+  consuming model's derived plan. A consumer whose derived scan clamp on this source exceeds the
+  ceiling fails loud (`MaintenanceScanUnbounded`, citing both the source declaration and the
+  offending cell); an unclocked full-read consumer must carry an explicit `allow_full_scan` (K8) to
+  compile at all.
+- **It never modifies any clamp** — same discipline as K8 and `horizon_ceiling:`. It is a governance
+  assertion, not a maintenance modifier: the source owner states a cost expectation and the
+  framework refuses plans that silently blow past it.
+- Absent = no source-side ceiling (the model-side K8 default still applies). This is the one source
+  property that constrains *consumers* rather than describing the feed, so it is deliberately opt-in.
+
+---
+
 ## Summary table
 
 | Property | Surface | Values / shape | Default | Trust class | Licenses | Verified by |
@@ -237,6 +271,7 @@ mutation_profile:
 | Retention | `retention:` | interval | absent (replayable) | narrows backfill | region recompute validity | plan-time refusal; ledger-anomaly probe |
 | Delta identity | `.delta_identity` | column list | absent | narrows | additive fold + ledger | existence/NOT NULL/uniqueness probe |
 | Key recurrence | `key_recurrence:` | existing shape | absent | narrows | locality-pruned merge scan | transactional check (existing) |
+| Consumer scan ceiling *(deferred)* | `max_consumer_scan:` | interval | absent | **asserts** (neither) | — (caps consumers, never modifies clamp) | plan-time refusal (`MaintenanceScanUnbounded`) |
 
 ## Worked example: the paper's `conversions` source, fully annotated
 
@@ -273,7 +308,9 @@ default — recompute-only, watermark-relative settling — with the model still
 
 - Probe cost governance: which tripwires run per-run vs sampled vs on-demand (`smelt verify`) —
   likely a project-level policy key, not per-source.
-- Whether `mutation_profile`'s structured block subsumes `key_recurrence` (it is delivery-contract
-  metadata of the same species) — leaning yes, deferred until the locality gate has a consumer.
+- ~~Whether `mutation_profile`'s structured block subsumes `key_recurrence`.~~ **Resolved 2026-07-06:
+  subsume** — `key_recurrence` folds into the `mutation_profile` block (delivery-contract metadata of
+  the same species); the standalone key is dropped (`09-spec-readiness.md` decision 9).
 - Backend-published facts (Delta CDF presence, Iceberg snapshots) could *derive* `change_feed` +
   `delta_identity` instead of declaring them — a capability-flag question for `multi_backend.md`.
+  **Left as a Known Divergence (decision 10):** tracked separately, not gating this spec.

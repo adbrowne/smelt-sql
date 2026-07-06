@@ -18,37 +18,49 @@ worth closing before the spec commits, the concrete spec-diff map, and the seque
 
 ## 1. Decisions to ratify (blocking; each is argued elsewhere, this is the queue)
 
+**Ratified 2026-07-06 (Andrew):** all decisions 1–11 below are resolved as annotated. The
+resolutions are the spec's marching orders.
+
 Design forks from the loop ([`03-design-forks.md`](03-design-forks.md), recommendations
-included there):
+included there) — **all four ratified as recommended:**
 
 1. **F1 (G-11)** — outer output clamp: adopt the always-wrap-in-subquery repair (also closes
    F5, the same-named multi-timeseries ambiguity). *Blocks the spec*: the spec's own documented
-   self-referential pattern must execute.
+   self-referential pattern must execute. **✓ ratified.**
 2. **F2 (G-10)** — composite unique keys: spec the declaration composite-valued from day one;
-   the `JoinContext` generalization lands with the first `fan_out` consumer.
+   the `JoinContext` generalization lands with the first `fan_out` consumer. **✓ ratified.**
 3. **F3 (FIX-2)** — dormant `input_delta_discovery`: wire only as an input to the
-   plan-derivation layer, evolved to per-trigger delta channels; no standalone landing.
+   plan-derivation layer, evolved to per-trigger delta channels; no standalone landing. **✓ ratified.**
 4. **F4 (BigInt truncation)** — fix now, ahead of everything; framework-independent live
-   silent corruption.
+   silent corruption. **✓ ratified.**
 
 Surface decisions flagged contentious by their own proposals:
 
-5. **Mode-name sugar** ([`04-knobs.md`](04-knobs.md) K1): do `batched`/`keyed` survive as sugar
-   for grain declarations, or are they removed outright (as proposed)? This decides the
-   migration story for every existing model and the shape of `models.md`'s rewrite.
-6. **Retention trust default** ([`05-source-properties.md`](05-source-properties.md) P5):
-   undeclared retention is *trusted* replayable — the one deviation from
-   conservative-by-default. Accept, or flip to requiring a declaration before any backfill?
-7. **Technique-preference granularity** (K2): per-model `maintenance.defaults.prefer` vs
-   per-cell only — proposal defers to bake-off experience, but the spec must pick an initial
-   grammar.
-8. **`columns.<c>.contract` grammar ownership** (K3): the per-column contract key shares the
-   `columns:` map with future column `tests:`; one grammar owner needed in `models.md`.
-9. **`key_recurrence` subsumption** (P1): fold it into the `mutation_profile` block or keep it
-   standalone (leaning subsume; deferred until the locality gate has a consumer).
-10. **Backend-derived source facts** (P6/open): may a backend capability (Delta CDF, Iceberg
-    snapshots) *derive* `change_feed` + `delta_identity` instead of a declaration? Touches
-    `multi_backend.md`; can be deferred to a Known Divergence.
+5. **Mode-name sugar** ([`04-knobs.md`](04-knobs.md) K1): **✓ resolved — `batched`/`keyed`/`versioned`
+   are removed outright, no sugar.** smelt has no users, so there is no compatibility cost to
+   preserving the names, and keeping them would imply the old strategy semantics the paper removes.
+   `models.md`'s rewrite and `smelt migrate` do a hard cut.
+6. **Retention trust default** ([`05-source-properties.md`](05-source-properties.md) P5): **✓ resolved —
+   accept as proposed.** Undeclared retention stays *trusted* replayable; the ledger-anomaly probe
+   is the blast-radius bound.
+7. **Technique-preference granularity** (K2): **✓ resolved — support BOTH.** `maintenance.defaults.prefer`
+   sets a per-model default and `maintenance.cells[].prefer` overrides per cell (distinct from the
+   hard per-cell `technique:` pin). K2 updated accordingly.
+8. **`columns.<c>.contract` grammar ownership** (K3): **✓ resolved — deferred deliberately.** The
+   collision with future column `tests:` is real but not blocking; ownership in `models.md` is
+   worked out when the shared `columns:` grammar is specced, provided the per-column-contract design
+   holds up (it does).
+9. **`key_recurrence` subsumption** (P1): **✓ resolved — subsume** into the `mutation_profile` block
+   (it is delivery-contract metadata of the same species); the standalone key is dropped.
+10. **Backend-derived source facts** (P6/open): **✓ resolved — leave as a Known Divergence.** Whether
+    a backend capability (Delta CDF, Iceberg snapshots) *derives* `change_feed` + `delta_identity`
+    is a `multi_backend.md` question tracked separately, not gating this spec.
+11. **Scan-locality guardrail default** ([`04-knobs.md`](04-knobs.md) K8): **✓ resolved — ship
+    `require: partition_local` + `on_violation: error`** (silent full scans impossible by default; no
+    users to migrate, so no friction cost to the strict default). **The ceiling is model-side,
+    per-consumer** (`maintenance.scan_bounds.per_source.<s>.max_lookback`); the source-side mirror
+    (`max_consumer_scan:`, [`05-source-properties.md`](05-source-properties.md) P7) is **deferred** as
+    a design option, not initial surface — added only if owner-side governance proves needed.
 
 ## 2. Machinery the spec will name that does not exist anywhere yet
 
@@ -70,6 +82,13 @@ From [`06-proof-obligations.md`](06-proof-obligations.md) (its three hardest) pl
 - **The generalized ledger's straddle attribution without key temporal locality** — the one
   part of the §8 ledger design the paper itself flags as proposal-not-property; the spec should
   scope v1 to locality-or-explicit-footprint and name the rest a Known Divergence.
+- **Partition-locality derivation + the emitted partition predicate** (`01-framework.md` §5) —
+  projecting each cell's `(partition_col, before, after)` reach/footprint triple onto the source and
+  output partition columns to decide partition-locality, *and* emitting that partition predicate into
+  the maintenance SQL (scan and merge/overwrite target) so the engine prunes. The derivation reuses
+  the reach machinery, but the "project onto the partition column and refuse when unbounded" step,
+  the K8/P7 guardrail check, and the `MaintenanceScanUnbounded` diagnostic are new. Without it the
+  targeted-write cells are correct but silently full-table.
 
 The spec can (and should) be written with these as normative behavior + admission rules; but
 each needs at least a sketch-level derivation story in the spec so it isn't specifying magic.
@@ -105,8 +124,11 @@ sections.
   instances of the theorem's failure cases; `nondeterministic_columns` superseded by per-column
   contracts (K3).
 - **Sources spec (`smelt_yml.md` / `sources.md`)** — the structured `mutation_profile` block,
-  lateness/watermark, composite `unique_key`, retention, delta identity, and the trust rule
-  (widening trusted / narrowing verified) from `05`.
+  lateness/watermark, composite `unique_key`, retention, delta identity, the source-side scan
+  ceiling (`max_consumer_scan:`, P7), and the trust rule (widening trusted / narrowing verified)
+  from `05`. The model-side scan-locality guardrail (`maintenance.scan_bounds`, K8) lands with the
+  refresh-surface rewrite in `models.md` / `maintenance_plan.md`, and the partition-locality
+  property + its emitted predicate land in `model_maintenance.md` / `maintenance_plan.md`.
 - **`model_transforms.md`** — the clamp change (F1's subquery wrap) and the new technique
   primitives (column-scoped merge, ledger fold/reset) as transform contracts.
 - **`architecture.md`** — one new invariant: the maintenance plan is pure data in
@@ -129,5 +151,6 @@ sections.
    can land any time; M1–M2 give the descriptive plan + diagnostics with **no behavior
    change**, which de-risks everything after).
 
-**Definition of ready-to-spec**: §1 items 1–8 decided; §3 item 1 probed; the §2 sketches
-reviewed once. Everything else can trail as Known Divergences with plan links.
+**Definition of ready-to-spec**: §1 items 1–10 decided (✓ 2026-07-06); item 11 (K8 default) decided;
+§3 item 1 probed; the §2 sketches reviewed once. Everything else can trail as Known Divergences with
+plan links.

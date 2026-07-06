@@ -104,11 +104,11 @@ batched:                          timeseries: {...}
 pre-1.0 with no compatibility constraints, so this is a hard cut with a `smelt migrate` assist, not
 a compat shim.
 
-**Contentious point, flagged:** an alternative keeps `refresh: batched|keyed|versioned` as *sugar*
-for the grain declarations (each name pinning a grain, all strategy content still derived). That
-preserves familiar names at the cost of implying the old strategy semantics. This proposal removes
-the names to make the semantic change unmissable; the sugar variant is the fallback if migration
-friction matters more.
+**Resolved (2026-07-06):** the names are **removed outright** — no `batched|keyed|versioned` sugar.
+smelt has no users, so there is no compatibility cost to preserving them, and keeping them would
+imply the old strategy semantics this proposal deletes. The sugar variant (each name pinning a
+grain, strategy content still derived) was considered and rejected on exactly that ground; the hard
+cut with a `smelt migrate` assist stands (`09-spec-readiness.md` decision 5).
 
 ---
 
@@ -125,15 +125,22 @@ can pin a cell. Proposed surface:
 ```yaml
 maintenance:
   defaults:
-    prefer: recompute            # recompute | fold | auto   (auto = cost-model default)
+    prefer: recompute            # recompute | fold | auto   (auto = cost-model default) — per-model default
   cells:
     - columns: [converted]       # the column-group, named by member columns
       on: smelt.sources.conversions   # the input whose delta this cell handles
-      technique: fold            # fold | recompute | rederive_columns
+      prefer: fold               # soft per-cell override of defaults.prefer (still cost-model-guided)
     - columns: [converted]
       on: backfill               # the reserved trigger name for explicit region recompute
-      technique: recompute
+      technique: recompute       # hard per-cell pin (bypasses the cost model entirely)
 ```
+
+**Two granularities, both supported** (decision 7, `09-spec-readiness.md`): `defaults.prefer` sets
+the **per-model** default posture, and a cell may carry its own **per-cell** `prefer:` to shift just
+that cell — a *soft* bias the cost model still refines. Distinct from `technique:`, which is the
+*hard* per-cell pin that bypasses the cost model outright. So the ladder is: model default (`prefer`)
+→ cell soft bias (`prefer`) → cell hard pin (`technique`), each narrower scope winning. Almost every
+model sets none of them.
 
 Addressing scheme: a cell is `(columns, on)` where `columns` names any member of a derived column
 group (the planner resolves it to the whole group and errors if the listed columns span two groups
@@ -281,6 +288,66 @@ smelt bakeoff <model> [--cells <col>@<source>,...] \
 
 ---
 
+## K8 — Scan-locality guardrails: assert partition-bounded maintenance
+
+**Status:** declared, **check-only** (never modifies the clamp) — the `horizon_ceiling:` sibling on
+the scan-span axis. **Motivation:** `01-framework.md` §5 (partition-local maintenance); the
+fail-loud discipline (a silent full-table scan on a huge Delta/Iceberg table is exactly the failure
+this design exists to make impossible).
+
+Partition-locality is **derived** (§5): every maintenance op either projects onto a bounded
+partition interval or it does not. This knob does not compute that — it says what to *do* when a
+source's maintenance is *not* partition-local, and lets an operator assert a **tighter numeric
+ceiling** than "merely bounded". Crucially, it **never changes the clamp**: it cannot truncate a
+scan (that would silently drop data — a skeleton mutation, forbidden by rule 2). It only asserts an
+expectation and fails loud when the derived scan cannot meet it.
+
+```yaml
+maintenance:
+  scan_bounds:
+    require: partition_local        # partition_local (default) | none
+    on_violation: error             # error (default) | warn
+    per_source:
+      smelt.sources.conversions:
+        max_lookback: '10 days'     # derived scan span on this source must be ≤ 10 days
+      smelt.sources.customers:
+        allow_full_scan: true       # named acceptance of an unclocked full-dimension read (EX-07)
+```
+
+- **`require: partition_local`** (default): every op (each trigger × source, plus backfill) must be
+  partition-local in that source. A cell whose footprint chains across all history — a per-key
+  correlation without temporal locality, an unclocked mutable dimension read in full — is **not**
+  partition-local, so the compile fails loud (or warns) naming the source, the offending cell, and
+  *why* it is unbounded (`MaintenanceScanUnbounded`). This is the default so that shipping a silent
+  full-table scan requires an explicit, reviewable opt-out.
+- **`max_lookback: <interval>`**: a concrete ceiling on the *derived* scan span for that source. If
+  the SQL implies a wider reach than declared (a 30-day correlated window under a `'10 days'`
+  ceiling), the compile fails even though §5 alone would accept it as bounded — the ceiling catches
+  a scan that is *technically partition-local but far larger than the operator intended*, which is
+  the silent-cost case §5's bare property misses. The fix is to change the SQL or the source
+  declaration, **never** to let smelt clip the clamp.
+- **`allow_full_scan: true`**: the per-source named escape for a legitimately unclocked lookup
+  dimension — a rule-3 acknowledgement that "yes, this one is read in full on every recompute" — so
+  the global `partition_local` assertion does not fire for it. Distinct from silence: the full read
+  is *declared*, visible in review, and reported by `smelt explain`.
+- **`on_violation: warn`** downgrades the hard error to a surfaced warning, for staged adoption on
+  an existing project not yet partition-clean.
+
+**Trust class (rule 4).** This declaration neither widens nor narrows the clamp — it is a pure
+assertion, always safe, that can only fail loud. That is why it is admitted declared: like
+`horizon_ceiling:`, it never relaxes the derived plan; it only refuses one that exceeds the stated
+expectation. A project-level default (`smelt.yml`) sets the baseline `require`/`on_violation`;
+per-model `scan_bounds` refine it.
+
+**Ratified defaults (2026-07-06, `09-spec-readiness.md` decision 11):** ship
+`require: partition_local` with `on_violation: error` — a silent full-table scan is impossible
+without an explicit `allow_full_scan`. The `max_lookback` ceiling is **model-side, per-consumer**
+(each model asserts its own scan span per source it reads); the symmetric source-owner ceiling
+(`max_consumer_scan:`, [`05-source-properties.md`](05-source-properties.md) P7) is deferred as a
+design option, not initial surface.
+
+---
+
 ## Summary table
 
 | Knob | Surface | Status | Default | Validated by / trades |
@@ -293,14 +360,22 @@ smelt bakeoff <model> [--cells <col>@<source>,...] \
 | Settle bounds | *(none — `smelt explain` output)* | derived | — | absolute form requires source lateness declaration |
 | Backfill cascade | `backfill: cascade\|local` | declared (need is derived) | `cascade` where self-edge/trajectory | `local` = named staleness trade (G-08) |
 | Horizon ceiling | `horizon_ceiling:` | declared, warning-only | absent | never relaxes the derived clamp (existing) |
+| Scan-locality guardrail | `maintenance.scan_bounds` (`require`/`max_lookback`/`allow_full_scan`) | declared, **check-only** | `require: partition_local`, `on_violation: error` | never modifies the clamp; fails loud on non-partition-local or over-ceiling scans (K8) |
 | Bake-off | `smelt bakeoff` (+ `--pin` → K2 block) | CLI | — | measured; pin re-validated per compile |
 | Full refresh | `--full-refresh` | CLI | — | resets ledger regions it overwrites |
 | Safety overrides | `safety_overrides:` | declared | all false | partition-grain only (existing) |
 
 ## Open questions this part leaves
 
-- Whether `batched`/`keyed` survive as sugar names for the grain declarations (K1, flagged).
-- The `maintenance.defaults.prefer` granularity — per-model may be too coarse and per-cell too
-  noisy; the bake-off experience should decide.
+- ~~Whether `batched`/`keyed` survive as sugar names for the grain declarations (K1).~~ **Resolved
+  2026-07-06: removed outright, no sugar** (`09-spec-readiness.md` decision 5).
+- ~~The `maintenance.defaults.prefer` granularity — per-model vs per-cell.~~ **Resolved 2026-07-06:
+  both** — per-model `defaults.prefer` + soft per-cell `prefer` + hard per-cell `technique` (K2,
+  decision 7).
 - Where the `columns.<c>.contract` key collides with future column-level `tests:` — same map, needs
-  one grammar owner (`models.md` §"`columns:`").
+  one grammar owner (`models.md` §"`columns:`"). **Deferred (decision 8):** not blocking; worked out
+  when the shared `columns:` grammar is specced.
+- ~~Whether the K8 default should be `error` or `warn`-first, and whether the ceiling is model-side
+  or mirrored source-side.~~ **Resolved 2026-07-06:** `require: partition_local` + `on_violation:
+  error`; ceiling is model-side per-consumer `max_lookback`; source-side P7 deferred
+  ([`09-spec-readiness.md`](09-spec-readiness.md) decision 11).

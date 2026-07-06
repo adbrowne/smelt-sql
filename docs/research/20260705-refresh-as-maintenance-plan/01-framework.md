@@ -198,6 +198,16 @@ late row rewrites an existing partition, the cell is bottom-right — a full ups
 re-derivation of that partition.) Exhaustiveness is defensible: *every* incremental
 write picks a read scope and a write scope.
 
+**Physical caveat on the write axis (partition-locality — §5).** The left column's
+cheapness is not automatic. A *targeted* write is only partition-bounded when the delta's
+footprint projects onto a bounded set of the output's partitions; when it does not — a
+per-key footprint with no temporal locality — a "targeted" write scatters across every
+partition and can cost *more* than a bounded recompute-region. **Partition-locality** (§5)
+is the derived property that decides this, and a guardrail declaration ([`04-knobs.md`](04-knobs.md)
+§K8) turns it into a fail-loud check so a silent full-table scan is impossible. The 2×2
+classifies the *logical* read/write scope; partition-locality is the orthogonal
+*physical* question of whether that scope prunes to bounded partitions.
+
 The two *named* techniques remain the load-bearing corners because they anchor the cost
 model and the theorem:
 
@@ -366,6 +376,45 @@ scan `(before=0, after=7d)` reflects to footprint `(before=7d, after=0)`: an eve
 run window `[s,e)` reads conversions over `[s, e+7d)`; a conversion at `t` writes events
 over `[t−7d, t]`. The numbers look symmetric here only by coincidence; an asymmetric
 window would make the reflection visible, so it must be stated, not assumed.
+
+**Partition-local maintenance (the physical realizability of the reflection).** The
+scan/footprint reflection is a claim about *logical* windows on the event-time axis.
+Whether it is *cheap* to execute is a second, derivable question: does each window
+project onto a **bounded set of partitions** of the table it addresses? Define, for a
+model partitioned on `P_out` fed by sources `i` partitioned on `P_i`:
+
+> A model's maintenance is **partition-local in source `i`** when, for every trigger
+> driven by a change to `i` (and for a bounded backfill), the **scan clamp** projects
+> onto a bounded interval of every read source's `P` (no source read in full) **and** the
+> **footprint** projects onto a bounded interval of `P_out` (no write touches an unbounded
+> set of output partitions). When it holds, all maintenance triggered by `i` runs
+> **partition-by-partition** — bounded scans, bounded joins, bounded transactions; no
+> full-table scan, whole-table shuffle, or table-spanning commit.
+
+This is **derived, not declared** — the `(partition_col, before, after)` triple projected
+onto each source's and the output's partition column. The obligation is threefold:
+**derive** it per source; **emit** the partition-pruning predicate into the maintenance
+SQL (both the scan *and* the merge/overwrite target must carry the `P` predicate, or the
+engine cannot prune — a footprint window stated only on a non-partition column is a
+logical bound the storage layer cannot use); and **warn/refuse** when it fails. It fails
+exactly at §4's degeneracy — a footprint with no temporal locality (a per-key correlation
+chaining across all history, an unclocked mutable dimension) spans unbounded partitions,
+so no predicate bounds it and a "targeted" write scatters across the whole table. That
+refusal is the honest boundary; the alternative is a silent full-table operation. The
+declared guardrail that makes this a fail-loud check (rather than a silent cost) is
+[`04-knobs.md`](04-knobs.md) §K8 — an assertion on the derived scan span that never
+modifies the clamp, only refuses when it is wider than the operator will tolerate.
+
+**Partition-locality is not clustering-alignment.** A model can be partition-local while
+its merge key is *orthogonal* to `P_out`: the conversions example is partition-local in
+`conversions` (a late conversion touches a bounded `event_date` span) even though it
+merges on `user_id`. The orthogonality costs only *within-partition* write amplification —
+under copy-on-write, data files in the touched partitions holding a matched row are
+rewritten whole. That cost is **secondary and mitigated**: deletion vectors /
+merge-on-read avoid the rewrite, and `OPTIMIZE`/compaction over recent partitions reclaims
+fragmentation. The property smelt computes and guarantees is the *partition bound* — that
+maintenance stays confined to a bounded partition set — not file-level rewrite
+minimization, which is the engine's job.
 
 ---
 
