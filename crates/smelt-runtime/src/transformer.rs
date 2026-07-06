@@ -29,6 +29,13 @@ pub enum TransformError {
     NoFromClause,
 
     #[error(
+        "output-clamp column '{0}' is qualified: the clamp ranges over the model's \
+         output schema, where an inner-alias qualifier is out of scope — pass the \
+         unqualified output column name"
+    )]
+    QualifiedClampColumn(String),
+
+    #[error(
         "Query contains subqueries which are not yet supported for incremental transformation"
     )]
     SubqueryNotSupported,
@@ -275,68 +282,67 @@ pub fn is_transparent_single_source(
     }
 }
 
-/// Transform a SQL query to filter by event time range.
+/// Apply the outer output clamp: restrict the model's **output** to the
+/// write window `[start, end)`.
 ///
-/// This function injects a WHERE clause filter to restrict the query
-/// to only process data within the specified time range.
+/// The clamp is applied to a wrapping projection over the model's output
+/// schema — `SELECT * FROM (<sql>) AS _smelt_output_clamp WHERE <col> …` —
+/// never spliced into the model's own outermost `WHERE`
+/// (`docs/specs/model_transforms.md` §"Source-filter pushdown + the two
+/// clamps"; design fork F1/G-11). The wrap is what makes the clamp bind
+/// unambiguously when several FROM items expose the clamp column's name (a
+/// self-referential model, two same-named timeseries sources), and it
+/// filters output *rows* — evaluated after any window function the
+/// outermost `SELECT` computes, so it can never undercut a widened-scan
+/// margin.
 ///
 /// # Arguments
 /// * `sql` - The original SQL query
-/// * `event_time_column` - The column name to filter on
+/// * `event_time_column` - An **unqualified** column of the model's output
+///   schema. A qualified (dotted) name is rejected: the wrapping
+///   projection's scope has no inner aliases to qualify by.
 /// * `range` - The time range (start inclusive, end exclusive)
-///
-/// # Returns
-/// The transformed SQL with the time filter injected, or an error if
-/// the transformation cannot be safely applied.
 ///
 /// # Example
 /// ```ignore
 /// let sql = "SELECT * FROM users WHERE active = true";
 /// let range = TimeRange { start: "2024-01-15".into(), end: "2024-01-18".into() };
 /// let result = inject_time_filter(sql, "created_at", &range)?;
-/// // Result: "SELECT * FROM users WHERE active = true AND (created_at >= '2024-01-15' AND created_at < '2024-01-18')"
+/// // Result: "SELECT * FROM (\nSELECT * FROM users WHERE active = true\n) AS _smelt_output_clamp \
+/// //          WHERE created_at >= '2024-01-15' AND created_at < '2024-01-18'"
 /// ```
 pub fn inject_time_filter(
     sql: &str,
     event_time_column: &str,
     range: &TimeRange,
 ) -> Result<String, TransformError> {
-    // Parse the SQL to get AST
+    // Contract: the clamp column names a column of the model's *output*
+    // schema; a dotted name is an inner-alias reference, definitionally out
+    // of scope in the wrapping projection.
+    if event_time_column.contains('.') {
+        return Err(TransformError::QualifiedClampColumn(
+            event_time_column.to_string(),
+        ));
+    }
+
+    // Validate the input is a SELECT with a FROM — clamping anything else
+    // is meaningless and refused (unchanged from the pre-wrap contract).
     let parse_result = parse(sql);
     let file = File::cast(parse_result.syntax()).ok_or(TransformError::ParseFailed)?;
     let stmt = file.select_stmt().ok_or(TransformError::NoSelectStmt)?;
+    if stmt.from_clause().is_none() {
+        return Err(TransformError::NoFromClause);
+    }
 
-    // Build the filter expression
-    // Escape single quotes in the column name (defensive)
+    // Escape single quotes (defensive)
     let safe_column = event_time_column.replace('\'', "''");
     let safe_start = range.start.replace('\'', "''");
     let safe_end = range.end.replace('\'', "''");
 
-    let filter = format!(
-        "{} >= '{}' AND {} < '{}'",
-        safe_column, safe_start, safe_column, safe_end
-    );
-
-    // Determine where to inject the filter
-    if let Some(where_clause) = stmt.where_clause() {
-        // Append to existing WHERE clause
-        let where_end = usize::from(where_clause.text_range().end());
-
-        // Split the SQL at the end of the WHERE clause
-        let (before, after) = sql.split_at(where_end);
-
-        Ok(format!("{} AND ({}){}", before, filter, after))
-    } else if let Some(from_clause) = stmt.from_clause() {
-        // Insert new WHERE clause after FROM
-        let from_end = usize::from(from_clause.text_range().end());
-
-        // Split the SQL at the end of the FROM clause
-        let (before, after) = sql.split_at(from_end);
-
-        Ok(format!("{} WHERE {}{}", before, filter, after))
-    } else {
-        Err(TransformError::NoFromClause)
-    }
+    Ok(format!(
+        "SELECT * FROM (\n{sql}\n) AS _smelt_output_clamp \
+         WHERE {safe_column} >= '{safe_start}' AND {safe_column} < '{safe_end}'"
+    ))
 }
 
 /// Freeze every run-deterministic clock call (`NOW()`, `CURRENT_TIMESTAMP()`,
@@ -770,8 +776,12 @@ mod tests {
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
 
+        // The clamp lives on a wrapping projection over the model's output,
+        // never spliced into the model body (F1/G-11 subquery wrap).
+        assert!(result.starts_with("SELECT * FROM ("));
+        assert!(result.contains("AS _smelt_output_clamp"));
         assert!(result.contains("WHERE event_time >= '2024-01-15' AND event_time < '2024-01-18'"));
-        assert!(result.starts_with("SELECT * FROM smelt.models.transactions"));
+        assert!(result.contains("SELECT * FROM smelt.models.transactions"));
     }
 
     #[test]
@@ -784,8 +794,12 @@ mod tests {
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
 
+        // The model's own WHERE is untouched inside the wrap; the clamp is
+        // the wrapping projection's WHERE.
         assert!(result.contains("WHERE status = 'active'"));
-        assert!(result.contains("AND (event_time >= '2024-01-15' AND event_time < '2024-01-18')"));
+        assert!(result.contains(
+            "_smelt_output_clamp WHERE event_time >= '2024-01-15' AND event_time < '2024-01-18'"
+        ));
     }
 
     #[test]
@@ -806,14 +820,16 @@ GROUP BY 1, 2
 
         let result = inject_time_filter(sql, "transaction_timestamp", &range).unwrap();
 
-        // Should have both the original WHERE and the new filter
+        // The original WHERE stays inside the wrapped body; the clamp lands
+        // on the wrapping projection, evaluated over the model's output.
         assert!(
             result.contains("WHERE transaction_timestamp IS NOT NULL"),
             "Missing original WHERE. Got: {}",
             result
         );
         assert!(result.contains(
-            "AND (transaction_timestamp >= '2024-01-15' AND transaction_timestamp < '2024-01-18')"
+            "_smelt_output_clamp WHERE transaction_timestamp >= '2024-01-15' \
+             AND transaction_timestamp < '2024-01-18'"
         ));
         // GROUP BY should still be there
         assert!(result.contains("GROUP BY 1, 2"));
@@ -839,13 +855,21 @@ GROUP BY 1, 2
             end: "2024-01-18".into(),
         };
 
-        let result = inject_time_filter(sql, "orders.created_at", &range).unwrap();
+        // Contract change with the F1 subquery wrap (deliberate, see
+        // 03-design-forks.md F1): the clamp column is an UNQUALIFIED column
+        // of the model's output schema — a qualified inner-alias name is
+        // definitionally out of scope in the wrapping projection and is
+        // rejected rather than emitted broken.
+        let err = inject_time_filter(sql, "orders.created_at", &range)
+            .expect_err("qualified clamp column must be rejected");
+        assert!(matches!(err, TransformError::QualifiedClampColumn(_)));
 
-        // Should have WHERE clause injected
+        // The unqualified output column clamps the join fine.
+        let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(result.contains(
-            "WHERE orders.created_at >= '2024-01-15' AND orders.created_at < '2024-01-18'"
+            "_smelt_output_clamp WHERE created_at >= '2024-01-15' AND created_at < '2024-01-18'"
         ));
-        // JOINs should still be there
+        // JOINs should still be there, inside the wrapped body.
         assert!(result.contains("INNER JOIN"));
     }
 

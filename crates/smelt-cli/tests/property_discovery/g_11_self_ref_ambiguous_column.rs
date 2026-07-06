@@ -21,12 +21,15 @@
 //! produce SQL DuckDB will execute, when the FROM scope exposes the bare
 //! column name from more than one input.
 //!
-//! Hypothesis: DuckDB rejects the compiled SQL with `Binder Error: Ambiguous
-//! reference to column name "d"` on EVERY run of this model shape, because
-//! both `t` and `bal` expose a `d` column and the injected clamp does not
-//! qualify which one it means. This reproduces on the FIRST run — no
-//! adversarial schedule needed; it is a hard compile-time-of-SQL failure, not
-//! a data-dependent divergence.
+//! RESOLVED (design fork F1, ratified 2026-07-06; fixed 2026-07-07): the
+//! outer clamp is now applied to a wrapping projection over the model's
+//! output schema (`SELECT * FROM (…) AS _smelt_output_clamp WHERE …`), so
+//! the bare column binds unambiguously — the FROM scope of the clamp
+//! exposes exactly the model's own output columns. The original hypothesis
+//! (DuckDB `Binder Error: Ambiguous reference` on every run of this shape)
+//! was CONFIRMED red pre-fix; this cell now pins the fix: the spec's own
+//! documented direct self-join form executes, and its first window produces
+//! the correct running balance.
 
 use crate::link_c_harness::{base_request, LinkCProject};
 use crate::model_shapes::{running_balance_self_ref_direct_join, ModelShape};
@@ -75,13 +78,15 @@ fn seed_sources(db_path: &std::path::Path) {
     .expect("seed sources");
 }
 
-/// RED (pre-fix): the direct self-join form — the exact shape
+/// GREEN (post-fix): the direct self-join form — the exact shape
 /// `docs/specs/batched_models.md` documents and `window_independence`'s own
-/// unit tests use — fails on its very first run because the injected outer
-/// clamp is an unqualified bare column reference into a FROM scope that
-/// exposes that column name from two inputs (`t.d`, `bal.d`).
+/// unit tests use — executes under the F1 subquery-wrapped output clamp,
+/// and the produced window is correct. Pre-fix this failed on the very
+/// first run with DuckDB's ambiguous-column binder error, because the
+/// spliced clamp was a bare column reference into a FROM scope exposing
+/// that name from two inputs (`t.d`, `bal.d`).
 #[tokio::test]
-async fn direct_self_join_output_clamp_is_ambiguous_without_subquery_wrap() {
+async fn direct_self_join_executes_under_the_subquery_wrapped_output_clamp() {
     let shape = running_balance_self_ref_direct_join();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project_dir = tmp.path().to_path_buf();
@@ -96,17 +101,22 @@ async fn direct_self_join_output_clamp_is_ambiguous_without_subquery_wrap() {
     request.start = Some("2024-01-01".to_string());
     request.end = Some("2024-01-02".to_string());
 
-    let result = project.run_quiet("run-1", request).await;
+    project
+        .run_quiet("run-1", request)
+        .await
+        .expect("the spec's own documented self-referential pattern must execute (F1)");
 
-    let err = result.expect_err(
-        "the direct self-join form (no subquery wrap) is expected to fail: the outer \
-         output-clamp injection is an unqualified bare column reference into a FROM \
-         scope where both the driving source and the self-reference expose that same \
-         column name",
-    );
-    let message = format!("{err:#}");
-    assert!(
-        message.contains("Ambiguous") || message.contains("ambiguous"),
-        "expected a DuckDB ambiguous-column binder error, got: {message}"
-    );
+    // The first window's balance is correct: day 1's transactions (10.0)
+    // with no prior balance row.
+    let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+    let (rows, balance): (i64, f64) = conn
+        .query_row(
+            "SELECT count(*), min(balance) FROM main.running_balance \
+             WHERE d = DATE '2024-01-01'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read balance");
+    assert_eq!(rows, 1);
+    assert_eq!(balance, 10.0);
 }

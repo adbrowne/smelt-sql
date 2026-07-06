@@ -75,7 +75,9 @@ mod tests {
         };
         let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(result.contains("WHERE status = 'active'"));
-        assert!(result.contains("AND (created_at >= '2024-01-15' AND created_at < '2024-01-18')"));
+        assert!(result.contains(
+            "_smelt_output_clamp WHERE created_at >= '2024-01-15' AND created_at < '2024-01-18'"
+        ));
     }
 
     #[test]

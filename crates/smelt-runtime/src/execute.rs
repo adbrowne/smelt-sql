@@ -992,9 +992,19 @@ pub async fn execute_project(
                     let filtered_sql = if is_transparent_single_source(&per_model_source_bounds) {
                         inject_source_filters(&clean_sql, &per_model_source_bounds, &run_range)
                     } else {
+                        // The output clamp ranges over the model's OUTPUT
+                        // schema (F1 subquery wrap), so its column is the
+                        // declared `partition_column` — the output-axis
+                        // column the DELETE below also ranges over. Using
+                        // `event_time_column` here was doubly wrong for a
+                        // model that derives its partition column (e.g.
+                        // `DATE(ts) AS d`): the raw timestamp is not in the
+                        // output schema at all, and clamping a different
+                        // column than the DELETE breaks write-window =
+                        // output-window by construction.
                         let filtered_sql = inject_time_filter(
                             &clean_sql,
-                            &inc_plan.timeseries.event_time_column,
+                            &inc_plan.timeseries.partition_column,
                             &run_range,
                         )?;
                         inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range)
@@ -1029,12 +1039,13 @@ pub async fn execute_project(
                     // the write window equals the output window
                     // (`docs/specs/model_transforms.md` §Constraints — "Write window
                     // = output window; scan window ⊇ output window"). `inject_time_filter`
-                    // now clamps the output on `event_time_column` to the narrow
-                    // `run_range` (`[partition_start, partition_end)`), so the DELETE
-                    // range must match that same narrow window: widening it to the
-                    // scan's margin would re-delete-and-rewrite the neighboring
-                    // partition using a scan sized for *this* batch's margin, not
-                    // that partition's own — silently corrupting it.
+                    // clamps the wrapped output on `partition_column` to the narrow
+                    // `run_range` (`[partition_start, partition_end)`) — the SAME
+                    // column and window this DELETE ranges over, so the two agree
+                    // by construction. Widening the DELETE to the scan's margin
+                    // would re-delete-and-rewrite the neighboring partition using a
+                    // scan sized for *this* batch's margin, not that partition's
+                    // own — silently corrupting it.
                     let partition = PartitionRange {
                         column: inc_plan.timeseries.partition_column.clone(),
                         start: batch.partition_start.format("%Y-%m-%d").to_string(),

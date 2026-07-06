@@ -332,8 +332,11 @@ GROUP BY 1, 2"#;
         start: "2024-01-01".to_string(),
         end: "2024-01-06".to_string(),
     };
+    // The output clamp ranges over the model's OUTPUT schema (F1 subquery
+    // wrap), so it clamps the declared partition column — `event_time` is
+    // an input timestamp this aggregating model never projects.
     let filtered_sql =
-        smelt_runtime::inject_time_filter(stripped_sql, &event_time_col, &range).unwrap();
+        smelt_runtime::inject_time_filter(stripped_sql, &partition_col, &range).unwrap();
 
     backend
         .execute_sql(&format!(
@@ -367,7 +370,7 @@ GROUP BY 1, 2"#;
         end: "2024-01-07".to_string(),
     };
     let filtered_day6 =
-        smelt_runtime::inject_time_filter(stripped_sql, &event_time_col, &range_day6).unwrap();
+        smelt_runtime::inject_time_filter(stripped_sql, &partition_col, &range_day6).unwrap();
 
     // DELETE + INSERT pattern
     backend
@@ -470,7 +473,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
     }
 
     let steps = plan_steps.unwrap();
-    let (event_time_col, _partition_col) = inc_config.unwrap();
+    let (_event_time_col, partition_col) = inc_config.unwrap();
 
     // Run naive query for full date range as reference
     let naive_sql = r#"
@@ -502,8 +505,10 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
     for step in &steps {
         match step {
             ExecutionStep::CreateTemp { name, sql } => {
+                // Clamp the step's OUTPUT on the partition column (F1 wrap)
+                // — the input timestamp is not in the step's projection.
                 let filtered =
-                    smelt_runtime::inject_time_filter(sql, &event_time_col, &range).unwrap();
+                    smelt_runtime::inject_time_filter(sql, &partition_col, &range).unwrap();
                 let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, filtered);
                 backend.execute_sql(&create_sql).await.unwrap();
             }

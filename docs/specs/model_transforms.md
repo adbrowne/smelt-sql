@@ -86,15 +86,25 @@ land, with `versioned` a prospective future consumer of the same driver; the nor
 **Source-filter pushdown + the two clamps.** Three related mechanisms share one
 window. Source-filter pushdown wraps each bounded input ref in a subquery so the
 scan is pruned at the source. The outer output-clamp filters the outermost
-projection so only the write window is emitted. When the model has a **finite
-frame reach `k`** (a `RANGE … INTERVAL` window, an interval join), the two-layer
-widened-scan reads `[start − k − offset, end)` — wide enough to compute the window
-correctly at the left edge — while the output clamp still restricts writes to
-`[start, end)`: the margin is *read but never re-written*, which is what keeps the
-result partition-equivalent. For the transparent single-source, zero-margin case
-the pushdown filter *is* the clamp (same window by construction) and the outer
-clamp is dropped as textually redundant. UNION-branch wrap-and-filter is the same
-pushdown distributed independently over each set-operation branch.
+projection so only the write window is emitted; it is applied to a **wrapping
+projection over the model's output schema** (`SELECT * FROM (<model>) AS
+_smelt_output_clamp WHERE <col> …`), never spliced into the model's own
+outermost `WHERE` — the clamp ranges over the output schema by output column
+name, so it binds unambiguously even when several FROM items expose the same
+column name (a self-referential model, two same-named timeseries sources), and
+it filters output *rows*, evaluated after any window function the outermost
+`SELECT` computes. The clamp column is an **unqualified** column of the model's
+output schema; a qualified (dotted) name is rejected — an inner-alias
+qualifier is definitionally out of scope in the wrapping projection. When the
+model has a **finite frame reach `k`** (a `RANGE … INTERVAL` window, an
+interval join), the two-layer widened-scan reads `[start − k − offset, end)` —
+wide enough to compute the window correctly at the left edge — while the output
+clamp still restricts writes to `[start, end)`: the margin is *read but never
+re-written*, which is what keeps the result partition-equivalent. For the
+transparent single-source, zero-margin case the pushdown filter *is* the clamp
+(same window by construction) and the outer clamp is dropped as textually
+redundant. UNION-branch wrap-and-filter is the same pushdown distributed
+independently over each set-operation branch.
 
 **Hidden decomposed state + presentation view.** The stored column is a monoid
 element that is not itself the user value; the user value is a pure function
@@ -235,18 +245,14 @@ by `docs/plans/20260704-model-updates.md` (design:
   conv_ts]` and hands it to `Backend::merge_into`, licensed by a monotone
   join contribution (`join_contribution_monotone`) and a bounded horizon `H`
   (the forward `after` reach from `derive_model_bounds`).
-- **The output clamp is injected at the model's own SELECT level.** The clamp
-  is added as a `WHERE` condition on the model body itself, at the same query
-  level the model's outermost `SELECT` runs at. For a model whose outermost
-  `SELECT` computes a window function directly (e.g. a bare `LAG(...) OVER
-  (RANGE BETWEEN INTERVAL ... PRECEDING AND CURRENT ROW)` with no wrapping
-  CTE), a same-level `WHERE` is evaluated before the window function per
-  standard SQL order — so the clamp can filter the rows feeding the window
-  function, not just its output, undercutting the widened-scan margin the
-  window function needs. Wrapping the window function in an inner CTE (so the
-  clamp lands on an outer `SELECT` over the CTE) avoids this; the join/subquery
-  lookback shapes are unaffected since their `WHERE` naturally applies after
-  the join.
+- ~~The output clamp is injected at the model's own SELECT level.~~ Resolved:
+  the clamp is applied to a wrapping projection over the model's output schema
+  (§"Source-filter pushdown + the two clamps"), which closes both defects of
+  the same-level injection — the binder ambiguity when several FROM items
+  exposed the clamp column's name (a self-referential model, two same-named
+  timeseries sources), and the window-function hazard where a same-level
+  `WHERE` filtered the rows *feeding* a bare outermost window function,
+  undercutting its widened-scan margin.
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.

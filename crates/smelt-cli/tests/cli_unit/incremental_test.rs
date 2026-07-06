@@ -182,11 +182,12 @@ async fn test_inject_time_filter_with_existing_where() -> anyhow::Result<()> {
 
     let result = inject_time_filter(sql, "transaction_timestamp", &range)?;
 
-    // Should keep original WHERE
+    // The model's own WHERE is untouched inside the F1 subquery wrap…
     assert!(result.contains("WHERE user_id = 1"));
-    // Should add AND with filter
+    // …and the output clamp lives on the wrapping projection.
     assert!(result.contains(
-        "AND (transaction_timestamp >= '2024-12-25' AND transaction_timestamp < '2024-12-26')"
+        "_smelt_output_clamp WHERE transaction_timestamp >= '2024-12-25' \
+         AND transaction_timestamp < '2024-12-26'"
     ));
 
     Ok(())
