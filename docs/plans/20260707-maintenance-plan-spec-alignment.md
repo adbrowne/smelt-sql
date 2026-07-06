@@ -59,7 +59,7 @@ Three of the spec-diff map's rows landed (`maintenance_plan.md` created; `models
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| SA1   | pending  |        |      |
+| SA1   | done     | `spec(batched): demote to the partition-grain shape profile; admission as per-cell obligations` | 2026-07-07 |
 | SA2   | pending  |        |      |
 | SA3   | pending  |        |      |
 | SA4   | pending  |        |      |
