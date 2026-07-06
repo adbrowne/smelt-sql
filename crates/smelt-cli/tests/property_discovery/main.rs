@@ -30,3 +30,4 @@ mod sc_2_clocked_mutable_window_forward;
 mod smoke;
 mod tracer_evolution;
 mod tracer_maintenance;
+mod tracer_propagation;

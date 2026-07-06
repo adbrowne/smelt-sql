@@ -26,6 +26,7 @@
 
 pub mod derive;
 pub mod emit;
+pub mod propagate;
 
 use std::collections::BTreeSet;
 
