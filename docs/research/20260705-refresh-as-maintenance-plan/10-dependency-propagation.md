@@ -209,7 +209,7 @@ DuckDB), 🔜 = designed here, not yet built.
 | S7 | backward slice *sufficiency*: sandbox staged with exactly the computed slices reproduces the target period bit-for-bit (multiset), with a sentinel that fails under-widening | backward | ✅ |
 | S8 | adjointness: `forward(backward(P)) ⊇ P` — replaying the resolved inputs dirties at least the requested period | both | ✅ |
 | S9 | self-referential model (reads own output at `t−1`): table-graph cycle, time-DAG — refuse in v0, unroll later | both | 🔜 (§6) |
-| S10 | granularity mapping: daily model feeding a monthly rollup (and hourly→daily) | both | 🔜 (§7) |
+| S10 | granularity mapping: daily model feeding a monthly rollup — day/month built (grain *derivation* from the SQL, and an hourly axis, remain) | both | ✅ (§7) |
 | S11 | column-group-scoped dirt: a conversions delta skips consumers that never read `conversion_score` | forward | 🔜 (§8) |
 | S12 | keyed-grain hop: dirt entering a keyed end-state model (no partition axis) and re-emerging | forward | 🔜 (§3 caveat) |
 
@@ -255,9 +255,18 @@ the day-ceiling already sits:
 
 Formally each axis gets a `grain` and each edge composes `align_outward(grain_downstream)
 ∘ reflect ∘ align_outward(grain_upstream)` — monotone outward maps, so sufficiency
-composes. The day-ordinal `DayInterval` generalizes to `(grain, ordinal)` without changing
-the propagation algorithm. This is S10 and the first post-v0 extension, since
-daily-feeding-monthly-reporting is ubiquitous.
+composes.
+
+**Status: built for Day/Month** (`PartitionGrain` on each edge endpoint; intervals stay
+day-ordinal, anchored to the civil calendar so month boundaries are real; seeds align
+outward to their node's grain, so a mid-month delta on a monthly dim is a whole-month
+delta and a partial-month *request* is a whole-month request). Tracer-proven both
+directions, including a trailing window crossing a month boundary (dirties both months)
+and the DuckDB leg where a dirty January day rebuilds exactly the January report
+partition while February is never scheduled. Remaining: **grain derivation** — the edge's
+grains are declared by the caller today; deriving Month from a `date_trunc('month', …)`
+grouping projection is classifier work — and an **hourly axis** (sub-day ordinals, same
+algorithm).
 
 ---
 
@@ -301,14 +310,16 @@ Consistent with [`08-code-placement.md`](08-code-placement.md):
 
 ## 10. Tracer status and open questions
 
-**Proven (day-granular v0):** S1–S8 — forward sufficiency and per-edge cell routing on
-DuckDB; backward slice resolution with both widening directions, sandbox-build
-equivalence with an under-widening sentinel; cascade-as-delta; adjointness containment;
-cycle refusal (incl. self-edge).
+**Proven:** S1–S8 — forward sufficiency and per-edge cell routing on DuckDB; backward
+slice resolution with both widening directions, sandbox-build equivalence with an
+under-widening sentinel; cascade-as-delta; adjointness containment; cycle refusal (incl.
+self-edge) — and S10 day/month grain mapping (both directions, boundary-crossing windows,
+month-partition rebuild on DuckDB).
 
 **Open, in order of expected next need:**
 
-1. Granularity mapping (§7) — blocks daily→monthly reporting models.
+1. Grain derivation + hourly axis (§7 status note) — the grains are edge-declared today;
+   deriving Month from a `date_trunc` grouping is classifier work.
 2. Self-referential unrolling (§6) — blocks rolling-balance models; interacts with G-08's
    cascade knob.
 3. Column-group-scoped dirt (§8) — cost, not correctness; lands with cross-model

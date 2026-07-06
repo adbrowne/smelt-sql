@@ -1,17 +1,19 @@
-//! Tracer bullet, series 3: cross-model dirty-partition propagation.
+//! Tracer bullet, series 3: cross-model dependency propagation
+//! (`docs/research/20260705-refresh-as-maintenance-plan/10-dependency-propagation.md`).
 //!
-//! Runs start from *what changed upstream*: given the partition intervals
-//! that landed per source, compute which partitions of every downstream
-//! model must run, by composing each edge's derived scan clamp through the
-//! graph (scan → footprint reflection per edge, merged dirt per model,
-//! topological order). Day-granular v0; grain mapping (daily → monthly) is
-//! the named next step.
+//! Forward: runs start from *what changed upstream* — per-source deltas
+//! reflect through each edge's derived scan clamp to the downstream
+//! partitions that must run. Backward: `required_inputs` resolves what must
+//! *exist* for a target period (test/validation builds), the date
+//! arithmetic running backwards through the same clamps. Day/Month grains
+//! align intervals outward per hop.
 
 use std::collections::BTreeMap;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::propagate::{
-    normalize, propagate, required_inputs, DayInterval, Edge,
+    civil_from_ordinal, day_ordinal, normalize, ordinal_to_iso, propagate, required_inputs,
+    DayInterval, Edge, PartitionGrain,
 };
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Trigger,
@@ -36,6 +38,8 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         downstream: downstream.to_string(),
         before_days,
         after_days,
+        upstream_grain: PartitionGrain::Day,
+        downstream_grain: PartitionGrain::Day,
     }
 }
 
@@ -408,4 +412,108 @@ fn empty_period_resolves_to_nothing() {
     let result = required_inputs(&edges, "m", iv(7, 7)).expect("resolve");
     assert!(result.required.is_empty());
     assert!(result.build_order.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Granularity mapping (10-dependency-propagation.md §7, S10): daily models
+// feeding monthly reporting models and back. All intervals stay day-ordinal;
+// a coarse axis aligns them outward per hop.
+// ---------------------------------------------------------------------------
+
+fn month(y: i64, m: u32) -> DayInterval {
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    iv(day_ordinal(y, m, 1), day_ordinal(ny, nm, 1))
+}
+
+#[test]
+fn calendar_math_roundtrips() {
+    for ymd in [
+        (1970, 1, 1),
+        (2026, 1, 1),
+        (2026, 2, 28),
+        (2024, 2, 29),
+        (1999, 12, 31),
+    ] {
+        assert_eq!(civil_from_ordinal(day_ordinal(ymd.0, ymd.1, ymd.2)), ymd);
+    }
+    assert_eq!(day_ordinal(1970, 1, 1), 0);
+    assert_eq!(ordinal_to_iso(day_ordinal(2026, 7, 7)), "2026-07-07");
+}
+
+#[test]
+fn a_dirty_day_dirties_its_whole_containing_month() {
+    let mut e = edge("silver", "monthly_report", 0, 0);
+    e.downstream_grain = PartitionGrain::Month;
+    let d17 = day_ordinal(2026, 1, 17);
+    let result = propagate(&[e], &deltas(&[("silver", iv(d17, d17 + 1))])).expect("propagate");
+    assert_eq!(result.dirty["monthly_report"], vec![month(2026, 1)]);
+}
+
+#[test]
+fn a_trailing_window_crossing_the_month_boundary_dirties_both_months() {
+    // The monthly report reads the daily rollup with a 7d trailing window:
+    // a rollup day near the end of January feeds early-February report rows,
+    // so both months are dirty.
+    let mut e = edge("rollup", "monthly_report", 7, 0);
+    e.downstream_grain = PartitionGrain::Month;
+    let jan28 = day_ordinal(2026, 1, 28);
+    let result = propagate(&[e], &deltas(&[("rollup", iv(jan28, jan28 + 1))])).expect("propagate");
+    assert_eq!(
+        result.dirty["monthly_report"],
+        vec![iv(day_ordinal(2026, 1, 1), day_ordinal(2026, 3, 1))]
+    );
+}
+
+#[test]
+fn a_changed_month_of_a_coarse_dim_dirties_all_its_days_downstream() {
+    let mut e = edge("monthly_dim", "daily_model", 0, 0);
+    e.upstream_grain = PartitionGrain::Month;
+    // A mid-month delta on the dim is a whole-month delta by definition —
+    // the seed aligns outward to the source's grain.
+    let jan20 = day_ordinal(2026, 1, 20);
+    let result =
+        propagate(&[e], &deltas(&[("monthly_dim", iv(jan20, jan20 + 1))])).expect("propagate");
+    assert_eq!(result.dirty["daily_model"], vec![month(2026, 1)]);
+}
+
+#[test]
+fn backward_request_for_a_month_reaches_the_days_that_feed_it() {
+    let mut e_report = edge("rollup", "monthly_report", 7, 0);
+    e_report.downstream_grain = PartitionGrain::Month;
+    let edges = vec![edge("silver", "rollup", 0, 0), e_report];
+    let result = required_inputs(&edges, "monthly_report", month(2026, 2)).expect("resolve");
+    let expected = iv(day_ordinal(2026, 1, 25), day_ordinal(2026, 3, 1));
+    assert_eq!(
+        result.required["rollup"],
+        vec![expected],
+        "February's report needs rollup days back to Jan 25 (7d trailing window)"
+    );
+    assert_eq!(result.required["silver"], vec![expected]);
+    // A misaligned request (part of February) is a request for the whole
+    // month — the seed aligns outward to the target's grain.
+    let partial = required_inputs(
+        &edges,
+        "monthly_report",
+        iv(day_ordinal(2026, 2, 3), day_ordinal(2026, 2, 10)),
+    )
+    .expect("resolve");
+    assert_eq!(partial.required["monthly_report"], vec![month(2026, 2)]);
+    assert_eq!(partial.required["rollup"], vec![expected]);
+}
+
+#[test]
+fn backward_through_a_monthly_dim_requires_whole_months() {
+    let mut e = edge("monthly_dim", "daily_model", 0, 0);
+    e.upstream_grain = PartitionGrain::Month;
+    let result = required_inputs(
+        &[e],
+        "daily_model",
+        iv(day_ordinal(2026, 1, 20), day_ordinal(2026, 2, 10)),
+    )
+    .expect("resolve");
+    assert_eq!(
+        result.required["monthly_dim"],
+        vec![iv(day_ordinal(2026, 1, 1), day_ordinal(2026, 3, 1))],
+        "a day-range request touching two months requires both whole months of the dim"
+    );
 }

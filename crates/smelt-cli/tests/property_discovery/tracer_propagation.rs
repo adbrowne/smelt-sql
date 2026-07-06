@@ -694,3 +694,87 @@ fn bounded_period_build_including_upstreams_matches_the_full_universe() {
         .expect("late arrival");
     assert_eq!(late_arrival_rows, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Granularity mapping on DuckDB (S10 of 10-dependency-propagation.md §7):
+// a daily silver model feeds a monthly reporting model. A dirty day dirties
+// its whole containing month; only that month is rebuilt, and a sibling
+// month is never scheduled yet stays correct.
+// ---------------------------------------------------------------------------
+
+use smelt_logical::maintenance::propagate::{day_ordinal, ordinal_to_iso, PartitionGrain};
+
+#[test]
+fn a_dirty_day_rebuilds_exactly_its_containing_month_downstream() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE silver_events (event_id INT, event_date DATE, amount DOUBLE);
+         INSERT INTO silver_events VALUES
+           (1, DATE '2026-01-05', 5.0),
+           (2, DATE '2026-01-17', 7.0),
+           (3, DATE '2026-02-03', 9.0);",
+    )
+    .expect("stage silver");
+    let monthly_body = "SELECT date_trunc('month', event_date) AS report_month, \
+                        COUNT(*) AS events, SUM(amount) AS revenue \
+                        FROM silver_events GROUP BY 1";
+    conn.execute_batch(&format!("CREATE TABLE monthly_report AS {monthly_body};"))
+        .expect("materialize monthly");
+
+    // The edge: same clock axis, coarser downstream grain. The (0,0) clamp
+    // is the derived same-axis clamp; the Month grain is declared on the
+    // edge (deriving grain from the date_trunc projection is future
+    // classifier work — 10-dependency-propagation.md §7).
+    let e = Edge {
+        upstream: "silver_events".to_string(),
+        downstream: "monthly_report".to_string(),
+        before_days: 0,
+        after_days: 0,
+        upstream_grain: PartitionGrain::Day,
+        downstream_grain: PartitionGrain::Month,
+    };
+
+    // A January day changes upstream (a late-arriving event lands).
+    conn.execute_batch("INSERT INTO silver_events VALUES (4, DATE '2026-01-17', 11.0);")
+        .expect("land new silver row");
+    let d17 = day_ordinal(2026, 1, 17);
+    let mut deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    deltas.insert(
+        "silver_events".to_string(),
+        vec![DayInterval::new(d17, d17 + 1)],
+    );
+    let result = propagate(&[e], &deltas).expect("propagate");
+
+    let jan = DayInterval::new(day_ordinal(2026, 1, 1), day_ordinal(2026, 2, 1));
+    assert_eq!(
+        result.dirty["monthly_report"],
+        vec![jan],
+        "the dirty day dirties its whole containing month — and only that month"
+    );
+
+    // Rebuild exactly the propagated month partition.
+    for iv in &result.dirty["monthly_report"] {
+        let region = Region {
+            start: format!("DATE '{}'", ordinal_to_iso(iv.start)),
+            end: format!("DATE '{}'", ordinal_to_iso(iv.end)),
+        };
+        batch(
+            &conn,
+            &emit_delete_insert("monthly_report", "report_month", &region, monthly_body),
+        );
+    }
+    assert!(multiset_equal(
+        &conn,
+        "SELECT * FROM monthly_report",
+        monthly_body
+    ));
+    // February was never scheduled and is still correct (one event, 9.0).
+    let (feb_events, feb_revenue): (i64, f64) = conn
+        .query_row(
+            "SELECT events, revenue FROM monthly_report WHERE report_month = DATE '2026-02-01'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("feb row");
+    assert_eq!((feb_events, feb_revenue), (1, 9.0));
+}
