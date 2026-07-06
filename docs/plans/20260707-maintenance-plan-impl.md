@@ -81,6 +81,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP14  | pending  |        |      |
 | MP15  | pending  |        |      |
 | MP16  | pending  |        |      |
+| MP17  | pending  |        |      |
 
 ---
 
@@ -500,6 +501,43 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 
 ---
 
+### Phase MP17: Coverage-matrix conformance sweep
+
+**Goal.** The plan-conformance fixture set inhabits **every inhabited cell of the research coverage
+matrix** (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md` §"Coverage
+matrix": 22 construct rows × 7 source-property columns): each EX machine header is translated into a
+testkit shape (`model_shapes.rs`'s catalogue, per `08-code-placement.md` §2.7), and each shape asserts
+one of exactly two honest outcomes — the derived plan matches the catalogue's expected cell/technique
+and (where the technique is live) the emitted maintenance ≡ full refresh over adversarial schedules,
+**or** the shape refuses with the named diagnostic (no third, silent outcome). This lifts the 19
+lift-ready probe cells (07 §"Candidate probe cells") and doubles the named single-example thin spots
+(the composite-key column, LEFT JOIN, fan-out, LAG/LEAD, ROW_NUMBER dedup, self-referential,
+GROUP-BY-coarser, correlated first-value).
+
+**Pre-conditions.** MP8 (testkit is the home), MP11+MP12 (both technique families live so HOLDS cells
+can assert execution, not just description). Cells whose catalogue verdict is UNSUPPORTED-TODAY assert
+the refusal diagnostic and are annotated with the catalogue id so later work flips them deliberately.
+
+**TDD tests to write first.**
+- `smelt-maintenance-testkit`: one shape per unclaimed matrix cell, named by catalogue id (`ex_03_late_passthrough`, `ex_14_cdc_retraction_sum`, …), each with its expected-plan or expected-refusal assertion from the catalogue's machine header.
+- `crates/smelt-logical/tests/maintenance_plan_conformance.rs::coverage_matrix_is_inhabited` — a meta-test: every inhabited `(construct × source-property)` cell of the matrix (encoded as a table in the testkit) has ≥ 1 registered shape; adding a matrix row without a shape fails.
+- The `INTERSECT`/`EXCEPT` set-operation shapes assert today's honest verdict (refusal — set-op distribution classifies `UNION ALL` only, `model_properties.md` §Known Divergences), pinning the classification gap.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-maintenance-testkit/`, `crates/smelt-logical/tests/`, `crates/smelt-cli/tests/`
+
+**Docs touched.** *Timeless.*
+- `docs/specs/maintenance_plan.md` §References → Tests: name the coverage-matrix meta-test as the standing inventory gate; §Known Divergences: record any UNSUPPORTED-TODAY cell worth a future flip in behavioural terms.
+
+**Review checklist**:
+- [ ] No cell asserted optimistically: HOLDS requires the equivalence leg, not just plan description
+- [ ] Refusal assertions name the diagnostic code, not just "errors"
+- [ ] The meta-test makes the matrix additive-only (a new construct row must bring a shape)
+
+**Commit.** `test(maintenance): coverage-matrix conformance sweep — every construct×source cell asserted or refused by name`
+
+---
+
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
@@ -508,7 +546,9 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 
 - `cargo test --quiet 2>&1 | tail -40` — full workspace green (with `DUCKDB_LIB_DIR` exported).
 - `cargo test -p smelt-runtime --test execute_parity`; `cargo test -p smelt-cli --test example_diagnostics`; `cargo test -p smelt-lsp --test example_workspaces` — all green.
-- The standing testkit equivalence gate green over the shape catalogue.
+- The standing testkit equivalence gate green over the shape catalogue; the coverage-matrix
+  meta-test (`coverage_matrix_is_inhabited`) green — every inhabited construct×source cell of
+  `07-example-catalogue.md`'s matrix has a shape asserting derived-plan-or-named-refusal.
 - `rg -n 'refresh: (batched|keyed|cumulative|versioned)' examples/ docs-site/docs/` → zero.
 - `/smelt:validate maintenance_plan`, `/smelt:validate models`, `/smelt:validate sources` — Known Divergences reduced to exactly the deliberately-deferred list in §Scope.
 - `smelt explain`, `smelt run --since-upstream`, `smelt build --period --include-upstreams`, `smelt bakeoff` all exercised against `examples/timeseries`.

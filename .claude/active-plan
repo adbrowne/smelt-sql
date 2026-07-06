@@ -107,7 +107,7 @@
 #   1. docs/plans/20260707-maintenance-plan-spec-alignment.md (SA1–SA5,
 #      docs-only: shape-profile demotions, transform contracts, architecture
 #      invariant, Maintenance* diagnostics catalogue)
-#   2. docs/plans/20260707-maintenance-plan-impl.md (MP1–MP16: refresh-axis
+#   2. docs/plans/20260707-maintenance-plan-impl.md (MP1–MP17: refresh-axis
 #      surface cut, docs-site rewrite, plan derivation + diagnostics +
 #      smelt explain, testkit graduation, reconciliation ledger, targeted-write
 #      + fold cells closing G-12, bakeoff, forward/backward propagation)
