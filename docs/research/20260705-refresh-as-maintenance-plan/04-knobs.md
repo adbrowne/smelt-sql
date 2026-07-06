@@ -355,7 +355,7 @@ design option, not initial surface.
 | Refresh trichotomy | `refresh: full\|incremental\|materialized_view` | declared | `full` | freshness-owner is a real commitment; unchanged |
 | Output grain | `grain: partition\|key\|key_per_partition` (+ `versioning: interval`) | declared, checked | — (required for incremental) | checked against derived plan; mismatch = error (K1) |
 | Row identity | `unique_key: [..]` | declared, checked | absent (partition grain) / required (key grains) | uniqueness cross-check + probe; deterministic-columns rule |
-| Technique per cell | `maintenance.cells[]` | **override** (derived default) | absent (cost-model default) | admissibility check; theorem guarantees contract-preservation |
+| Technique preference/pin | `maintenance.defaults.prefer` → `cells[].prefer` → `cells[].technique` | **override** (derived default); three-level ladder, narrower scope wins (K2) | absent (cost-model default) | admissibility check; theorem guarantees contract-preservation; `technique:` alone bypasses the cost model |
 | Column contract | `columns.<c>.contract: exact\|plausible` | declared | `exact` | skeleton-position + DAG propagation fail-loud; trades bit-identity → plausibility |
 | Settle bounds | *(none — `smelt explain` output)* | derived | — | absolute form requires source lateness declaration |
 | Backfill cascade | `backfill: cascade\|local` | declared (need is derived) | `cascade` where self-edge/trajectory | `local` = named staleness trade (G-08) |

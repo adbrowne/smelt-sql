@@ -97,7 +97,9 @@ From [`06-proof-obligations.md`](06-proof-obligations.md) (its three hardest) pl
   from upstream (bottom-left — reuses the `dimension_horizon_merge` emitter). The classifier
   must also fail-loud when the added field lands in a **skeleton** position (a grain change,
   not a field-add — [`07-example-catalogue.md`](07-example-catalogue.md) EX-39), reusing the
-  skeleton-role extraction above. Worked cells: Family G (EX-36–39).
+  skeleton-role extraction above. A field co-sensitive with an existing group still starts at
+  `S = ∅` and forms its own catch-up group until its ledger converges with its sibling's
+  (group convergence, EX-40). Worked cells: Family G (EX-36–40).
 
 The spec can (and should) be written with these as normative behavior + admission rules; but
 each needs at least a sketch-level derivation story in the spec so it isn't specifying magic.

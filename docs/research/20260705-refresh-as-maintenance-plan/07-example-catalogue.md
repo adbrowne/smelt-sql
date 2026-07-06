@@ -66,6 +66,9 @@ stated once:
   partition, no full-table scan/shuffle); ⚠️ = only under a declared bound/horizon; ❌ =
   the footprint chains across unbounded partitions (a full-table operation is the only
   honest option — several REFUSED/UNSUPPORTED verdicts refuse *because* of this).
+  **Definition-change entries (Family G) grade per added field-group instead**: each
+  group is a separate backfill op with its own read sources, so the verdict attaches to
+  the op, and a multi-group add can carry mixed verdicts (EX-38).
 - **`Amplification (secondary):`** appears only where the merge key is *orthogonal* to the
   partition key; it states what copy-on-write actually rewrites, and that deletion vectors
   / `OPTIMIZE` absorb the within-partition scatter. The *partition bound* is what the plan
@@ -102,7 +105,7 @@ probed by the loop.
 
 † = the property appears in that example's discussion/variant, not its headline cell.
 
-**Family G (EX-36–39) is trigger-orthogonal** and so occupies no matrix cell: column
+**Family G (EX-36–40) is trigger-orthogonal** and so occupies no matrix cell: column
 addition is a *definition-change* trigger ([`01-framework.md`](01-framework.md) §5) that can
 apply to **any** construct row above. Its examples reuse EX-02 / 07 / 08 / 13's shapes
 rather than inhabiting new cells.
@@ -1132,7 +1135,9 @@ Fields added together factor by **shared mutation-sensitivity** exactly as the b
 does: co-sensitive fields share one op (EX-37's `{unit_price, margin}`), cross-group fields
 get one op each (EX-38). A *foldable* added field's **backfill** is still full-input
 (`∅ → current`) — there is no prior state of that column to fold onto; its ongoing fold is a
-separate, later concern. The boundary: a field added to a **skeleton** position
+separate, later concern — and a field co-sensitive with an **existing** group still starts at
+`S = ∅` and forms its own catch-up group until its ledger converges with its sibling's
+(EX-40). The boundary: a field added to a **skeleton** position
 (grouping / dedup / identity) is a **grain change**, not a column backfill (EX-39) — this
 family applies to **payload** columns only (§6).
 
@@ -1159,8 +1164,9 @@ itself (§3's read-scope definition). No key (a per-row function of own columns)
 untouched (no identity change).
 
 **Physical maintenance.** One source `events`, partition `event_date`; but the backfill
-reads none of it. **Partition-local:** ✅ trivially (reads only stored output).
+reads none of it. **Partition-local:** `{referrer_domain}` ✅ trivially (reads only stored output).
 - *Column added* — *top-left* in-place `UPDATE` per stored partition, no upstream read.
+  input clamp: none (reads only the stored region); output clamp: `{referrer_domain}` on partition `P`.
   ```sql
   -- loop over existing partitions P:
   UPDATE clickstream SET referrer_domain = regexp_extract(referrer, '://([^/]+)', 1)
@@ -1224,12 +1230,13 @@ JOIN smelt.sources.customers c ON c.user_id = o.user_id
 Two added fields, two groups, two corners — the definition-change trigger factors by group
 just like every other trigger.
 
-**Physical maintenance.** **Partition-local:** `{order_month}` ✅; `{tier}` ❌ over unclocked `customers`.
+**Physical maintenance.** **Partition-local** (per field-group): `{order_month}` ✅; `{tier}` ❌ over unclocked `customers`.
 - *`{order_month}` added* — sensitivity `{}` → *top-left* in-place `UPDATE`, no upstream read, no key.
+  input clamp: none (stored region only); output clamp: `{order_month}` on partition `P`.
   ```sql
   UPDATE orders_tiered SET order_month = date_trunc('month', order_date) WHERE order_date = P;
   ```
-- *`{tier}` added* — sensitivity `{customers}` → *bottom-left* keyed `MERGE`; partition-local **only** if the dim is clocked/horizoned. Over EX-07's unclocked `customers` it is ❌ (full-table scatter), and the field-add inherits EX-07's refusal:
+- *`{tier}` added* — sensitivity `{customers}` → *bottom-left* keyed `MERGE`; partition-local **only** if the dim is clocked/horizoned. input clamp: `customers` in full (❌ — the unbounded read is the problem); output clamp: `{tier}`, all partitions holding matched keys. Over EX-07's unclocked `customers` it is ❌ (full-table scatter), and the field-add inherits EX-07's refusal:
   ```sql
   MERGE INTO orders_tiered m USING (SELECT user_id, tier FROM customers) s
   ON m.user_id = s.user_id        -- ❌ no partition predicate (EX-07): full-table scatter unless customers is clocked
@@ -1258,6 +1265,7 @@ column (grouping key), so the output's row identity moves from `pay_date` to
 patch that in place. **Partition-local:** ✅ per partition *for the recompute* — but this is
 a **recompute** (bottom-right), not a targeted field write.
 - *Skeleton field added* — REFUSED as a column backfill; the admissible plan is recompute-region.
+  input clamp: `payments WHERE pay_date = P`; output clamp: partition `P` (every column — the rows themselves change).
   ```sql
   DELETE FROM daily_revenue WHERE pay_date = P;
   INSERT INTO daily_revenue SELECT pay_date, region, SUM(amount) FROM payments WHERE pay_date = P GROUP BY pay_date, region;
@@ -1266,6 +1274,56 @@ The diagnostic names it a **grain change** (§10 anchor): adding a skeleton colu
 different model, not a payload field-add. This boundary is what keeps "single-field
 backfill" honest — the whole family applies to *payload* columns (§6) and never to skeleton
 positions.
+
+### EX-40 — add an aggregate field to the daily-revenue rollup (ledger catch-up)
+- grid: construct=schema evolution (add an additive aggregate `order_count` to EX-13's rollup, same `GROUP BY`) | sources=payments: append-only (**unchanged**) | output-shape=time-partitioned (day) | technique(s)=`{order_count}` × column-added → *bottom-left* column-scoped `MERGE` per partition (aggregate re-derived from upstream); ongoing maintenance → EX-13's fold arm once caught up
+- expected: UNSUPPORTED-TODAY(the column-scoped backfill emitter, plus the per-group ledger instantiation: the added group's `(region, group)` entries start at `S = ∅` even though the field is co-sensitive with the existing `{revenue}` group)
+- probe-status: unprobed-candidate
+- use-case: finance adds `order_count` to the months-old daily-revenue mart; old days must gain the count without disturbing `revenue` or re-landing payments wholesale.
+
+```sql
+-- was: SELECT pay_date, SUM(amount) AS revenue FROM … GROUP BY pay_date
+SELECT pay_date, SUM(amount) AS revenue,
+       COUNT(*) AS order_count            -- newly added, sensitivity {payments}
+FROM smelt.sources.payments
+GROUP BY pay_date
+```
+
+The wrinkle EX-36–38 don't exercise: the added field's mutation-sensitivity (`{payments}`)
+is **identical to an existing group's** (`{revenue}`), but shared sensitivity does not mean
+shared ledger state. `{revenue}`'s `(region, group)` entries sit at current `S`;
+`{order_count}`'s are instantiated at `∅` (§8). So the added field forms its **own
+catch-up group** whose backfill — always full-input, §5 — advances region by region, and
+only when its processed-input vector equals its sibling's over every region do the two
+groups **converge** into one co-sensitive group served by one op. Until then the ledger
+must keep them apart, or a payments delta arriving mid-backfill folds into `revenue` but
+has nothing sound to do on a not-yet-backfilled region's `order_count` (its entry is still
+`∅` — folding into an absent value is exactly the never-fold-a-delta-ahead-of-its-entry
+refusal of §8). This is the aggregate-model instance of the definition-change trigger, and
+the reason the ledger is per-`(region × column-group)` rather than per-region.
+
+**Physical maintenance.** One source `payments`, `GROUP BY` = partition col (EX-13's shape).
+**Partition-local:** `{order_count}` ✅ (the aggregate re-derives partition-by-partition).
+- *Field `{order_count}` added* — *bottom-left* column-scoped `MERGE` per partition, full-input over the region. input clamp: `payments WHERE pay_date = P`; output clamp: `{order_count}` on partition `P`.
+  ```sql
+  -- loop over existing partitions P:
+  MERGE INTO daily_revenue m
+  USING (SELECT pay_date, COUNT(*) AS order_count
+         FROM payments WHERE pay_date = P GROUP BY pay_date) s
+  ON m.pay_date = s.pay_date                                  -- partition-pruned target
+  WHEN MATCHED THEN UPDATE SET order_count = s.order_count;   -- revenue untouched
+  -- ledger: S(P, {order_count}) := the S this MERGE read
+  ```
+  Partition-aligned — no amplification.
+- *New payments delta mid-backfill* — factors per `(region, group)`: a new day's creation
+  computes both columns together (EX-13's path; both entries start at current `S`); on an
+  already-stored region, `{revenue}` folds per EX-13's fold arm while `{order_count}` folds
+  only where its entry has caught up — elsewhere the fold is refused and the backfill's own
+  full-input pass will reflect the delta anyway (it reads current `S`).
+- *Contrast EX-39*: `order_count` is a new **payload** aggregate over the *same* groups;
+  adding `region` to the `GROUP BY` is **skeleton**. The same edit-shape — "one more thing
+  after `SELECT`" — lands on opposite verdicts, which is why the classifier, not the diff
+  shape, must decide.
 
 ---
 
@@ -1294,21 +1352,29 @@ Unprobed-candidate entries above, in the loop catalog's row format
 | EX-35 | correlated MIN_BY first-value (7d window) | append-only, late | order-sensitive fold (stored-winner ledger) | linkC | UNSUPPORTED-TODAY; recompute arm HOLDS (EX-01 analogue, order-sensitive combiner) |
 | EX-36 | add derived pass-through field (fn of stored column) | definition-change trigger (sources unchanged) | in-place per-partition UPDATE, no upstream read (top-left) | linkC | UNSUPPORTED-TODAY (column-scoped backfill); whole-partition recompute arm HOLDS |
 | EX-37 | add co-sensitive field group from keyed dim | definition-change trigger + change_feed dim | keyed column-scoped MERGE per partition (bottom-left) | linkC | UNSUPPORTED-TODAY (same emitter as EX-08); confirm today leaves NULL or forces full rebuild |
+| EX-40 | add additive aggregate to a rollup | definition-change trigger, co-sensitive with existing group | column-scoped MERGE per partition + per-group ledger catch-up | linkC | UNSUPPORTED-TODAY; probe the mid-backfill fold refusal (group convergence) |
 
 ---
 
-**Summary**: 39 examples. Verdict distribution: **13 HOLDS** (EX-02, 05, 09, 13, 15, 17,
-24, 25, 26, 27†, 32, 33, plus EX-01's probed recompute arm), **9 CONDITIONAL** (EX-03, 04,
-06, 07, 12, 20, 21, 23, 34), **6 REFUSED** (EX-16, 22, 29, 30, 31, plus EX-39's
-REFUSED-as-column-backfill grain-change boundary), **11 UNSUPPORTED-TODAY** (EX-01 fold
-cell, 08, 10, 11, 14, 19, 28, 35, plus Family G's 36, 37, 38). († EX-27 HOLDS under the
-spec'd-but-unbuilt locality gate.) Every construct row and source-property column of the
-coverage matrix is inhabited by ≥2 examples except the deliberately-degenerate
-multi-input-merge row (EX-12, definitional), engine-maintained (EX-32, delegation), and
-correlated first-value pick (EX-35, added for the three-way ledger-grade contrast with
-EX-01/EX-11). **Family G** (EX-36–39) adds the trigger-orthogonal *definition-change*
-(column-addition) trigger: the single-field backfill as the 2×2's left column
-([`01-framework.md`](01-framework.md) §5).
+**Summary**: 40 examples, counted by **headline verdict** (mixed-verdict arms are noted in
+place, never double-counted: EX-01's recompute arm is probed-HOLDS but its headline is the
+fold cell; EX-09's targeted arm is UNSUPPORTED under a HOLDS headline; EX-16's recompute
+arm HOLDS under a REFUSED headline). Distribution: **13 HOLDS** (EX-02, 05, 09, 13, 15,
+17, 18, 24, 25, 26, 27†, 32, 33), **9 CONDITIONAL** (EX-03, 04, 06, 07, 12, 20, 21, 23,
+34), **6 REFUSED** (EX-16, 22, 29, 30, 31, plus EX-39's REFUSED-as-column-backfill
+grain-change boundary), **12 UNSUPPORTED-TODAY** (EX-01, 08, 10, 11, 14, 19, 28, 35, plus
+Family G's 36, 37, 38, 40). († EX-27 HOLDS under the spec'd-but-unbuilt locality gate.)
+Every construct row and source-property column of the coverage matrix is inhabited, though
+not all by two *distinct* examples: single-example rows are LEFT JOIN (EX-09), join
+fan-out (EX-10), LAG/LEAD (EX-25), ROW_NUMBER dedup and dedup-to-latest (both EX-27),
+self-referential (EX-21), GROUP-BY-coarser (EX-18), multi-input merge (EX-12,
+definitional), engine-maintained (EX-32, delegation), and correlated first-value pick
+(EX-35, added for the three-way ledger-grade contrast with EX-01/EX-11); the composite-key
+*column* is carried by EX-10 alone — the known thin spot given F2's
+composite-keys-from-day-one ratification. **Family G** (EX-36–40) adds the
+trigger-orthogonal *definition-change* (column-addition) trigger: the single-field
+backfill as the 2×2's left column ([`01-framework.md`](01-framework.md) §5), including the
+co-sensitive ledger catch-up case (EX-40).
 
 Every example now carries a `**Physical maintenance**` block (see §"Physical-maintenance
 notation") giving the emitted `DELETE`+`INSERT` / `MERGE` per trigger, its input/output

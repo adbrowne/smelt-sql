@@ -617,9 +617,14 @@ be finer than the ledger region; the ledger region exists only for attribution.
 **instantiates** ledger entries `(r, g)` for every existing region `r`, each at
 `S_{i,g} = ∅`; the field-backfill (§3's targeted-write column, §5's definition-change
 trigger) is then just *fold/recompute into `(r, g)`* advancing those entries to current `S`,
-while every skeleton and sibling `(r, g′)` entry is untouched. The ledger already carries
-exactly the state schema evolution needs — which is why a single-field backfill is a
-first-class plan cell rather than a bespoke migration path.
+while every skeleton and sibling `(r, g′)` entry is untouched. Sensitivity-sharing does not
+short-circuit this: a field co-sensitive with an **existing** group still instantiates at
+`∅` and forms its own catch-up group, merging with its sibling only once its processed-input
+vector has caught up over every region — until then a delta that folds into the sibling has
+nothing sound to do on the new group's unbackfilled regions, exactly the
+never-fold-ahead-of-the-entry refusal above ([`07-example-catalogue.md`](07-example-catalogue.md)
+EX-40). The ledger already carries exactly the state schema evolution needs — which is why a
+single-field backfill is a first-class plan cell rather than a bespoke migration path.
 
 **Degenerate specializations (why this is "the ledger, generalized" and not a new
 thing).**
