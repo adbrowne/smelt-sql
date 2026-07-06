@@ -89,6 +89,15 @@ From [`06-proof-obligations.md`](06-proof-obligations.md) (its three hardest) pl
   the reach machinery, but the "project onto the partition column and refuse when unbounded" step,
   the K8/P7 guardrail check, and the `MaintenanceScanUnbounded` diagnostic are new. Without it the
   targeted-write cells are correct but silently full-table.
+- **Definition-change (schema-evolution) trigger + column-scoped backfill emitter** — detecting
+  that a model gained one or more output fields, instantiating the ledger entries `(region,
+  new-group)` at `S = ∅` (§8 of [`01-framework.md`](01-framework.md)), and emitting the
+  field-backfill in the 2×2's left column: an in-place `UPDATE` when the field is a pure
+  function of stored columns (top-left), or a keyed column-scoped `MERGE` when it re-derives
+  from upstream (bottom-left — reuses the `dimension_horizon_merge` emitter). The classifier
+  must also fail-loud when the added field lands in a **skeleton** position (a grain change,
+  not a field-add — [`07-example-catalogue.md`](07-example-catalogue.md) EX-39), reusing the
+  skeleton-role extraction above. Worked cells: Family G (EX-36–39).
 
 The spec can (and should) be written with these as normative behavior + admission rules; but
 each needs at least a sketch-level derivation story in the spec so it isn't specifying magic.
@@ -130,7 +139,15 @@ sections.
   refresh-surface rewrite in `models.md` / `maintenance_plan.md`, and the partition-locality
   property + its emitted predicate land in `model_maintenance.md` / `maintenance_plan.md`.
 - **`model_transforms.md`** — the clamp change (F1's subquery wrap) and the new technique
-  primitives (column-scoped merge, ledger fold/reset) as transform contracts.
+  primitives (column-scoped merge, ledger fold/reset) as transform contracts, plus the
+  **schema-evolution field-backfill** primitive (in-place `UPDATE` / keyed column-scoped
+  `MERGE` over existing regions, §5 definition-change trigger).
+- **`models.md` / `maintenance_plan.md`** — the **definition-change trigger** as a first-class
+  plan trigger beside creation/mutation, and a proposed **`on_column_add: backfill |
+  leave_null | recompute`** policy knob (species of EX-21's `on_backfill` cascade knob) noted
+  for [`04-knobs.md`](04-knobs.md): whether adding a field auto-backfills it column-scoped,
+  leaves it `NULL` on already-processed regions, or triggers a whole-region recompute. Held to
+  a *mention* here — surfaced fully when the refresh-surface rewrite lands.
 - **`architecture.md`** — one new invariant: the maintenance plan is pure data in
   `smelt-logical`, derived by pure functions; consumers (smelt-db diagnostics, smelt-planner
   application, smelt-runtime lowering) never re-derive (per Andrew's rule that plans landing

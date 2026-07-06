@@ -102,6 +102,11 @@ probed by the loop.
 
 † = the property appears in that example's discussion/variant, not its headline cell.
 
+**Family G (EX-36–39) is trigger-orthogonal** and so occupies no matrix cell: column
+addition is a *definition-change* trigger ([`01-framework.md`](01-framework.md) §5) that can
+apply to **any** construct row above. Its examples reuse EX-02 / 07 / 08 / 13's shapes
+rather than inhabiting new cells.
+
 ---
 
 ## Family A — Ingest (raw → bronze landing)
@@ -1102,6 +1107,168 @@ becomes a queryable property of a column, not folklore about a pipeline.
 
 ---
 
+## Family G — Schema evolution (column addition)
+
+Every family above is indexed by an **input-delta** trigger — a *source* changed. This
+family's trigger is different in kind: the **model definition** changed, gaining one or
+more output fields, while the sources stand still. It is the **definition-change trigger**
+([`01-framework.md`](01-framework.md) §5, the third trigger beside *creation* and
+*mutation*): a newly-added column-group's processed-input vector `S` starts **empty** over
+every existing region, and the backfill advances it from `∅` to current (§8 ledger — the
+new group's entries are instantiated at `S = ∅`; skeleton and sibling entries are
+untouched).
+
+The admissible plan is the 2×2's **left column** — a *targeted* write that touches **only
+the new field(s)**, leaving the skeleton and every sibling column in place. It splits by
+what the field must read:
+
+- **top-left** (delta+state, empty input delta) — the field is a **pure function of
+  already-stored columns**; no upstream read, just an in-place `UPDATE` of the stored
+  region (EX-36). The cheapest tier.
+- **bottom-left** (full-input) — the field must **re-derive from upstream** (an enrichment
+  join, a subquery); a column-scoped `MERGE`, **keyed where the source is keyed** (EX-37).
+
+Fields added together factor by **shared mutation-sensitivity** exactly as the base plan
+does: co-sensitive fields share one op (EX-37's `{unit_price, margin}`), cross-group fields
+get one op each (EX-38). A *foldable* added field's **backfill** is still full-input
+(`∅ → current`) — there is no prior state of that column to fold onto; its ongoing fold is a
+separate, later concern. The boundary: a field added to a **skeleton** position
+(grouping / dedup / identity) is a **grain change**, not a column backfill (EX-39) — this
+family applies to **payload** columns only (§6).
+
+### EX-36 — add a derived pass-through field to the clickstream landing
+- grid: construct=schema evolution (add one derived field, pure function of a stored column) | sources=events: append-only, clocked (**unchanged**) | output-shape=time-partitioned (day) | technique(s)=`{referrer_domain}` × column-added → in-place per-partition `UPDATE` from stored `referrer` (no upstream read)
+- expected: UNSUPPORTED-TODAY(the column-scoped in-place backfill — no path detects that a model gained a field and populates only it; today the field is `NULL` on already-processed partitions until an explicit whole-partition recompute, which HOLDS but re-reads upstream and rewrites *every* column)
+- probe-status: unprobed-candidate
+- use-case: an analyst adds `referrer_domain` to the bronze clickstream (EX-02) months in; old partitions must gain the field without re-landing the raw events.
+
+```sql
+---
+refresh: batched
+timeseries: { event_time_column: event_ts, partition_column: event_date, granularity: day }
+---
+SELECT event_id, user_id, event_date, event_ts, page, referrer,
+       regexp_extract(referrer, '://([^/]+)', 1) AS referrer_domain   -- newly added
+FROM smelt.sources.events
+```
+
+The new field's mutation-sensitivity is `{}` — it depends only on the row's own stored
+`referrer`, so the backfill needs **no upstream read at all**. This is the top-left corner
+with an empty input delta: the "state" the read touches is the *stored output region*
+itself (§3's read-scope definition). No key (a per-row function of own columns), skeleton
+untouched (no identity change).
+
+**Physical maintenance.** One source `events`, partition `event_date`; but the backfill
+reads none of it. **Partition-local:** ✅ trivially (reads only stored output).
+- *Column added* — *top-left* in-place `UPDATE` per stored partition, no upstream read.
+  ```sql
+  -- loop over existing partitions P:
+  UPDATE clickstream SET referrer_domain = regexp_extract(referrer, '://([^/]+)', 1)
+  WHERE event_date = P;                       -- reads only stored rows; skeleton + siblings untouched
+  ```
+- *Today's only path* — the whole-partition recompute (EX-02 backfill, *bottom-right*): re-reads `events`, rewrites every column. Correct but pays for the sibling columns it did not change.
+
+### EX-37 — add re-pricing fields to existing order lines (keyed, per-partition)
+- grid: construct=schema evolution (add a **co-sensitive field group** `{unit_price, margin}` from a keyed dimension) | sources=order_lines: append-only, clocked (**unchanged**); products: change feed, `unique_key: [product_id]` (**unchanged**) | output-shape=time-partitioned + column-scoped | technique(s)=`{unit_price, margin}` × column-added → *bottom-left* keyed column-scoped `MERGE` per partition
+- expected: UNSUPPORTED-TODAY(the column-scoped backfill emitter — the same dormant `dimension_horizon_merge` as EX-08; adding the fields and running today either leaves them `NULL` on old partitions or forces a whole-history recompute)
+- probe-status: unprobed-candidate
+- use-case: EX-08's retailer adds `unit_price` and `margin` to an order-line table that previously stored only order fields; existing lines must gain **both** fields, keyed by product, per partition — not a full rebuild.
+
+```sql
+---
+refresh: batched
+timeseries: { event_time_column: order_ts, partition_column: order_date, granularity: day }
+---
+SELECT ol.order_id, ol.qty, ol.order_date, ol.product_id,
+       p.unit_price, p.margin                 -- both newly added, sensitivity {products}
+FROM smelt.sources.order_lines ol
+JOIN smelt.sources.products p ON p.product_id = ol.product_id
+```
+
+The two added fields **share** mutation-sensitivity `{products}`, so they are **one column
+group** and **one `MERGE`** populates both — the "one or more fields" case at its cleanest.
+The field must read the dimension, so this is bottom-left (full-input), keyed on
+`product_id` because the source is keyed.
+
+**Physical maintenance.** Two sources: `order_lines` (partition `order_date`), `products`
+(change feed, unclocked). **Partition-local:** ✅ `order_lines` — the backfill walks
+partitions, scanning the join in bounds; `products` read per partition. The whole backfill
+stays partition-confined, unlike a whole-table rebuild.
+- *Fields `{unit_price, margin}` added* — *bottom-left* keyed column-scoped `MERGE`, per partition. input clamp: `order_lines WHERE order_date = P` ⋈ `products`; output clamp: `{unit_price, margin}` on partition `P`.
+  ```sql
+  -- loop over existing partitions P (or bounded by a declared backfill horizon):
+  MERGE INTO order_line_margin m
+  USING (SELECT ol.order_id, ol.order_date, p.unit_price, p.margin
+         FROM order_lines ol JOIN products p ON p.product_id = ol.product_id
+         WHERE ol.order_date = P) s
+  ON m.order_id = s.order_id AND m.order_date = s.order_date        -- partition-pruned target
+  WHEN MATCHED THEN UPDATE SET unit_price = s.unit_price, margin = s.margin;   -- one MERGE, both fields
+  ```
+  *Amplification (secondary):* `product_id` ⟂ `order_date` → within-partition scatter; deletion vectors / `OPTIMIZE` absorb it. The *partition* bound is what the plan guarantees.
+- *Variant — no-locality dimension.* If the added field were enriched from an **unclocked mutable dim with no horizon** (EX-07's `customers`), its backfill footprint is every past row of that key across all partitions → ❌ scatters; the K8 guardrail refuses, exactly as EX-07. **A field-add backfill inherits its source's partition-locality verdict unchanged.**
+- *Variant — foldable added field.* If instead `converted` (EX-01) were added, its *backfill* is still this full-input bottom-left shape (compute fresh over existing partitions — no prior `converted` state to fold); only its *ongoing* maintenance uses EX-01's fold cell.
+
+### EX-38 — add two fields that span different groups (the backfill factors)
+- grid: construct=schema evolution (add fields with **different** mutation-sensitivity) | sources=orders: append-only (**unchanged**); customers: mutable lookup (**unchanged**) | output-shape=time-partitioned | technique(s)=`{order_month}` (`{}`-sensitivity, in-place) + `{tier}` (`{customers}`, keyed `MERGE`) × column-added → **two distinct left-column ops**
+- expected: UNSUPPORTED-TODAY(both column-scoped backfills; the point is the *factoring* — the definition-change trigger partitions by mutation-sensitivity exactly as an input-delta trigger does)
+- probe-status: not-probe-worthy(the factoring is a classification fact, like EX-12; the *classifier producing distinct backfill ops per group* is the Link-B probe)
+- use-case: in one edit an analyst adds both `order_month` (a pure date bucket of the stored `order_date`) and `tier` (joined from the customer dim) to the EX-07 orders table.
+
+```sql
+SELECT o.order_date, o.order_id, o.user_id, o.amount, c.tier,   -- tier: sensitivity {customers}
+       date_trunc('month', o.order_date) AS order_month         -- order_month: sensitivity {}
+FROM smelt.sources.orders o
+JOIN smelt.sources.customers c ON c.user_id = o.user_id
+```
+
+Two added fields, two groups, two corners — the definition-change trigger factors by group
+just like every other trigger.
+
+**Physical maintenance.** **Partition-local:** `{order_month}` ✅; `{tier}` ❌ over unclocked `customers`.
+- *`{order_month}` added* — sensitivity `{}` → *top-left* in-place `UPDATE`, no upstream read, no key.
+  ```sql
+  UPDATE orders_tiered SET order_month = date_trunc('month', order_date) WHERE order_date = P;
+  ```
+- *`{tier}` added* — sensitivity `{customers}` → *bottom-left* keyed `MERGE`; partition-local **only** if the dim is clocked/horizoned. Over EX-07's unclocked `customers` it is ❌ (full-table scatter), and the field-add inherits EX-07's refusal:
+  ```sql
+  MERGE INTO orders_tiered m USING (SELECT user_id, tier FROM customers) s
+  ON m.user_id = s.user_id        -- ❌ no partition predicate (EX-07): full-table scatter unless customers is clocked
+  WHEN MATCHED THEN UPDATE SET tier = s.tier;
+  ```
+`order_month` backfills in-place immediately; `tier` needs the EX-08 upgrade (clocked
+change feed + horizon) before its backfill is partition-local. One edit, two independent
+verdicts — the value is the diagnostic that separates them.
+
+### EX-39 — the boundary: a skeleton-position field is a grain change, not a backfill
+- grid: construct=schema evolution into a **skeleton** position (new `GROUP BY` / dedup key) | sources=payments: append-only (**unchanged**) | output-shape=**changes** (`pay_date` → `(pay_date, region)`) | technique(s)=none column-scoped — recompute-region
+- expected: REFUSED-as-column-backfill(a field added to a membership / grouping / dedup / ordering position changes *which rows exist* — §6 skeleton — so it is a **grain change** (§10), not a payload field-add; no targeted column write is admissible, and the framework must **not** silently `UPDATE` it in place. The honest plan is a whole-region recompute — effectively a new model; the diagnostic names the grain change)
+- probe-status: not-probe-worthy(compile-time classification: skeleton-role extraction decides it — the §2 machinery of [`09-spec-readiness.md`](09-spec-readiness.md))
+- use-case: an analyst adds `region` to the `GROUP BY` of EX-13's daily-revenue rollup, expecting a cheap field-add — but this re-partitions every group; the row set itself changes.
+
+```sql
+-- was: SELECT pay_date, SUM(amount) AS revenue FROM … GROUP BY pay_date
+SELECT pay_date, region, SUM(amount) AS revenue
+FROM smelt.sources.payments
+GROUP BY pay_date, region          -- `region` enters the skeleton (grouping key)
+```
+
+**Physical maintenance.** n/a **as a column backfill.** The added `region` is a skeleton
+column (grouping key), so the output's row identity moves from `pay_date` to
+`(pay_date, region)`: the stored rows are now the *wrong rows*, and no `UPDATE`/`MERGE` can
+patch that in place. **Partition-local:** ✅ per partition *for the recompute* — but this is
+a **recompute** (bottom-right), not a targeted field write.
+- *Skeleton field added* — REFUSED as a column backfill; the admissible plan is recompute-region.
+  ```sql
+  DELETE FROM daily_revenue WHERE pay_date = P;
+  INSERT INTO daily_revenue SELECT pay_date, region, SUM(amount) FROM payments WHERE pay_date = P GROUP BY pay_date, region;
+  ```
+The diagnostic names it a **grain change** (§10 anchor): adding a skeleton column is a
+different model, not a payload field-add. This boundary is what keeps "single-field
+backfill" honest — the whole family applies to *payload* columns (§6) and never to skeleton
+positions.
+
+---
+
 ## Candidate probe cells (lift-ready)
 
 Unprobed-candidate entries above, in the loop catalog's row format
@@ -1125,17 +1292,23 @@ Unprobed-candidate entries above, in the loop catalog's row format
 | EX-33 | hash-of-skeleton surrogate | append-only | surrogate stability under backfill | linkC | HOLDS |
 | EX-34 | three-model chain settledness | append-only + unbounded-late conversions | cross-model watermark propagation | linkC | CONDITIONAL; no propagation surface today — probe what downstream sees |
 | EX-35 | correlated MIN_BY first-value (7d window) | append-only, late | order-sensitive fold (stored-winner ledger) | linkC | UNSUPPORTED-TODAY; recompute arm HOLDS (EX-01 analogue, order-sensitive combiner) |
+| EX-36 | add derived pass-through field (fn of stored column) | definition-change trigger (sources unchanged) | in-place per-partition UPDATE, no upstream read (top-left) | linkC | UNSUPPORTED-TODAY (column-scoped backfill); whole-partition recompute arm HOLDS |
+| EX-37 | add co-sensitive field group from keyed dim | definition-change trigger + change_feed dim | keyed column-scoped MERGE per partition (bottom-left) | linkC | UNSUPPORTED-TODAY (same emitter as EX-08); confirm today leaves NULL or forces full rebuild |
 
 ---
 
-**Summary**: 35 examples. Verdict distribution: **13 HOLDS** (EX-02, 05, 09, 13, 15, 17,
+**Summary**: 39 examples. Verdict distribution: **13 HOLDS** (EX-02, 05, 09, 13, 15, 17,
 24, 25, 26, 27†, 32, 33, plus EX-01's probed recompute arm), **9 CONDITIONAL** (EX-03, 04,
-06, 07, 12, 20, 21, 23, 34), **5 REFUSED** (EX-16, 22, 29, 30, 31), **8 UNSUPPORTED-TODAY**
-(EX-01 fold cell, 08, 10, 11, 14, 19, 28, 35). († EX-27 HOLDS under the spec'd-but-unbuilt
-locality gate.) Every construct row and source-property column of the coverage matrix is
-inhabited by ≥2 examples except the deliberately-degenerate multi-input-merge row (EX-12,
-definitional), engine-maintained (EX-32, delegation), and correlated first-value pick
-(EX-35, added for the three-way ledger-grade contrast with EX-01/EX-11).
+06, 07, 12, 20, 21, 23, 34), **6 REFUSED** (EX-16, 22, 29, 30, 31, plus EX-39's
+REFUSED-as-column-backfill grain-change boundary), **11 UNSUPPORTED-TODAY** (EX-01 fold
+cell, 08, 10, 11, 14, 19, 28, 35, plus Family G's 36, 37, 38). († EX-27 HOLDS under the
+spec'd-but-unbuilt locality gate.) Every construct row and source-property column of the
+coverage matrix is inhabited by ≥2 examples except the deliberately-degenerate
+multi-input-merge row (EX-12, definitional), engine-maintained (EX-32, delegation), and
+correlated first-value pick (EX-35, added for the three-way ledger-grade contrast with
+EX-01/EX-11). **Family G** (EX-36–39) adds the trigger-orthogonal *definition-change*
+(column-addition) trigger: the single-field backfill as the 2×2's left column
+([`01-framework.md`](01-framework.md) §5).
 
 Every example now carries a `**Physical maintenance**` block (see §"Physical-maintenance
 notation") giving the emitted `DELETE`+`INSERT` / `MERGE` per trigger, its input/output

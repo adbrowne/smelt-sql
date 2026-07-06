@@ -198,6 +198,18 @@ late row rewrites an existing partition, the cell is bottom-right — a full ups
 re-derivation of that partition.) Exhaustiveness is defensible: *every* incremental
 write picks a read scope and a write scope.
 
+**The left column has a second occupant: schema-evolution backfill.** The targeted-write
+column (both left corners) is also where a **single-field backfill** lands when a model
+gains a column (§5's definition-change trigger,
+[`07-example-catalogue.md`](07-example-catalogue.md) Family G): it writes only the new
+field(s), leaving skeleton and siblings in place. It splits across *both* left corners by
+what the field reads — **bottom-left** (full-input) when the field re-derives from upstream
+(a column-scoped `MERGE`, keyed where the source is keyed), **top-left** (delta+state with an
+*empty* input delta) when the field is a pure function of already-stored columns, so the
+"state" read is the stored output region itself and the op is an in-place `UPDATE` with no
+upstream read. The dimension-driven MERGE and the schema-evolution backfill are thus the
+same corner reached by two different triggers.
+
 **Physical caveat on the write axis (partition-locality — §5).** The left column's
 cheapness is not automatic. A *targeted* write is only partition-bounded when the delta's
 footprint projects onto a bounded set of the output's partitions; when it does not — a
@@ -352,6 +364,25 @@ append-only premise of §2 do double duty: it is what keeps bronze out of `conve
 mutation-sensitivity set — under a *mutable* bronze the two groups would merge and the
 targeted update would be lost, exactly as the observer-semantics refusal of §4
 predicts.)
+
+**A third trigger: definition change (schema evolution).** Creation and mutation are both
+*data* triggers — an input delta. A model **gaining one or more output fields** is a third
+trigger of a different kind: the *definition* changed while the sources stood still. A
+newly-added column-group has, over every already-materialized region, an empty
+processed-input vector `S = ∅` (nothing of its inputs is yet reflected in a column that did
+not exist), and its **backfill advances `S` from `∅` to current** — a one-time catch-up that
+touches only the new group. It is graded by the *same* mutation-sensitivity machinery: the
+added group's sensitivity decides its scan and its 2×2 corner (§3's targeted-write column),
+exactly as for a dimension-driven update. Fields added together **factor by shared
+mutation-sensitivity** just as the base plan does — co-sensitive fields share one backfill
+op, cross-group fields get one each. Two consequences are worth stating. First, the backfill
+of a newly-added group is **always full-input** (`∅ → current`), even for a column whose
+*ongoing* algebra would fold, because there is no prior state of that column to fold onto;
+its fold is a separate, later concern. Second, a field added to a **skeleton** position is
+not a payload backfill at all but a **grain change** (§10): it changes which rows exist, so
+it forces a recompute and must be refused as a column backfill rather than silently patched
+in place. The worked inhabitants are Family G of
+[`07-example-catalogue.md`](07-example-catalogue.md).
 
 **How often does the plan actually factor?** Settled by decision rather than survey:
 the cost gap between a per-cell targeted maintenance and a whole-model recompute is
@@ -582,6 +613,14 @@ be finer than the ledger region; the ledger region exists only for attribution.
   recompute read. This is what makes fold-then-recompute safe and
   recompute-then-refold a double-count (§4's asymmetric hazard).
 
+**Schema evolution is a ledger operation, not a new mechanism.** Adding a column-group `g`
+**instantiates** ledger entries `(r, g)` for every existing region `r`, each at
+`S_{i,g} = ∅`; the field-backfill (§3's targeted-write column, §5's definition-change
+trigger) is then just *fold/recompute into `(r, g)`* advancing those entries to current `S`,
+while every skeleton and sibling `(r, g′)` entry is untouched. The ledger already carries
+exactly the state schema evolution needs — which is why a single-field backfill is a
+first-class plan cell rather than a bespoke migration path.
+
 **Degenerate specializations (why this is "the ledger, generalized" and not a new
 thing).**
 
@@ -653,6 +692,15 @@ touch. Two facts, separated:
 - **The identity itself, when needed, is declared and checked** — the `unique_key` /
   grain the modeller states, validated against the plan (an error if a cell's targeted
   write cannot be addressed by it), never silently inferred and then depended on.
+
+**Schema evolution respects the anchor.** Adding a *payload* field is a within-grain change
+— a column backfill (§3's targeted-write column, §5's definition-change trigger). Adding a
+field to a **skeleton** position (a `unique_key` / grain / grouping / dedup / ordering role)
+changes *what a row is*, so it is a **grain change**, not a field-add: the stored rows become
+the wrong rows and no targeted write repairs them. The framework must refuse it as a column
+backfill and name the grain change — the honest plan is a recompute, effectively a new model
+— never silently patch a skeleton column in place.
+[`07-example-catalogue.md`](07-example-catalogue.md) EX-39 is the worked boundary.
 
 **Output shape (partitioned vs keyed) — declared-and-checked, *not* silently derived.**
 Deriving output shape from the plan was considered and rejected: it reintroduces
