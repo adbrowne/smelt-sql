@@ -34,6 +34,7 @@ becomes derived, while output shape/grain stays declared-and-checked.
 | 7 | [`07-example-catalogue.md`](07-example-catalogue.md) | 40 worked examples across constructs × source properties × output shapes × techniques, each with a real-world use case and a machine-scannable header; 19 lift-ready probe cells. Includes Family G — schema evolution (single-field backfill as the 2×2's left column, through the co-sensitive ledger catch-up). | ~990 |
 | 8 | [`08-code-placement.md`](08-code-placement.md) | Where it lives: `MaintenancePlan` as pure data in `smelt-logical`, Salsa query in `smelt-db`, choice in `smelt-planner`, lowering in `smelt-runtime`, primitives in `smelt-backend*`, ledger in `smelt-state`; migration sketch M0–M6. | ~320 |
 | 9 | [`09-spec-readiness.md`](09-spec-readiness.md) | The gap list: decisions to ratify, machinery that doesn't exist yet, empirical gaps, the spec-diff map, and the definition of "ready to spec". | — |
+| 10 | [`10-dependency-propagation.md`](10-dependency-propagation.md) | The graph layer: forward propagation (what landed → which partitions of which models run, per-edge trigger cells) and backward resolution (build a model for a period *including upstreams* — test/validation builds); scenario catalogue S1–S12, granularity/self-reference/column-scoped-dirt roadmap. | ~300 |
 
 Skimming for a decision? Read the Summary of `01`, then `03` (the ratification queue), then `09`
 (everything else that stands between here and a spec). The catalogue (`07`) is the reference you

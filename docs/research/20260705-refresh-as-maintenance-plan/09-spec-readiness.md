@@ -101,16 +101,16 @@ From [`06-proof-obligations.md`](06-proof-obligations.md) (its three hardest) pl
   `S = ∅` and forms its own catch-up group until its ledger converges with its sibling's
   (group convergence, EX-40). Worked cells: Family G (EX-36–40).
 
-- **Cross-model dirty-partition propagation** (added 2026-07-07; not in the original gap
-  list) — runs start from *what landed upstream*, not a cron tick: given the partition
-  intervals that landed per source, compose each DAG edge's derived scan clamp (reflected
-  to a footprint) through the graph to name exactly which partitions of every downstream
-  model must run, keyed per inbound edge so the right trigger cell (recompute vs
-  column-scoped merge) runs per region. Day-granular v0 tracer exists
-  (`smelt-logical/src/maintenance/propagate.rs`); **grain mapping** (a daily model feeding
-  a monthly rollup — an outward interval alignment per edge, in the same seam as the
-  day-ceiling) and column-group-scoped dirt are the named next steps. Relates to EX-34's
-  cross-model settledness (this is its scheduling dual).
+- **Cross-model dependency propagation** (added 2026-07-07; scoped fully in
+  [`10-dependency-propagation.md`](10-dependency-propagation.md)) — the graph layer over
+  the per-model plan: **forward** (what landed upstream → which partitions of which
+  downstream models run, keyed per inbound edge so the right trigger cell runs per
+  region) and **backward** (build a model for a specified period *including upstreams* —
+  the test/validation-build resolution, where the date arithmetic runs backwards through
+  the same edge clamps). Day-granular v0 tracer exists
+  (`smelt-logical/src/maintenance/propagate.rs`); grain mapping, self-referential
+  unrolling, and column-group-scoped dirt are the named next steps (`10` §§6–8). Relates
+  to EX-34's cross-model settledness (this is its scheduling dual).
 
 The spec can (and should) be written with these as normative behavior + admission rules; but
 each needs at least a sketch-level derivation story in the spec so it isn't specifying magic.
