@@ -104,6 +104,18 @@ From [`06-proof-obligations.md`](06-proof-obligations.md) (its three hardest) pl
 The spec can (and should) be written with these as normative behavior + admission rules; but
 each needs at least a sketch-level derivation story in the spec so it isn't specifying magic.
 
+**Tracer bullet (2026-07-06).** A v0 of the plan datatype and its derivation/emission now
+exists in code and discharges the "sketches reviewed once" condition executably:
+`crates/smelt-logical/src/maintenance/` (`MaintenancePlan`, the 2×2 corners, trigger
+taxonomy incl. definition-change, K8 refusals; pure functions, no wiring into
+diagnostics/planning/execution), exercised by
+`crates/smelt-logical/tests/maintenance_tracer.rs` (EX-02/07/13/24/36/39/40 corner +
+refusal assertions) and `crates/smelt-cli/tests/property_discovery/tracer_maintenance.rs`
+(DuckDB equivalence: emitted maintenance ≡ full refresh per trigger, via the loop's
+EXCEPT-ALL oracle). Hand-supplied in v0, exactly the deferred machinery above: column
+groups, skeleton roles, the fold spec. Derived and consumed: scan bounds, combiner
+algebra, the additive-only column-add proof.
+
 ## 3. Empirical gaps worth closing before the spec commits (the loop's next backlog)
 
 From [`02-loop-findings.md`](02-loop-findings.md) §8, prioritized in

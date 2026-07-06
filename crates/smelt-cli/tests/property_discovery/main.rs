@@ -28,3 +28,4 @@ mod sc_1_correlated_exists;
 mod sc_1b_column_name_collision;
 mod sc_2_clocked_mutable_window_forward;
 mod smoke;
+mod tracer_maintenance;

@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod graph;
 pub mod logical;
 pub mod lowering;
+pub mod maintenance;
 pub mod plan_builder;
 pub mod rules;
 pub mod types;
