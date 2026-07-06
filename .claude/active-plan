@@ -104,7 +104,7 @@
 # docs/research/20260705-refresh-as-maintenance-plan/ (ratified 09 §1); specs:
 # docs/specs/maintenance_plan.md, models.md, sources.md. Two registered
 # sub-plans run in order:
-#   1. docs/plans/20260707-maintenance-plan-spec-alignment.md (SA1–SA6,
+#   1. docs/plans/20260707-maintenance-plan-spec-alignment.md (SA1–SA7,
 #      docs-only: shape-profile demotions, transform contracts, architecture
 #      invariant, Maintenance* diagnostics catalogue, model_properties sync)
 #   2. docs/plans/20260707-maintenance-plan-impl.md (MP1–MP17: refresh-axis

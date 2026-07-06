@@ -65,6 +65,7 @@ Three of the spec-diff map's rows landed (`maintenance_plan.md` created; `models
 | SA4   | pending  |        |      |
 | SA5   | pending  |        |      |
 | SA6   | pending  |        |      |
+| SA7   | pending  |        |      |
 
 ---
 
@@ -276,6 +277,62 @@ proof's declared-unique-key input as composite-valued (F2).
 - [ ] Spec edits are timeless
 
 **Commit.** `spec(properties): the complete proof catalogue — plan proof inputs re-homed as referenced rows`
+
+---
+
+### Phase SA7: Second-ring sweep — cli, run_state, schema_evolution, timeseries + removed-mode-name residue
+
+**Goal.** Bring the second-ring specs in sync with the new set (audit 2026-07-07). Per file:
+
+- **`cli.md`** — fix the live contradiction: the `smelt explain --json` schema's
+  `"refresh": "full" | "batched" | "keyed" | "versioned" | "materialized_view"` becomes the
+  trichotomy (+ `grain`); add the maintenance CLI surface (`smelt explain <model>` plan report,
+  `smelt run --since-upstream`, `smelt build --period --include-upstreams`, `smelt bakeoff`) as
+  references to `maintenance_plan.md` §CLI with a Known-Divergence note that they are unwired
+  (impl plan MP7/MP13/MP15/MP16).
+- **`run_state.md`** — reference the reconciliation ledger (`(region × column-group)`,
+  frontier/per-delta grades) and per-source landed-delta recording as the state model's extension,
+  owned by `maintenance_plan.md` §"The reconciliation ledger" (storage/serialisation stays here);
+  rewrite the "`refresh: keyed` transactional merge ledger" section to the grain vocabulary; soften
+  the "intervals are opt-in observability, no change to correctness" claim to note that forward
+  propagation consumes recorded landed deltas (Known Divergence until MP14/MP15 land).
+- **`schema_evolution.md`** — reference `maintenance_plan.md` §"The definition-change trigger" as
+  the owner of column-add *data* semantics: the change-classification table's leave-NULL /
+  full-refresh outcomes become the pre-plan behaviours, with re-derivable payload fields
+  auto-backfilling column-scoped and skeleton-position adds refused
+  (`MaintenanceSkeletonColumnAdded`); note group convergence; keep DDL mechanics (its actual
+  ownership) unchanged.
+- **`timeseries.md`** — granularity's role as the declared propagation grain, checked against the
+  SQL's grouping (ratified P3; cite `maintenance_plan.md` §"The graph layer" and the
+  `model_properties.md` grain-alignment row from SA6); sweep the `refresh: batched`/`refresh: keyed`
+  interaction sections and the `TimeseriesRequiredForBatched` prose to trichotomy + grain
+  vocabulary.
+- **Removed-mode-name residue** — `functions.md:144,156` (`refresh: keyed` classifier prose →
+  key-grain vocabulary), `smelt_yml.md:26` (`refresh: keyed` example → `refresh: incremental` +
+  grain), `materialized_view.md:62,85` ("use `refresh: keyed` for smelt-driven maintenance" →
+  `refresh: incremental` + `grain: key`).
+
+**Pre-conditions.** SA6 (the property rows these references cite exist).
+
+**Verification greps (red before, green after).**
+- `rg -n '"refresh"' docs/specs/cli.md` → trichotomy values only.
+- `rg -n 'refresh: (batched|keyed|cumulative|versioned|latest_value)' docs/specs/ --glob '!models.md'` → zero hits outside Known-Divergence/history contexts (check each survivor's context; `models.md`'s removed-values table is the one legitimate Surface mention).
+- `rg -n 'maintenance_plan' docs/specs/{cli,run_state,schema_evolution,timeseries}.md` → each references its owner section.
+- `/smelt:validate cli`, `/smelt:validate run_state`, `/smelt:validate schema_evolution`, `/smelt:validate timeseries` — no timeless-oracle violations.
+
+**Critical files (allowed to touch in this phase).**
+- `docs/specs/{cli,run_state,schema_evolution,timeseries,functions,smelt_yml,materialized_view}.md`
+
+**Docs touched.** *Timeless.*
+- as above
+
+**Review checklist** (material findings only):
+- [ ] No ownership inversion: these specs *reference* maintenance_plan/model_properties, they don't restate plan semantics
+- [ ] DDL mechanics in schema_evolution.md and storage mechanics in run_state.md unchanged
+- [ ] Unwired surface is Known-Divergence-noted with the impl-plan link, never described as shipped
+- [ ] Spec edits are timeless
+
+**Commit.** `spec(second-ring): sync cli/run_state/schema_evolution/timeseries + sweep removed mode names`
 
 ---
 
