@@ -517,3 +517,74 @@ fn backward_through_a_monthly_dim_requires_whole_months() {
         "a day-range request touching two months requires both whole months of the dim"
     );
 }
+
+// ---------------------------------------------------------------------------
+// S13 (ratified P6): a delta on an unclocked source dirties the WHOLE model
+// for every mutation-sensitive consumer — never a silent no-op — and flows
+// downstream as whole-table dirt; backward, the required unclocked slice is
+// the whole table.
+// ---------------------------------------------------------------------------
+
+fn unclocked_edge(upstream: &str, downstream: &str) -> Edge {
+    Edge {
+        upstream: upstream.to_string(),
+        downstream: downstream.to_string(),
+        before_days: 0,
+        after_days: 0,
+        upstream_grain: PartitionGrain::Unclocked,
+        downstream_grain: PartitionGrain::Day,
+    }
+}
+
+#[test]
+fn s13_unclocked_dim_delta_dirties_the_whole_consumer_and_flows_on() {
+    let edges = vec![
+        unclocked_edge("customers", "orders_tiered"),
+        edge("orders_tiered", "rollup", 0, 0),
+    ];
+    // Any delta on the dim — the interval is meaningless on an unclocked
+    // axis and aligns outward to WHOLE.
+    let result = propagate(&edges, &deltas(&[("customers", iv(5, 6))])).expect("propagate");
+    assert_eq!(result.dirty["orders_tiered"].len(), 1);
+    assert!(
+        result.dirty["orders_tiered"][0].is_whole(),
+        "dim churn dirties the whole consumer, never a silent no-op"
+    );
+    assert!(
+        result.dirty["rollup"][0].is_whole(),
+        "whole-table dirt flows downstream as whole-table dirt"
+    );
+}
+
+#[test]
+fn s13_backward_requires_the_whole_unclocked_table() {
+    let edges = vec![unclocked_edge("customers", "orders_tiered")];
+    let result = required_inputs(&edges, "orders_tiered", iv(4, 7)).expect("resolve");
+    assert!(
+        result.required["customers"][0].is_whole(),
+        "an unclocked source's required slice is the whole table (EX-07's full read)"
+    );
+    // The target's own requirement stays the requested period.
+    assert_eq!(result.required["orders_tiered"], vec![iv(4, 7)]);
+}
+
+// ---------------------------------------------------------------------------
+// S12 guard (ratified P7): a keyed-grain node in the graph refuses fail-loud
+// in both directions — silently treating it as a day axis would be
+// wrong-and-quiet.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s12_keyed_node_refuses_in_both_directions() {
+    let mut keyed_edge = edge("payments", "lifetime_spend", 0, 0);
+    keyed_edge.downstream_grain = PartitionGrain::Keyed;
+    let edges = vec![keyed_edge, edge("lifetime_spend", "report", 0, 0)];
+
+    let fwd =
+        propagate(&edges, &deltas(&[("payments", iv(5, 6))])).expect_err("keyed node must refuse");
+    assert!(fwd.contains("keyed"), "{fwd}");
+    assert!(fwd.contains("lifetime_spend"), "{fwd}");
+
+    let bwd = required_inputs(&edges, "report", iv(4, 7)).expect_err("keyed node must refuse");
+    assert!(bwd.contains("keyed"), "{bwd}");
+}

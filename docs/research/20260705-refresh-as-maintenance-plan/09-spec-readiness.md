@@ -151,8 +151,13 @@ sections.
   1; declaration law preserved for shape/grain. Decision 5 (sugar) shapes this diff.
 - **`model_maintenance.md`** — gains the plan matrix (cells, corners), the S-indexed theorem
   and faithful-fold conditions, the generalized ledger, and the obligations table from `06`.
-  Likely the spec that grows most; consider splitting a new **`maintenance_plan.md`** and
-  leaving `model_maintenance.md` as the invariant/ladder spec it already is.
+  Likely the spec that grows most; **resolved (P11, 2026-07-07)**: split a new
+  **`maintenance_plan.md`** carrying the plan matrix *and* the graph layer
+  ([`10-dependency-propagation.md`](10-dependency-propagation.md) — forward/backward
+  propagation, ratified P1–P11), leaving `model_maintenance.md` as the invariant/ladder spec.
+  The graph layer also touches the sources spec (P10 delta interface),
+  `models.md` (granularity's role as the propagation grain, P3), `diagnostics.md`
+  (keyed/self-referential/unclocked refusal codes), and the CLI docs (P9 surface).
 - **`batched_models.md` / `keyed_models.md` / `versioned` material** — demoted from strategy
   specs to *shape profiles* (grain + default plan); their admission matrices re-derived as
   instances of the theorem's failure cases; `nondeterministic_columns` superseded by per-column

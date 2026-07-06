@@ -129,10 +129,17 @@ cyclic edge set is refused (§6 for the self-referential case).
   conversions delta in truth stales only `{conversion_score}` — downstream models that do
   not read that column need not run. Column-group-scoped dirt requires cross-model column
   provenance (part 9 §2's payload-propagation machinery) and is future work (§8).
-- **Interval-shaped dirt.** Dirt is tracked as intervals on the partition axis, so a
-  keyed-grain model in the chain coarsens to "the whole keyed table is dirty" (no
-  partition axis to be finer against). Fine for v0; keyed dirt-sets (per-key) are a
-  later refinement with real cost trade-offs.
+- **Interval-shaped dirt.** Dirt is tracked as intervals on the partition axis. A
+  keyed-grain model has no partition axis to be finer against, and silently treating it
+  as day-axis would be wrong-and-quiet — so a keyed node in the graph **refuses
+  fail-loud in v1** (ratified P7); keyed dirt-sets (per-key) are the later refinement
+  with real cost trade-offs (S12).
+- **Unclocked sources propagate whole-model dirt** (ratified P6): an unclocked dim's
+  delta has no interval representation, so every mutation-sensitive consumer's dirt is
+  the whole table — never a silent no-op (the under-run the review caught). The cell was
+  only admitted under K8's `allow_full_scan` in the first place, so the whole-table run
+  is already a declared, reviewable cost. Backward, the unclocked slice required is the
+  whole table (exactly EX-07's backfill semantics).
 - **Content-blind deltas.** "A day landed" dirties its footprint even if every landed row
   is a no-op duplicate. Content-aware pruning is an engine/CDF question, not a plan one.
 
@@ -211,7 +218,8 @@ DuckDB), 🔜 = designed here, not yet built.
 | S9 | self-referential model (reads own output at `t−1`): table-graph cycle, time-DAG — refuse in v0, unroll later | both | 🔜 (§6) |
 | S10 | granularity mapping: daily model feeding a monthly rollup — day/month built (grain *derivation* from the SQL, and an hourly axis, remain) | both | ✅ (§7) |
 | S11 | column-group-scoped dirt: a conversions delta skips consumers that never read `conversion_score` | forward | 🔜 (§8) |
-| S12 | keyed-grain hop: dirt entering a keyed end-state model (no partition axis) and re-emerging | forward | 🔜 (§3 caveat) |
+| S12 | keyed-grain hop: dirt entering a keyed end-state model (no partition axis) and re-emerging | forward | 🔜 (§3 caveat; **refused fail-loud in v1**, P7) |
+| S13 | delta on an **unclocked** source (dim churn): whole-model dirt for every mutation-sensitive consumer, never a silent no-op; backward, the unclocked slice is the whole table | both | ✅ (P6) |
 
 ---
 
@@ -299,12 +307,12 @@ Consistent with [`08-code-placement.md`](08-code-placement.md):
   manifests / CDF / interval-store diff) feeds `propagate`; the runner executes per-edge
   regions with their trigger cells behind `execute_project` (run-pipeline parity). The
   ledger records the advance.
-- **CLI surface (sketch, not committed)** — forward: `smelt run --since-upstream`
-  (compute deltas from the ledger, run the propagated set; the default posture once
-  trusted). Backward: `smelt build <model> --period <start>..<end> --include-upstreams`
-  (resolve, print the per-ancestor slices + build order, optionally execute) — the
-  test/validation build. Both should print their plan before acting; the dirty/required
-  sets are exactly the explainable artifact.
+- **CLI surface (ratified P9)** — forward: `smelt run --since-upstream`
+  (compute deltas from the ledger, run the propagated set; opt-in first, the default
+  posture once trusted). Backward: `smelt build <model> --period <start>..<end>
+  --include-upstreams` (resolve, print the per-ancestor slices + build order, optionally
+  execute) — the test/validation build. Both print their plan before acting; the
+  dirty/required sets are exactly the explainable artifact.
 
 ---
 
@@ -318,13 +326,51 @@ month-partition rebuild on DuckDB).
 
 **Open, in order of expected next need:**
 
-1. Grain derivation + hourly axis (§7 status note) — the grains are edge-declared today;
-   deriving Month from a `date_trunc` grouping is classifier work.
+1. Grain checking + hourly axis — per ratified P3, grain is **declared**
+   (`timeseries.granularity`, whose enum already spans Hour…Year), never per-edge and
+   never derived from SQL; the classifier work is *checking* the declared grain against
+   the SQL (a `date_trunc('month', …)` grouping), same declared-and-checked posture as
+   output shape. Hour needs sub-day ordinals (same algorithm) and is a Known Divergence
+   in v1.
 2. Self-referential unrolling (§6) — blocks rolling-balance models; interacts with G-08's
-   cascade knob.
+   cascade knob. Refused fail-loud in v1 (ratified P8).
 3. Column-group-scoped dirt (§8) — cost, not correctness; lands with cross-model
    provenance.
 4. Keyed-grain hops (S12) — dirty *key-sets* as a second dirt shape beside intervals.
-5. Delta detection itself — what "landed" means per source posture (append-only landing
-   manifests vs CDF offsets vs snapshot diffing); part 5's `mutation_profile` decides the
-   mechanism, the interval-store (`smelt-state`) records it.
+   Refused fail-loud in v1 (ratified P7).
+5. Delta detection — per ratified P10 the spec commits to the *interface* (per-source
+   partition-interval deltas recorded in the interval-store); the v1 mechanism is
+   append-only landing/interval diff only; CDF offsets and snapshot diffing follow per
+   `mutation_profile`.
+
+## 11. Ratified decisions (2026-07-07, Andrew — all as recommended)
+
+1. **P1 — Delta-driven scheduling is the normative unit.** Runs are driven by per-source
+   partition-interval deltas; cron is the poller. The dirty set is the ledger's
+   `S`-advance made schedulable (§1).
+2. **P2 — The edge model.** One edge = the derived scan clamp between two partition
+   axes; forward = reflection, backward = clamp-direct; day-ordinal intervals;
+   **widen-never-narrow** (outward ceiling/alignment) is the composition law (§2).
+3. **P3 — Grain is declared, not derived and not per-edge.** A node's grain is its
+   declared `timeseries.granularity`; the classifier only *checks* it against the SQL.
+   v1 scope: Day and coarser; Hour is a Known Divergence. (The tracer's edge-declared
+   grains were a v0 shortcut; production graph assembly reads the declaration.)
+4. **P4 — Per-edge dirt keys trigger cells; per-model union feeds consumers** (§3).
+5. **P5 — The v0 over-approximations are normative-safe defaults**, recorded as Known
+   Divergences: whole-partition dirt, content-blind deltas (§3).
+6. **P6 — Unclocked-upstream posture:** a delta on an unclocked source dirties the
+   **whole model** for every mutation-sensitive consumer — never a silent no-op;
+   backward, the required unclocked slice is the whole table (§3, S13).
+7. **P7 — Keyed models in the propagation graph refuse fail-loud in v1** (S12).
+8. **P8 — Self-referential models refuse fail-loud in v1**, with the unrolling design
+   recorded in §6 (admissible iff strictly time-backward; forward dirt to the frontier =
+   G-08's cascade/local trade; backward to the basis/checkpoint).
+9. **P9 — Surface:** `smelt build <model> --period <start>..<end> --include-upstreams`
+   (backward) and `smelt run --since-upstream` (forward, opt-in first, intended default
+   posture once trusted); both print their plan before acting (§9).
+10. **P10 — Delta detection:** spec the interface (per-source partition-interval deltas
+    in the interval-store); v1 mechanism = append-only landing/interval diff; CDF and
+    snapshot-diff deferred per `mutation_profile` (§10.5).
+11. **P11 — Spec home:** one new `maintenance_plan.md` carries the per-model plan matrix
+    *and* this graph layer as its closing sections; `model_maintenance.md` stays the
+    invariant/ladder spec.

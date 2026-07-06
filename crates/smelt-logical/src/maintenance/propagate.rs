@@ -49,8 +49,25 @@ pub struct DayInterval {
 }
 
 impl DayInterval {
+    /// The whole-axis sentinel: dirt or a requirement with no interval
+    /// bound (an unclocked source's delta or slice — ratified P6). Chosen
+    /// far outside any civil date a pipeline touches (±1,000,000 days ≈
+    /// ±2700 years) yet safely inside `i64` for clamp shifts and calendar
+    /// math. Consumers check [`DayInterval::is_whole`], never the raw
+    /// bounds.
+    pub const WHOLE: DayInterval = DayInterval {
+        start: -1_000_000,
+        end: 1_000_000,
+    };
+
     pub fn new(start: i64, end: i64) -> Self {
         DayInterval { start, end }
+    }
+
+    /// Whether this interval means "the whole table" — it contains the
+    /// [`DayInterval::WHOLE`] sentinel (clamp shifts only ever widen it).
+    pub fn is_whole(&self) -> bool {
+        self.start <= Self::WHOLE.start && self.end >= Self::WHOLE.end
     }
 
     fn is_empty(&self) -> bool {
@@ -118,12 +135,22 @@ pub enum PartitionGrain {
     Day,
     /// One partition per calendar month.
     Month,
+    /// No clock at all (an unclocked lookup/dim): every delta on and every
+    /// requirement of this axis is the whole table (ratified P6) — there is
+    /// no interval structure to be finer against.
+    Unclocked,
+    /// Key-addressed end-state: no partition axis. Refused fail-loud in the
+    /// propagation graph (ratified P7; S12 keyed dirt-sets are the later
+    /// refinement) — silently treating it as a day axis would be
+    /// wrong-and-quiet.
+    Keyed,
 }
 
 impl PartitionGrain {
     /// Align an interval **outward** to this grain's boundaries — a touched
-    /// month is a whole dirty (or required) month. Outward maps are
-    /// monotone, so sufficiency composes hop by hop; narrowing never would.
+    /// month is a whole dirty (or required) month; an unclocked axis is
+    /// all-or-nothing. Outward maps are monotone, so sufficiency composes
+    /// hop by hop; narrowing never would.
     fn align_outward(&self, iv: &DayInterval) -> DayInterval {
         match self {
             PartitionGrain::Day => *iv,
@@ -136,8 +163,33 @@ impl PartitionGrain {
                     end: day_ordinal(ny, nm, 1),
                 }
             }
+            PartitionGrain::Unclocked => DayInterval::WHOLE,
+            // Unreachable in practice: keyed nodes are refused before any
+            // interval math runs (`refuse_keyed_nodes`).
+            PartitionGrain::Keyed => *iv,
         }
     }
+}
+
+/// Ratified P7: a keyed-grain node has no partition axis, so interval dirt
+/// through it would be wrong-and-quiet — refuse fail-loud until keyed
+/// dirt-sets exist (S12).
+fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
+    for e in edges {
+        let (name, grain) = if e.upstream_grain == PartitionGrain::Keyed {
+            (&e.upstream, e.upstream_grain)
+        } else if e.downstream_grain == PartitionGrain::Keyed {
+            (&e.downstream, e.downstream_grain)
+        } else {
+            continue;
+        };
+        debug_assert_eq!(grain, PartitionGrain::Keyed);
+        return Err(format!(
+            "'{name}' is keyed-grain: it has no partition axis for interval dirt to \
+             propagate over — keyed dirt-sets are not yet supported (S12)"
+        ));
+    }
+    Ok(())
 }
 
 /// One dependency edge: `downstream` reads `upstream` under a derived scan
@@ -274,6 +326,7 @@ pub fn propagate(
     edges: &[Edge],
     source_deltas: &BTreeMap<String, Vec<DayInterval>>,
 ) -> Result<Propagation, String> {
+    refuse_keyed_nodes(edges)?;
     let order = topo_order(edges, source_deltas.keys().map(|s| s.as_str()))?;
 
     let mut result = Propagation::default();
@@ -347,6 +400,7 @@ pub fn required_inputs(
     if period.is_empty() {
         return Ok(RequiredSlices::default());
     }
+    refuse_keyed_nodes(edges)?;
     let order = topo_order(edges, [target])?;
 
     let mut required: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
