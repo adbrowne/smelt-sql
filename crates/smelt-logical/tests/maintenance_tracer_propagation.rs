@@ -10,7 +10,9 @@
 use std::collections::BTreeMap;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
-use smelt_logical::maintenance::propagate::{normalize, propagate, DayInterval, Edge};
+use smelt_logical::maintenance::propagate::{
+    normalize, propagate, required_inputs, DayInterval, Edge,
+};
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Trigger,
 };
@@ -222,4 +224,188 @@ fn cyclic_graph_is_refused() {
 fn normalize_merges_overlaps_and_drops_empties() {
     let merged = normalize(vec![iv(5, 5), iv(3, 6), iv(1, 4), iv(8, 9)]);
     assert_eq!(merged, vec![iv(1, 6), iv(8, 9)]);
+}
+
+// ---------------------------------------------------------------------------
+// Backward resolution (10-dependency-propagation.md §4, S6): build a model
+// for a specified period *including upstreams* — the date arithmetic runs
+// backwards through the same edge clamps the forward runs reflect.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn backward_resolution_uses_the_scan_clamp_directly() {
+    // silver [4, 7) requires conversions [4, 21) (forward-widening source)
+    // and sessions [2, 7) (backward-widening source) — both directions of
+    // widening appear in one resolution.
+    let edges = vec![
+        edge("conversions", "silver", 0, 14),
+        edge("sessions", "silver", 2, 0),
+    ];
+    let result = required_inputs(&edges, "silver", iv(4, 7)).expect("resolve");
+    assert_eq!(result.required["silver"], vec![iv(4, 7)]);
+    assert_eq!(result.required["conversions"], vec![iv(4, 21)]);
+    assert_eq!(result.required["sessions"], vec![iv(2, 7)]);
+    assert_eq!(result.build_order, vec!["silver".to_string()]);
+}
+
+#[test]
+fn backward_resolution_composes_through_the_chain_and_orders_the_build() {
+    let edges = vec![
+        edge("bronze", "silver", 0, 2),
+        edge("conversions", "silver", 0, 14),
+        edge("sessions", "silver", 2, 0),
+        edge("silver", "rollup", 0, 0),
+        edge("rollup", "report", 7, 0),
+    ];
+    let result = required_inputs(&edges, "report", iv(10, 13)).expect("resolve");
+    assert_eq!(result.required["report"], vec![iv(10, 13)]);
+    assert_eq!(
+        result.required["rollup"],
+        vec![iv(3, 13)],
+        "the 7d trailing window reaches back"
+    );
+    assert_eq!(result.required["silver"], vec![iv(3, 13)]);
+    assert_eq!(result.required["bronze"], vec![iv(3, 15)]);
+    assert_eq!(result.required["conversions"], vec![iv(3, 27)]);
+    assert_eq!(result.required["sessions"], vec![iv(1, 13)]);
+    assert_eq!(
+        result.build_order,
+        vec![
+            "silver".to_string(),
+            "rollup".to_string(),
+            "report".to_string()
+        ],
+        "ancestor models in dependency order, target last"
+    );
+}
+
+#[test]
+fn backward_resolution_ignores_non_ancestors() {
+    // A sibling consumer of silver is not an ancestor of rollup and must
+    // not appear in the resolution.
+    let edges = vec![
+        edge("bronze", "silver", 0, 2),
+        edge("silver", "rollup", 0, 0),
+        edge("silver", "unrelated_report", 7, 0),
+        edge("other_src", "unrelated_report", 0, 0),
+    ];
+    let result = required_inputs(&edges, "rollup", iv(4, 7)).expect("resolve");
+    assert!(!result.required.contains_key("unrelated_report"));
+    assert!(!result.required.contains_key("other_src"));
+    assert_eq!(
+        result.build_order,
+        vec!["silver".to_string(), "rollup".to_string()]
+    );
+}
+
+#[test]
+fn backward_diamond_merges_requirements_at_the_shared_ancestor() {
+    // sink reads a (no margin) and b (1d lookback); both read src. src's
+    // requirement is the union of the two paths' widenings.
+    let edges = vec![
+        edge("src", "a", 0, 0),
+        edge("src", "b", 1, 0),
+        edge("a", "sink", 0, 0),
+        edge("b", "sink", 3, 0),
+    ];
+    let result = required_inputs(&edges, "sink", iv(10, 11)).expect("resolve");
+    assert_eq!(result.required["a"], vec![iv(10, 11)]);
+    assert_eq!(result.required["b"], vec![iv(7, 11)]);
+    // via a: [10, 11); via b: [6, 11) — merged.
+    assert_eq!(result.required["src"], vec![iv(6, 11)]);
+}
+
+// ---------------------------------------------------------------------------
+// Adjointness (10-dependency-propagation.md §2, S8): the two directions are
+// adjoint, not inverse — replaying the resolved inputs forward dirties at
+// least the requested period.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn forward_of_backward_covers_the_requested_period() {
+    let edges = vec![
+        edge("bronze", "silver", 0, 2),
+        edge("conversions", "silver", 0, 14),
+        edge("silver", "rollup", 0, 0),
+    ];
+    let period = iv(4, 7);
+    let resolved = required_inputs(&edges, "rollup", period).expect("resolve");
+    // Replay the resolved *source* slices as forward deltas.
+    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    for src in ["bronze", "conversions"] {
+        replay.insert(src.to_string(), resolved.required[src].clone());
+    }
+    let forward = propagate(&edges, &replay).expect("propagate");
+    let dirty = &forward.dirty["rollup"];
+    assert!(
+        dirty
+            .iter()
+            .any(|d| d.start <= period.start && period.end <= d.end),
+        "forward(backward([4,7))) must cover [4,7); got {dirty:?}"
+    );
+    // And strictly more than the period — adjoint, not inverse.
+    assert_ne!(dirty, &vec![period]);
+}
+
+// ---------------------------------------------------------------------------
+// Cascade-as-delta (S5): an upstream *model's* region recompute is itself a
+// delta — forward propagation prices the downstream write side of a
+// cascading backfill.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_model_region_recompute_cascades_as_a_delta() {
+    let edges = vec![
+        edge("bronze", "silver", 0, 2),
+        edge("silver", "rollup", 0, 0),
+        edge("rollup", "report", 7, 0),
+    ];
+    // silver [4, 7) is being recomputed (a backfill); what must follow?
+    let mut deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    deltas.insert("silver".to_string(), vec![iv(4, 7)]);
+    let result = propagate(&edges, &deltas).expect("propagate");
+    assert_eq!(result.dirty["rollup"], vec![iv(4, 7)]);
+    assert_eq!(
+        result.dirty["report"],
+        vec![iv(4, 14)],
+        "the trailing window extends the cascade forward"
+    );
+    // Nothing upstream of the recomputed region is scheduled.
+    assert!(!result
+        .per_edge
+        .contains_key(&("silver".to_string(), "bronze".to_string())));
+}
+
+// ---------------------------------------------------------------------------
+// No-op deltas (S4): a source nothing reads, or an empty delta, propagates
+// nothing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deltas_nothing_reads_propagate_nothing() {
+    let edges = vec![edge("src", "m", 0, 0)];
+    let result = propagate(&edges, &deltas(&[("unrelated", iv(5, 6))])).expect("propagate");
+    assert!(!result.dirty.contains_key("m"));
+    assert!(result.per_edge.is_empty());
+
+    let empty = propagate(&edges, &deltas(&[("src", iv(5, 5))])).expect("propagate");
+    assert!(!empty.dirty.contains_key("m"));
+}
+
+#[test]
+fn self_edge_is_refused_as_a_cycle() {
+    // A self-referential model is a cycle in the *table* graph even though
+    // it is a DAG in time — v0 refuses; the unrolling is 10-dependency-
+    // propagation.md §6.
+    let edges = vec![edge("rolling", "rolling", 1, 0)];
+    assert!(propagate(&edges, &deltas(&[("rolling", iv(0, 1))])).is_err());
+    assert!(required_inputs(&edges, "rolling", iv(0, 1)).is_err());
+}
+
+#[test]
+fn empty_period_resolves_to_nothing() {
+    let edges = vec![edge("src", "m", 0, 0)];
+    let result = required_inputs(&edges, "m", iv(7, 7)).expect("resolve");
+    assert!(result.required.is_empty());
+    assert!(result.build_order.is_empty());
 }

@@ -115,22 +115,23 @@ pub struct Propagation {
     pub dirty: BTreeMap<String, Vec<DayInterval>>,
 }
 
-/// Propagate `source_deltas` (the partitions that landed per source) through
-/// `edges`. Nodes are processed in topological order so a model's dirt is
-/// complete (all inbound edges merged) before its consumers read it. Errors
-/// on a cycle — propagation over a cyclic graph has no well-defined order.
-pub fn propagate(
-    edges: &[Edge],
-    source_deltas: &BTreeMap<String, Vec<DayInterval>>,
-) -> Result<Propagation, String> {
-    // Kahn's algorithm over every node mentioned anywhere.
+/// Topological order (Kahn's algorithm) over every node mentioned in
+/// `edges` plus `extra_nodes`. Errors on a cycle — neither direction of
+/// propagation has a well-defined order over a cyclic edge set (a
+/// self-referential model is a *time*-DAG, not a table-DAG; see the
+/// research doc `10-dependency-propagation.md` §6 for the unrolling that
+/// will admit it later).
+fn topo_order<'a>(
+    edges: &'a [Edge],
+    extra_nodes: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<&'a str>, String> {
     let mut nodes: BTreeSet<&str> = BTreeSet::new();
     for e in edges {
         nodes.insert(&e.upstream);
         nodes.insert(&e.downstream);
     }
-    for s in source_deltas.keys() {
-        nodes.insert(s);
+    for n in extra_nodes {
+        nodes.insert(n);
     }
     let mut in_degree: BTreeMap<&str, usize> = nodes.iter().map(|n| (*n, 0)).collect();
     for e in edges {
@@ -143,33 +144,10 @@ pub fn propagate(
         .filter(|(_, d)| **d == 0)
         .map(|(n, _)| *n)
         .collect();
-
-    let mut result = Propagation::default();
-    // Seed: the source deltas are the sources' own "dirty" intervals.
-    for (source, intervals) in source_deltas {
-        result
-            .dirty
-            .insert(source.clone(), normalize(intervals.clone()));
-    }
-
-    let mut processed = 0usize;
+    let mut order = Vec::with_capacity(nodes.len());
     while let Some(node) = queue.pop_front() {
-        processed += 1;
-        let node_dirty = result.dirty.get(node).cloned().unwrap_or_default();
+        order.push(node);
         for e in edges.iter().filter(|e| e.upstream == node) {
-            if !node_dirty.is_empty() {
-                let reflected: Vec<DayInterval> =
-                    node_dirty.iter().map(|iv| e.reflect(iv)).collect();
-                let per_edge = result
-                    .per_edge
-                    .entry((e.downstream.clone(), e.upstream.clone()))
-                    .or_default();
-                per_edge.extend(reflected.iter().copied());
-                *per_edge = normalize(per_edge.clone());
-                let model_dirty = result.dirty.entry(e.downstream.clone()).or_default();
-                model_dirty.extend(reflected);
-                *model_dirty = normalize(model_dirty.clone());
-            }
             let d = in_degree
                 .get_mut(e.downstream.as_str())
                 .ok_or_else(|| format!("unknown node '{}'", e.downstream))?;
@@ -179,10 +157,127 @@ pub fn propagate(
             }
         }
     }
-    if processed != nodes.len() {
+    if order.len() != nodes.len() {
         return Err("dependency graph has a cycle — propagation order is undefined".to_string());
+    }
+    Ok(order)
+}
+
+/// Propagate `source_deltas` (the partitions that landed per source) through
+/// `edges`. Nodes are processed in topological order so a model's dirt is
+/// complete (all inbound edges merged) before its consumers read it. Errors
+/// on a cycle.
+pub fn propagate(
+    edges: &[Edge],
+    source_deltas: &BTreeMap<String, Vec<DayInterval>>,
+) -> Result<Propagation, String> {
+    let order = topo_order(edges, source_deltas.keys().map(|s| s.as_str()))?;
+
+    let mut result = Propagation::default();
+    // Seed: the source deltas are the sources' own "dirty" intervals.
+    for (source, intervals) in source_deltas {
+        result
+            .dirty
+            .insert(source.clone(), normalize(intervals.clone()));
+    }
+
+    for node in order {
+        let node_dirty = result.dirty.get(node).cloned().unwrap_or_default();
+        if node_dirty.is_empty() {
+            continue;
+        }
+        for e in edges.iter().filter(|e| e.upstream == node) {
+            let reflected: Vec<DayInterval> = node_dirty.iter().map(|iv| e.reflect(iv)).collect();
+            let per_edge = result
+                .per_edge
+                .entry((e.downstream.clone(), e.upstream.clone()))
+                .or_default();
+            per_edge.extend(reflected.iter().copied());
+            *per_edge = normalize(per_edge.clone());
+            let model_dirty = result.dirty.entry(e.downstream.clone()).or_default();
+            model_dirty.extend(reflected);
+            *model_dirty = normalize(model_dirty.clone());
+        }
     }
     // Drop models that ended up with no dirt (reachable but untouched).
     result.dirty.retain(|_, v| !v.is_empty());
     Ok(result)
+}
+
+/// The backward resolution: everything that must *exist* for a target
+/// period to be computable.
+#[derive(Debug, Clone, Default)]
+pub struct RequiredSlices {
+    /// node → merged required partition intervals, for every ancestor of
+    /// the target (raw sources *and* intermediate models) plus the target
+    /// itself. For a raw source this is the data prerequisite (the slice to
+    /// stage or verify); for a model it is the region to build.
+    pub required: BTreeMap<String, Vec<DayInterval>>,
+    /// The required **models** (nodes with at least one inbound edge) in
+    /// dependency order, ending with the target — the order a bounded
+    /// test/validation build materializes them.
+    pub build_order: Vec<String>,
+}
+
+/// Resolve what must exist upstream for `target` to be correct over
+/// `period`: walk the ancestor sub-DAG in *reverse* topological order
+/// (consumers before producers), pushing each node's merged requirement up
+/// its inbound edges using the scan clamp **directly** —
+/// `[s, e)` downstream requires `[s − before, e + after)` upstream. This is
+/// the dual of [`propagate`] (which uses the clamp *reflected*); the date
+/// arithmetic runs backwards relative to the day-to-day forward runs.
+///
+/// The driving use case is the bounded test/validation build: "build
+/// `target` for `period`, including upstreams" — stage exactly
+/// `required[source]` per raw source, build `build_order` bottom-up, and
+/// the target period equals what a build over complete history would
+/// produce (proven by the tracer's sandbox test).
+pub fn required_inputs(
+    edges: &[Edge],
+    target: &str,
+    period: DayInterval,
+) -> Result<RequiredSlices, String> {
+    if period.is_empty() {
+        return Ok(RequiredSlices::default());
+    }
+    let order = topo_order(edges, [target])?;
+
+    let mut required: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    required.insert(target.to_string(), vec![period]);
+
+    // Reverse topological order: a node's requirement is final (every
+    // consumer already contributed) before it is pushed up its inbound
+    // edges.
+    for node in order.iter().rev() {
+        let Some(node_required) = required.get(*node).cloned() else {
+            continue;
+        };
+        for e in edges.iter().filter(|e| e.downstream == *node) {
+            let widened: Vec<DayInterval> = node_required
+                .iter()
+                .map(|iv| DayInterval {
+                    start: iv.start - e.before_days,
+                    end: iv.end + e.after_days,
+                })
+                .collect();
+            let upstream_required = required.entry(e.upstream.clone()).or_default();
+            upstream_required.extend(widened);
+            *upstream_required = normalize(upstream_required.clone());
+        }
+    }
+
+    // Build order: the required models (nodes with an inbound edge) in
+    // forward topological order — ancestors of the target precede it, so
+    // the target is last.
+    let has_inbound: BTreeSet<&str> = edges.iter().map(|e| e.downstream.as_str()).collect();
+    let build_order: Vec<String> = order
+        .iter()
+        .filter(|n| required.contains_key(**n) && has_inbound.contains(**n))
+        .map(|n| n.to_string())
+        .collect();
+
+    Ok(RequiredSlices {
+        required,
+        build_order,
+    })
 }

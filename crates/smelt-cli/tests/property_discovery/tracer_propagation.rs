@@ -361,3 +361,336 @@ fn landed_upstream_days_propagate_to_exactly_the_partitions_that_must_run() {
         .expect("old partition");
     assert_eq!(old_rows, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Backward resolution on DuckDB (S6/S7 of 10-dependency-propagation.md):
+// "build daily_conv_rate for [Jan 5, Jan 8) including upstreams". The
+// universe lives in schema `uni`; the sandbox is staged with EXACTLY the
+// resolved per-source slices, built bottom-up in build_order, and the target
+// period must equal what a build over complete history produces. A sentinel
+// event converts AFTER the period's edge (day 17), so an under-widened
+// conversions slice yields a NULL score — the naive build is run first and
+// must diverge, proving the widening is load-bearing.
+// ---------------------------------------------------------------------------
+
+use smelt_logical::maintenance::propagate::required_inputs;
+
+/// Silver over prefixed source tables: 48h lateness clamp, session
+/// enrichment (48h max length), first conversion score within 14d.
+fn sb_silver_body(p: &str) -> String {
+    format!(
+        "SELECT e.event_id, e.user_id, e.event_ts, CAST(e.event_ts AS DATE) AS event_date, \
+         s.session_id, \
+         (SELECT c.score FROM {p}conversions c \
+           WHERE c.event_id = e.event_id \
+             AND c.conversion_ts >= e.event_ts \
+             AND c.conversion_ts < e.event_ts + INTERVAL '14 days' \
+             AND c.conversion_date BETWEEN CAST(e.event_ts AS DATE) \
+                                       AND CAST(e.event_ts AS DATE) + INTERVAL '14 days' \
+           ORDER BY c.conversion_ts LIMIT 1) AS conversion_score \
+         FROM {p}bronze_events e \
+         LEFT JOIN {p}sessions s \
+           ON s.user_id = e.user_id \
+          AND e.event_ts >= s.session_start_ts \
+          AND e.event_ts < s.session_end_ts \
+          AND s.session_start_date BETWEEN CAST(e.event_ts AS DATE) - INTERVAL '2 days' \
+                                       AND CAST(e.event_ts AS DATE) \
+         WHERE e.arrival_ts < e.event_ts + INTERVAL '48 hours' \
+           AND e.arrival_date BETWEEN CAST(e.event_ts AS DATE) \
+                                  AND CAST(e.event_ts AS DATE) + INTERVAL '2 days'"
+    )
+}
+
+fn sb_rollup_body(silver_rel: &str) -> String {
+    format!(
+        "SELECT event_date, COUNT(*) AS events, COUNT(conversion_score) AS converted, \
+         COUNT(session_id) AS in_session FROM {silver_rel} GROUP BY event_date"
+    )
+}
+
+fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
+    ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "silver_events".to_string(),
+            grain: Grain::Partition {
+                partition_col: "event_date".to_string(),
+            },
+            skeleton_columns: set(&["event_id", "event_date"]),
+        },
+        sources: vec![
+            SourceFacts {
+                name: "bronze_events".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: Some("arrival_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "sessions".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: Some("session_start_date".to_string()),
+                unique_key: strings(&["session_id"]),
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "conversions".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: Some("conversion_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+        ],
+        column_groups: vec![
+            ColumnGroup {
+                columns: strings(&["user_id", "event_ts"]),
+                mutation_sensitivity: Default::default(),
+            },
+            ColumnGroup {
+                columns: strings(&["session_id"]),
+                mutation_sensitivity: set(&["sessions"]),
+            },
+            ColumnGroup {
+                columns: strings(&["conversion_score"]),
+                mutation_sensitivity: set(&["conversions"]),
+            },
+        ],
+        fold: None,
+        column_add_proof: None,
+    }
+}
+
+/// Stage the sandbox source slices (CTAS from `uni`), build the models
+/// bottom-up over `period` via the plan's recompute technique, and return
+/// nothing — assertions live with the caller. `conversions_slice` is the
+/// experiment variable (naive vs resolved).
+fn build_sandbox(
+    conn: &Connection,
+    required: &BTreeMap<String, Vec<DayInterval>>,
+    conversions_slice: &DayInterval,
+    period: &DayInterval,
+) {
+    let slice_pred = |col: &str, iv: &DayInterval| {
+        format!(
+            "{col} >= {} AND {col} < {}",
+            date_of(iv.start),
+            date_of(iv.end)
+        )
+    };
+    let bronze_iv = required["bronze_events"][0];
+    let sessions_iv = required["sessions"][0];
+    conn.execute_batch(&format!(
+        "CREATE TABLE bronze_events AS SELECT * FROM uni.bronze_events WHERE {};
+         CREATE TABLE sessions AS SELECT * FROM uni.sessions WHERE {};
+         CREATE TABLE conversions AS SELECT * FROM uni.conversions WHERE {};",
+        slice_pred("arrival_date", &bronze_iv),
+        slice_pred("session_start_date", &sessions_iv),
+        slice_pred("conversion_date", conversions_slice),
+    ))
+    .expect("stage sandbox slices");
+
+    // Build in build_order (silver_events, then daily_conv_rate), each via
+    // the plan's recompute-region technique over the requested period.
+    let silver = sb_silver_body("");
+    conn.execute_batch(&format!(
+        "CREATE TABLE silver_events AS SELECT * FROM ({silver}) WHERE FALSE;"
+    ))
+    .expect("empty silver");
+    batch(
+        conn,
+        &emit_delete_insert("silver_events", "event_date", &region_of(period), &silver),
+    );
+    let rollup = sb_rollup_body("silver_events");
+    conn.execute_batch(&format!(
+        "CREATE TABLE daily_conv_rate AS SELECT * FROM ({rollup}) WHERE FALSE;"
+    ))
+    .expect("empty rollup");
+    batch(
+        conn,
+        &emit_delete_insert("daily_conv_rate", "event_date", &region_of(period), &rollup),
+    );
+}
+
+fn drop_sandbox(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE daily_conv_rate; DROP TABLE silver_events; \
+         DROP TABLE conversions; DROP TABLE sessions; DROP TABLE bronze_events;",
+    )
+    .expect("drop sandbox");
+}
+
+#[test]
+fn bounded_period_build_including_upstreams_matches_the_full_universe() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    // The universe: complete history, schema `uni`. Epoch day 0 = 2026-01-01.
+    conn.execute_batch(
+        "CREATE SCHEMA uni;
+         CREATE TABLE uni.bronze_events (event_id INT, user_id INT, event_ts TIMESTAMP, \
+                                         arrival_ts TIMESTAMP, arrival_date DATE);
+         CREATE TABLE uni.sessions (session_id INT, user_id INT, session_start_ts TIMESTAMP, \
+                                    session_end_ts TIMESTAMP, session_start_date DATE);
+         CREATE TABLE uni.conversions (event_id INT, conversion_ts TIMESTAMP, \
+                                       conversion_date DATE, score DOUBLE);
+         INSERT INTO uni.bronze_events VALUES
+           (1, 10, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-01 10:01:00', DATE '2026-01-01'),
+           (3, 10, TIMESTAMP '2026-01-05 08:00:00', TIMESTAMP '2026-01-05 08:01:00', DATE '2026-01-05'),
+           (2, 11, TIMESTAMP '2026-01-06 09:00:00', TIMESTAMP '2026-01-06 09:01:00', DATE '2026-01-06'),
+           (6, 12, TIMESTAMP '2026-01-05 23:00:00', TIMESTAMP '2026-01-07 04:00:00', DATE '2026-01-07'),
+           (4, 12, TIMESTAMP '2026-01-07 12:00:00', TIMESTAMP '2026-01-07 12:01:00', DATE '2026-01-07'),
+           (7, 11, TIMESTAMP '2026-01-07 20:00:00', TIMESTAMP '2026-01-09 10:00:00', DATE '2026-01-09'),
+           (5, 10, TIMESTAMP '2026-01-09 11:00:00', TIMESTAMP '2026-01-09 11:01:00', DATE '2026-01-09');
+         INSERT INTO uni.sessions VALUES
+           (100, 10, TIMESTAMP '2026-01-03 22:00:00', TIMESTAMP '2026-01-05 10:00:00', DATE '2026-01-03'),
+           (200, 11, TIMESTAMP '2026-01-06 07:00:00', TIMESTAMP '2026-01-06 20:00:00', DATE '2026-01-06');
+         INSERT INTO uni.conversions VALUES
+           (3, TIMESTAMP '2026-01-06 15:00:00', DATE '2026-01-06', 2.0),
+           (2, TIMESTAMP '2026-01-18 10:00:00', DATE '2026-01-18', 4.5),
+           (3, TIMESTAMP '2026-01-17 09:00:00', DATE '2026-01-17', 8.8),
+           (1, TIMESTAMP '2026-01-02 08:00:00', DATE '2026-01-02', 9.9);",
+    )
+    .expect("stage universe");
+
+    // Derive the plans; the edges (and therefore the backward widening) are
+    // the derived clamps, never hand-typed.
+    let silver_sql = sb_silver_body("");
+    let s_inputs = sb_silver_inputs(&silver_sql);
+    let silver_plan = derive_maintenance_plan(
+        &s_inputs,
+        &[Trigger::NewData {
+            source: "bronze_events".to_string(),
+        }],
+    );
+    assert!(
+        silver_plan.refusals.is_empty(),
+        "{:?}",
+        silver_plan.refusals
+    );
+    let scans = &silver_plan.cells[0].scans;
+    let rollup_sql = sb_rollup_body("silver_events");
+    let mut r_inputs = rollup_inputs();
+    r_inputs.sql = &rollup_sql;
+    let rollup_plan = derive_maintenance_plan(
+        &r_inputs,
+        &[Trigger::NewData {
+            source: "silver_events".to_string(),
+        }],
+    );
+    let edges = vec![
+        Edge::from_clamp("silver_events", clamp_for(scans, "bronze_events")),
+        Edge::from_clamp("silver_events", clamp_for(scans, "sessions")),
+        Edge::from_clamp("silver_events", clamp_for(scans, "conversions")),
+        Edge::from_clamp(
+            "daily_conv_rate",
+            clamp_for(&rollup_plan.cells[0].scans, "silver_events"),
+        ),
+    ];
+
+    // Backward resolution: build daily_conv_rate for [Jan 5, Jan 8) = [4, 7).
+    let period = DayInterval::new(4, 7);
+    let resolved = required_inputs(&edges, "daily_conv_rate", period).expect("resolve");
+    assert_eq!(
+        resolved.required["silver_events"],
+        vec![DayInterval::new(4, 7)]
+    );
+    assert_eq!(
+        resolved.required["bronze_events"],
+        vec![DayInterval::new(4, 9)],
+        "arrivals widen forward by the 48h lateness window"
+    );
+    assert_eq!(
+        resolved.required["conversions"],
+        vec![DayInterval::new(4, 21)],
+        "conversions widen forward by the 14d attribution window"
+    );
+    assert_eq!(
+        resolved.required["sessions"],
+        vec![DayInterval::new(2, 7)],
+        "sessions widen backward by the 48h max session length"
+    );
+    assert_eq!(
+        resolved.build_order,
+        vec!["silver_events".to_string(), "daily_conv_rate".to_string()]
+    );
+
+    // Universe baselines, restricted to the period.
+    let uni_silver = sb_silver_body("uni.");
+    let period_pred = format!(
+        "event_date >= {} AND event_date < {}",
+        date_of(period.start),
+        date_of(period.end)
+    );
+    let silver_baseline = format!("SELECT * FROM ({uni_silver}) WHERE {period_pred}");
+    let rollup_baseline = format!(
+        "SELECT * FROM ({}) WHERE {period_pred}",
+        sb_rollup_body(&format!("({uni_silver})"))
+    );
+
+    // --- Negative control: an under-widened conversions slice (the naive
+    // [4, 7) guess) builds without error but silently diverges — the
+    // sentinel event (id 2, converting on day 17) loses its score.
+    build_sandbox(&conn, &resolved.required, &DayInterval::new(4, 7), &period);
+    let naive_sentinel: Option<f64> = conn
+        .query_row(
+            "SELECT conversion_score FROM silver_events WHERE event_id = 2",
+            [],
+            |r| r.get(0),
+        )
+        .expect("naive sentinel");
+    assert_eq!(
+        naive_sentinel, None,
+        "under-widened conversions slice must lose the late conversion"
+    );
+    assert!(
+        !multiset_equal(&conn, "SELECT * FROM silver_events", &silver_baseline),
+        "the naive build must diverge from the full-universe baseline"
+    );
+    drop_sandbox(&conn);
+
+    // --- The resolved build: exact slices, bottom-up, equal to the
+    // full-universe computation over the period.
+    build_sandbox(
+        &conn,
+        &resolved.required,
+        &resolved.required["conversions"][0],
+        &period,
+    );
+    assert!(multiset_equal(
+        &conn,
+        "SELECT * FROM silver_events",
+        &silver_baseline
+    ));
+    assert!(multiset_equal(
+        &conn,
+        "SELECT * FROM daily_conv_rate",
+        &rollup_baseline
+    ));
+    // The sentinel proves the forward widening is load-bearing…
+    let sentinel: f64 = conn
+        .query_row(
+            "SELECT conversion_score FROM silver_events WHERE event_id = 2",
+            [],
+            |r| r.get(0),
+        )
+        .expect("sentinel");
+    assert_eq!(sentinel, 4.5);
+    // …the boundary session proves the backward widening is (session 100
+    // started on day 2, the first required sessions day)…
+    let boundary_session: i64 = conn
+        .query_row(
+            "SELECT session_id FROM silver_events WHERE event_id = 3",
+            [],
+            |r| r.get(0),
+        )
+        .expect("boundary session");
+    assert_eq!(boundary_session, 100);
+    // …and the late arrival proves the bronze widening is (event 7 landed
+    // on day 8, the last required arrivals day).
+    let late_arrival_rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM silver_events WHERE event_id = 7",
+            [],
+            |r| r.get(0),
+        )
+        .expect("late arrival");
+    assert_eq!(late_arrival_rows, 1);
+}
