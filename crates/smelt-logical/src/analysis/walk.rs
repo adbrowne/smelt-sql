@@ -1424,6 +1424,63 @@ mod tests {
         );
     }
 
+    /// Set-operation arms carry a per-branch trace VECTOR: arms anchored to
+    /// different sources each keep their own verdict — there is no collapsed
+    /// single-source reduction — and a `StaticSeed` arm keeps its per-branch
+    /// refusal (the consumer's per-branch policy refuses that branch's push),
+    /// never averaged away.
+    #[test]
+    fn set_op_branch_trace_vector() {
+        use super::super::monotonicity::{
+            trace_event_time_composed, ComposedTrace, EventTimeTrace,
+        };
+        use super::super::source_bounds::BoundContext;
+
+        let ctx = BoundContext::new()
+            .with_source("sources.a", "a_ts")
+            .with_source("sources.b", "b_ts");
+
+        let sql = "SELECT a_ts AS event_time FROM smelt.sources.a \
+                   UNION ALL \
+                   SELECT b_ts AS event_time FROM smelt.sources.b";
+        match trace_event_time_composed(sql, "event_time", &ctx, false) {
+            Some(ComposedTrace::Branches(traces)) => {
+                assert_eq!(traces.len(), 2, "one trace per arm; got {traces:?}");
+                match (&traces[0], &traces[1]) {
+                    (
+                        EventTimeTrace::Traceable { source: s0, .. },
+                        EventTimeTrace::Traceable { source: s1, .. },
+                    ) => {
+                        assert_eq!(s0, "sources.a");
+                        assert_eq!(s1, "sources.b");
+                    }
+                    other => {
+                        panic!("each branch must trace to its own source, got {other:?}")
+                    }
+                }
+            }
+            other => panic!("expected a per-branch trace vector, got {other:?}"),
+        }
+
+        let sql = "SELECT a_ts AS event_time FROM smelt.sources.a \
+                   UNION ALL \
+                   SELECT NULL AS event_time FROM smelt.sources.b";
+        match trace_event_time_composed(sql, "event_time", &ctx, false) {
+            Some(ComposedTrace::Branches(traces)) => {
+                assert_eq!(traces.len(), 2);
+                assert!(matches!(traces[0], EventTimeTrace::Traceable { .. }));
+                assert!(
+                    matches!(traces[1], EventTimeTrace::StaticSeed { .. }),
+                    "the seed branch must keep its own refusal in the vector, got {:?}",
+                    traces[1]
+                );
+            }
+            other => {
+                panic!("expected a per-branch vector with the seed branch preserved, got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn chained_join_bands_add_along_path() {
         use super::super::source_bounds::{

@@ -822,6 +822,367 @@ fn combine_offset(existing: Offset, shift: Offset) -> Offset {
     }
 }
 
+// ===== Relational composition over the property walk =====
+
+/// Whole-model composed event-time trace for one target output column
+/// (`model_properties.md` §"The composition walk"): the expression-level
+/// trace lifted through the model's relational operators — a rename/monotone
+/// re-projection through a CTE or derived table reduces to the source leaf
+/// (offsets add, strictness meets, the outermost grid wins), and a set
+/// operation carries a per-branch vector instead of a collapsed verdict.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComposedTrace {
+    /// The model's root is a single SELECT scope: one verdict, reduced
+    /// through any CTE / derived-table projection layers beneath it.
+    Single(EventTimeTrace),
+    /// The model's root is a set operation: one verdict per arm, in source
+    /// order. Branches may anchor to different sources with different
+    /// offsets — no single-verdict reduction exists in general, so the
+    /// vector is the honest type; a `StaticSeed`/`NotTraceable` arm keeps
+    /// its own refusal.
+    Branches(Vec<EventTimeTrace>),
+}
+
+/// Per-column event-time trace of one projected output column of a walk
+/// scope — the value a consuming (outer) scope reduces its own leaf-column
+/// reference against.
+#[derive(Debug, Clone)]
+pub(crate) struct ColumnTrace {
+    pub output: String,
+    pub trace: EventTimeTrace,
+}
+
+/// The trace transfer function's per-node verdict over the composition walk.
+#[derive(Debug, Clone)]
+pub(crate) enum TraceNode {
+    /// A single SELECT scope: the trace of each projected output column, in
+    /// projection order.
+    Scope(Vec<ColumnTrace>),
+    /// A set operation: the per-arm verdicts, in source order (CTE-definition
+    /// children excluded — each reference site carries the definition's
+    /// verdict already).
+    Branches(Vec<TraceNode>),
+    /// A construct the walk cannot model — the entry point rejects the whole
+    /// tree fail-closed before walking, so this arm is a defensive mirror of
+    /// `OpNode::Unsupported`.
+    Unsupported,
+}
+
+/// The event-time trace transfer function (`model_properties.md` §"The
+/// composition walk"): leaf-level classification is the unchanged pure
+/// expression fold (`classify`); the operator rule is projection re-mapping —
+/// a scope's leaf column that resolves (via the walk's alias map) to a CTE or
+/// derived-table input reduces against that input's own column trace
+/// (offsets add, strictness meets, outermost grid wins; `StaticSeed` and
+/// `NotTraceable` are absorbing, kind preserved). Every shape the reduction
+/// does not positively resolve falls back to the existing name-based
+/// `resolve_against_ctx` — the widening is exactly trace-through-projection,
+/// never a new expression admission.
+pub(crate) struct TraceTransfer<'a> {
+    pub ctx: &'a BoundContext,
+    pub declared_monotonic: bool,
+}
+
+impl TraceTransfer<'_> {
+    /// Trace every projected column of one SELECT scope. Wildcard items keep
+    /// a placeholder entry (so ordinal correspondence across set-op arms is
+    /// preserved) that no outer scope can reduce through.
+    fn scope_columns(
+        &self,
+        sn: &crate::analysis::walk::SelectNode,
+        cx: &crate::analysis::walk::NodeCx,
+        input_traces: &std::collections::BTreeMap<String, &TraceNode>,
+    ) -> Vec<ColumnTrace> {
+        let Some(select_list) = sn.select.select_list() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in select_list.items() {
+            if item.is_wildcard() {
+                out.push(ColumnTrace {
+                    output: "*".to_string(),
+                    trace: EventTimeTrace::NotTraceable {
+                        reason: "wildcard projection is not a single traced column".to_string(),
+                        kind: NotTraceableKind::Undecidable,
+                    },
+                });
+                continue;
+            }
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            let output = item
+                .column_name()
+                .unwrap_or_else(|| expr.text().trim().to_string());
+            let trace = self.trace_item(&expr, cx, input_traces);
+            out.push(ColumnTrace { output, trace });
+        }
+        out
+    }
+
+    /// Trace one projected expression: the pure expression fold, then leaf
+    /// resolution through the scope's inputs where that positively resolves,
+    /// name-based `resolve_against_ctx` otherwise (unchanged behaviour).
+    fn trace_item(
+        &self,
+        expr: &Expr,
+        cx: &crate::analysis::walk::NodeCx,
+        input_traces: &std::collections::BTreeMap<String, &TraceNode>,
+    ) -> EventTimeTrace {
+        use crate::analysis::walk::RelationSource;
+
+        let chain = match classify(expr, self.declared_monotonic) {
+            Classification::Trace(chain) => chain,
+            Classification::StaticSeed(reason) => return EventTimeTrace::StaticSeed { reason },
+            Classification::NotTraceable(reason, kind) => {
+                return EventTimeTrace::NotTraceable { reason, kind }
+            }
+        };
+
+        // Which FROM input does the traced leaf column read from? A
+        // qualifier names it; unqualified is unambiguous only with a single
+        // input. Anything unresolvable keeps the name-based resolution.
+        let qualifier =
+            find_leaf_column_ref(expr).and_then(|col| col.qualifier().map(|q| q.to_string()));
+        let alias_key = match qualifier {
+            Some(q) => Some(q.to_ascii_lowercase()),
+            None if cx.aliases.len() == 1 => cx.aliases.keys().next().cloned(),
+            None => None,
+        };
+        let Some(key) = alias_key else {
+            return resolve_against_ctx(chain, self.ctx);
+        };
+
+        match cx.aliases.get(&key) {
+            Some(RelationSource::Table(table)) => {
+                // Alias-scoped confirmation against the context (both the
+                // segment-path and `smelt.`-prefixed key forms, matching the
+                // reach transfer). Confirmation only ever admits; every
+                // non-confirming case keeps the name-based verdict.
+                let entry = self
+                    .ctx
+                    .source_partition_cols
+                    .get_key_value(table.as_str())
+                    .or_else(|| {
+                        self.ctx
+                            .source_partition_cols
+                            .get_key_value(&format!("smelt.{table}"))
+                    });
+                if let Some((ctx_key, partition_col)) = entry {
+                    if partition_col.as_str() == chain.source_column.as_str() {
+                        return EventTimeTrace::Traceable {
+                            source: ctx_key.clone(),
+                            source_column: chain.source_column,
+                            offset: chain.offset,
+                            monotonicity: chain.monotonicity,
+                        };
+                    }
+                }
+                resolve_against_ctx(chain, self.ctx)
+            }
+            Some(RelationSource::Cte(_)) | Some(RelationSource::DerivedTable(_)) => {
+                let inner = input_traces.get(&key).and_then(|node| match node {
+                    TraceNode::Scope(cols) => cols
+                        .iter()
+                        .find(|c| c.output.eq_ignore_ascii_case(&chain.source_column)),
+                    // A set-op or unmodellable input is not a simple
+                    // projection — no reduction; keep the current verdict.
+                    TraceNode::Branches(_) | TraceNode::Unsupported => None,
+                });
+                match inner {
+                    Some(col) => compose_projection(&col.trace, chain),
+                    None => resolve_against_ctx(chain, self.ctx),
+                }
+            }
+            None => resolve_against_ctx(chain, self.ctx),
+        }
+    }
+}
+
+impl crate::analysis::walk::Transfer for TraceTransfer<'_> {
+    type Verdict = TraceNode;
+
+    fn leaf(
+        &self,
+        _leaf: &crate::analysis::walk::LeafInput<'_>,
+        _cx: &crate::analysis::walk::NodeCx,
+    ) -> TraceNode {
+        // A base relation projects no expressions of its own; the consuming
+        // scope resolves its columns directly against the context.
+        TraceNode::Scope(Vec::new())
+    }
+
+    fn operator(
+        &self,
+        op: &crate::analysis::walk::OpNode<'_>,
+        children: &[TraceNode],
+        cx: &crate::analysis::walk::NodeCx,
+    ) -> TraceNode {
+        use crate::analysis::walk::{InputItem, OpNode};
+        match op {
+            OpNode::Unsupported { .. } => TraceNode::Unsupported,
+            OpNode::SetOp(so) => TraceNode::Branches(children[so.ctes.len()..].to_vec()),
+            OpNode::Select(sn) => {
+                // Input verdicts keyed like the walk's alias map, for the
+                // projection re-mapping (CTE references and aliased derived
+                // tables only — base tables resolve via the context).
+                let mut input_traces = std::collections::BTreeMap::new();
+                for (input, child) in sn.inputs.iter().zip(&children[sn.ctes.len()..]) {
+                    match input {
+                        InputItem::CteRef { name, alias } => {
+                            let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
+                            input_traces.insert(key, child);
+                        }
+                        InputItem::Derived {
+                            alias: Some(alias), ..
+                        } => {
+                            input_traces.insert(alias.to_ascii_lowercase(), child);
+                        }
+                        _ => {}
+                    }
+                }
+                TraceNode::Scope(self.scope_columns(sn, cx, &input_traces))
+            }
+        }
+    }
+}
+
+/// Reduce an outer projection layer (`outer`, the scope's own §expression
+/// chain over an input's output column) onto that column's inner verdict:
+/// offsets add ([`combine_offset`]), strictness meets, the outermost grid
+/// wins. `StaticSeed` and `NotTraceable` are absorbing — a projection layer
+/// over them keeps the refusal, including its `Disproven`/`Undecidable` kind.
+fn compose_projection(inner: &EventTimeTrace, outer: Chain) -> EventTimeTrace {
+    match inner {
+        EventTimeTrace::Traceable {
+            source,
+            source_column,
+            offset,
+            monotonicity,
+        } => EventTimeTrace::Traceable {
+            source: source.clone(),
+            source_column: source_column.clone(),
+            offset: combine_offset(offset.clone(), outer.offset),
+            monotonicity: meet_monotonicity(*monotonicity, outer.monotonicity),
+        },
+        other => other.clone(),
+    }
+}
+
+/// The monotonicity meet across two stacked layers: booleans conjoin (the
+/// stack is monotone/strict only when every layer is), and the grid is
+/// last-writer-wins — the outer layer's grid when it truncates, the inner
+/// layer's surviving grid otherwise.
+fn meet_monotonicity(inner: Monotonicity, outer: Monotonicity) -> Monotonicity {
+    Monotonicity {
+        is_monotonic: inner.is_monotonic && outer.is_monotonic,
+        is_positive: inner.is_positive && outer.is_positive,
+        is_always_monotonic: inner.is_always_monotonic && outer.is_always_monotonic,
+        is_strict: inner.is_strict && outer.is_strict,
+        grid_unit: outer.monotonicity_grid_or(inner.grid_unit),
+    }
+}
+
+impl Monotonicity {
+    /// `self.grid_unit` when set, else `inner` — the outermost
+    /// grid-truncating layer governs the final partition grid.
+    fn monotonicity_grid_or(&self, inner: Option<Granularity>) -> Option<Granularity> {
+        self.grid_unit.or(inner)
+    }
+}
+
+/// Trace `target_col` (the projected event-time column of the model's
+/// outermost scope) through the model's relational composition.
+///
+/// Pure and fail-closed. Returns `None` when the text has no SELECT, when
+/// the walk tree contains a construct the normalization cannot model
+/// (`has_unsupported` — the caller keeps its existing non-walk behaviour,
+/// mirroring the bound-derivation fallback discipline), or when the root
+/// scope does not project `target_col`. For a set-operation root, arms after
+/// the first are matched by output name when they alias the same column,
+/// falling back to the first arm's ordinal position (SQL takes a compound
+/// query's output names from its first arm).
+pub fn trace_event_time_composed(
+    sql: &str,
+    target_col: &str,
+    ctx: &BoundContext,
+    declared_monotonic: bool,
+) -> Option<ComposedTrace> {
+    use crate::analysis::walk::QueryTree;
+
+    let tree = QueryTree::from_sql(sql)?;
+    trace_event_time_composed_for_tree(&tree, target_col, ctx, declared_monotonic)
+}
+
+/// Like [`trace_event_time_composed`], but from an already-parsed outermost
+/// `SelectStmt` rather than raw SQL text — avoids a redundant re-parse for
+/// callers (e.g. `rules::incremental::trace_union_branches`) that already
+/// hold the parsed statement. `select` must be the *whole* set-operation
+/// chain's head (the statement `.union_select()`/`.set_operation_select()`
+/// walks from) — passing a single arm mid-chain would re-flatten the
+/// remaining arms as its own branches.
+pub(crate) fn trace_event_time_composed_from_select(
+    select: &smelt_parser::SelectStmt,
+    target_col: &str,
+    ctx: &BoundContext,
+    declared_monotonic: bool,
+) -> Option<ComposedTrace> {
+    use crate::analysis::walk::QueryTree;
+
+    let tree = QueryTree::from_select(select);
+    trace_event_time_composed_for_tree(&tree, target_col, ctx, declared_monotonic)
+}
+
+/// Shared reduction of an already-built [`QueryTree`] to the composed trace
+/// of `target_col` — the common tail of [`trace_event_time_composed`] and
+/// [`trace_event_time_composed_from_select`].
+fn trace_event_time_composed_for_tree(
+    tree: &crate::analysis::walk::QueryTree,
+    target_col: &str,
+    ctx: &BoundContext,
+    declared_monotonic: bool,
+) -> Option<ComposedTrace> {
+    use crate::analysis::walk::walk;
+
+    if tree.root.has_unsupported() {
+        return None;
+    }
+    let verdict = walk(
+        tree,
+        &TraceTransfer {
+            ctx,
+            declared_monotonic,
+        },
+    );
+    match verdict {
+        TraceNode::Scope(cols) => cols
+            .iter()
+            .find(|c| c.output.eq_ignore_ascii_case(target_col))
+            .map(|c| ComposedTrace::Single(c.trace.clone())),
+        TraceNode::Branches(branches) => {
+            let TraceNode::Scope(first) = branches.first()? else {
+                return None;
+            };
+            let position = first
+                .iter()
+                .position(|c| c.output.eq_ignore_ascii_case(target_col))?;
+            let mut out = Vec::with_capacity(branches.len());
+            for branch in &branches {
+                let TraceNode::Scope(cols) = branch else {
+                    return None;
+                };
+                let col = cols
+                    .iter()
+                    .find(|c| c.output.eq_ignore_ascii_case(target_col))
+                    .or_else(|| cols.get(position))?;
+                out.push(col.trace.clone());
+            }
+            Some(ComposedTrace::Branches(out))
+        }
+        TraceNode::Unsupported => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,6 +1786,82 @@ mod tests {
                 );
             }
             other => panic!("expected NotTraceable, got {other:?}"),
+        }
+    }
+
+    // ---- Relational composition (the composition walk) ----
+
+    /// A trace that fails ONLY because the event-time column was renamed
+    /// through a CTE projection reduces to the source leaf: name-based
+    /// expression-level matching alone sees `event_ts`, which is no source's
+    /// partition column.
+    #[test]
+    fn trace_reduces_through_renaming_cte() {
+        let sql = "WITH b AS (SELECT ts AS event_ts FROM src) \
+                   SELECT event_ts AS event_time FROM b";
+        let ctx = BoundContext::new().with_source("src", "ts");
+        match trace_event_time_composed(sql, "event_time", &ctx, false) {
+            Some(ComposedTrace::Single(EventTimeTrace::Traceable {
+                source,
+                source_column,
+                offset,
+                monotonicity,
+            })) => {
+                assert_eq!(source, "src");
+                assert_eq!(source_column, "ts");
+                assert_eq!(offset, Offset::Seconds(Seconds::ZERO));
+                assert!(monotonicity.is_strict);
+                assert!(monotonicity.is_monotonic);
+            }
+            other => panic!("expected Traceable src.ts through the renaming CTE, got {other:?}"),
+        }
+    }
+
+    /// Offsets ADD across projection layers and strictness MEETS: a CTE
+    /// shifting `+ INTERVAL '1 day'` under an outer `+ INTERVAL '2 hours'`
+    /// folds to one 26h offset; a `DATE_TRUNC` in the inner layer weakens
+    /// `is_strict` for the whole stack (and its grid survives an outer
+    /// shift-only layer).
+    #[test]
+    fn offsets_add_and_strictness_meets_across_layers() {
+        let ctx = BoundContext::new().with_source("src", "ts");
+
+        let sql = "WITH b AS (SELECT ts + INTERVAL '1 day' AS event_ts FROM src) \
+                   SELECT event_ts + INTERVAL '2 hours' AS event_time FROM b";
+        match trace_event_time_composed(sql, "event_time", &ctx, false) {
+            Some(ComposedTrace::Single(EventTimeTrace::Traceable {
+                source,
+                source_column,
+                offset,
+                monotonicity,
+            })) => {
+                assert_eq!(source, "src");
+                assert_eq!(source_column, "ts");
+                assert_eq!(
+                    offset,
+                    Offset::Seconds(Seconds(Seconds::days(1).0 + Seconds::hours(2).0)),
+                    "layer offsets must fold additively"
+                );
+                assert!(monotonicity.is_strict, "constant shifts keep strictness");
+            }
+            other => panic!("expected folded offset across layers, got {other:?}"),
+        }
+
+        let sql = "WITH b AS (SELECT DATE_TRUNC('day', ts) AS event_ts FROM src) \
+                   SELECT event_ts + INTERVAL '2 hours' AS event_time FROM b";
+        match trace_event_time_composed(sql, "event_time", &ctx, false) {
+            Some(ComposedTrace::Single(EventTimeTrace::Traceable { monotonicity, .. })) => {
+                assert!(
+                    !monotonicity.is_strict,
+                    "an inner truncation weakens strictness for the whole stack"
+                );
+                assert_eq!(
+                    monotonicity.grid_unit,
+                    Some(Granularity::Day),
+                    "the inner grid survives an outer shift-only layer"
+                );
+            }
+            other => panic!("expected weakened strictness through the CTE, got {other:?}"),
         }
     }
 

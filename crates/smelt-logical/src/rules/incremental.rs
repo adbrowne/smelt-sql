@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::analysis::monotonicity::{
-    classify_function_determinism, trace_event_time, EventTimeTrace, FunctionDeterminism,
-    NONDETERMINISTIC_FUNCTIONS,
+    classify_function_determinism, trace_event_time, trace_event_time_composed_from_select,
+    ComposedTrace, EventTimeTrace, FunctionDeterminism, NONDETERMINISTIC_FUNCTIONS,
 };
 use crate::analysis::source_bounds::{
     from_clause_alias_sources, resolve_join_driving_fact, BoundContext, BoundResult, InjectionPoint,
@@ -1108,6 +1108,31 @@ pub fn trace_union_branches(
             None => break,
         }
     }
+
+    // The composed walk (`model_properties.md` §"The composition walk")
+    // resolves a branch that renames its event-time column through a CTE
+    // projection — a per-branch shape the loop above cannot see, since it
+    // only ever traces the branch's own outer expression against the
+    // (possibly branch-scoped) context, never reduces through a CTE
+    // reference. Consulted here as a pure widening: it only ever upgrades a
+    // `NotTraceable` slot to `Traceable`, never overrides a verdict the loop
+    // above already reached (`Traceable`/`StaticSeed` stay exactly as
+    // computed above), so behaviour for every branch shape the old path
+    // already handled is unchanged.
+    if let Some(ComposedTrace::Branches(composed)) =
+        trace_event_time_composed_from_select(select, target_col, ctx, false)
+    {
+        if composed.len() == traces.len() {
+            for (slot, composed_trace) in traces.iter_mut().zip(composed) {
+                if matches!(slot, EventTimeTrace::NotTraceable { .. })
+                    && matches!(composed_trace, EventTimeTrace::Traceable { .. })
+                {
+                    *slot = composed_trace;
+                }
+            }
+        }
+    }
+
     Ok(traces)
 }
 
@@ -1286,14 +1311,6 @@ fn restrict_ctx_for_derived_tables(
         }
     }
 
-    if derived.is_empty() {
-        // No derived table projects the event-time column — nothing to
-        // classify; keep ctx untouched (unchanged behaviour).
-        return Ok(BoundContext {
-            source_partition_cols: ctx.source_partition_cols.clone(),
-        });
-    }
-
     let new_ctx = BoundContext {
         source_partition_cols: ctx.source_partition_cols.clone(),
     };
@@ -1321,6 +1338,33 @@ fn restrict_ctx_for_derived_tables(
             }
         }
     }
+
+    // The scan above only classifies a derived table's item that is
+    // literally aliased `partition_col` *inside its own body* — a CTE that
+    // renames the column to something else, re-aliased to `partition_col`
+    // only by the *outer* SELECT, is invisible to that literal match, so a
+    // static/NULL seed hidden behind such a rename silently passed through
+    // as a no-op. The composed walk (`model_properties.md` §"The
+    // composition walk") reduces through exactly that rename and is
+    // consulted here as an additional, fail-closed check — reached only
+    // when the scan above found no error, so it can only ADD a rejection
+    // the scan above missed, never override or duplicate a verdict already
+    // reached for a construct the scan above already saw.
+    let declared_monotonic = model
+        .timeseries_config
+        .as_ref()
+        .is_some_and(|ts| ts.assert_monotonic);
+    if let Some(ComposedTrace::Single(EventTimeTrace::StaticSeed { reason })) =
+        trace_event_time_composed_from_select(select, partition_col, ctx, declared_monotonic)
+    {
+        return Err(format!(
+            "Model '{}': the projection of '{partition_col}' reduces through a CTE/derived-table \
+             rename to a static/NULL seed ({reason}) — not a partitionable stream; batched \
+             pushdown cannot be proven safe",
+            model.name
+        ));
+    }
+
     Ok(new_ctx)
 }
 
@@ -2796,6 +2840,108 @@ mod tests {
             bounds.is_empty(),
             "NotTraceable branch must yield no per-source pushdown entries; got: {:?}",
             bounds
+        );
+    }
+
+    // --- Property-composition walk (Phase 5): trace composes through CTEs
+    // and set-op branches. ---
+
+    /// A UNION ALL branch that renames its event-time column through a CTE
+    /// (the branch's own CTE aliases the source column to something other
+    /// than the model's partition column, and the branch's outer SELECT
+    /// re-aliases *that* to the partition column) is invisible to the old
+    /// per-branch name-based trace — `trace_event_time` only ever sees the
+    /// branch's own outer expression, which is a bare reference to the CTE's
+    /// output column, not the source column, so it never matches any
+    /// source's partition-column name and comes back `NotTraceable`. The
+    /// composed walk reduces through the CTE rename to the real source
+    /// column and traces the branch, closing this gap without changing the
+    /// other (already-Traceable/StaticSeed) branches' verdicts.
+    #[test]
+    fn test_union_all_branch_traces_through_renaming_cte() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("web_events", "event_ts", "event_date"));
+        graph.add_model(upstream_ts_model("mobile_events", "event_ts", "event_date"));
+
+        let m = ModelInfo {
+            name: "all_events".to_string(),
+            sql: "WITH staged AS (SELECT event_date AS raw FROM smelt.web_events) \
+                  SELECT raw AS event_date, user_id FROM staged \
+                  UNION ALL \
+                  SELECT event_date, user_id FROM smelt.mobile_events"
+                .to_string(),
+            refs: vec!["web_events".to_string(), "mobile_events".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
+            }),
+        };
+
+        let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
+        assert!(
+            bounds.contains_key("web_events"),
+            "the renamed branch must trace through the CTE to its real source; keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            bounds.contains_key("mobile_events"),
+            "keys: {:?}",
+            bounds.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A CTE that projects a static/NULL seed under a name *other* than the
+    /// model's partition column, re-aliased to the partition column only by
+    /// the outer SELECT, is invisible to the old per-CTE-item scan (which
+    /// only inspects a CTE item literally aliased the partition column) — the
+    /// hazard silently passed as a no-op. The composed walk reduces through
+    /// the rename and must reject the model, the same way a directly-aliased
+    /// static seed already does.
+    #[test]
+    fn test_cte_body_static_seed_hidden_behind_rename_is_rejected() {
+        let mut graph = ModelGraph::new();
+        graph.add_model(upstream_ts_model("upstream", "event_date", "event_date"));
+
+        let m = ModelInfo {
+            name: "cte_model".to_string(),
+            sql: "WITH staged AS (SELECT NULL AS raw, user_id FROM upstream) \
+                  SELECT raw AS event_date, user_id FROM staged"
+                .to_string(),
+            refs: vec!["upstream".to_string()],
+            timeseries_config: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            incremental_config: Some(BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec![],
+                safety_overrides: BatchedSafetyOverrides {
+                    allow_subqueries: true,
+                    ..Default::default()
+                },
+            }),
+        };
+
+        let result = derive_model_source_bounds(&m, &graph);
+        assert!(
+            result.is_err(),
+            "a static/NULL seed hidden behind a CTE rename must be rejected, got: {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("static"),
+            "error must name the construct: {err}"
         );
     }
 
