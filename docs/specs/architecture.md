@@ -405,6 +405,21 @@ The rule reaches every type in `smelt-db`'s diagnostic surface, every diagnostic
 
 The standing CI gate is `cargo test -p smelt-lsp --test position_encoding`, which opens a workspace fixture containing non-ASCII identifiers and asserts that LSP diagnostics report the correct UTF-16 column at the diagnostic site under both the default UTF-16 and the negotiated UTF-8 (byte) encoding. ASCII-only fixtures continue to pass before and after this rule lands (since byte / UTF-16 / codepoint columns are identical for ASCII), so the existing `example_diagnostics` and `example_workspaces` gates are the regression baseline. Run `rg 'offset_to_position|text_range_to_range' crates/smelt-db/src/ crates/smelt-parser/src/` to confirm no analysis-crate violations were reintroduced.
 
+### Property composition walk rule
+
+A composition-relevant model-property verdict — bound/reach derivation, partition-alignment admission, the event-time monotonicity trace, grain/functional-dependency/determinism folding — is produced by the shared bottom-up property walk in `smelt-logical::analysis::walk` (`crates/smelt-logical/src/analysis/walk.rs`: the normalized `QueryTree`, the `Transfer` trait, per-node scope enumeration and column lineage), never by an ad hoc scan over the model's raw SQL text. Per-clause or substring scans are admissible only in two shapes: as **leaf classifiers** invoked by the walk over one already-bounded node's own region (a single window frame, one already-isolated expression, the text the walk itself carved out for that node) — never over the whole model — or as **advisory heuristics** that never feed a composition-relevant verdict (an estimate consumed only for presentation, batch-sizing, or other non-correctness-bearing output). A scan that gates admission or a derived bound while operating on the whole model's text, outside the walk, is exactly the shape this rule forbids: it under-derives nested composition (a stacked window frame or a chained join band collapses to the same margin as a single one) and skips scopes the flat scan never visits (CTE-internal `HAVING`/`DISTINCT`/`OVER`/`LIMIT`).
+
+This mirrors `docs/specs/model_properties.md` §Constraints "Composition happens in the walk, not in scans" — same rule, authoritative there for property semantics; this section is the architectural (cross-cutting, `smelt-logical`-wide) statement of it.
+
+**The rule in practice:**
+- **DO** add new composition-relevant logic as a `Transfer` impl (or an extension of an existing one) in `analysis/walk.rs`, so it folds bottom-up with exhaustive scope enumeration — CTE bodies, set-operation branches, derived tables — included by construction.
+- **DO** write a leaf classifier as a pure function over one AST node's own text/subtree, invoked by a `Transfer::leaf`/`Transfer::operator` implementation — never called directly against the whole model's SQL from a proof path.
+- **DO** tag every surviving non-walk text scan in `smelt-logical` with a doc comment classifying it `Leaf classifier` or `Advisory heuristic`, naming what invokes it (or, for an advisory heuristic, that no admission/bound path consumes its output).
+- **DON'T** add a new uppercase/lowercase-substring scan over the full model SQL to gate admission, a bound, or a monotonicity verdict. If the walk cannot yet see the construct you need, extend the walk — a scan bolted on beside it re-opens the coverage hole the walk exists to close.
+- **DON'T** let an advisory heuristic's output reach an admission gate or a pushdown-eligibility proof — the moment it does, it is no longer advisory and must be migrated onto the walk (or promoted to a leaf classifier invoked by it).
+
+The standing CI gate is `cargo test -p smelt-logical --test walk_coverage`, which scans the admission/proof modules under `crates/smelt-logical/src/{analysis,rules}` for raw substring text-scans (`.contains("…")` on case-folded free text) and fails on any that lack a `Leaf classifier`/`Advisory heuristic` doc-comment tag on the enclosing function (or a file-wide tag on the module's `//!` doc, used where an entire module is a deliberate advisory divergence, e.g. `analysis/temporal.rs`'s `EffectiveWindow` estimate). Run it whenever adding or modifying a text-scanning helper in `smelt-logical`.
+
 ### Planner scope
 
 The planner handles cross-model and execution-shape transforms only:

@@ -1249,3 +1249,9 @@ Block schema:
 - Coverage caveat: the SC-6 cell is linkB — it asserts the analyzer fact directly (no once-write
   consumer exists to drive a linkC divergence). The narrative divergence (a frozen once-write
   value for a colliding key) is described, not executed.
+- (Phase 7 review, 2026-07-08) `has_set_op_barrier` grades a *bare* `UNION ALL` (no branch-level
+  discriminant or declared disjointness) as `Refused`, where `docs/research/20260707-property-
+  per-key-constancy.md` §5 prescribes `NotProven` — a bare union's branches might be key-disjoint
+  as a world-fact, so a future branch-disjointness declaration could widen it; `Refused`
+  forecloses that route entirely. This is strictly more conservative, not unsound, and stays
+  as-is behaviourally (docs-only note); a widening-in-place fix, if wanted, is future work.

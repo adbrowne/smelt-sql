@@ -4,6 +4,18 @@
 //! or future context (lookahead) each query needs beyond the requested
 //! time range. This is combined with upstream data latency to compute
 //! the effective window for incremental execution.
+//!
+//! Advisory heuristic (`docs/specs/architecture.md` §"Property composition
+//! walk rule", `docs/specs/model_properties.md` §Known Divergences): this
+//! module's `EffectiveWindow` estimate is a deliberately separate,
+//! day-granular, uppercase-substring-scanning walk — not the second-granular
+//! `BoundResult` composition walk in `source_bounds.rs`. It answers a
+//! different question (backfill batch-chunking size) with deliberately
+//! different fail-closure (a bare `LAG`/`LEAD` is a bounded row/period
+//! estimate here, where `source_bounds.rs` refuses the same construct
+//! outright). Its output feeds no admission gate and no pushdown-eligibility
+//! proof; every function in this module is an advisory heuristic and stays
+//! text-scan based by design.
 
 use serde::Serialize;
 use smelt_parser::{parse, File, FrameUnit, SelectStmt};

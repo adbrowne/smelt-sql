@@ -411,6 +411,10 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
     })
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): scoped to one already-resolved function call's own text, not the
+/// surrounding query — safe to compose under the walk.
+///
 /// Check if a FunctionCall contains the DISTINCT keyword by examining its text.
 fn has_distinct_keyword(func: &smelt_parser::FunctionCall) -> bool {
     // Use the function's text representation and check for DISTINCT
@@ -429,6 +433,11 @@ fn extract_distinct_argument(func: &smelt_parser::FunctionCall) -> String {
     }
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): locates one clause's boundary within the outer scope's own text so
+/// the caller ([`extract_group_by_from_text`]) can extract a leaf-level GROUP
+/// BY expression list; it never reasons about a nested scope's structure.
+///
 /// Find the byte-position of the last `GROUP BY` keyword in `sql` that is not
 /// inside a line comment (`--`).  Returns `None` if no such occurrence exists.
 ///
@@ -459,6 +468,10 @@ fn find_group_by_outside_comments(sql: &str) -> Option<usize> {
     best
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): extracts the outer scope's own GROUP BY expression list from its
+/// own text; it does not reason about nested scopes.
+///
 /// Extract GROUP BY expressions from raw SQL text, resolving ordinal references.
 ///
 /// This avoids needing access to parser internals for GROUP BY clause nodes.
@@ -580,6 +593,11 @@ fn split_by_comma_not_in_parens(text: &str) -> Vec<String> {
     parts
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): a model-level presentation annotation lookup, not a composition
+/// verdict — reads the whole model's comments but never feeds bound/reach,
+/// admission, or monotonicity derivation.
+///
 /// Check for `-- smelt:cube_split` comment anywhere in the SQL.
 fn check_cube_split_annotation(sql: &str) -> bool {
     for line in sql.lines() {

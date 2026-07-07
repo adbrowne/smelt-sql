@@ -68,7 +68,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 4     | done     |        | 2026-07-07 |
 | 5     | done     |        | 2026-07-08 |
 | 6     | done     |        | 2026-07-08 |
-| 7     | pending  |        |      |
+| 7     | done     |        | 2026-07-08 |
 
 ---
 
@@ -312,6 +312,19 @@ You are executing this plan from the start of a new session. Your job is to driv
   is populated at aggregate outputs via `combiner_discriminants`, but no verdict reads it yet
   (the idempotence discriminant of `20260707-property-aggregate-algebra.md` §2 is not added to the
   tuple here). (Phase 6)
+- **Bare-UNION FD barrier graded `Refused` where the research design prescribes `NotProven`**
+  (Phase 6 review): `has_set_op_barrier` refuses a declared FD whose `determines` crosses a bare
+  `UNION ALL` outright, but `docs/research/20260707-property-per-key-constancy.md` §5 prescribes
+  `NotProven` — a bare union's branches might be key-disjoint as a world-fact, so a future
+  branch-disjointness declaration could widen it, a route `Refused` forecloses. Strictly more
+  conservative, not unsound; left as-is behaviourally. Recorded in
+  `docs/research/property-discovery/ledger.md` under the SC-6 block. (Phase 7)
+- **`rules/cumulative.rs`'s whole-SQL window-function admission scan is not classified or
+  migrated onto the walk** (Phase 7 review): `classify_cumulative`'s `OVER(`/`OVER (` check
+  predates this plan's scope (cumulative-model admission, not incremental-model composition) and
+  is excluded from `walk_coverage.rs`'s scanned-file list rather than mislabeled as a leaf
+  classifier or advisory heuristic it isn't. Tracked as remaining debt for a future
+  property-discovery pass. (Phase 7)
 
 ## Verification
 

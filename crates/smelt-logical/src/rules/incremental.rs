@@ -691,6 +691,13 @@ fn collect_over_contents(upper_sql: &str) -> Vec<String> {
     contents
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): every `to_uppercase()`/`.contains(` site below is a keyword
+/// predicate over one already-isolated AST node's own text (a single select
+/// item, the WHERE clause, one window's `OVER` content, one CTE body) — a
+/// nondeterminism taint check, not a scope-alignment admission judgment
+/// (`docs/specs/model_properties.md` §Known Divergences).
+///
 /// The non-determinism flow/taint check (batched_models.md §"Non-determinism
 /// and the equivalence contract"; Constraint 13).
 ///

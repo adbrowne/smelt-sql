@@ -587,6 +587,14 @@ pub fn derive_and_classify_bounds(
         .collect()
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule") — also the whole-text fallback [`derive_model_bounds`] uses for a
+/// tree the walk cannot normalize (`QueryNode::has_unsupported`). In that
+/// fallback role it treats the whole model SQL as a single region, the same
+/// extraction [`derive_region_reach`] runs per walk node; it never widens
+/// coverage beyond what the walk-backed path derives, only substitutes for it
+/// when the walk cannot see the tree.
+///
 /// Derive a bound for a single source given its partition column.
 ///
 /// Returns `None` for lookup sources (no timeseries). For timeseries sources,
@@ -688,6 +696,10 @@ fn derive_bound_for_source(sql: &str, partition_col: &str) -> Option<BoundResult
     }
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`derive_region_reach`] over one walk node's own region
+/// text (and by [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Check whether the SQL has a bare LAG or LEAD with no RANGE BETWEEN clause.
 ///
 /// A "bare" LAG/LEAD is one whose OVER clause lacks an explicit RANGE frame.
@@ -722,11 +734,19 @@ fn has_bare_lag_lead_over(upper_sql: &str) -> bool {
     false
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`derive_region_reach`] over one walk node's own region
+/// text (and by [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Check for RANGE BETWEEN UNBOUNDED PRECEDING in the SQL.
 fn has_unbounded_preceding_range(upper_sql: &str) -> bool {
     upper_sql.contains("UNBOUNDED PRECEDING")
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`derive_region_reach`] over one walk node's own region
+/// text (and by [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// True if any `INTERVAL '...'` literal in the SQL parses to
 /// `Offset::Symbolic` (a month/year literal) — a calendar-relative unit that
 /// cannot populate a `Bounded{before,after}` value at all. A single scan
@@ -756,6 +776,10 @@ fn has_symbolic_interval_in_bound_position(upper_sql: &str) -> bool {
     false
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`derive_region_reach`] over one walk node's own region
+/// text (and by [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Check whether any `RANGE BETWEEN` frame in the SQL has an unbounded or
 /// unparseable forward (`FOLLOWING`) reach — the mirror of
 /// [`has_unbounded_preceding_range`]. Unlike the `PRECEDING` check (a plain
@@ -781,6 +805,10 @@ fn has_unbounded_forward_reach(upper_sql: &str) -> bool {
     false
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): sub-helper of [`has_unbounded_forward_reach`], scoped to the text
+/// following one `RANGE BETWEEN` occurrence.
+///
 /// True if the text after `RANGE BETWEEN ` carries a `FOLLOWING` bound that
 /// is either `UNBOUNDED FOLLOWING` or a `FOLLOWING` bound with no parseable
 /// `INTERVAL` literal before it (an unrecognised/non-Form-A forward bound —
@@ -801,6 +829,10 @@ fn frame_forward_is_unbounded(text: &str) -> bool {
     parse_interval_seconds_before(before_fol).is_none()
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`derive_region_reach`] over one walk node's own region
+/// text (and by [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Extract Form A bounds: (before, after) from RANGE BETWEEN INTERVAL patterns.
 ///
 /// Scans for `RANGE BETWEEN` followed by interval specs.
@@ -823,6 +855,10 @@ fn extract_form_a_bounds(upper_sql: &str) -> Vec<(Seconds, Seconds)> {
     bounds
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): sub-helper of [`extract_form_a_bounds`], scoped to text following
+/// one `RANGE BETWEEN` occurrence.
+///
 /// Parse "... PRECEDING AND ... FOLLOWING/CURRENT ROW" from text after "RANGE BETWEEN".
 fn parse_between_bounds(text: &str) -> (Seconds, Seconds) {
     let mut before = Seconds::ZERO;
@@ -850,6 +886,10 @@ fn parse_between_bounds(text: &str) -> (Seconds, Seconds) {
     (before, after)
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`derive_region_reach`] over one walk node's own region
+/// text (and by [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Extract Form B bounds: (before, after) from WHERE/JOIN BETWEEN/comparison with INTERVAL.
 ///
 /// Patterns recognised:
@@ -939,6 +979,10 @@ fn extract_form_b_bounds(upper_sql: &str, partition_col_upper: &str) -> Vec<(Sec
     bounds
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): sub-helper of [`extract_form_b_bounds`] / the `extract_gte_lt_*`
+/// pair, scoped to the text immediately preceding one comparison operator.
+///
 /// True if the identifier immediately preceding `pos` in `upper_sql` (skipping
 /// trailing whitespace), read as a bare or table-qualified column reference
 /// (`EVENT_DATE` or `E.EVENT_DATE`), is the given partition column. Used to
@@ -1106,6 +1150,11 @@ fn parse_interval_seconds_before(text: &str) -> Option<Seconds> {
 
 /// Extract bounds from >= / < (or <=) patterns with INTERVAL.
 ///
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`extract_form_b_bounds`], which is itself invoked by
+/// [`derive_region_reach`] over one walk node's own region text (and by
+/// [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Pattern: `col >= expr - INTERVAL '...'` (gives `before`)
 /// and `col < expr + INTERVAL '...'` (gives `after`)
 ///
@@ -1165,6 +1214,11 @@ fn extract_gte_lt_interval_bounds(
     bounds
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): invoked by [`extract_form_b_bounds`], which is itself invoked by
+/// [`derive_region_reach`] over one walk node's own region text (and by
+/// [`derive_bound_for_source`] as the whole-text fallback).
+///
 /// Extract bounds from bare-integer `>= expr - <int>` / `< expr + <int>` (or
 /// `<= expr + <int>`) patterns — the non-temporal sibling of
 /// [`extract_gte_lt_interval_bounds`], for monotone integer partition keys
